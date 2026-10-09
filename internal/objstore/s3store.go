@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	smithy "github.com/aws/smithy-go"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
@@ -152,6 +153,29 @@ func IsPreconditionFailed(err error) bool {
 	var respErr *smithyhttp.ResponseError
 	if errors.As(err, &respErr) {
 		return respErr.HTTPStatusCode() == 412
+	}
+	return false
+}
+
+// IsNotFound reports whether err is the backend's "no such key" response,
+// covering both GetObject (which reports a typed NoSuchKey) and
+// HeadObject/CopyObject (which report a generic 404 with no distinguishing
+// body).
+func IsNotFound(err error) bool {
+	var noSuchKey *types.NoSuchKey
+	if errors.As(err, &noSuchKey) {
+		return true
+	}
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "NoSuchKey", "NotFound", "404":
+			return true
+		}
+	}
+	var respErr *smithyhttp.ResponseError
+	if errors.As(err, &respErr) {
+		return respErr.HTTPStatusCode() == 404
 	}
 	return false
 }
