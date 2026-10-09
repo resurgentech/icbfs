@@ -36,12 +36,15 @@ type Store interface {
 
 	// UpdateMetadata replaces an object's metadata without rewriting its
 	// body. On a versioned bucket this creates a new version, same as a
-	// content write would.
-	UpdateMetadata(ctx context.Context, key string, metadata map[string]string) (*Object, error)
+	// content write would. If ifMatch is non-empty, the update is
+	// conditioned on the current object's ETag matching it, same as Put.
+	UpdateMetadata(ctx context.Context, key string, metadata map[string]string, ifMatch string) (*Object, error)
 
 	// ListVersions returns every version of key, newest first.
 	ListVersions(ctx context.Context, key string) ([]Object, error)
 
 	// Delete removes key (creating a delete marker on a versioned bucket).
-	Delete(ctx context.Context, key string) error
+	// If ifMatch is non-empty, the delete is conditioned on the current
+	// object's ETag matching it.
+	Delete(ctx context.Context, key string, ifMatch string) error
 }

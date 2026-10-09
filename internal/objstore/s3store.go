@@ -91,15 +91,22 @@ func (s *S3Store) headVersion(ctx context.Context, key string, versionID *string
 
 // UpdateMetadata replaces key's metadata via a copy-onto-self with the
 // REPLACE directive. This does not re-upload the body, and on a versioned
-// bucket it creates a new version exactly as a content write would.
-func (s *S3Store) UpdateMetadata(ctx context.Context, key string, metadata map[string]string) (*Object, error) {
-	out, err := s.client.CopyObject(ctx, &s3.CopyObjectInput{
+// bucket it creates a new version exactly as a content write would. Since
+// source and destination are the same key, CopySourceIfMatch conditions
+// the update on the object's current ETag — the same CAS mechanism Put
+// uses, applied to a metadata-only write.
+func (s *S3Store) UpdateMetadata(ctx context.Context, key string, metadata map[string]string, ifMatch string) (*Object, error) {
+	in := &s3.CopyObjectInput{
 		Bucket:            aws.String(s.bucket),
 		Key:               aws.String(key),
 		CopySource:        aws.String(s.bucket + "/" + key),
 		Metadata:          metadata,
 		MetadataDirective: types.MetadataDirectiveReplace,
-	})
+	}
+	if ifMatch != "" {
+		in.CopySourceIfMatch = aws.String(ifMatch)
+	}
+	out, err := s.client.CopyObject(ctx, in)
 	if err != nil {
 		return nil, fmt.Errorf("update metadata %s: %w", key, err)
 	}
@@ -135,11 +142,15 @@ func (s *S3Store) ListVersions(ctx context.Context, key string) ([]Object, error
 	return versions, nil
 }
 
-func (s *S3Store) Delete(ctx context.Context, key string) error {
-	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+func (s *S3Store) Delete(ctx context.Context, key string, ifMatch string) error {
+	in := &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
-	})
+	}
+	if ifMatch != "" {
+		in.IfMatch = aws.String(ifMatch)
+	}
+	_, err := s.client.DeleteObject(ctx, in)
 	if err != nil {
 		return fmt.Errorf("delete %s: %w", key, err)
 	}
