@@ -26,17 +26,26 @@ var (
 )
 
 // Attr is the POSIX-ish attribute set for one inode, assembled from the
-// blob's own object metadata (mode/uid/gid/nlink) plus properties the
-// object store gives us for free (size, mtime). See ARCHITECTURE.md's
+// blob's own object metadata (mode/uid/gid/nlink/mtime) plus properties
+// the object store gives us for free (size, ctime). See ARCHITECTURE.md's
 // metadata model for why mode/uid/gid/nlink live in object metadata rather
 // than the directory row.
+//
+// mtime and ctime are deliberately distinct fields, not the same value
+// reported twice: ctime (POSIX "any change at all, content or metadata")
+// is exactly what the current version's LastModified already measures,
+// since a metadata-only update bumps it the same way a content write
+// does. mtime (POSIX "content changed") is not — it needs its own stored
+// field, set only by operations that actually rewrite content, or a
+// chmod/chown would incorrectly look like a content change too.
 type Attr struct {
 	Mode  uint32 // permission bits only (e.g. 0644) — type bits are not stored here
 	Uid   uint32
 	Gid   uint32
 	Nlink uint32
 	Size  int64
-	Mtime time.Time // derived from the current version's LastModified
+	Mtime time.Time // stored explicitly; bumped only on a content write
+	Ctime time.Time // derived from the current version's LastModified
 	Btime time.Time // derived from the UUIDv7 key; zero if the key isn't a UUIDv7
 }
 
@@ -45,22 +54,36 @@ const (
 	metaUid   = "uid"
 	metaGid   = "gid"
 	metaNlink = "nlink"
+	metaMtime = "mtime"
 )
 
 // metadataFromAttr builds the object-metadata map Attr's mutable fields are
 // stored as.
 func metadataFromAttr(a Attr) map[string]string {
+	mtime := a.Mtime
+	if mtime.IsZero() {
+		mtime = time.Now()
+	}
 	return map[string]string{
 		metaMode:  strconv.FormatUint(uint64(a.Mode), 10),
 		metaUid:   strconv.FormatUint(uint64(a.Uid), 10),
 		metaGid:   strconv.FormatUint(uint64(a.Gid), 10),
 		metaNlink: strconv.FormatUint(uint64(a.Nlink), 10),
+		metaMtime: strconv.FormatInt(mtime.UnixNano(), 10),
 	}
 }
 
 func parseMetaUint(m map[string]string, key string) uint32 {
 	v, _ := strconv.ParseUint(m[key], 10, 32)
 	return uint32(v)
+}
+
+func parseMetaTime(m map[string]string, key string) time.Time {
+	v, err := strconv.ParseInt(m[key], 10, 64)
+	if err != nil {
+		return time.Time{}
+	}
+	return time.Unix(0, v).UTC()
 }
 
 // NewUUIDv7 generates a new blob identifier. Using UUIDv7 means every new

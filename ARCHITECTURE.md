@@ -37,7 +37,19 @@ abstraction is being built.
   filesystems**, each anchored by its own named root.
 - **Hard links** are simply multiple directory rows pointing at the same
   UUID — this falls out of the model for free, with no special-casing,
-  because identity (UUID) is already decoupled from name.
+  because identity (UUID) is already decoupled from name. The link count
+  (nlink) itself, however, needs real compare-and-swap protection against
+  concurrent Link/Unlink calls, and — per the ETag limitation in the
+  Concurrency section below — that can't live in the target's own object
+  metadata the way the rest of this section implies. It lives instead in
+  a tiny dedicated side object (`<uuid>.nlink`) whose *body* is the
+  decimal count, so every change is a real content write and ETag CAS is
+  meaningful again; reaching zero writes a tombstone value under the same
+  CAS check before the target is physically deleted, so a concurrent Link
+  can never race past a decrement that's already decided to delete. The
+  target's own object metadata still carries a best-effort cached copy of
+  nlink so `stat()` stays a single round trip in the common (never
+  hardlinked) case.
 - **Symlinks** store their target as the object's *content* (same shape as
   a tiny regular file); the row's type flag marks it as a symlink.
 
@@ -62,9 +74,17 @@ This single decision resolves several things at once:
   metadata-only update creates a new object version when versioning is
   enabled — exactly like a content write — so permission/ownership changes
   show up in version history automatically, with no separate side channel.
-- **Size and mtime aren't stored redundantly.** Size is the object's
-  `Content-Length`; mtime is the version's `Last-Modified`. A single HEAD
-  request returns size + mtime + all custom metadata together.
+- **Size isn't stored redundantly.** Size is the object's `Content-Length`.
+  A single HEAD request returns size + all custom metadata together.
+- **mtime and ctime are distinct fields, not the same value reported
+  twice.** ctime (POSIX: "any change, content or metadata") is exactly
+  the current version's `Last-Modified`, since a metadata-only update
+  bumps it the same way a content write does. mtime (POSIX: "content
+  changed") is *not* the same thing and needs its own explicitly stored
+  field, set only by operations that actually rewrite content — otherwise
+  a `chmod` would incorrectly look like a content change too. This was a
+  bug in the first implementation pass (both were reported as the same
+  value) caught by testing, not foreseen at design time.
 - **atime is not tracked.** Neither backend bumps a timestamp on read, and
   tracking it ourselves would require a write on every read — exactly the
   propagation cost this model avoids elsewhere. Report it as equal to mtime.
@@ -81,7 +101,23 @@ All directory block and root block writes use **conditional PUT via ETag**
 block, modifies it, and writes back conditioned on the ETag it read; a
 mismatch (someone else wrote first) is rejected and the client re-reads and
 retries. No external lock service, no new infrastructure — both target
-backends support this as a first-class primitive.
+backends support this as a first-class primitive. This is proven correct
+against real MinIO (not just assumed): a conditional write with a stale
+ETag is rejected with 412, and the rejected write never applies.
+
+**Important limitation, discovered through that same testing, not
+foreseen at design time: ETag is a hash of the object's *body*.** A
+metadata-only update does not change the body, so it does not change the
+ETag either — two different metadata states can share the exact same
+ETag. This means ETag-based CAS is only meaningful for writes that change
+content; it provides **no protection at all** for a metadata-only update
+racing against another metadata-only update (e.g. two concurrent nlink
+changes). It was also confirmed that MinIO does not enforce
+`DeleteObject`'s `If-Match` header at all — a conditional delete against
+a deliberately stale ETag still succeeds. Directory/root block writes are
+unaffected (every mutation there is a real content write, so ETag always
+moves), but this ruled out using the same ifMatch mechanism for
+metadata-only fields — see hard links, below, for the actual fix.
 
 ## Snapshots: point-in-time reconstruction
 
@@ -116,13 +152,21 @@ problem the metadata model above was built to avoid.
 
 ## Large directories: median-key B-tree sharding
 
-In scope for v1. A directory block holds `name → UUID` rows up to a size
-cap. On overflow, it splits into two children at the **median key actually
+Implemented. A directory block holds `name → UUID` rows up to a size cap.
+On overflow, it splits into two children at the **median key actually
 present in the block** — not a fixed alphabetic boundary (real names
 cluster by prefix, e.g. `IMG_*`, `2026-*`, which skews fixed-range splits
 badly) and not a hash (which would destroy lexicographic ordering). The
 parent's rows become range pointers (`< median → child A`, `≥ median →
-child B`), recursively, forming a standard B-tree keyed on filename.
+child B`), recursively, forming a standard B-tree keyed on filename. A
+directory's own key (its UUID, or the filesystem's well-known root key)
+always stays the entry point into its own tree, however many levels deep
+that tree currently is — a split keeps the overflowing node's existing
+key for the left half and mints a new UUID only for the right half,
+except at the very top of a directory's own tree, where splitting instead
+mints two new UUIDs for both halves and rewrites the fixed key as a new
+Internal node, since that key's identity can't be reassigned to either
+half.
 
 - Lookup is a descent comparing the target name against each node's
   boundary — O(log n) in the number of splits, not a linear scan (this is
@@ -130,14 +174,26 @@ child B`), recursively, forming a standard B-tree keyed on filename.
   lookups don't scale).
 - Lexicographic order is preserved, so sorted listing and prefix scans stay
   cheap (walk the relevant subtree instead of fanning out to every shard).
-- Split/merge logic (insert-overflow, delete-underflow) and split
-  operations racing with concurrent writers need to be designed alongside
-  the CAS mechanism above, not independently.
+- Splitting on insert-overflow is implemented and proven (against real
+  MinIO) to keep lookup, full listing, and removal all correct across
+  however many shard levels a directory has grown. **Merging underfull
+  nodes back together on delete is not implemented** — a directory that
+  sharded once and then had most of its entries removed stays as tall as
+  it grew, rather than being compacted back down. Not a correctness
+  problem, just an accepted, explicit simplification.
+- Concurrent writers racing on the same split are handled by retrying the
+  *whole* top-down operation from scratch on any lost CAS race at any
+  level, rather than per-node retries — simpler to reason about, at the
+  cost of occasionally orphaning an already-written split half from an
+  abandoned attempt (harmless: nothing ever comes to reference it).
 - What this actually solves is **write amplification**, not storage
   capacity — a directory block is cheap to store even at a million rows
   (~50-100 bytes/row, well within either backend's object size limits); the
   real cost is rewriting a whole large block for one small change. Split
-  thresholds should be tuned around mutation cost, not object size.
+  thresholds should be tuned around mutation cost, not object size — the
+  current threshold is deliberately small (8 entries) to make splitting
+  easy to exercise in tests; production tuning is a separate, later
+  concern.
 
 ## FUSE inode numbers
 

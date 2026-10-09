@@ -134,7 +134,7 @@ func TestMetadataUpdateCreatesNewVersion(t *testing.T) {
 
 	updated, err := store.UpdateMetadata(ctx, "file-1", map[string]string{
 		"mode": "0600",
-	})
+	}, "")
 	if err != nil {
 		t.Fatalf("update metadata: %v", err)
 	}
@@ -271,5 +271,80 @@ func TestConditionalPutRejectsStaleETag(t *testing.T) {
 	data, _ := io.ReadAll(body)
 	if string(data) != "entry-a,entry-b" {
 		t.Fatalf("stale write must not have applied: got %q", data)
+	}
+}
+
+// TestConditionalUpdateMetadataIgnoresUnchangedETag documents a real,
+// empirically-discovered limitation (not a bug): ETag on an S3-compatible
+// store is a hash of the object's *body*. A metadata-only update
+// (CopySourceIfMatch, since source and destination are the same key)
+// does not change the body, so it does not change the ETag either — two
+// different metadata states can share the exact same ETag. That means
+// ETag-based CAS cannot detect a lost race between two metadata-only
+// writers, even though it works correctly for content writes (see
+// TestConditionalPutRejectsStaleETag). This is why icbfs's nlink hardening
+// does not use UpdateMetadata's ifMatch for correctness — see
+// icbfs.adjustNlink's doc comment for the actual fix (a dedicated side
+// object whose body really does change).
+func TestConditionalUpdateMetadataIgnoresUnchangedETag(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	v1, err := store.Put(ctx, "file-1", strings.NewReader("unchanging body"), map[string]string{
+		"nlink": "1",
+	}, "")
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	v2, err := store.UpdateMetadata(ctx, "file-1", map[string]string{"nlink": "2"}, v1.ETag)
+	if err != nil {
+		t.Fatalf("first conditional metadata update should have succeeded: %v", err)
+	}
+
+	if v2.ETag != v1.ETag {
+		t.Fatalf("got etag %q after a metadata-only update, want it unchanged at %q — if this ever fails, the backend's ETag semantics changed and the nlink side-object workaround may no longer be needed", v2.ETag, v1.ETag)
+	}
+
+	// Because the ETag never moved, a "stale" writer's conditional update
+	// does not actually get rejected — this is the crux of the finding.
+	v3, err := store.UpdateMetadata(ctx, "file-1", map[string]string{"nlink": "99"}, v1.ETag)
+	if err != nil {
+		t.Fatalf("expected this update to succeed (unprotected) given unchanged ETag, got: %v", err)
+	}
+	if v3.Metadata["nlink"] != "99" {
+		t.Fatalf("got nlink %q, want %q", v3.Metadata["nlink"], "99")
+	}
+}
+
+// TestConditionalDeleteIgnoresIfMatch documents another empirically-
+// discovered limitation: MinIO does not enforce DeleteObject's If-Match
+// header at all — a delete conditioned on a deliberately stale ETag
+// still succeeds. icbfs's nlink hardening therefore never relies on
+// conditional delete; see icbfs.adjustNlink's doc comment for the
+// tombstone-via-conditional-Put protocol used instead.
+func TestConditionalDeleteIgnoresIfMatch(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	v1, err := store.Put(ctx, "file-1", strings.NewReader("content"), nil, "")
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+
+	// Someone else updates the object after we observed v1, which (per
+	// the finding above) may not even move the ETag if it's metadata-only
+	// — so use a real content change to guarantee a different ETag.
+	if _, err := store.Put(ctx, "file-1", strings.NewReader("different content"), nil, ""); err != nil {
+		t.Fatalf("concurrent update: %v", err)
+	}
+
+	err = store.Delete(ctx, "file-1", v1.ETag)
+	if err != nil {
+		t.Fatalf("expected delete with a stale If-Match to succeed unprotected (MinIO does not enforce it), got: %v", err)
+	}
+
+	if _, err := store.Head(ctx, "file-1"); !IsNotFound(err) {
+		t.Fatalf("expected object to be gone after the unprotected delete, head error: %v", err)
 	}
 }

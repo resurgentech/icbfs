@@ -2,6 +2,7 @@ package fuseserver
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -273,6 +274,46 @@ func TestMountAppendAcrossOpens(t *testing.T) {
 	if string(data) != "first-second" {
 		t.Fatalf("got %q, want %q", data, "first-second")
 	}
+}
+
+func TestMountLargeDirectorySharding(t *testing.T) {
+	mnt := mountTestFS(t)
+	dir := filepath.Join(mnt, "many")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	const n = 40 // forces several splits (maxEntriesPerBlock is 8)
+	for i := 0; i < n; i++ {
+		name := filepath.Join(dir, "f"+itoa(i))
+		if err := os.WriteFile(name, []byte(itoa(i)), 0644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != n {
+		t.Fatalf("got %d entries via ls, want %d", len(entries), n)
+	}
+
+	// Spot-check a few individual files resolve correctly too (point
+	// lookup through the sharded tree, not just the full listing).
+	for _, i := range []int{0, n / 2, n - 1} {
+		data, err := os.ReadFile(filepath.Join(dir, "f"+itoa(i)))
+		if err != nil {
+			t.Fatalf("read f%d: %v", i, err)
+		}
+		if string(data) != itoa(i) {
+			t.Fatalf("got %q, want %q", data, itoa(i))
+		}
+	}
+}
+
+func itoa(i int) string {
+	return fmt.Sprintf("%03d", i)
 }
 
 func TestMountBirthtimeFromUUID(t *testing.T) {
