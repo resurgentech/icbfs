@@ -1,0 +1,81 @@
+// Command icbfs mounts an icbfs filesystem backed by an S3-API-compatible
+// store (MinIO today; Azure Blob is a separate backend behind the same
+// objstore.Store interface, not yet wired up here).
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log"
+	"os"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awscreds "github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+
+	"github.com/hanwen/go-fuse/v2/fs"
+	"github.com/hanwen/go-fuse/v2/fuse"
+
+	"github.com/resurgentech/icbfs/internal/fuseserver"
+	"github.com/resurgentech/icbfs/internal/icbfs"
+	"github.com/resurgentech/icbfs/internal/objstore"
+)
+
+func main() {
+	if len(os.Args) < 2 || os.Args[1] != "mount" {
+		fmt.Fprintln(os.Stderr, "usage: icbfs mount [flags] <mountpoint>")
+		os.Exit(2)
+	}
+
+	fset := flag.NewFlagSet("mount", flag.ExitOnError)
+	endpoint := fset.String("endpoint", "http://127.0.0.1:9000", "S3-API endpoint (MinIO)")
+	bucket := fset.String("bucket", "icbfs", "bucket name (must have versioning enabled)")
+	fsName := fset.String("fs", "default", "filesystem name (root block key: root/<fs>)")
+	accessKey := fset.String("access-key", "minioadmin", "access key")
+	secretKey := fset.String("secret-key", "minioadmin", "secret key")
+	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
+	debug := fset.Bool("debug", false, "log every FUSE operation")
+	if err := fset.Parse(os.Args[2:]); err != nil {
+		os.Exit(2)
+	}
+	if fset.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: icbfs mount [flags] <mountpoint>")
+		os.Exit(2)
+	}
+	mountpoint := fset.Arg(0)
+
+	ctx := context.Background()
+
+	client := s3.New(s3.Options{
+		Region:       *region,
+		BaseEndpoint: aws.String(*endpoint),
+		UsePathStyle: true,
+		Credentials:  awscreds.NewStaticCredentialsProvider(*accessKey, *secretKey, ""),
+	})
+	store := objstore.NewS3Store(client, *bucket)
+
+	fsys := icbfs.New(store, *fsName)
+	if err := fsys.Bootstrap(ctx, 0755, 0, 0); err != nil {
+		log.Fatalf("bootstrap filesystem %q: %v", *fsName, err)
+	}
+
+	root := fuseserver.Root(fsys)
+	server, err := fs.Mount(mountpoint, root, &fs.Options{
+		MountOptions: fuseMountOptions(*debug),
+	})
+	if err != nil {
+		log.Fatalf("mount %s: %v", mountpoint, err)
+	}
+
+	log.Printf("icbfs %q mounted at %s (bucket %s via %s)", *fsName, mountpoint, *bucket, *endpoint)
+	server.Wait()
+}
+
+func fuseMountOptions(debug bool) fuse.MountOptions {
+	return fuse.MountOptions{
+		FsName: "icbfs",
+		Name:   "icbfs",
+		Debug:  debug,
+	}
+}
