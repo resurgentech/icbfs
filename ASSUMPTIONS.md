@@ -677,3 +677,51 @@ real shape, whatever it turns out to be, can slot in without changing
 `Source`'s own logic).
 
 ---
+
+## E6: a real adapter this time (unlike E5), plus why
+
+**Question I'd have asked:** E5 deliberately stopped short of real
+backend-SDK code because Azure's SDK isn't installed/verifiable here.
+Should E6 do the same for AWS S3/SQS, or write a real adapter against
+`aws-sdk-go-v2/service/sqs`?
+
+**Assumed:** wrote a real, concrete adapter this time
+(`internal/notify/sqssrc.Source`, directly against
+`aws-sdk-go-v2/service/sqs`'s actual `ReceiveMessage`/`DeleteMessage`
+API, verified by reading the installed package source the same way
+every other backend API in this project has been). Rationale for the
+asymmetry with E5: `aws-sdk-go-v2` is *already* a trusted, verified
+dependency this project uses for every other S3-API call — adding
+`service/sqs` just extends an SDK family already in use, and its real
+API shape could be checked directly, unlike Azure's SDK (not
+installed, no account to test against, would have meant guessing from
+training knowledge alone). The "no real AWS account" testing
+constraint (ARCHITECTURE.md's Testing reality note, same as E5) is
+handled by defining a minimal `receiver` interface
+(`ReceiveMessage`/`DeleteMessage`) a real `*sqs.Client` satisfies, and
+testing against a fake implementation of just that interface instead
+— real adapter code, fake-queue test, matching E6's own "Done when"
+bar exactly.
+- The S3-event-notification JSON schema (what an SQS message body
+  actually contains) is parsed via a small struct defined locally in
+  `sqssrc`, not by importing `minio-go/v7/pkg/notification` — even
+  though that package's types were already confirmed (while building
+  E4) to mirror this exact schema for MinIO's S3-compatibility, pulling
+  a MinIO-labeled package into an AWS-specific adapter for this felt
+  like the wrong dependency direction.
+- Added a client-side prefix filter here too, even though
+  ARCHITECTURE.md says AWS S3 supports server-side filtering on the
+  bucket notification configuration itself (unlike Azure) — that
+  configuration lives outside this package (task E6 scopes this
+  adapter to the consumption side only, per its own text), so a
+  redundant, cheap client-side check keeps `Source`'s filtering
+  contract identical across all three backend adapters.
+
+**Check this if:** a real AWS account becomes available to test
+against — `PutBucketNotificationConfiguration` (the S3-to-SQS wiring
+itself, including its own prefix/suffix filter) still isn't
+implemented anywhere in this project and would need to be, alongside
+verifying this adapter's parsing against a genuine S3-generated event
+body rather than the hand-constructed JSON this task's test uses.
+
+---
