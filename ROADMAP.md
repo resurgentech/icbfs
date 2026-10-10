@@ -30,6 +30,13 @@ Four workstreams so far:
   for its schema (task D1), and its prefixing change affects every other
   part's object-naming — sequence it early relative to B and C's own
   object-creation code, not as an afterthought bolted on at the end.
+- **Part E: Change notifications.** Implements the Change notifications
+  section of `ARCHITECTURE.md` — three backend-specific event sources
+  behind one internal interface, wired to go-fuse's notification API.
+  Depends on Part D's ID-prefixing (notifications are scoped by it) and,
+  for MinIO, on Part A's Protobuf toolchain not being required at all —
+  this part's wire format is each backend's own event schema, not
+  something icbfs defines.
 
 ---
 
@@ -519,3 +526,107 @@ Not scoped in detail — `ARCHITECTURE.md` acknowledges this is wanted
 designing it. At minimum it's a CAS write to the master block entry's
 `size` field; whether it needs anything beyond that (validation against
 current "Used," for instance) isn't decided.
+
+---
+
+## Part E: Change notifications
+
+Implements the Change notifications section of `ARCHITECTURE.md`.
+Depends on Part D (notifications are scoped by the filesystem's ID
+prefix — build D's prefixing first).
+
+### E1. Internal event-source interface
+
+- Define one internal interface all three backend adapters implement:
+  something like "a channel of wake-up signals, each naming the
+  key/prefix that changed," deliberately minimal — per
+  `ARCHITECTURE.md`'s governing principle, a signal is never expected to
+  carry authoritative payload data, so the interface shouldn't be
+  designed as if it needs to.
+- **Done when:** the interface is defined and at least one trivial fake
+  implementation exists for testing the consumer side independent of
+  any real backend.
+
+### E2. Mount-time opt-in flag, and the explicit "works with none of these" test
+
+- A CLI flag (`cmd/icbfs`), defaulting to off — same pattern as
+  Locking's flag.
+- **This needs its own explicit, permanent regression test, not an
+  assumption that "optional" naturally holds**: mount with no
+  notification backend configured at all, and confirm every existing
+  operation (create, read, write, mkdir, etc.) works identically to a
+  mount that predates this feature entirely — no hang, no error, no
+  behavioral difference. This was specifically called for, not left
+  implicit.
+- **Done when:** that test exists and passes, run as part of the normal
+  suite, not a one-off manual check.
+
+### E3. Per-watch UUID tracking and go-fuse wiring
+
+- A FUSE watch gets established via a path lookup, which already
+  resolves to a UUID at that moment (`Lookup`'s existing behavior) — the
+  driver records "this active watch corresponds to UUID X" at setup
+  time, rather than needing any general reverse index from UUID back to
+  path.
+- Filter incoming wake-up signals (from whichever backend adapter is
+  active) against the set of currently-active watched UUIDs; on a
+  match, push the notification via go-fuse's `Inode.NotifyContent`/
+  `NotifyEntry` — investigate the actual current API shape before
+  assuming it, same practice as every other go-fuse assumption in this
+  project.
+- Renames are the known remaining wrinkle: inotify's `MOVED_FROM`/
+  `MOVED_TO` semantics don't fall out of plain "a UUID changed" signals
+  — not solved here, flagged for whoever picks this up.
+- **Done when:** a real mount test establishes a watch, triggers a
+  change through a *second*, independent client against the same
+  backend, and confirms the watching mount receives a notification —
+  this is the test that actually proves cross-mount delivery works, not
+  just that the internal plumbing compiles.
+
+### E4. MinIO adapter
+
+- New dependency: `github.com/minio/minio-go/v7` (confirmed non-standard,
+  not reachable via the `aws-sdk-go-v2` client already used everywhere
+  else — this is an exception to the project's otherwise-single-SDK
+  approach, worth a comment at the import site saying why).
+- Use prefix-scoped `ListenBucketNotification`, scoped to the
+  filesystem's own ID prefix (MinIO supports this server-side).
+- Prefer **sync** delivery mode over async: async can silently drop
+  events under sustained queue overload (documented), and since this
+  feature is already latency-tolerant by design, sync's slower send rate
+  is a good trade, not a real cost.
+- **Done when:** a real MinIO container test (testcontainers-go, same
+  pattern as the rest of this project) proves an actual change produces
+  an actual received notification — this is the one backend that can be
+  tested the way everything else in this project is.
+
+### E5. Azure adapter
+
+- Change Feed is a pull-and-resume log — this task includes cursor/
+  checkpoint persistence (where does "I've read up to here" live
+  between polls?), not just a one-shot read.
+- No server-side filtering exists — read the whole account's feed and
+  filter client-side for this filesystem's own ID prefix.
+- Given latency is minutes-scale and this environment has no way to
+  provision a real Azure Storage Account (see `ARCHITECTURE.md`'s
+  Testing reality note), this task's test strategy needs its own
+  decision: a mocked/fake Change Feed reader exercising the
+  checkpoint-and-filter logic in isolation is realistic here; an actual
+  end-to-end Azure test is not, and shouldn't be assumed into this
+  project's automated suite the way MinIO's can.
+- **Done when:** the checkpoint/filter logic has a passing test against
+  a fake feed, and the gap (no automated real-Azure test exists) is
+  documented plainly in the code, not silently absent.
+
+### E6. AWS S3 adapter
+
+- Bucket notification configuration → SQS; consume via long-polling
+  `ReceiveMessage` (`WaitTimeSeconds` up to 20).
+- Stays within the existing SDK family (`aws-sdk-go-v2/service/sqs`) —
+  no new dependency, unlike MinIO's adapter.
+- Same testing-reality constraint as Azure: no real AWS account
+  available in this environment, so this task's automated coverage is
+  necessarily a fake/mocked SQS consumer, with real-account testing
+  documented as a manual, not automated, gap.
+- **Done when:** the consumption logic has a passing test against a
+  fake queue, same bar as E5.
