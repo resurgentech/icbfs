@@ -37,6 +37,7 @@ func main() {
 	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
 	size := fset.Uint64("size", 100<<30, "declared filesystem size in bytes, for df (only used the first time a filesystem name is created)")
 	locking := fset.Bool("locking", false, "enable the Locking feature (flock/fcntl); off by default, per ARCHITECTURE.md's Locking section")
+	notify := fset.Bool("notify", false, "enable the Change notifications feature (ROADMAP.md Part E); off by default, same opt-in reasoning as --locking. No backend is wired up to this flag yet (task E4 adds the MinIO one) — mounting with it set has no effect for now.")
 	debug := fset.Bool("debug", false, "log every FUSE operation")
 	if err := fset.Parse(os.Args[2:]); err != nil {
 		os.Exit(2)
@@ -67,8 +68,9 @@ func main() {
 		log.Fatalf("bootstrap filesystem %q: %v", *fsName, err)
 	}
 	fsys.EnableLocking(*locking)
+	_ = *notify // no backend wired up yet — see the flag's own usage string
 
-	root := fuseserver.Root(fsys)
+	root := fuseserver.Root(fsys, nil)
 	server, err := fs.Mount(mountpoint, root, &fs.Options{
 		MountOptions: fuseMountOptions(*debug),
 		// Without this, go-fuse silently rewrites a real, stored "0000"

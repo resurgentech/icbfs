@@ -16,16 +16,24 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
+	"github.com/resurgentech/icbfs/internal/notify"
 )
 
 // Node is one filesystem entry: either the root, or identified by its
 // blob's UUID (key). Its type (file/dir/symlink) is fixed for the inode's
 // lifetime, matching ARCHITECTURE.md's model where identity never changes.
+//
+// notifySrc is nil when the Change notifications feature (ROADMAP.md
+// Part E) isn't enabled for this mount — task E2's explicit
+// requirement is that a nil notifySrc makes every operation behave
+// exactly as if this field didn't exist at all, so every access to it
+// is a plain nil check, never a required dependency.
 type Node struct {
 	fs.Inode
-	fsys *icbfs.Filesystem
-	key  string
-	typ  icbfs.EntryType
+	fsys      *icbfs.Filesystem
+	key       string
+	typ       icbfs.EntryType
+	notifySrc notify.Source
 }
 
 var (
@@ -52,10 +60,13 @@ var (
 // disk) — see ARCHITECTURE.md's du/df design.
 const statfsBlockSize = 4096
 
-// Root builds the node representing fsys's root directory, for use with
-// fs.Mount.
-func Root(fsys *icbfs.Filesystem) *Node {
-	return &Node{fsys: fsys, key: fsys.RootKey(), typ: icbfs.TypeDir}
+// Root builds the node representing fsys's root directory, for use
+// with fs.Mount. source is the Change notifications backend (ROADMAP.md
+// Part E) to wire watches against — nil disables the feature entirely
+// for this mount (task E2), with every operation behaving exactly as
+// it did before this feature existed.
+func Root(fsys *icbfs.Filesystem, source notify.Source) *Node {
+	return &Node{fsys: fsys, key: fsys.RootKey(), typ: icbfs.TypeDir, notifySrc: source}
 }
 
 func typeToFuseMode(t icbfs.EntryType) uint32 {
@@ -135,7 +146,7 @@ func errnoFromErr(err error) syscall.Errno {
 }
 
 func (n *Node) newChild(ctx context.Context, key string, typ icbfs.EntryType) *fs.Inode {
-	child := &Node{fsys: n.fsys, key: key, typ: typ}
+	child := &Node{fsys: n.fsys, key: key, typ: typ, notifySrc: n.notifySrc}
 	stable := fs.StableAttr{Ino: icbfs.Ino(key), Mode: typeToFuseMode(typ)}
 	// StableAttr.Ino dedups against any already-known inode with the same
 	// number — this is exactly how hardlinks (Link, below) end up sharing

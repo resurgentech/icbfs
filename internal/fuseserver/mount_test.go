@@ -91,7 +91,7 @@ func mountFSWithLocking(t *testing.T, store objstore.Store, fsName string, locki
 	fsys.EnableLocking(locking)
 
 	mountDir := t.TempDir()
-	server, err := fs.Mount(mountDir, Root(fsys), &fs.Options{
+	server, err := fs.Mount(mountDir, Root(fsys, nil), &fs.Options{
 		MountOptions: fuse.MountOptions{
 			FsName:  "icbfs-test",
 			Name:    "icbfs-test",
@@ -145,7 +145,7 @@ func mountTestFSWithFsys(t *testing.T) (string, *icbfs.Filesystem) {
 	}
 
 	mountDir := t.TempDir()
-	server, err := fs.Mount(mountDir, Root(fsys), &fs.Options{
+	server, err := fs.Mount(mountDir, Root(fsys, nil), &fs.Options{
 		MountOptions: fuse.MountOptions{
 			FsName:  "icbfs-test",
 			Name:    "icbfs-test",
@@ -789,5 +789,49 @@ func TestMountFcntlByteRangeLocksAcrossProcesses(t *testing.T) {
 
 	if err := syscall.FcntlFlock(f2.Fd(), syscall.F_SETLK, &overlapping); err != nil {
 		t.Fatalf("F_SETLK f2 [5,15) after helper process exited (and released) = %v, want nil", err)
+	}
+}
+
+// TestMountWithNoNotificationBackendBehavesIdentically covers
+// ROADMAP.md's task E2's explicitly-called-for requirement: mounting
+// with no Change notifications backend configured (Root's source
+// argument nil — what every other test in this file already passes,
+// and what cmd/icbfs's --notify flag still produces today, since no
+// backend is wired up to it yet) must work identically to a mount
+// that predates this feature entirely. This isn't an assumption that
+// "optional" naturally holds; it's a named, permanent regression test
+// per ROADMAP.md's own instruction, exercising the same create/read/
+// write/mkdir/rmdir/unlink operations the rest of this suite already
+// covers individually, as one explicit end-to-end sequence specifically
+// framed around this invariant.
+func TestMountWithNoNotificationBackendBehavesIdentically(t *testing.T) {
+	mnt := mountTestFS(t) // mountTestFS always passes a nil source
+
+	dir := filepath.Join(mnt, "e2-dir")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	path := filepath.Join(dir, "e2-file.txt")
+	if err := os.WriteFile(path, []byte("no notifications here"), 0644); err != nil {
+		t.Fatalf("create/write: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(data) != "no notifications here" {
+		t.Fatalf("got %q, want %q", data, "no notifications here")
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("unlink: %v", err)
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatalf("rmdir: %v", err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("expected dir to be gone, got err: %v", err)
 	}
 }
