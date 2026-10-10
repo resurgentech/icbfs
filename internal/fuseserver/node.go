@@ -7,6 +7,8 @@ package fuseserver
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
 	"syscall"
 	"time"
 
@@ -299,10 +301,13 @@ type FileHandle struct {
 }
 
 var (
-	_ fs.FileHandle  = (*FileHandle)(nil)
-	_ fs.FileReader  = (*FileHandle)(nil)
-	_ fs.FileWriter  = (*FileHandle)(nil)
-	_ fs.FileFlusher = (*FileHandle)(nil)
+	_ fs.FileHandle   = (*FileHandle)(nil)
+	_ fs.FileReader   = (*FileHandle)(nil)
+	_ fs.FileWriter   = (*FileHandle)(nil)
+	_ fs.FileFlusher  = (*FileHandle)(nil)
+	_ fs.FileGetlker  = (*FileHandle)(nil)
+	_ fs.FileSetlker  = (*FileHandle)(nil)
+	_ fs.FileSetlkwer = (*FileHandle)(nil)
 )
 
 func (h *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
@@ -317,4 +322,129 @@ func (h *FileHandle) Write(ctx context.Context, data []byte, off int64) (uint32,
 func (h *FileHandle) Flush(ctx context.Context) syscall.Errno {
 	_, err := h.open.Flush(ctx)
 	return errnoFromErr(err)
+}
+
+// fcntlLockEOF is the fuse.FileLock.End sentinel the kernel sends for
+// "to end of file" (len == 0 in the original flock_t) — go-fuse's own
+// FileLock.FromFlockT maps that case to (1<<63)-1 (math.MaxInt64, the
+// largest value an int64 lock offset can hold), confirmed by reading
+// that conversion directly rather than assumed.
+const fcntlLockEOF = math.MaxInt64
+
+// lockLeaseTTL is the lease every FUSE-sourced flock/fcntl claim gets
+// (task B8). Real POSIX locks have no TTL at all — held until
+// explicitly unlocked or the owning fd/process goes away — but every
+// claim in this codebase's Locking model requires one (see
+// ARCHITECTURE.md's Locking section). This project doesn't implement
+// background lease renewal for the duration an application holds a
+// real fcntl/flock lock, so a lock held longer than this TTL without
+// being renewed can be silently stolen by another claimant — a known,
+// accepted gap (see ASSUMPTIONS.md), not a guarantee this TTL is
+// trying to approximate. 24 hours is chosen to make that gap
+// practically unreachable for ordinary use rather than to model any
+// real semantics.
+const lockLeaseTTL = 24 * time.Hour
+
+// lockHolderFromOwner turns a FUSE lock owner token (kernel-assigned,
+// stable for the lifetime of one open-file-description's/process's
+// locking context, per fcntl(2)/flock(2)) into this codebase's opaque
+// holder string.
+func lockHolderFromOwner(owner uint64) string {
+	return fmt.Sprintf("fuse-owner-%d", owner)
+}
+
+// lockRangeFromFileLock translates a fuse.FileLock into this codebase's
+// [start, end) exclusive-end convention. For an flock(2)-style request
+// (the FUSE_LK_FLOCK flag), the range is always the whole file,
+// matching go-fuse's own reference LoopbackFile implementation, which
+// ignores lk.Start/End entirely in that case. For an fcntl(2)-style
+// request, lk.End is inclusive (confirmed via FileLock.ToFlockT/
+// FromFlockT) with fcntlLockEOF meaning "to EOF" — mapped directly to
+// lockWholeFileEnd-equivalent rather than lk.End+1, which would
+// overflow.
+func lockRangeFromFileLock(lk *fuse.FileLock, flags uint32) (start, end int64) {
+	if flags&fuse.FUSE_LK_FLOCK != 0 {
+		return 0, fcntlLockEOF
+	}
+	start = int64(lk.Start)
+	if lk.End == fcntlLockEOF {
+		return start, fcntlLockEOF
+	}
+	return start, int64(lk.End) + 1
+}
+
+// Getlk implements fcntl(F_GETLK): reports a lock that would conflict
+// with the requested one, or L_UNLCK if none would. See
+// fs.NodeGetlker's doc comment.
+func (h *FileHandle) Getlk(ctx context.Context, owner uint64, lk *fuse.FileLock, flags uint32, out *fuse.FileLock) syscall.Errno {
+	if lk.Typ == syscall.F_UNLCK {
+		out.Typ = syscall.F_UNLCK
+		return 0
+	}
+	start, end := lockRangeFromFileLock(lk, flags)
+	info, conflict, err := h.open.FindConflictingLockRange(ctx, start, end, lockHolderFromOwner(owner))
+	if err != nil {
+		return errnoFromErr(err)
+	}
+	if !conflict {
+		out.Typ = syscall.F_UNLCK
+		return 0
+	}
+	out.Start = uint64(info.Start)
+	if info.End >= fcntlLockEOF {
+		out.End = fcntlLockEOF
+	} else {
+		out.End = uint64(info.End - 1)
+	}
+	// This codebase's lock model has no shared/exclusive distinction
+	// (see setlk's doc comment) — every held claim is reported back as
+	// a write lock, regardless of what type the original holder asked
+	// for.
+	out.Typ = syscall.F_WRLCK
+	return 0
+}
+
+// Setlk implements fcntl(F_SETLK)/flock(LOCK_*, non-blocking). See
+// fs.NodeSetlker's doc comment.
+func (h *FileHandle) Setlk(ctx context.Context, owner uint64, lk *fuse.FileLock, flags uint32) syscall.Errno {
+	return h.setlk(ctx, owner, lk, flags, false)
+}
+
+// Setlkw implements fcntl(F_SETLKW)/flock(LOCK_*, blocking). See
+// fs.NodeSetlkwer's doc comment.
+func (h *FileHandle) Setlkw(ctx context.Context, owner uint64, lk *fuse.FileLock, flags uint32) syscall.Errno {
+	return h.setlk(ctx, owner, lk, flags, true)
+}
+
+// setlk is Setlk/Setlkw's shared implementation.
+//
+// F_RDLCK and F_WRLCK are both mapped onto the same underlying
+// TryAcquireLockRange/AcquireLockRange call — this codebase's Locking
+// model (ARCHITECTURE.md, ROADMAP.md tasks B2-B6) has no shared
+// (read) vs. exclusive (write) distinction at all, only "claimed by
+// exactly one holder at a time, overlap or not"; neither document
+// mentions one anywhere, and adding real reader/writer semantics would
+// mean redesigning the core lock data model for something never
+// actually asked for. Documented deliberate simplification, logged to
+// ASSUMPTIONS.md: two cooperating readers that both only wanted a
+// shared lock will find the second one refused/blocked by the first,
+// unlike real POSIX fcntl semantics.
+func (h *FileHandle) setlk(ctx context.Context, owner uint64, lk *fuse.FileLock, flags uint32, blocking bool) syscall.Errno {
+	start, end := lockRangeFromFileLock(lk, flags)
+	holder := lockHolderFromOwner(owner)
+	switch lk.Typ {
+	case syscall.F_UNLCK:
+		return errnoFromErr(h.open.ReleaseLockRange(ctx, start, end, holder))
+	case syscall.F_RDLCK, syscall.F_WRLCK:
+		if blocking {
+			return errnoFromErr(h.open.AcquireLockRange(ctx, start, end, holder, lockLeaseTTL))
+		}
+		err := h.open.TryAcquireLockRange(ctx, start, end, holder, lockLeaseTTL)
+		if errors.Is(err, icbfs.ErrLocked) {
+			return syscall.EAGAIN
+		}
+		return errnoFromErr(err)
+	default:
+		return syscall.EINVAL
+	}
 }

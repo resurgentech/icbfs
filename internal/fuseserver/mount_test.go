@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -76,12 +77,18 @@ func newMountTestStore(t *testing.T) objstore.Store {
 // mountpoint.
 func mountFS(t *testing.T, store objstore.Store, fsName string) string {
 	t.Helper()
+	return mountFSWithLocking(t, store, fsName, false)
+}
+
+func mountFSWithLocking(t *testing.T, store objstore.Store, fsName string, locking bool) string {
+	t.Helper()
 	ctx := context.Background()
 
 	fsys := icbfs.New(store, fsName)
 	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0); err != nil {
 		t.Fatalf("bootstrap filesystem: %v", err)
 	}
+	fsys.EnableLocking(locking)
 
 	mountDir := t.TempDir()
 	server, err := fs.Mount(mountDir, Root(fsys), &fs.Options{
@@ -108,6 +115,13 @@ func mountFS(t *testing.T, store objstore.Store, fsName string) string {
 func mountTestFS(t *testing.T) string {
 	t.Helper()
 	return mountFS(t, newMountTestStore(t), "test")
+}
+
+// mountTestFSWithLocking is mountTestFS with the Locking feature
+// (ROADMAP.md tasks B2-B8) turned on.
+func mountTestFSWithLocking(t *testing.T) string {
+	t.Helper()
+	return mountFSWithLocking(t, newMountTestStore(t), "test", true)
 }
 
 func TestMountBasicFileLifecycle(t *testing.T) {
@@ -460,5 +474,197 @@ func TestMountArchivedFilesystemRejectsWritesButAllowsReads(t *testing.T) {
 
 	if err := os.Remove(filepath.Join(mnt, "before-archive.txt")); !errors.Is(err, syscall.EROFS) {
 		t.Fatalf("unlink on an archived filesystem = %v, want EROFS", err)
+	}
+}
+
+// TestMountFlockWholeFileExclusive covers ROADMAP.md's task B8 "Done
+// when" for flock(2): real kernel flock syscalls against a real mount,
+// not the Filesystem-level API directly. flock is always whole-file —
+// a second fd's non-blocking exclusive attempt must fail while the
+// first fd holds it, and succeed once released.
+func TestMountFlockWholeFileExclusive(t *testing.T) {
+	mnt := mountTestFSWithLocking(t)
+	path := filepath.Join(mnt, "flock-test.bin")
+	if err := os.WriteFile(path, []byte("hello"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	f1, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open f1: %v", err)
+	}
+	defer f1.Close()
+	f2, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open f2: %v", err)
+	}
+	defer f2.Close()
+
+	if err := syscall.Flock(int(f1.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatalf("flock f1 LOCK_EX: %v", err)
+	}
+
+	if err := syscall.Flock(int(f2.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); !errors.Is(err, syscall.EAGAIN) {
+		t.Fatalf("flock f2 LOCK_EX|LOCK_NB while f1 holds it = %v, want EAGAIN", err)
+	}
+
+	if err := syscall.Flock(int(f1.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatalf("flock f1 LOCK_UN: %v", err)
+	}
+
+	if err := syscall.Flock(int(f2.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatalf("flock f2 after f1 released = %v, want nil", err)
+	}
+}
+
+
+// TestMain intercepts the test binary's own invocation when re-exec'd
+// as a cross-process fcntl lock holder (see runFcntlLockHolderHelper)
+// — a real, separate OS process is required to exercise fcntl(2)'s
+// actual ownership semantics: fcntl byte-range locks are owned by
+// (process, inode), not by file descriptor, so two fds opened by the
+// *same* process (confirmed by testing directly: the naive two-fd,
+// one-process version of this test always "succeeded" without
+// conflict, because the kernel reports the same lock owner for both,
+// and this codebase's holder model correctly treats a holder's own
+// re-acquisition as a non-conflicting replace, exactly like real
+// fcntl semantics do) never actually conflict with each other,
+// regardless of what this driver does.
+func TestMain(m *testing.M) {
+	if os.Getenv("ICBFS_FCNTL_HELPER") == "1" {
+		runFcntlLockHolderHelper()
+		return
+	}
+	os.Exit(m.Run())
+}
+
+// runFcntlLockHolderHelper opens ICBFS_FCNTL_HELPER_PATH (a path under
+// an already-mounted icbfs FUSE mount, inherited from the parent
+// process — no testcontainers/mount setup of its own needed, since it
+// operates on the mount the same way any other real process accessing
+// an already-mounted filesystem would), takes an F_SETLK on [0,10),
+// signals readiness by creating ICBFS_FCNTL_HELPER_READY, then waits
+// for ICBFS_FCNTL_HELPER_RELEASE to appear before exiting (releasing
+// the lock as a side effect of process exit, same as a real
+// application would).
+func runFcntlLockHolderHelper() {
+	path := os.Getenv("ICBFS_FCNTL_HELPER_PATH")
+	readyPath := os.Getenv("ICBFS_FCNTL_HELPER_READY")
+	releasePath := os.Getenv("ICBFS_FCNTL_HELPER_RELEASE")
+
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "helper: open:", err)
+		os.Exit(1)
+	}
+	lk := syscall.Flock_t{Type: syscall.F_WRLCK, Whence: 0, Start: 0, Len: 10}
+	if err := syscall.FcntlFlock(f.Fd(), syscall.F_SETLK, &lk); err != nil {
+		fmt.Fprintln(os.Stderr, "helper: F_SETLK [0,10):", err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(readyPath, []byte("ready"), 0644); err != nil {
+		fmt.Fprintln(os.Stderr, "helper: signal ready:", err)
+		os.Exit(1)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(releasePath); err == nil {
+			os.Exit(0)
+		}
+		if time.Now().After(deadline) {
+			fmt.Fprintln(os.Stderr, "helper: timed out waiting for release signal")
+			os.Exit(1)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func waitForFileOrFail(t *testing.T, path string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s to appear", path)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestMountFcntlByteRangeLocksAcrossProcesses covers ROADMAP.md's task
+// B8 "Done when" for fcntl(2) byte-range locks through real kernel
+// syscalls against a real mount, using a genuine second OS process
+// (see TestMain/runFcntlLockHolderHelper's doc comments on why that's
+// required, not optional, for fcntl specifically): an overlapping
+// F_SETLK from the other process is refused while held, a genuinely
+// non-overlapping range succeeds while that lock is still held, a
+// conflicting F_GETLK reports it back rather than L_UNLCK, and the
+// overlapping range succeeds once the holder process exits (releasing
+// it).
+func TestMountFcntlByteRangeLocksAcrossProcesses(t *testing.T) {
+	mnt := mountTestFSWithLocking(t)
+	path := filepath.Join(mnt, "fcntl-cross-process.bin")
+	if err := os.WriteFile(path, make([]byte, 100), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	signalDir := t.TempDir()
+	readyPath := filepath.Join(signalDir, "ready")
+	releasePath := filepath.Join(signalDir, "release")
+
+	cmd := exec.Command(os.Args[0], "-test.run=NoSuchTest")
+	cmd.Env = append(os.Environ(),
+		"ICBFS_FCNTL_HELPER=1",
+		"ICBFS_FCNTL_HELPER_PATH="+path,
+		"ICBFS_FCNTL_HELPER_READY="+readyPath,
+		"ICBFS_FCNTL_HELPER_RELEASE="+releasePath,
+	)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper process: %v", err)
+	}
+	defer func() {
+		_ = os.WriteFile(releasePath, []byte("release"), 0644)
+		_ = cmd.Wait()
+	}()
+
+	waitForFileOrFail(t, readyPath, 5*time.Second)
+
+	f2, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open f2: %v", err)
+	}
+	defer f2.Close()
+
+	overlapping := syscall.Flock_t{Type: syscall.F_WRLCK, Whence: 0, Start: 5, Len: 10}
+	if err := syscall.FcntlFlock(f2.Fd(), syscall.F_SETLK, &overlapping); !errors.Is(err, syscall.EAGAIN) {
+		t.Fatalf("F_SETLK f2 [5,15) while helper process holds [0,10) = %v, want EAGAIN", err)
+	}
+
+	query := syscall.Flock_t{Type: syscall.F_WRLCK, Whence: 0, Start: 5, Len: 10}
+	if err := syscall.FcntlFlock(f2.Fd(), syscall.F_GETLK, &query); err != nil {
+		t.Fatalf("F_GETLK f2 [5,15): %v", err)
+	}
+	if query.Type != syscall.F_WRLCK {
+		t.Fatalf("F_GETLK reported Type=%d, want F_WRLCK (a real conflict from the helper process)", query.Type)
+	}
+
+	nonOverlapping := syscall.Flock_t{Type: syscall.F_WRLCK, Whence: 0, Start: 20, Len: 10}
+	if err := syscall.FcntlFlock(f2.Fd(), syscall.F_SETLK, &nonOverlapping); err != nil {
+		t.Fatalf("F_SETLK f2 [20,30) while helper holds [0,10) = %v, want nil", err)
+	}
+
+	if err := os.WriteFile(releasePath, []byte("release"), 0644); err != nil {
+		t.Fatalf("signal release: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("helper process exited with error: %v", err)
+	}
+
+	if err := syscall.FcntlFlock(f2.Fd(), syscall.F_SETLK, &overlapping); err != nil {
+		t.Fatalf("F_SETLK f2 [5,15) after helper process exited (and released) = %v, want nil", err)
 	}
 }

@@ -347,17 +347,21 @@ call).
 
 ## Known pre-existing flaky test (not caused by this session's changes)
 
-`internal/fuseserver.TestMountStatfsReflectsDeclaredSizeAndUsage`
-intermittently fails with `open .../statfs-usage.bin: input/output
-error` when run as part of the full package suite (not when run
-alone — 10/10 clean in isolation every time it's been tried). First
-observed during Part D (StatFS/df wiring) work, before any Part B
-locking code existed, and still happens at a similar rate after all of
-Part B's changes — confirmed the failure is in `Node.Create` (an EIO
-from an unmapped underlying error, almost certainly a MinIO-testcontainer
-"reports ready but isn't fully serving yet" startup race), not
-anywhere near Part B's lock/escalation code, which only runs inside
-`Flush`, never `Create`.
+Several `internal/fuseserver` mount tests (first
+`TestMountStatfsReflectsDeclaredSizeAndUsage`, during Part D; later
+also `TestMountFcntlByteRangeLocksAcrossProcesses`, during Part B's
+task B8) intermittently fail with `open .../<newfile>: input/output
+error` — always on a plain `os.WriteFile` creating a brand-new file,
+always clean (10/10+) when the same test is run alone, only showing up
+when run as part of the full package suite (and more often under
+`-race`, which slows the whole run down, giving more opportunities to
+hit it). The common factor across both occurrences is `Node.Create`
+returning an EIO from an unmapped underlying error — almost certainly a
+MinIO-testcontainer "reports ready but isn't fully serving yet"
+startup race — not anything specific to either test's own feature
+(StatFS/df wiring in one case, fcntl locking in the other), confirming
+this is generic container-startup flakiness in the shared test
+infrastructure, not a defect in either feature.
 
 **Check this if:** this flakiness rate gets worse or starts showing up
 in CI in a way that blocks merges — at that point it's worth adding a
@@ -410,5 +414,70 @@ opted-out mount, but its data in `.lock` is still there and still
 respected if that mount ever turns Locking on" behavior surprising —
 that's the direct consequence of this being per-mount, local state
 rather than shared.
+
+---
+
+## B8: no shared/exclusive lock types, a fixed 24h lease with no renewal, and the cross-process test discovery
+
+**Question I'd have asked:** go-fuse's `Getlk`/`Setlk`/`Setlkw` pass a
+real POSIX `Typ` (`F_RDLCK`/`F_WRLCK`/`F_UNLCK`) and a lock `owner`
+token, plus the real kernel enforces real POSIX lock-ownership rules
+(fcntl locks are per-(process, inode); flock locks are per-open-file-
+description) — but ARCHITECTURE.md/ROADMAP.md's Locking design never
+mentions a shared-vs-exclusive distinction, and a lease-based model has
+no "held until explicitly released" concept real POSIX locks have. How
+should the FUSE wiring reconcile these?
+
+**Assumed:**
+- `F_RDLCK` and `F_WRLCK` are both mapped onto the exact same
+  `TryAcquireLockRange`/`AcquireLockRange` call — every claim in this
+  codebase's model is exclusive, full stop. Rationale: neither design
+  document mentions shared/read locks anywhere; building real
+  reader-writer semantics into the lock data model was never asked
+  for and wasn't attempted. **Real consequence:** two cooperating
+  readers that both only wanted a `F_RDLCK` (shared) lock on the same
+  range will find the second one refused/blocked by the first, unlike
+  real POSIX fcntl semantics.
+- FUSE-sourced locks get a fixed `lockLeaseTTL = 24h`, with **no
+  background renewal** for as long an application holds the lock.
+  Rationale: this project's lease model has no "forever" concept at
+  all (every claim needs an `expires_at`); implementing real renewal
+  would mean a goroutine tied to the FUSE file handle's lifetime,
+  explicitly out of scope for what B8's "Done when" asks for. **Real
+  consequence:** an application that holds an fcntl/flock lock longer
+  than 24h without this codebase ever renewing it could have that
+  lock silently stolen by another claimant — picked long enough to
+  make this impractical to hit by accident, not to model real "no
+  TTL" semantics.
+- `owner` (the kernel-assigned FUSE lock-owner token) becomes this
+  codebase's holder string directly (`fuse-owner-<owner>`) — no
+  translation needed; it already has exactly the stability guarantee
+  (same token = same lock context across calls) this codebase's
+  `holder` concept needs.
+
+**Real discovery, not a guess — the single-process fcntl test was
+wrong:** the first version of the fcntl byte-range test opened two fds
+*in the same test process* and expected a "second fd's overlapping
+lock" to conflict with the first. It didn't — confirmed empirically
+that real fcntl(2) ownership is per-(process, inode), not per-fd, so
+the kernel reports the *same* owner for both fds, and this codebase's
+"a holder's own re-claim never conflicts with itself" rule (needed for
+idempotent re-acquire/renew) correctly treated the second request as
+the same holder replacing its own lock — exactly matching real fcntl
+semantics, where a second `F_SETLK` from the same process really does
+just replace the first rather than erroring. Fixed by spawning a real
+second OS process (`TestMain` intercepting an `ICBFS_FCNTL_HELPER=1`
+re-exec of the test binary itself, operating directly on the parent's
+already-mounted FUSE path — no second testcontainers/mount setup
+needed) to get a genuinely different lock owner. `flock(2)`, by
+contrast, is owned per-open-file-description, so the original
+single-process, two-fd version of that test was correct as written
+and needed no such fix.
+
+**Check this if:** a real application legitimately needs shared
+(read) lock semantics, or needs a lock held reliably longer than 24h
+— both would require real design work (a reader/writer-aware lock
+model; a renewal mechanism tied to the FUSE file handle's lifetime)
+this session deliberately didn't attempt.
 
 ---
