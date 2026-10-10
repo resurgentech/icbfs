@@ -99,9 +99,9 @@ func (w *watchRegistry) lookup(key string) (*fs.Inode, bool) {
 // dependent side effects.
 var notifyContentHook func(key string, errno syscall.Errno)
 
-func startNotifyDispatch(source notify.Source, watches *watchRegistry) {
+func startNotifyDispatch(signals <-chan notify.Signal, watches *watchRegistry) {
 	go func() {
-		for sig := range source.Signals() {
+		for sig := range signals {
 			key := strings.TrimSuffix(sig.Key, ".metadata")
 			inode, ok := watches.lookup(key)
 			if !ok {

@@ -883,7 +883,7 @@ func TestMountNotifyDispatchesSignalToCorrectInode(t *testing.T) {
 
 	source := notify.NewFakeSource(4)
 	mountDir := t.TempDir()
-	server, err := fs.Mount(mountDir, Root(fsys, source), &fs.Options{
+	server, err := fs.Mount(mountDir, Root(fsys, source.Signals()), &fs.Options{
 		MountOptions: fuse.MountOptions{
 			FsName:  "icbfs-test",
 			Name:    "icbfs-test",

@@ -725,3 +725,38 @@ verifying this adapter's parsing against a genuine S3-generated event
 body rather than the hand-constructed JSON this task's test uses.
 
 ---
+
+## B10: a real architectural gap found before implementing — one Source, two consumers
+
+**Not a guess — a real problem B10's own premise creates:** B10 says
+"this task only does anything when both [Locking and Change
+notifications] happen to be on," meaning its core scenario is exactly
+the case where task E3's FUSE watch dispatch and B10's own lock-
+acquisition accelerator both need to observe the *same* backend
+signal stream at once. But `notify.Source.Signals()` (as built for
+tasks E1/E4-E6) is a single-consumption channel — a value read by one
+consumer is gone for any other. Two independent readers of the same
+`Source` would silently steal signals from each other, breaking
+*both* E3's dispatch and B10's accelerator intermittently, exactly in
+the scenario B10 is supposed to matter.
+
+**Assumed/built:** added `notify.Broadcaster` (fans out one `Source`'s
+signals to any number of independent `Subscribe()` channels, each
+seeing every signal) rather than solving this inline in either
+consumer. `fuseserver.Root` now takes a plain `<-chan notify.Signal`
+instead of a `notify.Source` — it never needed anything beyond
+ranging over a channel, and this decouples it from needing to know
+`Broadcaster` exists at all; the caller (`cmd/icbfs`) owns the one
+real `Source`, wraps it in one `Broadcaster`, and hands each consumer
+its own `Subscribe()`. `Filesystem.EnableChangeNotifications` takes
+the same shape. A dropped signal under a slow/stalled subscriber
+(`Broadcaster`'s bounded per-subscriber buffer, non-blocking send) is
+accepted the same way every other missed signal is throughout this
+feature — never a correctness problem, just a slower wake-up.
+
+**Check this if:** a future consumer of signals (beyond E3's dispatch
+and B10's accelerator) gets added — it should get its own
+`Subscribe()` too, never share a channel with an existing consumer,
+or this exact bug reappears for that new pair.
+
+---

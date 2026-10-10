@@ -75,7 +75,7 @@ func main() {
 	}
 	fsys.EnableLocking(*locking)
 
-	var source notify.Source
+	var fuseSignals <-chan notify.Signal
 	if *enableNotify {
 		minioClient, err := newMinIOClient(*endpoint, *accessKey, *secretKey)
 		if err != nil {
@@ -83,10 +83,21 @@ func main() {
 		}
 		src := miniosrc.New(ctx, minioClient, *bucket, fsys.Prefix())
 		defer src.Close()
-		source = src
+
+		// A Broadcaster, not src.Signals() directly: task B10 needs
+		// Locking's blocking-acquisition accelerator to independently
+		// observe the exact same signal stream task E3's FUSE watch
+		// dispatch does, and Source.Signals() is a single-consumption
+		// channel — reading it from two places would steal signals
+		// from each other instead of each seeing every one.
+		broadcaster := notify.NewBroadcaster(src)
+		fuseSignals = broadcaster.Subscribe()
+		if *locking {
+			fsys.EnableChangeNotifications(broadcaster.Subscribe())
+		}
 	}
 
-	root := fuseserver.Root(fsys, source)
+	root := fuseserver.Root(fsys, fuseSignals)
 	server, err := fs.Mount(mountpoint, root, &fs.Options{
 		MountOptions: fuseMountOptions(*debug),
 		// Without this, go-fuse silently rewrites a real, stored "0000"

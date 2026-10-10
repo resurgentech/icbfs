@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/resurgentech/icbfs/internal/block"
+	"github.com/resurgentech/icbfs/internal/notify"
 	"github.com/resurgentech/icbfs/internal/objstore"
 )
 
@@ -45,6 +46,12 @@ type Filesystem struct {
 	id             string // 4-hex-digit prefix, set by Bootstrap
 	archived       bool   // set by Bootstrap; see ErrArchived
 	lockingEnabled bool   // off by default; see EnableLocking, task B7
+
+	// lockNotify is nil unless EnableChangeNotifications (task B10) was
+	// called — read concurrently by every in-flight AcquireLockRange
+	// call (never written after setup), so it's set once, before
+	// concurrent use begins, same usage contract as lockingEnabled.
+	lockNotify <-chan notify.Signal
 }
 
 // New builds a Filesystem for the named filesystem. Call Bootstrap
@@ -66,6 +73,28 @@ func New(store objstore.Store, fsName string) *Filesystem {
 // relative to Bootstrap.
 func (f *Filesystem) EnableLocking(enabled bool) {
 	f.lockingEnabled = enabled
+}
+
+// EnableChangeNotifications wires this Filesystem's blocking lock
+// acquisition (AcquireLockRange, task B3) to accelerate via Change
+// notifications (task B10): a matching signal on signals makes a
+// waiting acquire retry immediately instead of waiting out its
+// current backoff interval. nil (the default, if this is never
+// called) disables the accelerator entirely — AcquireLockRange falls
+// back to pure polling, exactly as it behaved before this task
+// existed; this is never a load-bearing dependency for Locking's own
+// correctness, only a latency improvement when available.
+//
+// signals should be this Filesystem's own subscription (e.g. from
+// notify.Broadcaster.Subscribe, if the mount also has Change
+// notifications enabled — ROADMAP.md explicitly calls this
+// cross-cutting and optional on top of two independently-optional
+// features) to the exact same backend stream task E3's FUSE watch
+// dispatch observes; it must be an independent subscription, not the
+// same single-consumption channel, or the two would steal signals
+// from each other.
+func (f *Filesystem) EnableChangeNotifications(signals <-chan notify.Signal) {
+	f.lockNotify = signals
 }
 
 // RootKey returns the block key identifying this filesystem's root:

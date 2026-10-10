@@ -23,18 +23,17 @@ import (
 // blob's UUID (key). Its type (file/dir/symlink) is fixed for the inode's
 // lifetime, matching ARCHITECTURE.md's model where identity never changes.
 //
-// notifySrc/watches are nil when the Change notifications feature
-// (ROADMAP.md Part E) isn't enabled for this mount — task E2's
-// explicit requirement is that nil here makes every operation behave
-// exactly as if these fields didn't exist at all, so every access to
-// them is a plain nil check, never a required dependency.
+// watches is nil when the Change notifications feature (ROADMAP.md
+// Part E) isn't enabled for this mount — task E2's explicit
+// requirement is that nil here makes every operation behave exactly
+// as if this field didn't exist at all, so every access to it is a
+// plain nil check, never a required dependency.
 type Node struct {
 	fs.Inode
-	fsys      *icbfs.Filesystem
-	key       string
-	typ       icbfs.EntryType
-	notifySrc notify.Source
-	watches   *watchRegistry
+	fsys    *icbfs.Filesystem
+	key     string
+	typ     icbfs.EntryType
+	watches *watchRegistry
 }
 
 var (
@@ -62,17 +61,28 @@ var (
 const statfsBlockSize = 4096
 
 // Root builds the node representing fsys's root directory, for use
-// with fs.Mount. source is the Change notifications backend (ROADMAP.md
-// Part E) to wire watches against — nil disables the feature entirely
-// for this mount (task E2), with every operation behaving exactly as
-// it did before this feature existed.
-func Root(fsys *icbfs.Filesystem, source notify.Source) *Node {
+// with fs.Mount. signals is this mount's subscription to the Change
+// notifications backend (ROADMAP.md Part E, task E2) — nil disables
+// the feature entirely for this mount, with every operation behaving
+// exactly as it did before this feature existed.
+//
+// signals is a plain channel, not a notify.Source, deliberately: task
+// B10 needs the exact same underlying signal stream independently
+// observed by both this dispatch and Locking's blocking-acquisition
+// accelerator, and notify.Source.Signals() is a single-consumption
+// channel — one value read by one consumer is gone for any other. The
+// caller is expected to fan one real Source out via
+// notify.NewBroadcaster and pass each consumer, including this one,
+// its own Subscribe() channel; this package has no need to know that
+// Broadcaster exists at all, since all it ever does with signals is
+// range over it.
+func Root(fsys *icbfs.Filesystem, signals <-chan notify.Signal) *Node {
 	var watches *watchRegistry
-	if source != nil {
+	if signals != nil {
 		watches = newWatchRegistry()
-		startNotifyDispatch(source, watches)
+		startNotifyDispatch(signals, watches)
 	}
-	return &Node{fsys: fsys, key: fsys.RootKey(), typ: icbfs.TypeDir, notifySrc: source, watches: watches}
+	return &Node{fsys: fsys, key: fsys.RootKey(), typ: icbfs.TypeDir, watches: watches}
 }
 
 func typeToFuseMode(t icbfs.EntryType) uint32 {
@@ -152,7 +162,7 @@ func errnoFromErr(err error) syscall.Errno {
 }
 
 func (n *Node) newChild(ctx context.Context, key string, typ icbfs.EntryType) *fs.Inode {
-	child := &Node{fsys: n.fsys, key: key, typ: typ, notifySrc: n.notifySrc, watches: n.watches}
+	child := &Node{fsys: n.fsys, key: key, typ: typ, watches: n.watches}
 	stable := fs.StableAttr{Ino: icbfs.Ino(key), Mode: typeToFuseMode(typ)}
 	// StableAttr.Ino dedups against any already-known inode with the same
 	// number — this is exactly how hardlinks (Link, below) end up sharing
