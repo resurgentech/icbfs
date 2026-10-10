@@ -682,28 +682,95 @@ in the other direction.
 Implements `ARCHITECTURE.md`'s "Windows compatibility: primary mode"
 section. The largest single workstream in this roadmap — everything
 else Windows-related (Part B's task B9, Part C's task C3) is blocked on
-F1 specifically, not separately scoped.
+this part, not separately scoped.
 
-### F1. WinFsp driver skeleton
+**A hard environment gap, true of every task below, stated once here
+rather than repeated on each one:** this development environment is
+Linux-only, and research into WinFsp's own testing story (cgofuse's CI
+runs on real Windows machines via AppVeyor) turned up no Wine-based or
+otherwise Linux-hosted way to test a WinFsp mount at all. Every "done
+when" below that says "against a real mount" means a real Windows
+machine or VM, genuinely unavailable here — the same category of gap as
+Part E's "no real Azure/AWS account," just for this entire access layer
+rather than one feature of it, and with no partial workaround (Part E
+could at least fall back to a fake/mocked adapter for its own unit-level
+coverage; there is no equivalent fake for "did this actually mount.")
 
-- Pick and verify a maintained Go binding for WinFsp (don't assume one
-  sight-unseen, same practice as checking go-fuse's actual API before
-  relying on it).
-- Mirror `internal/fuseserver`'s shape: a node type wrapping
-  `icbfs.Filesystem`, implementing WinFsp's callback interfaces for the
-  same basic operation set already proven on the FUSE side (lookup,
-  getattr, setattr, readdir, create, open, read, write, unlink, rmdir,
-  symlink, readlink, link).
-- **A real environment gap, worth naming plainly rather than assumed
-  away:** this development environment is Linux-only. A real WinFsp
-  mount test needs an actual Windows machine or VM — the same category
-  of gap as Part E's "no real Azure/AWS account here," just for the
-  driver itself rather than one feature of it.
+### F1. Choose a Go binding — a real tradeoff, not a default
+
+Two current, real options, not one:
+
+- **`github.com/winfsp/cgofuse`** — a FUSE-*compatible* shim: the same
+  callback shape across Windows/WinFsp, macOS/macFUSE, and Linux/libfuse.
+  Maintained but slow-moving (latest release Jan 2024, ~8-12 month
+  cadence). Path-string-addressed (`Open(path string, ...)`,
+  `Getattr(path string, ...)`), not node/inode-object-addressed.
+- **`github.com/winfsp/go-winfsp`** — a direct binding to WinFsp's
+  *native* C API, explicitly built to avoid cgofuse's "POSIX/Windows
+  semantic friction" per its own README. Far more actively maintained
+  (a release as recent as Oct 2026). Also path-string-addressed. Its
+  full interface surface wasn't fully enumerable during research (only
+  a representative subset confirmed: `OpenFile`, `Mkdir`, `Remove`,
+  `Rename`, `Stat`) — that incompleteness is itself part of the cost of
+  choosing it, not a settled risk.
+
+**Neither gives you what go-fuse's high-level `fs` package gives
+`internal/fuseserver`** — a cached node tree where `Lookup` returns a
+reusable `*Inode`. Both are flatly path-string-based. This means
+whichever is chosen, `internal/fuseserver`'s `Node` structs are **not
+portable** to this driver; only `icbfs.Filesystem`'s core logic is
+(it's already key/UUID-based and access-layer-agnostic by design — see
+task F2).
+
+- **Done when:** one is chosen, with the tradeoff above actually
+  weighed against this project's specific needs (go-winfsp's currency
+  and semantic-fit vs. its less-enumerated surface; cgofuse's maturity
+  and familiarity vs. its slower pace and FUSE-shaped impedance
+  mismatch against a filesystem that has real Windows-only concepts),
+  not defaulted to whichever is more familiar.
+
+### F2. Path-resolution layer
+
+- Since neither binding provides go-fuse's node-tree/`Lookup`-caches-an-
+  `Inode` convenience, this driver needs its own layer resolving a path
+  string to an `icbfs.Filesystem` UUID on every call — either a fresh
+  tree walk per call, or a driver-owned cache. This is genuinely new
+  architecture, not a port of anything already built.
+- **Done when:** path resolution is correct for nested directories and
+  for multiple hard-linked names resolving to the same UUID — provable
+  at the Go unit-test level, independent of a real WinFsp mount, since
+  this layer sits entirely on the `icbfs.Filesystem` side of the binding
+  boundary.
+
+### F3. Core operation wiring
+
+- Wire the chosen binding's callbacks to `icbfs.Filesystem` via F2's
+  path resolution, covering the same basic operation set already proven
+  on the FUSE side: create, read, write, mkdir, rmdir, unlink, readdir,
+  getattr/setattr, symlink, readlink, link.
+- **Reuse `icbfs.Ino()` for file identity — a genuine, confirmed point
+  of code reuse, not a Windows-specific reimplementation.** WinFsp's
+  `FSP_FSCTL_FILE_INFO.IndexNumber` is a direct analog to FUSE's
+  `st_ino`, and — same as FUSE — WinFsp does not generate one for you;
+  the existing hash-of-UUID function plugs directly into this different
+  struct field.
 - **Done when:** basic file lifecycle (create/read/write/mkdir/rmdir)
-  works through a real WinFsp mount on an actual Windows environment —
-  not simulated, not assumed from the FUSE driver's equivalent passing.
+  works against a real WinFsp mount.
 
-### F2. Primary-mode flag
+### F4. Case-sensitivity mount flag
+
+- Confirmed as a single whole-volume setting
+  (`VolumeParams.CaseSensitiveSearch`) — WinFsp explicitly does not
+  support NTFS's newer per-directory mixed-sensitivity model, so there's
+  no finer-grained option to consider. This maps cleanly onto the
+  already-decided design (case-preserving storage, case-folded
+  comparison only at the access layer, from `ARCHITECTURE.md`'s Windows
+  compatibility section): set this flag, do the case-fold in this
+  driver's own lookup path.
+- **Done when:** case-insensitive lookup behaves correctly against a
+  real mount while the underlying stored names remain unchanged.
+
+### F5. Primary-mode flag
 
 - Store whether a filesystem is primary-Windows or primary-POSIX, set
   once at creation and immutable afterward — add this to the master
@@ -712,7 +779,7 @@ F1 specifically, not separately scoped.
 - **Done when:** creating a filesystem lets the caller specify primary
   mode, and it's correctly retrievable afterward.
 
-### F3. Reserved-name/character enforcement
+### F6. Reserved-name/character enforcement
 
 - For a primary-Windows filesystem: `Create`/`Mkdir`/`Symlink`/`Link`
   reject Windows-reserved names and characters outright
@@ -725,27 +792,58 @@ F1 specifically, not separately scoped.
 - **Done when:** tests cover both primary modes' actual behavior for a
   reserved name, not just the Windows-primary rejection case.
 
-### F4. Windows file attribute bits
+### F7. Windows file attribute bits
 
 - Hidden/System/ReadOnly/Archive — storage (likely another entry in
   `.metadata`'s `xattrs` map, consistent with how ACLs landed there) and
   wiring to WinFsp's `FILE_ATTRIBUTE_*` reporting/setting.
 - **Done when:** round-trips correctly through a real WinFsp mount.
 
-### F5. Delete/rename-on-open-file emulation
+### F8. ACL wiring
+
+- The `xattrs` map itself is built in Part A's task A4 (`.metadata`'s
+  Protobuf schema); this task is specifically about implementing
+  WinFsp's `GetSecurity`/`SetSecurity` callbacks (confirmed real,
+  FUSE-side-has-no-analog operations) to read/write the `windows.acl`
+  entry, and — if `getfacl`/`setfacl`-style POSIX ACL support is ever
+  built on the FUSE side — the `system.posix_acl_access` entry
+  correspondingly.
+- **Done when:** a real security descriptor round-trips through a real
+  WinFsp mount.
+
+### F9. Delete/rename-on-open-file emulation
 
 - Windows's pending-delete and share-mode semantics around a file open
-  elsewhere, emulated at the WinFsp driver layer per `ARCHITECTURE.md`
-  — not a core object-model change.
+  elsewhere, emulated at this driver's layer per `ARCHITECTURE.md` —
+  not a core object-model change.
 - **Done when:** tests cover deleting/renaming a file that's open
   elsewhere behaving per Windows semantics, against a real mount.
 
-### F6. ACL wiring
+### F10. Licensing compliance
 
-- The `xattrs` map itself is built in Part A's task A4 (`.metadata`'s
-  Protobuf schema); this task is specifically about WinFsp reading/
-  writing the `windows.acl` entry via real security-descriptor queries,
-  and (if `getfacl`/`setfacl`-style POSIX ACL support is ever built on
-  the FUSE side) the `system.posix_acl_access` entry correspondingly.
-- **Done when:** a real security descriptor round-trips through a real
-  WinFsp mount.
+WinFsp is GPLv3 with a FLOSS exception, verified against its own
+`License.txt`, not assumed from general familiarity with GPL-family
+licenses — the exception requires **all three** of: (1) icbfs meeting
+the Free Software Definition or Open Source Definition; (2) including
+WinFsp's specific attribution notice and a link to its repo, in icbfs's
+own UI and user-facing docs; (3) **never** linking or distributing
+WinFsp together with any proprietary software while relying on this
+exception — mixing FLOSS and proprietary under it is not permitted. A
+commercial license exists as a fallback if that constraint ever doesn't
+fit (per-organization or per-developer terms, confirmed current
+pricing available on WinFsp's own site, not reproduced here since
+pricing changes independently of this project).
+- **Done when:** the attribution notice and repo link actually appear
+  in icbfs's own docs/UI wherever a user would encounter the WinFsp-
+  backed mount, not just noted here and forgotten.
+
+### F11. Deployment / installer story
+
+- WinFsp requires its own kernel-mode driver and user-mode DLL installed
+  on the target Windows machine, **separately from icbfs's own binary**,
+  requiring admin rights — confirmed, not assumed. icbfs cannot silently
+  carry or install this itself; it's a real, separate prerequisite a
+  user or an installer script has to satisfy via WinFsp's own installer.
+- **Done when:** icbfs's own install documentation says this plainly and
+  points to WinFsp's installer, rather than a user discovering the
+  missing dependency only when a mount attempt fails.
