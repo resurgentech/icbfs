@@ -7,20 +7,29 @@ the acceptance bar for each task — write the test first if that's
 practical, same as the rest of this codebase's testing style (real MinIO
 via testcontainers-go, not mocks).
 
-Three workstreams so far:
+Four workstreams so far:
 
 - **Part A: Serialization — JSON to Protobuf.** All of this project's own
   object bodies (directory/root blocks, the not-yet-built `.metadata`
-  object, the not-yet-built `.lock` object) move to Protobuf instead of
-  JSON. Do this one first, or at least its schema/toolchain setup —
-  Part B's `.lock` object should be defined in Protobuf from the start
-  rather than built in JSON and migrated a second time.
+  object, the not-yet-built `.lock` object, the not-yet-built master
+  block) move to Protobuf instead of JSON. Do this one first, or at least
+  its schema/toolchain setup — every object defined in Parts B and D
+  should be born in Protobuf rather than built in JSON and migrated a
+  second time.
 - **Part B: Locking.** Implements the Locking section (and the Content
   writes: CAS, bounded retry, and escalation to locking section) of
   `ARCHITECTURE.md`.
 - **Part C: Permission enforcement.** Mode bits are stored and reported
   correctly but not actually enforced on read/write — this closes that
   gap. Independent of A and B; can be done in any order relative to them.
+- **Part D: Multiple filesystems per bucket — the master block.**
+  Implements the Multiple filesystems per bucket section of
+  `ARCHITECTURE.md`: the master block itself, uniform ID-prefixing of
+  every object (a real migration — the current code has no such prefix
+  at all), the archive/prune lifecycle, and `df`/`du`. Depends on Part A
+  for its schema (task D1), and its prefixing change affects every other
+  part's object-naming — sequence it early relative to B and C's own
+  object-creation code, not as an afterthought bolted on at the end.
 
 ---
 
@@ -411,3 +420,102 @@ real ACL checking if `ARCHITECTURE.md`'s primary-mode ACL design has
 been built by then, or at minimum an approximated mode-bit check
 equivalent to C1's for a POSIX-primary filesystem mounted on Windows.
 Not further broken down here since the driver itself isn't scoped yet.
+
+---
+
+## Part D: Multiple filesystems per bucket — the master block
+
+Implements the Multiple filesystems per bucket section of
+`ARCHITECTURE.md`. Depends on Part A (task A1 at minimum) for the
+Protobuf toolchain — the master block schema should be defined in
+Protobuf from the start, same reasoning as `.metadata`/`.lock`.
+
+### D1. Define the master block schema and bootstrap logic
+
+- `FilesystemEntry{name, size, archived}` / `MasterBlock{repeated
+  filesystems}`, per `ARCHITECTURE.md`.
+- Create-if-missing bootstrap at a single fixed key, one per bucket —
+  mirrors `Filesystem.Bootstrap`'s existing logic for a root block
+  almost exactly; worth checking whether that function can be
+  generalized/reused rather than duplicated.
+- **Done when:** a fresh bucket's master block can be bootstrapped, and
+  bootstrapping an already-existing one is a no-op (same bar
+  `Bootstrap` already meets for roots).
+
+### D2. Filesystem creation through the master block
+
+- CAS-read the master block; scan the in-memory list for the
+  lowest-indexed free (`name == ""`) slot, reuse it if found, else
+  append; write back conditioned on the ETag read, retrying on a lost
+  race (the standard pattern, applied to a new object).
+- Derive the ID from the chosen index, zero-padded to 4 hex digits;
+  create the root at `<id>-root-<name>`.
+- **Done when:** tests cover: creating a filesystem allocates the
+  expected ID; two concurrent creation attempts both succeed with
+  distinct IDs (one retries after losing the CAS race, not both landing
+  on the same slot); after a filesystem is deleted (D5) and its slot
+  tombstoned, a new creation reuses that same freed slot rather than
+  only ever appending.
+
+### D3. Uniform ID-prefixing of every object — a real migration, not new-code-only
+
+**This is the task with the widest blast radius in this part.** Every
+key-generation call site in `internal/icbfs` currently produces a bare
+UUID (or `<uuid>.metadata`, `<uuid>.lock`, etc.) with no filesystem-ID
+prefix at all — `Create`, `Mkdir`, `Symlink`, the nlink side-object key
+helper, and anything added by Parts B/D's own new code. All of them need
+the owning filesystem's ID prepended, which means `Filesystem` needs to
+know its own ID (learned at open time, by finding its entry's position
+in the master block) and thread it into every key it generates.
+- **Done when:** a test creates a filesystem, writes a file, a
+  directory, and (once Part B exists) a lock, and confirms every one of
+  their keys in the backend actually carries the expected `<id>-`
+  prefix — not just that the filesystem still works end to end (the
+  existing test suite already proves that), but that the prefix
+  convention is actually present on disk, since that's the thing this
+  task is actually for.
+
+### D4. `df`/`du` via prefix-scoped listing
+
+- `du`: already free, a tree walk from the filesystem's own root — if
+  this isn't already exposed as a callable operation independent of
+  `ReadDir`'s existing recursive traversal, this task includes exposing
+  it as one.
+- `df`: "Total" is the master block entry's `size` field; "Used" is a
+  `ListObjectsV2`/`List Blobs` call scoped to the filesystem's `<id>-`
+  prefix, summing each returned entry's size across pagination.
+- Wire into FUSE's `StatFs` — investigate go-fuse's actual
+  `NodeStatfser` interface shape before assuming it, the same way every
+  other go-fuse API assumption in this project has been checked first.
+- **Done when:** a test creates two filesystems in the same bucket, adds
+  differently-sized content to each, and confirms each filesystem's `df`
+  "Used" reflects only its own content, not the other's — this is the
+  test that actually proves the multi-tenant scoping problem is solved,
+  not just that a number comes back.
+
+### D5. Archive and prune lifecycle
+
+- Archive: set `archived = true` on the filesystem's master block
+  entry (a CAS write, like any other). Enforcement is checked at
+  mount/session start, not per-operation — a mounted session doesn't
+  need to notice an archive that happens mid-session; the next mount
+  does. Document this explicitly wherever it's implemented, since it's
+  a deliberately chosen gap, not an accident.
+- Prune: list every object under the filesystem's `<id>-` prefix (the
+  same listing D4's "Used" calculation uses) and delete each one, then
+  blank the master block entry (`name = ""`), making its slot eligible
+  for D2's reuse.
+- **Done when:** tests cover: writes against an archived filesystem are
+  rejected (checked at the point this project chooses to enforce it —
+  mount/session start, per above — not necessarily mid-session); reads
+  against an archived filesystem still succeed; pruning actually removes
+  every object under the prefix (confirmed by listing after, not just
+  trusting the delete calls didn't error) and frees the slot for reuse.
+
+### D6. Deferred: a tool to change a filesystem's declared size after creation
+
+Not scoped in detail — `ARCHITECTURE.md` acknowledges this is wanted
+("a back-channel tool," not a normal mount-time operation) without
+designing it. At minimum it's a CAS write to the master block entry's
+`size` field; whether it needs anything beyond that (validation against
+current "Used," for instance) isn't decided.
