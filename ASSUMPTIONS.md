@@ -535,3 +535,71 @@ nuances above are worth closing for real, rather than continuing to
 rely on the "other"-bits proxy this session chose.
 
 ---
+
+## E3: a real bug (stale-nodeId registry) and two real dead ends (inotify, page cache)
+
+**Real bug found and fixed, not a guess:** the first implementation of
+`watchRegistry.register` overwrote its map entry unconditionally on
+every `newChild` call. Confirmed by reading `(*fs.Inode).NewInode`/
+`newInodeUnlocked` directly: when an explicit `StableAttr.Ino` is
+given (which every call here does), it does **not** deduplicate
+against an already-known Inode with that Ino at all — it always
+allocates a fresh wrapper. The real, authoritative "is this Ino
+already known, and if so, which Inode wins" resolution happens later,
+inside go-fuse's own `bridge.addNewChild`/`addNewNode`, called by the
+framework *after* our `Lookup`/`Create` method already returned. So a
+*second* lookup of an already-known file (e.g. `os.Open` after the
+`os.WriteFile`/`Create` that made it) builds a second, throwaway
+Inode that the bridge discards in favor of the first — and the old
+unconditional-overwrite `register` call stomped the correct,
+already-registered entry with a reference to that soon-to-be-discarded
+one. Caught directly via `fuse.MountOptions.Debug: true`'s raw
+protocol trace: the `NOTIFY_INVAL_INODE` message targeted a nodeId the
+kernel had never heard of, and the kernel's own write(2) response was
+a literal `ENOENT`. Fixed by making `register` first-writer-wins (the
+very first registration for any given Ino is, by construction, always
+the one go-fuse's own dedup lets win later).
+
+**Two real dead ends, tried and confirmed not to work, not left
+unexamined:**
+- Tried driving a real `inotify_add_watch`-observed `IN_MODIFY` event
+  via `Inode.NotifyContent`, with both `(0,0)` and `(0, <real size>)`
+  arguments. Confirmed via the same `Debug: true` trace that the
+  kernel accepts the notify write (errno 0) but no inotify event ever
+  arrives at a raw `syscall.InotifyInit1`/`InotifyAddWatch` watcher,
+  even after forcing a subsequent re-read. `NotifyDelete`'s own go-fuse
+  doc comment ("equivalent to NotifyEntry, but *also* sends an event to
+  inotify watchers") in hindsight is the tell: it calls out sending an
+  inotify event as a distinguishing feature, implying `NotifyContent`/
+  `NotifyEntry` alone don't reliably do so on their own.
+- Considered testing via kernel page-cache staleness instead (what
+  `NotifyContent`'s doc literally promises: "content... flushed from
+  buffers"). Checked this filesystem's own `Node.Open`/`FileHandle`:
+  it never requests `FOPEN_KEEP_CACHE`, and `fs.Options.AttrTimeout`/
+  `EntryTimeout` are both left nil (→ effectively zero caching) — so
+  there isn't actually any kernel-side cache in this configuration for
+  `NotifyContent` to meaningfully invalidate; a plain re-read would
+  show fresh content regardless of whether any notification ever
+  fired, so that comparison wouldn't have proven anything either.
+
+**Assumed, given both of the above:** `TestMountNotifyDispatchesSignalToCorrectInode`
+verifies this task's actual deliverable — the registry+dispatch
+pipeline correctly turns a `notify.Source` signal into a `NotifyContent`
+call against the right, kernel-validated Inode, accepted without
+error — via a test-only hook (`notifyContentHook`, nil in production)
+rather than an environment-dependent kernel side effect. Confirmed this
+is a real regression test by reverting the registry fix and watching
+it fail deterministically (3/3) with the exact `ENOENT` the real bug
+produced, then pass 3/3 once restored.
+
+**Check this if:** a real end-user-visible inotify/dnotify delivery
+guarantee is ever actually required — this task proves the plumbing
+*up to* the kernel accepting the notify call, not that a watching
+userspace process observably reacts to it; closing that gap for real
+would need either a different kernel/FUSE capability, opting into
+`FOPEN_KEEP_CACHE` plus real cache timeouts to make staleness
+observable, or revisiting whether `NotifyEntry`/`NotifyDelete`
+(confirmed to explicitly fire inotify events) are better suited to
+however this ends up being used in practice.
+
+---

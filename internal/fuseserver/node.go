@@ -23,17 +23,18 @@ import (
 // blob's UUID (key). Its type (file/dir/symlink) is fixed for the inode's
 // lifetime, matching ARCHITECTURE.md's model where identity never changes.
 //
-// notifySrc is nil when the Change notifications feature (ROADMAP.md
-// Part E) isn't enabled for this mount — task E2's explicit
-// requirement is that a nil notifySrc makes every operation behave
-// exactly as if this field didn't exist at all, so every access to it
-// is a plain nil check, never a required dependency.
+// notifySrc/watches are nil when the Change notifications feature
+// (ROADMAP.md Part E) isn't enabled for this mount — task E2's
+// explicit requirement is that nil here makes every operation behave
+// exactly as if these fields didn't exist at all, so every access to
+// them is a plain nil check, never a required dependency.
 type Node struct {
 	fs.Inode
 	fsys      *icbfs.Filesystem
 	key       string
 	typ       icbfs.EntryType
 	notifySrc notify.Source
+	watches   *watchRegistry
 }
 
 var (
@@ -66,7 +67,12 @@ const statfsBlockSize = 4096
 // for this mount (task E2), with every operation behaving exactly as
 // it did before this feature existed.
 func Root(fsys *icbfs.Filesystem, source notify.Source) *Node {
-	return &Node{fsys: fsys, key: fsys.RootKey(), typ: icbfs.TypeDir, notifySrc: source}
+	var watches *watchRegistry
+	if source != nil {
+		watches = newWatchRegistry()
+		startNotifyDispatch(source, watches)
+	}
+	return &Node{fsys: fsys, key: fsys.RootKey(), typ: icbfs.TypeDir, notifySrc: source, watches: watches}
 }
 
 func typeToFuseMode(t icbfs.EntryType) uint32 {
@@ -146,12 +152,20 @@ func errnoFromErr(err error) syscall.Errno {
 }
 
 func (n *Node) newChild(ctx context.Context, key string, typ icbfs.EntryType) *fs.Inode {
-	child := &Node{fsys: n.fsys, key: key, typ: typ, notifySrc: n.notifySrc}
+	child := &Node{fsys: n.fsys, key: key, typ: typ, notifySrc: n.notifySrc, watches: n.watches}
 	stable := fs.StableAttr{Ino: icbfs.Ino(key), Mode: typeToFuseMode(typ)}
 	// StableAttr.Ino dedups against any already-known inode with the same
 	// number — this is exactly how hardlinks (Link, below) end up sharing
 	// one Inode across multiple directory entries.
-	return n.NewInode(ctx, child, stable)
+	inode := n.NewInode(ctx, child, stable)
+	if n.watches != nil {
+		// Task E3: "a FUSE watch gets established via a path lookup,
+		// which already resolves to a UUID at that moment" — this is
+		// that moment, for every path that produces a node (Lookup,
+		// Create, Mkdir, Symlink all call newChild).
+		n.watches.register(key, inode)
+	}
+	return inode
 }
 
 func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {

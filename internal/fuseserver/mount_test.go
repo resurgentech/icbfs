@@ -20,6 +20,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/minio"
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
+	"github.com/resurgentech/icbfs/internal/notify"
 	"github.com/resurgentech/icbfs/internal/objstore"
 )
 
@@ -833,5 +834,120 @@ func TestMountWithNoNotificationBackendBehavesIdentically(t *testing.T) {
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("expected dir to be gone, got err: %v", err)
+	}
+}
+
+// TestMountNotifyDispatchesSignalToCorrectInode covers ROADMAP.md's
+// task E3 "Done when": a watch is established, a change is triggered
+// through a second, independent client against the same backend, and
+// the watching mount delivers a real notification — proving cross-
+// mount delivery, not just that the internal plumbing compiles.
+//
+// "Second, independent client" here is a second *icbfs.Filesystem
+// handle writing directly to the same backend bucket, bypassing this
+// mount's FUSE layer entirely — exactly the scenario Change
+// notifications exists for (another mount or process changed
+// something this mount didn't write itself). The real backend-to-
+// notify.Source delivery mechanism (task E4's MinIO adapter) isn't
+// exercised here — this test uses notify.FakeSource and manually
+// Emits the signal a real backend would have delivered, isolating
+// what this task actually owns: the registry + dispatch wiring that
+// turns a Source signal into a real go-fuse NotifyContent call against
+// the correct, kernel-validated Inode.
+//
+// This does NOT verify a userspace inotify_add_watch delivery, or a
+// page-cache staleness transition — both were tried first and found,
+// empirically, not to be reliable proof here: a successful (errno 0)
+// NotifyContent call was confirmed via direct FUSE debug tracing to
+// not produce any inotify event on this kernel/go-fuse version in this
+// environment (tried with both a zero and a non-zero size argument),
+// and this filesystem doesn't request FOPEN_KEEP_CACHE on Open, so
+// there's no kernel page cache staleness for NotifyContent to
+// meaningfully defeat either — attribute/entry timeouts are unset
+// (effectively zero), so every read already round-trips to this
+// driver regardless of any notification. See ASSUMPTIONS.md's E3
+// entry. What's verified instead, via the test-only notifyContentHook
+// seam, is the actual software this task delivers: a Source signal
+// naming a tracked UUID results in a NotifyContent call against the
+// right Inode, accepted by the kernel without error — confirmed
+// against the exact bug this uncovered (a naive implementation
+// targeted a stale, kernel-unknown nodeId and got ENOENT back; see
+// watchRegistry.register's doc comment).
+func TestMountNotifyDispatchesSignalToCorrectInode(t *testing.T) {
+	ctx := context.Background()
+	store := newMountTestStore(t)
+	fsys := icbfs.New(store, "test")
+	if err := fsys.Bootstrap(ctx, 1<<30, 0755, uint32(os.Getuid()), uint32(os.Getgid())); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	source := notify.NewFakeSource(4)
+	mountDir := t.TempDir()
+	server, err := fs.Mount(mountDir, Root(fsys, source), &fs.Options{
+		MountOptions: fuse.MountOptions{
+			FsName:  "icbfs-test",
+			Name:    "icbfs-test",
+			Options: []string{"default_permissions"},
+		},
+		NullPermissions: true,
+	})
+	if err != nil {
+		t.Fatalf("mount: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := server.Unmount(); err != nil {
+			t.Logf("unmount: %v", err)
+		}
+	})
+
+	path := filepath.Join(mountDir, "watched.txt")
+	if err := os.WriteFile(path, []byte("v1"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// A plain lookup (os.Open does one) is what registers this UUID in
+	// the watch registry — see newChild's doc comment.
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer f.Close()
+
+	entry, _, err := fsys.Lookup(ctx, fsys.RootKey(), "watched.txt")
+	if err != nil {
+		t.Fatalf("lookup via Filesystem API (to get the real UUID key): %v", err)
+	}
+
+	type dispatchResult struct {
+		key   string
+		errno syscall.Errno
+	}
+	resultCh := make(chan dispatchResult, 1)
+	notifyContentHook = func(key string, errno syscall.Errno) {
+		resultCh <- dispatchResult{key: key, errno: errno}
+	}
+	t.Cleanup(func() { notifyContentHook = nil })
+
+	// The second, independent client: writes directly to the backend
+	// object this mount's "watched.txt" resolves to, never going
+	// through this mount's FUSE layer at all.
+	if _, _, err := fsys.WriteFile(ctx, entry.UUID, []byte("v2 from another client"), ""); err != nil {
+		t.Fatalf("second client write: %v", err)
+	}
+
+	// Simulate the real backend adapter (task E4) having observed that
+	// write and delivered a signal.
+	source.Emit(notify.Signal{Key: entry.UUID})
+
+	select {
+	case res := <-resultCh:
+		if res.key != entry.UUID {
+			t.Fatalf("dispatch targeted key %q, want %q", res.key, entry.UUID)
+		}
+		if res.errno != 0 {
+			t.Fatalf("NotifyContent for %q = errno %d, want 0 (success)", res.key, res.errno)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the signal to be dispatched")
 	}
 }
