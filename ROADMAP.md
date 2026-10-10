@@ -377,6 +377,39 @@ does, wire its lock-related callbacks onto the same tasks B2-B6 primitives
 used by FUSE. Not further broken down here since Part F owns scoping
 the driver itself.
 
+### B10. Optional: use Change Notifications to accelerate blocking acquisition
+
+Cross-cutting with Part E — depends on both B3 (blocking acquisition)
+and Part E existing, and is itself optional on top of two already-
+optional features (Locking and Change Notifications each have their own
+mount flag; this task only does anything when both happen to be on).
+
+- When Change Notifications is enabled, B3's polling loop can
+  additionally subscribe to notifications scoped to the exact `.lock`
+  key it's waiting on, and retry the CAS-acquire as soon as a matching
+  notification arrives rather than waiting out the next poll interval.
+  Scoping this is simpler than Part E's general per-watch UUID tracking
+  (task E3) — the key being waited on is already known exactly, no
+  path-to-UUID resolution needed.
+- **Gate this per backend — do not wire it in for Azure.** MinIO's
+  adapter (task E4) is genuinely near-real-time, a real win here. Azure
+  Change Feed (task E5) is minutes-scale; using it as a lock wake-up
+  signal would make blocking acquisition slower than plain polling, not
+  faster. AWS S3 (task E6) is a plausible, modest win depending on the
+  polling interval being compared against.
+- The plain-polling fallback from B3 must stay fully correct and be the
+  actual behavior whenever a notification is missed, delayed, never
+  arrives, or Change Notifications isn't enabled at all — this task
+  only ever sharpens the retry trigger, it never becomes a load-bearing
+  dependency for Locking's correctness.
+- **Done when:** a test with both features enabled against MinIO shows
+  lock handoff latency measurably better than B3's plain-polling
+  baseline; a second test with Change Notifications disabled (or
+  pointed at a fake Azure-shaped adapter with injected multi-minute
+  delay) confirms blocking acquisition still converges correctly via
+  the B3 fallback, just without the speedup — proving the dependency is
+  genuinely optional, not just untested.
+
 ---
 
 ## Part C: Permission enforcement
@@ -541,7 +574,10 @@ current "Used," for instance) isn't decided.
 
 Implements the Change notifications section of `ARCHITECTURE.md`.
 Depends on Part D (notifications are scoped by the filesystem's ID
-prefix — build D's prefixing first).
+prefix — build D's prefixing first). Once this part exists, see Part
+B's task B10 — Locking's blocking acquisition can use it to wake up
+faster than polling, on MinIO specifically, as an optional enhancement
+in the other direction.
 
 ### E1. Internal event-source interface
 
