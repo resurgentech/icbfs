@@ -17,9 +17,12 @@
 package block
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
+
+	"google.golang.org/protobuf/proto"
+
+	"github.com/resurgentech/icbfs/internal/pb"
 )
 
 // EntryType is the kind of node a directory row points at.
@@ -33,9 +36,9 @@ const (
 
 // Entry is one row of a leaf block.
 type Entry struct {
-	Name string    `json:"name"`
-	UUID string    `json:"uuid"`
-	Type EntryType `json:"type"`
+	Name string
+	UUID string
+	Type EntryType
 }
 
 // Kind distinguishes a leaf (holds entries directly) from an internal
@@ -56,39 +59,76 @@ const (
 // MinKey rewritten, only the new sibling inserted into the parent needs a
 // real MinKey (see Block.SplitLeaf/SplitInternal).
 type Child struct {
-	MinKey string `json:"min_key"`
-	UUID   string `json:"uuid"`
+	MinKey string
+	UUID   string
 }
 
 // Block is the decoded body of a directory object: either a Leaf (a
 // sorted list of entries) or an Internal node (a sorted list of child
 // pointers).
 type Block struct {
-	Kind     Kind    `json:"kind"`
-	Entries  []Entry `json:"entries,omitempty"`
-	Children []Child `json:"children,omitempty"`
+	Kind     Kind
+	Entries  []Entry
+	Children []Child
 }
 
-// Decode parses a directory block body. Empty input decodes to an empty
-// leaf block, so a freshly created directory's body can just be nil bytes.
+// Decode parses a directory block body (Protobuf-encoded, per
+// proto/icbfs/v1/block.proto). Empty input decodes to an empty leaf
+// block, so a freshly created directory's body can just be nil bytes.
 func Decode(data []byte) (*Block, error) {
 	if len(data) == 0 {
 		return &Block{Kind: Leaf}, nil
 	}
-	var b Block
-	if err := json.Unmarshal(data, &b); err != nil {
+	var wire pb.Block
+	if err := proto.Unmarshal(data, &wire); err != nil {
 		return nil, fmt.Errorf("decode directory block: %w", err)
 	}
-	return &b, nil
+	return fromWire(&wire), nil
 }
 
 // Encode serializes the block back to bytes.
 func (b *Block) Encode() ([]byte, error) {
-	data, err := json.Marshal(b)
+	data, err := proto.Marshal(toWire(b))
 	if err != nil {
 		return nil, fmt.Errorf("encode directory block: %w", err)
 	}
 	return data, nil
+}
+
+func toWire(b *Block) *pb.Block {
+	w := &pb.Block{Kind: pb.BlockKind(b.Kind)}
+	for _, e := range b.Entries {
+		w.Entries = append(w.Entries, &pb.Entry{
+			Name: e.Name,
+			Uuid: e.UUID,
+			Type: pb.EntryType(e.Type),
+		})
+	}
+	for _, c := range b.Children {
+		w.Children = append(w.Children, &pb.Child{
+			MinKey: c.MinKey,
+			Uuid:   c.UUID,
+		})
+	}
+	return w
+}
+
+func fromWire(w *pb.Block) *Block {
+	b := &Block{Kind: Kind(w.Kind)}
+	for _, e := range w.Entries {
+		b.Entries = append(b.Entries, Entry{
+			Name: e.Name,
+			UUID: e.Uuid,
+			Type: EntryType(e.Type),
+		})
+	}
+	for _, c := range w.Children {
+		b.Children = append(b.Children, Child{
+			MinKey: c.MinKey,
+			UUID:   c.Uuid,
+		})
+	}
+	return b
 }
 
 // --- Leaf operations ---
