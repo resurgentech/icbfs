@@ -95,7 +95,7 @@ func TestDirectorySplitsAndStaysConsistent(t *testing.T) {
 	for i := 0; i < n; i++ {
 		name := fmt.Sprintf("file-%03d", i)
 		names[i] = name
-		if _, _, err := fsys.Create(ctx, root, name, 0644, 0, 0); err != nil {
+		if _, _, _, err := fsys.Create(ctx, root, name, 0644, 0, 0); err != nil {
 			t.Fatalf("create %q: %v", name, err)
 		}
 	}
@@ -186,7 +186,7 @@ func TestConcurrentLinkRaceDoesNotLoseUpdates(t *testing.T) {
 	ctx := context.Background()
 	root := fsys.RootKey()
 
-	targetUUID, _, err := fsys.Create(ctx, root, "original", 0644, 0, 0)
+	targetUUID, _, _, err := fsys.Create(ctx, root, "original", 0644, 0, 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestConcurrentLinkRaceDoesNotLoseUpdates(t *testing.T) {
 	if got != 1 {
 		t.Fatalf("authoritative nlink side object = %d after unlinking all links, want 1", got)
 	}
-	if _, _, err := fsys.ReadFile(ctx, targetUUID); err != nil {
+	if _, _, _, err := fsys.ReadFile(ctx, targetUUID); err != nil {
 		t.Fatalf("original file should still exist: %v", err)
 	}
 }
@@ -275,7 +275,7 @@ func TestXattrsRoundTripArbitraryBinaryValues(t *testing.T) {
 	ctx := context.Background()
 	root := fsys.RootKey()
 
-	uuid, _, err := fsys.Create(ctx, root, "has-xattrs.txt", 0644, 1000, 1000)
+	uuid, _, _, err := fsys.Create(ctx, root, "has-xattrs.txt", 0644, 1000, 1000)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -309,7 +309,7 @@ func TestXattrsRoundTripArbitraryBinaryValues(t *testing.T) {
 		t.Fatalf("put .metadata: %v", err)
 	}
 
-	_, got, err := fsys.ReadFile(ctx, uuid)
+	_, got, _, err := fsys.ReadFile(ctx, uuid)
 	if err != nil {
 		t.Fatalf("read file: %v", err)
 	}
@@ -338,7 +338,7 @@ func TestXattrsPosixAndWindowsACLsCoexist(t *testing.T) {
 	ctx := context.Background()
 	root := fsys.RootKey()
 
-	uuid, _, err := fsys.Create(ctx, root, "has-acls.txt", 0644, 0, 0)
+	uuid, _, _, err := fsys.Create(ctx, root, "has-acls.txt", 0644, 0, 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

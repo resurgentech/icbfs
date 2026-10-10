@@ -7,7 +7,6 @@ package fuseserver
 import (
 	"context"
 	"errors"
-	"sync"
 	"syscall"
 	"time"
 
@@ -122,6 +121,8 @@ func errnoFromErr(err error) syscall.Errno {
 		return syscall.EISDIR
 	case errors.Is(err, icbfs.ErrArchived):
 		return syscall.EROFS
+	case errors.Is(err, icbfs.ErrWriteContention):
+		return syscall.EAGAIN
 	default:
 		return syscall.EIO
 	}
@@ -231,21 +232,21 @@ func (n *Node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.En
 
 func (n *Node) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
 	uid, gid := callerOwner(ctx)
-	newUUID, attr, err := n.fsys.Create(ctx, n.key, name, mode&0o7777, uid, gid)
+	newUUID, attr, etag, err := n.fsys.Create(ctx, n.key, name, mode&0o7777, uid, gid)
 	if err != nil {
 		return nil, nil, 0, errnoFromErr(err)
 	}
 	fillAttr(&out.Attr, newUUID, icbfs.TypeFile, attr)
-	fh := &FileHandle{fsys: n.fsys, key: newUUID}
+	fh := &FileHandle{open: n.fsys.NewOpenFile(newUUID, etag, nil)}
 	return n.newChild(ctx, newUUID, icbfs.TypeFile), fh, 0, 0
 }
 
 func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	data, _, err := n.fsys.ReadFile(ctx, n.key)
+	open, err := n.fsys.Open(ctx, n.key)
 	if err != nil {
 		return nil, 0, errnoFromErr(err)
 	}
-	return &FileHandle{fsys: n.fsys, key: n.key, data: data}, 0, 0
+	return &FileHandle{open: open}, 0, 0
 }
 
 func (n *Node) Unlink(ctx context.Context, name string) syscall.Errno {
@@ -287,16 +288,10 @@ func (n *Node) Link(ctx context.Context, target fs.InodeEmbedder, name string, o
 	return n.newChild(ctx, tn.key, tn.typ), 0
 }
 
-// FileHandle buffers one open file's content in memory and flushes it back
-// as a single whole-object write on close — matching the "no chunking, an
-// object is an object" model: there is no partial/range write against the
-// store, so there is no reason to do partial writes here either.
+// FileHandle adapts icbfs.OpenFile (the shared buffering/CAS-retry
+// logic — see its doc comment) to go-fuse's FileHandle interfaces.
 type FileHandle struct {
-	mu    sync.Mutex
-	fsys  *icbfs.Filesystem
-	key   string
-	data  []byte
-	dirty bool
+	open *icbfs.OpenFile
 }
 
 var (
@@ -307,41 +302,15 @@ var (
 )
 
 func (h *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if off >= int64(len(h.data)) {
-		return fuse.ReadResultData(nil), 0
-	}
-	end := off + int64(len(dest))
-	if end > int64(len(h.data)) {
-		end = int64(len(h.data))
-	}
-	return fuse.ReadResultData(h.data[off:end]), 0
+	return fuse.ReadResultData(h.open.ReadAt(off, int64(len(dest)))), 0
 }
 
 func (h *FileHandle) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	end := off + int64(len(data))
-	if end > int64(len(h.data)) {
-		grown := make([]byte, end)
-		copy(grown, h.data)
-		h.data = grown
-	}
-	copy(h.data[off:end], data)
-	h.dirty = true
+	h.open.WriteAt(data, off)
 	return uint32(len(data)), 0
 }
 
 func (h *FileHandle) Flush(ctx context.Context) syscall.Errno {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if !h.dirty {
-		return 0
-	}
-	if _, err := h.fsys.WriteFile(ctx, h.key, h.data); err != nil {
-		return errnoFromErr(err)
-	}
-	h.dirty = false
-	return 0
+	_, err := h.open.Flush(ctx)
+	return errnoFromErr(err)
 }

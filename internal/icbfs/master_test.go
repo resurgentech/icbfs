@@ -129,7 +129,7 @@ func TestPruneFreesSlotForReuse(t *testing.T) {
 	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0); err != nil {
 		t.Fatalf("bootstrap to-prune: %v", err)
 	}
-	if _, _, err := fsys.Create(ctx, fsys.RootKey(), "somefile", 0644, 0, 0); err != nil {
+	if _, _, _, err := fsys.Create(ctx, fsys.RootKey(), "somefile", 0644, 0, 0); err != nil {
 		t.Fatalf("create file in to-prune: %v", err)
 	}
 
@@ -173,7 +173,7 @@ func TestIDPrefixingIsPresentOnDisk(t *testing.T) {
 		t.Fatalf("root key %q does not carry prefix %q", fsys.RootKey(), wantPrefix)
 	}
 
-	fileUUID, _, err := fsys.Create(ctx, fsys.RootKey(), "myfile", 0644, 0, 0)
+	fileUUID, _, _, err := fsys.Create(ctx, fsys.RootKey(), "myfile", 0644, 0, 0)
 	if err != nil {
 		t.Fatalf("create file: %v", err)
 	}
@@ -224,11 +224,11 @@ func TestArchivedFilesystemRejectsWritesButAllowsReads(t *testing.T) {
 	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	fileUUID, _, err := fsys.Create(ctx, fsys.RootKey(), "before-archive", 0644, 0, 0)
+	fileUUID, _, _, err := fsys.Create(ctx, fsys.RootKey(), "before-archive", 0644, 0, 0)
 	if err != nil {
 		t.Fatalf("create before archive: %v", err)
 	}
-	if _, err := fsys.WriteFile(ctx, fileUUID, []byte("hello")); err != nil {
+	if _, _, err := fsys.WriteFile(ctx, fileUUID, []byte("hello"), ""); err != nil {
 		t.Fatalf("write before archive: %v", err)
 	}
 
@@ -239,7 +239,7 @@ func TestArchivedFilesystemRejectsWritesButAllowsReads(t *testing.T) {
 	// This Filesystem handle was opened before the archive and, per the
 	// documented mount/session-start enforcement model, does not notice
 	// it until the next Bootstrap.
-	if _, _, err := fsys.ReadFile(ctx, fileUUID); err != nil {
+	if _, _, _, err := fsys.ReadFile(ctx, fileUUID); err != nil {
 		t.Fatalf("read on already-open handle after archive should still succeed: %v", err)
 	}
 
@@ -248,13 +248,13 @@ func TestArchivedFilesystemRejectsWritesButAllowsReads(t *testing.T) {
 		t.Fatalf("re-bootstrap archived filesystem: %v", err)
 	}
 
-	if _, _, err := reopened.ReadFile(ctx, fileUUID); err != nil {
+	if _, _, _, err := reopened.ReadFile(ctx, fileUUID); err != nil {
 		t.Fatalf("read against archived filesystem should succeed, got: %v", err)
 	}
-	if _, _, err := reopened.Create(ctx, reopened.RootKey(), "after-archive", 0644, 0, 0); err != ErrArchived {
+	if _, _, _, err := reopened.Create(ctx, reopened.RootKey(), "after-archive", 0644, 0, 0); err != ErrArchived {
 		t.Fatalf("create against archived filesystem = %v, want ErrArchived", err)
 	}
-	if _, err := reopened.WriteFile(ctx, fileUUID, []byte("nope")); err != ErrArchived {
+	if _, _, err := reopened.WriteFile(ctx, fileUUID, []byte("nope"), ""); err != ErrArchived {
 		t.Fatalf("write against archived filesystem = %v, want ErrArchived", err)
 	}
 	if _, _, err := reopened.Mkdir(ctx, reopened.RootKey(), "nope-dir", 0755, 0, 0); err != ErrArchived {
@@ -280,7 +280,7 @@ func TestPruneRemovesEveryObjectUnderPrefix(t *testing.T) {
 	id := fsys.id
 
 	for i := 0; i < 5; i++ {
-		if _, _, err := fsys.Create(ctx, fsys.RootKey(), fmt.Sprintf("file-%d", i), 0644, 0, 0); err != nil {
+		if _, _, _, err := fsys.Create(ctx, fsys.RootKey(), fmt.Sprintf("file-%d", i), 0644, 0, 0); err != nil {
 			t.Fatalf("create file-%d: %v", i, err)
 		}
 	}
@@ -343,19 +343,19 @@ func TestStatFSIsScopedPerFilesystem(t *testing.T) {
 	smallContent := bytes.Repeat([]byte("a"), 100)
 	bigContent := bytes.Repeat([]byte("b"), 10000)
 
-	fileA, _, err := fsA.Create(ctx, fsA.RootKey(), "small", 0644, 0, 0)
+	fileA, _, _, err := fsA.Create(ctx, fsA.RootKey(), "small", 0644, 0, 0)
 	if err != nil {
 		t.Fatalf("create in tenant-a: %v", err)
 	}
-	if _, err := fsA.WriteFile(ctx, fileA, smallContent); err != nil {
+	if _, _, err := fsA.WriteFile(ctx, fileA, smallContent, ""); err != nil {
 		t.Fatalf("write in tenant-a: %v", err)
 	}
 
-	fileB, _, err := fsB.Create(ctx, fsB.RootKey(), "big", 0644, 0, 0)
+	fileB, _, _, err := fsB.Create(ctx, fsB.RootKey(), "big", 0644, 0, 0)
 	if err != nil {
 		t.Fatalf("create in tenant-b: %v", err)
 	}
-	if _, err := fsB.WriteFile(ctx, fileB, bigContent); err != nil {
+	if _, _, err := fsB.WriteFile(ctx, fileB, bigContent, ""); err != nil {
 		t.Fatalf("write in tenant-b: %v", err)
 	}
 
