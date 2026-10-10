@@ -36,3 +36,110 @@ move later since nothing outside `internal/pb` and each package's
 `Encode`/`Decode` would need to change.
 
 ---
+
+## D1-D3: Master block design decisions (location, idempotency, prefixing)
+
+**Question I'd have asked:** should the master-block logic live in a new
+package or inside `internal/icbfs`; should `Bootstrap` handle both
+create-new and open-existing, or should those be separate entry points;
+and what's the exact algorithm for slot reuse/idempotency?
+
+**Assumed:**
+- Master-block logic (`bootstrapMaster`, `readMaster`,
+  `registerFilesystem`, `fsID`, `Archive`, `updateFilesystemEntry`,
+  `Prune`) lives in a new file `internal/icbfs/master.go`, same package
+  as `Filesystem` — not a separate package. Rationale: it's tightly
+  coupled to `Filesystem.Bootstrap` (which calls `registerFilesystem`
+  directly) and to the ID-prefixing scheme every `Filesystem` method
+  relies on; splitting it into its own package would just mean constant
+  cross-package calls with no real encapsulation benefit.
+- `Filesystem.Bootstrap(ctx, size, mode, uid, gid)` handles **both**
+  first-time creation and opening an already-existing filesystem,
+  exactly like the existing (pre-Part-D) `Bootstrap` already did for root
+  blocks. `registerFilesystem` is idempotent (returns the existing ID if
+  `name` is already registered, `size`/mode/uid/gid are ignored in that
+  case) rather than erroring if called again. Rationale: matches the
+  established pattern in this codebase (same no-op-if-exists contract
+  the root-block half of `Bootstrap` already had before Part D), and a
+  `mount` command shouldn't need to know in advance whether a filesystem
+  name is new.
+- Slot reuse: `registerFilesystem` scans for the lowest-indexed entry
+  with `Name == ""` (a pruned, freed slot) before appending a new one.
+  Rationale: ARCHITECTURE.md requires the list to never shrink/reorder
+  (so IDs, baked into every object key, never change), but it would be
+  wasteful to only ever grow the list when pruned slots are sitting
+  there unused.
+- CAS retry bound reused `maxTreeRetries` (already defined for the
+  directory-tree insert/remove loops) rather than defining a separate
+  constant for master-block CAS loops. Rationale: same shape of
+  problem (optimistic retry on a lost `If-Match` race), no reason for a
+  different bound.
+
+**Check this if:** multiple bucket-wide operations are expected to
+contend heavily on the master block at once (e.g. many filesystems being
+created/archived/pruned concurrently in automated tooling) — the single
+`_master` object is a serialization point by design, and `maxTreeRetries`
+(20) may need tuning or backoff if that contention becomes real instead
+of theoretical.
+
+---
+
+## D-cleanup: `cmd/icbfs` default declared size
+
+**Question I'd have asked:** what should the CLI default to for a
+filesystem's declared capacity (the `size` argument `Bootstrap` now
+needs), and should it be a flag at all?
+
+**Assumed:** added a `--size` flag to `icbfs mount`, defaulting to
+100 GiB (`100 << 30` bytes), only consulted the first time a given
+filesystem name is created (ignored on every subsequent mount of the
+same name, same as `registerFilesystem`'s existing idempotency). 100 GiB
+is an arbitrary round placeholder, not derived from any real capacity
+planning. Test helpers (`newTestFilesystem` in
+`internal/icbfs/filesystem_test.go`, `mountTestFS` in
+`internal/fuseserver/mount_test.go`) use a smaller 1 GiB placeholder
+since the value is irrelevant to what those tests exercise.
+
+**Check this if:** there's an intended real default (e.g. "unlimited"/no
+declared cap, or a value tied to the actual backing bucket's quota) —
+right now `StatFS`'s "Total" will just report whatever was passed at
+first creation, with no way to change it after the fact (no `Resize`
+operation exists yet).
+
+---
+
+## D1/D2: real bug found and fixed — `bootstrapMaster`'s race, not an assumption
+
+Not a question I'd have asked — this is a correctness bug the D2 "two
+concurrent creation attempts both succeed with distinct IDs" test
+caught directly, recorded here because the fix adds a new primitive to
+`objstore.Store` that wasn't in the original design.
+
+**What was wrong:** `bootstrapMaster` checked `Head` for "does the
+master block exist" and, if not, did an *unconditional* `Put` of an
+empty block. Two concurrent first-time callers can both observe
+"doesn't exist," and whichever one's unconditional write lands *after*
+another caller's subsequent `registerFilesystem` CAS write silently
+wipes that registration back to empty — a lost update, not a retried
+one, because `registerFilesystem`'s CAS loop only protects against
+races within itself, not against a late unconditional overwrite from
+someone else's `bootstrapMaster`.
+
+**Fix:** added `objstore.Store.PutIfAbsent(ctx, key, body, metadata)` —
+a true create-if-absent CAS primitive, implemented in `S3Store` via
+`PutObject`'s `IfNoneMatch: "*"`. Confirmed empirically against real
+MinIO (not assumed from the S3 API docs) that this is honored and
+returns a 412 `IsPreconditionFailed` on conflict, same signal `Put`'s
+`ifMatch` already produces. `bootstrapMaster` now calls this directly
+and treats a precondition failure as the expected "someone else already
+created it" no-op case.
+
+**Check this if:** a future backend adapter (Azure Blob, when that's
+built) is added to `objstore.Store` — it needs a real `PutIfAbsent`
+too, not a `Head`-then-`Put` shim, or this exact race reappears there.
+Azure Blob's `If-None-Match: *` (or the `BlobClient.Upload` SDK
+equivalent) should cover it, but that needs the same "confirmed against
+a real instance" verification this fix got against MinIO before
+trusting it.
+
+---

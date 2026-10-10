@@ -18,9 +18,12 @@ import (
 	"github.com/resurgentech/icbfs/internal/objstore"
 )
 
-// newTestFilesystem spins up a real MinIO container and a versioned
-// bucket, and returns a Filesystem backed by it. Requires Docker.
-func newTestFilesystem(t *testing.T) (*Filesystem, objstore.Store) {
+// newTestStore spins up a real MinIO container and a versioned bucket,
+// and returns a Store backed by it, with no filesystem bootstrapped yet
+// — callers that need more than one named filesystem in the same
+// bucket (the master-block tests) start here instead of
+// newTestFilesystem. Requires Docker.
+func newTestStore(t *testing.T) objstore.Store {
 	t.Helper()
 	ctx := context.Background()
 
@@ -61,9 +64,16 @@ func newTestFilesystem(t *testing.T) (*Filesystem, objstore.Store) {
 		t.Fatalf("enable bucket versioning: %v", err)
 	}
 
-	store := objstore.NewS3Store(client, bucket)
+	return objstore.NewS3Store(client, bucket)
+}
+
+// newTestFilesystem spins up a real MinIO container and a versioned
+// bucket, and returns a Filesystem backed by it. Requires Docker.
+func newTestFilesystem(t *testing.T) (*Filesystem, objstore.Store) {
+	t.Helper()
+	store := newTestStore(t)
 	fsys := New(store, "test")
-	if err := fsys.Bootstrap(ctx, 0755, 0, 0); err != nil {
+	if err := fsys.Bootstrap(context.Background(), 1<<30, 0755, 0, 0); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 	return fsys, store

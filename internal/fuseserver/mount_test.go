@@ -69,7 +69,7 @@ func mountTestFS(t *testing.T) string {
 
 	store := objstore.NewS3Store(client, bucket)
 	fsys := icbfs.New(store, "test")
-	if err := fsys.Bootstrap(ctx, 0755, 0, 0); err != nil {
+	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0); err != nil {
 		t.Fatalf("bootstrap filesystem: %v", err)
 	}
 

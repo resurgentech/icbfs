@@ -34,25 +34,78 @@ var errRetry = errors.New("icbfs: lost a race, retry the whole operation")
 // Filesystem is the core, access-layer-independent filesystem logic: it
 // turns object-store primitives plus the directory block format into
 // lookup/mkdir/create/read/write/link/etc. operations.
+//
+// id and archived are only known after Bootstrap resolves them against
+// the master block (see ARCHITECTURE.md's Multiple filesystems per
+// bucket section) — until then, a Filesystem returned by New isn't
+// usable for anything that touches the store.
 type Filesystem struct {
-	store   objstore.Store
-	rootKey string
+	store    objstore.Store
+	fsName   string
+	id       string // 4-hex-digit prefix, set by Bootstrap
+	archived bool   // set by Bootstrap; see ErrArchived
 }
 
-// New builds a Filesystem backed by store, rooted at the named filesystem's
-// well-known root key (see ARCHITECTURE.md: root blocks are discovered by
-// naming convention, not a random UUID).
+// New builds a Filesystem for the named filesystem. Call Bootstrap
+// before using it for anything else — New itself does no I/O and
+// doesn't know the filesystem's ID yet.
 func New(store objstore.Store, fsName string) *Filesystem {
-	return &Filesystem{store: store, rootKey: "root/" + fsName}
+	return &Filesystem{store: store, fsName: fsName}
 }
 
-// RootKey returns the block key identifying this filesystem's root.
-func (f *Filesystem) RootKey() string { return f.rootKey }
+// RootKey returns the block key identifying this filesystem's root:
+// "<id>-root-<name>", a derived key, not stored anywhere separately —
+// see ARCHITECTURE.md. Only meaningful after Bootstrap.
+func (f *Filesystem) RootKey() string { return f.id + "-root-" + f.fsName }
 
-// Bootstrap ensures the root block exists, creating an empty one if this
-// is a brand new filesystem.
-func (f *Filesystem) Bootstrap(ctx context.Context, mode, uid, gid uint32) error {
-	if _, err := f.store.Head(ctx, f.rootKey); err == nil {
+// newKey mints a fresh, filesystem-scoped object key: this filesystem's
+// ID prefix plus a new UUIDv7. Every object this filesystem creates
+// (files, directories, their .metadata, future .lock objects) gets a key
+// through this, never a bare NewUUIDv7() — that's what makes a single
+// prefix-scoped listing capture this filesystem's entire footprint (see
+// ARCHITECTURE.md).
+func (f *Filesystem) newKey() (string, error) {
+	raw, err := NewUUIDv7()
+	if err != nil {
+		return "", err
+	}
+	return f.id + "-" + raw, nil
+}
+
+// prefix returns the ID-prefix every object this filesystem owns is
+// stored under (root included) — what ListByPrefix is scoped to for
+// du/df and Prune.
+func (f *Filesystem) prefix() string { return f.id + "-" }
+
+// checkWritable is called at the top of every mutating operation. See
+// ErrArchived and ARCHITECTURE.md's Multiple filesystems per bucket
+// section: this is checked once per operation on an already-open
+// Filesystem, not continuously against the master block — an Archive
+// call made after Bootstrap resolved archived=false has no effect on
+// this Filesystem until the next Bootstrap (e.g. the next mount).
+func (f *Filesystem) checkWritable() error {
+	if f.archived {
+		return ErrArchived
+	}
+	return nil
+}
+
+// Bootstrap resolves this filesystem's ID and archived status against
+// the master block (registering a new entry with the given declared
+// size if this name has never been seen in this bucket before — size is
+// ignored if the filesystem already exists, same as mode/uid/gid are
+// ignored for an already-existing root, below), then ensures the root
+// block exists, creating an empty one if this is a brand new filesystem.
+func (f *Filesystem) Bootstrap(ctx context.Context, size uint64, mode, uid, gid uint32) error {
+	id, archived, err := registerFilesystem(ctx, f.store, f.fsName, size)
+	if err != nil {
+		return err
+	}
+	f.id = id
+	f.archived = archived
+
+	rootKey := f.RootKey()
+	if _, err := f.store.Head(ctx, rootKey); err == nil {
 		return nil
 	}
 	empty, err := (&block.Block{Kind: block.Leaf}).Encode()
@@ -60,8 +113,53 @@ func (f *Filesystem) Bootstrap(ctx context.Context, mode, uid, gid uint32) error
 		return err
 	}
 	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1, Mtime: time.Now()}
-	_, err = f.store.Put(ctx, f.rootKey, bytes.NewReader(empty), dirMetadataFromAttr(attr), "")
+	_, err = f.store.Put(ctx, rootKey, bytes.NewReader(empty), dirMetadataFromAttr(attr), "")
 	return err
+}
+
+// DiskUsage sums the size of every file under this filesystem's prefix —
+// the "du" half of ARCHITECTURE.md's du/df design. Already free in the
+// sense that it's just a prefix-scoped listing, same mechanism df's
+// "Used" uses, not a tree walk fetching every file's content.
+func (f *Filesystem) DiskUsage(ctx context.Context) (int64, error) {
+	objs, err := f.store.ListByPrefix(ctx, f.prefix())
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, o := range objs {
+		total += o.Size
+	}
+	return total, nil
+}
+
+// StatFS returns this filesystem's declared capacity ("Total") and
+// current usage ("Used"), per ARCHITECTURE.md's du/df design: Total is
+// the master block entry's declared size field, Used is the same
+// prefix-scoped listing DiskUsage performs (so it includes every object
+// this filesystem owns, root and .metadata objects included, not just
+// file content — matching what Prune would actually delete).
+func (f *Filesystem) StatFS(ctx context.Context) (total, used uint64, err error) {
+	mb, _, err := readMaster(ctx, f.store)
+	if err != nil {
+		return 0, 0, mapNotFound(err)
+	}
+	found := false
+	for _, e := range mb.Filesystems {
+		if e.Name == f.fsName {
+			total = e.Size
+			found = true
+			break
+		}
+	}
+	if !found {
+		return 0, 0, ErrNotFound
+	}
+	usedSigned, err := f.DiskUsage(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	return total, uint64(usedSigned), nil
 }
 
 // readBlock fetches and decodes the directory block at key, along with its
@@ -311,11 +409,11 @@ func (f *Filesystem) writeBackWithSplits(ctx context.Context, path []pathStep, i
 	}
 
 	if idx == 0 {
-		leftUUID, err := NewUUIDv7()
+		leftUUID, err := f.newKey()
 		if err != nil {
 			return err
 		}
-		rightUUID, err := NewUUIDv7()
+		rightUUID, err := f.newKey()
 		if err != nil {
 			return err
 		}
@@ -345,7 +443,7 @@ func (f *Filesystem) writeBackWithSplits(ctx context.Context, path []pathStep, i
 		}
 		return err
 	}
-	rightUUID, err := NewUUIDv7()
+	rightUUID, err := f.newKey()
 	if err != nil {
 		return err
 	}
@@ -439,7 +537,10 @@ func (f *Filesystem) ReadDir(ctx context.Context, dirKey string) ([]block.Entry,
 // block object — see Attr's doc comment — unaffected by the .metadata
 // split that applies to files/symlinks below.
 func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, gid uint32) (string, Attr, error) {
-	newUUID, err := NewUUIDv7()
+	if err := f.checkWritable(); err != nil {
+		return "", Attr{}, err
+	}
+	newUUID, err := f.newKey()
 	if err != nil {
 		return "", Attr{}, err
 	}
@@ -464,7 +565,10 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 // content object carries no attribute metadata at all — mode/uid/gid/
 // nlink live entirely in the new metadataObjectKey side object.
 func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid, gid uint32) (string, Attr, error) {
-	newUUID, err := NewUUIDv7()
+	if err := f.checkWritable(); err != nil {
+		return "", Attr{}, err
+	}
+	newUUID, err := f.newKey()
 	if err != nil {
 		return "", Attr{}, err
 	}
@@ -500,7 +604,10 @@ func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid,
 // target. The target string is stored as the object's content; mode/
 // uid/gid/nlink live in metadataObjectKey, same as for a regular file.
 func (f *Filesystem) Symlink(ctx context.Context, dirKey, name, target string, uid, gid uint32) (string, Attr, error) {
-	newUUID, err := NewUUIDv7()
+	if err := f.checkWritable(); err != nil {
+		return "", Attr{}, err
+	}
+	newUUID, err := f.newKey()
 	if err != nil {
 		return "", Attr{}, err
 	}
@@ -660,6 +767,9 @@ func (f *Filesystem) updateFileMetadata(ctx context.Context, uuid string, mutate
 // existing node targetUUID/targetType, incrementing its nlink via the
 // CAS-protected metadataObjectKey object.
 func (f *Filesystem) Link(ctx context.Context, dirKey, name, targetUUID string, targetType EntryType) (Attr, error) {
+	if err := f.checkWritable(); err != nil {
+		return Attr{}, err
+	}
 	if err := f.adjustNlink(ctx, targetUUID, +1); err != nil {
 		return Attr{}, err
 	}
@@ -675,6 +785,9 @@ func (f *Filesystem) Link(ctx context.Context, dirKey, name, targetUUID string, 
 // decrementing the target's nlink via the CAS-protected metadataObjectKey
 // object and deleting its blob once the count reaches zero.
 func (f *Filesystem) Unlink(ctx context.Context, dirKey, name string) error {
+	if err := f.checkWritable(); err != nil {
+		return err
+	}
 	entry, ok, err := f.findInTree(ctx, dirKey, name)
 	if err != nil {
 		return err
@@ -698,6 +811,9 @@ func (f *Filesystem) Unlink(ctx context.Context, dirKey, name string) error {
 
 // Rmdir removes an empty directory named name from dirKey.
 func (f *Filesystem) Rmdir(ctx context.Context, dirKey, name string) error {
+	if err := f.checkWritable(); err != nil {
+		return err
+	}
 	entry, ok, err := f.findInTree(ctx, dirKey, name)
 	if err != nil {
 		return err
@@ -777,6 +893,9 @@ func (f *Filesystem) ReadFile(ctx context.Context, key string) ([]byte, Attr, er
 // makes the content object's own LastModified a correct, uncorrupted
 // mtime (see Attr's doc comment).
 func (f *Filesystem) WriteFile(ctx context.Context, key string, data []byte) (Attr, error) {
+	if err := f.checkWritable(); err != nil {
+		return Attr{}, err
+	}
 	if _, err := f.store.Put(ctx, key, bytes.NewReader(data), nil, ""); err != nil {
 		return Attr{}, err
 	}
@@ -797,6 +916,9 @@ func (f *Filesystem) WriteFile(ctx context.Context, key string, data []byte) (At
 // the directory case — *is* real-CAS-protected, a quiet benefit of the
 // .metadata consolidation.
 func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mode, uid, gid *uint32, size *int64) (Attr, error) {
+	if err := f.checkWritable(); err != nil {
+		return Attr{}, err
+	}
 	if typ == TypeDir {
 		attr, err := f.Stat(ctx, key, TypeDir)
 		if err != nil {
