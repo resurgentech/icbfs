@@ -2,6 +2,7 @@ package fuseserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,12 +22,13 @@ import (
 	"github.com/resurgentech/icbfs/internal/objstore"
 )
 
-// mountTestFS spins up a real MinIO container, a versioned bucket in it,
-// and a real FUSE mount backed by it, returning the mountpoint. This is
-// the end-to-end proof that icbfs is an actual, working filesystem: every
-// operation below goes mountpoint -> kernel -> FUSE -> icbfs core ->
-// real object store calls against a real MinIO instance, and back.
-func mountTestFS(t *testing.T) string {
+// newMountTestStore spins up a real MinIO container and a versioned
+// bucket, returning a Store backed by it with no filesystem bootstrapped
+// yet — mountTestFS's single-filesystem callers go through mountTestFS
+// itself; callers that need to act on the store before mounting (e.g.
+// archiving a filesystem first, to prove mount-time enforcement) use
+// this directly.
+func newMountTestStore(t *testing.T) objstore.Store {
 	t.Helper()
 	ctx := context.Background()
 
@@ -67,8 +69,16 @@ func mountTestFS(t *testing.T) string {
 		t.Fatalf("enable bucket versioning: %v", err)
 	}
 
-	store := objstore.NewS3Store(client, bucket)
-	fsys := icbfs.New(store, "test")
+	return objstore.NewS3Store(client, bucket)
+}
+
+// mountFS bootstraps fsName against store and mounts it, returning the
+// mountpoint.
+func mountFS(t *testing.T, store objstore.Store, fsName string) string {
+	t.Helper()
+	ctx := context.Background()
+
+	fsys := icbfs.New(store, fsName)
 	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0); err != nil {
 		t.Fatalf("bootstrap filesystem: %v", err)
 	}
@@ -88,6 +98,16 @@ func mountTestFS(t *testing.T) string {
 	})
 
 	return mountDir
+}
+
+// mountTestFS spins up a real MinIO container, a versioned bucket in it,
+// and a real FUSE mount backed by it, returning the mountpoint. This is
+// the end-to-end proof that icbfs is an actual, working filesystem: every
+// operation below goes mountpoint -> kernel -> FUSE -> icbfs core ->
+// real object store calls against a real MinIO instance, and back.
+func mountTestFS(t *testing.T) string {
+	t.Helper()
+	return mountFS(t, newMountTestStore(t), "test")
 }
 
 func TestMountBasicFileLifecycle(t *testing.T) {
@@ -398,5 +418,47 @@ func TestMountStatfsReflectsDeclaredSizeAndUsage(t *testing.T) {
 	}
 	if after.Bfree >= before.Bfree {
 		t.Fatalf("statfs Bfree after a 5MB write = %d, want less than before (%d) — Used isn't moving", after.Bfree, before.Bfree)
+	}
+}
+
+// TestMountArchivedFilesystemRejectsWritesButAllowsReads is D5's FUSE-
+// level counterpart to internal/icbfs's TestArchivedFilesystemRejects-
+// WritesButAllowsReads: proves errnoFromErr's ErrArchived->EROFS mapping
+// (added in node.go) is actually reachable through a real kernel mount,
+// and exercises the documented mount-time (not continuous) enforcement
+// point — the filesystem is archived, then mounted fresh, so this
+// mount's Bootstrap is the one that observes archived=true.
+func TestMountArchivedFilesystemRejectsWritesButAllowsReads(t *testing.T) {
+	store := newMountTestStore(t)
+	ctx := context.Background()
+
+	fsys := icbfs.New(store, "archived-mount-test")
+	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if _, _, err := fsys.Create(ctx, fsys.RootKey(), "before-archive.txt", 0644, 0, 0); err != nil {
+		t.Fatalf("create before archive: %v", err)
+	}
+	if err := icbfs.Archive(ctx, store, "archived-mount-test"); err != nil {
+		t.Fatalf("archive: %v", err)
+	}
+
+	mnt := mountFS(t, store, "archived-mount-test")
+
+	if _, err := os.ReadFile(filepath.Join(mnt, "before-archive.txt")); err != nil {
+		t.Fatalf("read on an archived filesystem should succeed, got: %v", err)
+	}
+
+	err := os.WriteFile(filepath.Join(mnt, "after-archive.txt"), []byte("nope"), 0644)
+	if !errors.Is(err, syscall.EROFS) {
+		t.Fatalf("create on an archived filesystem = %v, want EROFS", err)
+	}
+
+	if err := os.Mkdir(filepath.Join(mnt, "nope-dir"), 0755); !errors.Is(err, syscall.EROFS) {
+		t.Fatalf("mkdir on an archived filesystem = %v, want EROFS", err)
+	}
+
+	if err := os.Remove(filepath.Join(mnt, "before-archive.txt")); !errors.Is(err, syscall.EROFS) {
+		t.Fatalf("unlink on an archived filesystem = %v, want EROFS", err)
 	}
 }
