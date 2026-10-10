@@ -1,6 +1,7 @@
 package icbfs
 
 import (
+	"bytes"
 	"context"
 	"sync"
 	"testing"
@@ -76,5 +77,69 @@ func TestConcurrentNonOverlappingWritesBothSurvive(t *testing.T) {
 	}
 	if string(final[10:15]) != "BBBBB" {
 		t.Fatalf("lost writer 2's edit: final[10:15] = %q, want %q", final[10:15], "BBBBB")
+	}
+}
+
+// TestFlushEscalatesWhenPlainRetryBudgetIsExhausted covers ROADMAP.md's
+// task B5 "Done when" deterministically, rather than relying on timing
+// -sensitive luck to ever actually observe real exhaustion in a short
+// test run: contentWriteRetryBudget is forced to zero, and a
+// concurrent write is landed on the object *before* Flush ever gets a
+// chance to retry — guaranteeing its one and only plain CAS attempt
+// loses the race, with zero budget left to retry. Without task B5's
+// escalation, Flush would have no option left but to return
+// ErrWriteContention right there, every single time this happens —
+// exactly the "one writer thrashing against the other's retries"
+// failure mode ARCHITECTURE.md describes. With escalation, Flush
+// instead blocks on a lock, rebases onto the concurrent writer's
+// content, and lands its own edit anyway: real forward progress
+// despite the exhausted plain-retry budget.
+func TestFlushEscalatesWhenPlainRetryBudgetIsExhausted(t *testing.T) {
+	orig := contentWriteRetryBudget
+	contentWriteRetryBudget = 0
+	defer func() { contentWriteRetryBudget = orig }()
+
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+	key, _, _, err := fsys.Create(ctx, root, "contended.bin", 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	open, err := fsys.Open(ctx, key)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	open.WriteAt([]byte("hello"), 0)
+
+	// A concurrent writer (not going through this OpenFile at all)
+	// lands its own change on the object before Flush is called —
+	// open's pristine ETag is now stale, so its first (and, with a
+	// zero budget, only) plain CAS attempt is guaranteed to fail.
+	concurrent := []byte("someone-else-wrote-this")
+	if _, _, err := fsys.WriteFile(ctx, key, concurrent, ""); err != nil {
+		t.Fatalf("simulate a concurrent writer: %v", err)
+	}
+
+	attr, err := open.Flush(ctx)
+	if err != nil {
+		t.Fatalf("flush with an exhausted plain-retry budget = %v, want nil (escalation should recover it)", err)
+	}
+	if attr.Size != int64(len(concurrent)) {
+		t.Fatalf("flushed size = %d, want %d", attr.Size, len(concurrent))
+	}
+
+	// The successful write should be the concurrent writer's content
+	// with this session's edit replayed onto it — proof Flush actually
+	// rebased before its final write, not that it just happened to
+	// land something.
+	final, _, _, err := fsys.ReadFile(ctx, key)
+	if err != nil {
+		t.Fatalf("read final: %v", err)
+	}
+	want := append([]byte("hello"), concurrent[len("hello"):]...)
+	if !bytes.Equal(final, want) {
+		t.Fatalf("final content = %q, want %q", final, want)
 	}
 }

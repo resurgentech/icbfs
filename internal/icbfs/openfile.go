@@ -10,19 +10,33 @@ import (
 )
 
 // contentWriteRetryBudget bounds how long OpenFile.Flush spends
-// retrying a lost CAS race before giving up. A time budget, not an
-// attempt count, per ROADMAP.md's task B1: a large file's retry means
-// resending its whole body, so a fixed attempt count would give large
-// and small files very different real retry windows — a time budget
-// gives them comparable ones.
-const contentWriteRetryBudget = 5 * time.Second
+// retrying a lost CAS race before escalating to locking (task B5). A
+// time budget, not an attempt count, per ROADMAP.md's task B1: a large
+// file's retry means resending its whole body, so a fixed attempt
+// count would give large and small files very different real retry
+// windows — a time budget gives them comparable ones.
+//
+// A var, not a const: internal/icbfs's own tests shrink it to force
+// deterministic, fast escalation under simulated contention rather
+// than relying on timing-sensitive luck within the real 5s budget.
+var contentWriteRetryBudget = 5 * time.Second
 
-// ErrWriteContention is returned by OpenFile.Flush when
-// contentWriteRetryBudget is exhausted without a successful write — see
-// ARCHITECTURE.md's Locking section and ROADMAP.md's task B5: this is
-// the trigger point B5 wires an escalation-to-locking attempt onto,
-// once Locking (tasks B2-B4) exists.
-var ErrWriteContention = errors.New("content write: exceeded retry budget under contention")
+// lockEscalationLeaseTTL is the lease length Flush's escalation path
+// (task B5) requests when it grabs a lock to guarantee its final write
+// attempt. Long enough to comfortably cover one read-modify-write round
+// trip even under load; per ARCHITECTURE.md's Locking section ("30+
+// seconds"), not tuned down just because this usage is normally brief —
+// Flush always releases promptly on its own once done, so a generous
+// TTL only matters if a holder crashes mid-escalation.
+const lockEscalationLeaseTTL = 30 * time.Second
+
+// ErrWriteContention is returned by OpenFile.Flush when even task B5's
+// lock-escalation attempt fails to land a final write (e.g. the ctx
+// passed to Flush is done before the escalation lock could be
+// acquired). Plain CAS-retry-budget exhaustion alone no longer
+// surfaces this directly — it now triggers escalation instead, per
+// ARCHITECTURE.md's Locking section and ROADMAP.md's task B5.
+var ErrWriteContention = errors.New("content write: exceeded retry budget and lock escalation under contention")
 
 // writeOp is one recorded edit in an OpenFile's edit log — see Flush's
 // doc comment for why the log, not just the merged buffer, has to be
@@ -46,14 +60,23 @@ type writeOp struct {
 // both for free just by using OpenFile the same way FUSE's FileHandle
 // does.
 type OpenFile struct {
-	fsys *Filesystem
-	key  string
+	fsys   *Filesystem
+	key    string
+	holder string // this session's unique identity for escalation locks (task B5)
 
 	mu    sync.Mutex
 	data  []byte
 	etag  string
 	ops   []writeOp
 	dirty bool
+}
+
+// newOpenFileHolder mints a unique per-session identity for Flush's
+// lock-escalation path (task B5) — distinct from the UUIDs newKey
+// mints for store objects, but drawing from the same generator since
+// both just need a unique opaque string.
+func newOpenFileHolder() (string, error) {
+	return NewUUIDv7()
 }
 
 // Open returns an OpenFile seeded with key's current content and ETag,
@@ -64,7 +87,11 @@ func (f *Filesystem) Open(ctx context.Context, key string) (*OpenFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &OpenFile{fsys: f, key: key, data: data, etag: etag}, nil
+	holder, err := newOpenFileHolder()
+	if err != nil {
+		return nil, err
+	}
+	return &OpenFile{fsys: f, key: key, holder: holder, data: data, etag: etag}, nil
 }
 
 // NewOpenFile seeds an OpenFile directly from a just-created content
@@ -73,7 +100,18 @@ func (f *Filesystem) Open(ctx context.Context, key string) (*OpenFile, error) {
 func (f *Filesystem) NewOpenFile(key, etag string, data []byte) *OpenFile {
 	buf := make([]byte, len(data))
 	copy(buf, data)
-	return &OpenFile{fsys: f, key: key, data: buf, etag: etag}
+	holder, err := newOpenFileHolder()
+	if err != nil {
+		// Astronomically unlikely (uuid.NewV7 only fails if the
+		// system's crypto RNG is broken) — fall back to a fixed
+		// placeholder rather than making NewOpenFile fallible for
+		// every caller over this. Worst case, two such sessions in
+		// the same unlikely failure mode would briefly share a lock
+		// identity during escalation; the ordinary, non-escalated
+		// write path is completely unaffected either way.
+		holder = "unknown-rng-failure"
+	}
+	return &OpenFile{fsys: f, key: key, holder: holder, data: buf, etag: etag}
 }
 
 // Size returns the current (post-edit, pre-flush) content length.
@@ -126,6 +164,44 @@ func (o *OpenFile) applyLocked(data []byte, off int64) {
 	copy(o.data[off:end], data)
 }
 
+// touchedRangeLocked returns the single contiguous span covering every
+// recorded edit's first-to-last differing byte — over-approximating
+// disjoint edits into one span is accepted here, same reasoning
+// ARCHITECTURE.md gives for task B6's diff-based enforcement: a wider
+// lock-escalation range can only make a conflict check more likely to
+// serialize against something real, never silently miss one. ops is
+// always non-empty here (Flush only reaches this with dirty == true,
+// which WriteAt never sets without also appending to ops).
+func (o *OpenFile) touchedRangeLocked() (start, end int64) {
+	start = o.ops[0].offset
+	end = start + int64(len(o.ops[0].data))
+	for _, op := range o.ops[1:] {
+		if op.offset < start {
+			start = op.offset
+		}
+		opEnd := op.offset + int64(len(op.data))
+		if opEnd > end {
+			end = opEnd
+		}
+	}
+	return start, end
+}
+
+// rebaseLocked re-fetches key's current content and replays every
+// recorded edit onto it, updating o.data/o.etag in place.
+func (o *OpenFile) rebaseLocked(ctx context.Context) error {
+	fresh, _, freshETag, err := o.fsys.ReadFile(ctx, o.key)
+	if err != nil {
+		return err
+	}
+	o.data = fresh
+	for _, op := range o.ops {
+		o.applyLocked(op.data, op.offset)
+	}
+	o.etag = freshETag
+	return nil
+}
+
 // Flush writes the accumulated edits back as a single whole-object CAS
 // write, conditioned on the ETag the edit log is currently based on.
 //
@@ -142,8 +218,19 @@ func (o *OpenFile) applyLocked(data []byte, off int64) {
 // describes as today's lost-update bug.
 //
 // Bounded by contentWriteRetryBudget, not an attempt count (see its doc
-// comment). Returns ErrWriteContention if the budget is exhausted
-// without a successful write.
+// comment). Once that budget is exhausted, Flush escalates (task B5,
+// connecting task B1 to tasks B2-B4): it blocks (task B3) on a lock
+// covering the byte range this session actually touched, then makes
+// one final, guaranteed-uncontested-among-escalating-writers CAS write
+// attempt while holding it, then releases. This is what guarantees
+// every writer eventually makes forward progress under sustained
+// contention, rather than every contender thrashing against every
+// other contender's retries indefinitely: whichever writer currently
+// holds the escalation lock has exclusive access to land its write
+// while every other escalating writer is blocked waiting on the lock
+// (not burning retries), so each gets its turn. Returns
+// ErrWriteContention only if the escalation lock itself couldn't be
+// acquired (e.g. ctx was done first).
 func (o *OpenFile) Flush(ctx context.Context) (Attr, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -164,17 +251,28 @@ func (o *OpenFile) Flush(ctx context.Context) (Attr, error) {
 			return Attr{}, err
 		}
 		if time.Now().After(deadline) {
-			return Attr{}, ErrWriteContention
+			break
 		}
-
-		fresh, _, freshETag, rerr := o.fsys.ReadFile(ctx, o.key)
-		if rerr != nil {
-			return Attr{}, rerr
+		if err := o.rebaseLocked(ctx); err != nil {
+			return Attr{}, err
 		}
-		o.data = fresh
-		for _, op := range o.ops {
-			o.applyLocked(op.data, op.offset)
-		}
-		o.etag = freshETag
 	}
+
+	start, end := o.touchedRangeLocked()
+	if err := o.fsys.AcquireLockRange(ctx, o.key, start, end, o.holder, lockEscalationLeaseTTL); err != nil {
+		return Attr{}, ErrWriteContention
+	}
+	defer func() { _ = o.fsys.ReleaseLockRange(context.WithoutCancel(ctx), o.key, start, end, o.holder) }()
+
+	if err := o.rebaseLocked(ctx); err != nil {
+		return Attr{}, err
+	}
+	attr, newETag, err := o.fsys.WriteFile(ctx, o.key, o.data, o.etag)
+	if err != nil {
+		return Attr{}, err
+	}
+	o.etag = newETag
+	o.ops = nil
+	o.dirty = false
+	return attr, nil
 }
