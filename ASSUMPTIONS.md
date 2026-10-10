@@ -603,3 +603,38 @@ observable, or revisiting whether `NotifyEntry`/`NotifyDelete`
 however this ends up being used in practice.
 
 ---
+
+## E4: no sync/async delivery-mode parameter exists on this specific API
+
+**Question I'd have asked:** ARCHITECTURE.md's Change notifications
+section calls out explicitly preferring MinIO's sync delivery mode
+over async (the latter can silently drop events under sustained queue
+overload). Where does this project's MinIO adapter actually set that?
+
+**Found while implementing, not assumed:** `minio-go/v7`'s
+`ListenBucketNotification`/`ListenNotification` — the API
+`internal/notify/miniosrc` wraps — is a direct, unqueued client HTTP
+long-poll against the MinIO server; reading its implementation
+directly shows no sync/async parameter anywhere in that call path at
+all. The sync-vs-async distinction ARCHITECTURE.md describes applies
+to MinIO's *separate* bucket-notification-to-external-target system
+(webhook/AMQP/Kafka/NATS targets configured via the server's own
+`notify_<type>` config, each with its own queue-store delivery mode) —
+a different mechanism this project isn't using, since
+`ListenBucketNotification` talks to the MinIO server directly with no
+external target/queue in between at all.
+
+**Assumed:** there is nothing for this code to configure — the
+sync/async consideration doesn't apply to the API actually in use.
+Documented directly in `miniosrc.New`'s doc comment rather than
+silently doing nothing and leaving future readers to wonder whether
+it was overlooked.
+
+**Check this if:** a future deployment needs this feature on a MinIO
+instance where `ListenBucketNotification` is unavailable/disabled and
+the fallback is a real external notification target instead — *that*
+path would need the sync-vs-async server config ARCHITECTURE.md
+describes, configured on the MinIO server itself, outside anything
+this Go code controls.
+
+---

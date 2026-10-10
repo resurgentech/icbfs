@@ -92,6 +92,12 @@ func (f *Filesystem) newKey() (string, error) {
 // du/df and Prune.
 func (f *Filesystem) prefix() string { return f.id + "-" }
 
+// Prefix is prefix, exported for callers outside this package that
+// need to scope their own operations to this filesystem's objects —
+// e.g. task E4's MinIO Change notifications adapter, which scopes its
+// server-side ListenBucketNotification subscription to exactly this.
+func (f *Filesystem) Prefix() string { return f.prefix() }
+
 // checkWritable is called at the top of every mutating operation. See
 // ErrArchived and ARCHITECTURE.md's Multiple filesystems per bucket
 // section: this is checked once per operation on an already-open
