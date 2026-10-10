@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -14,32 +15,41 @@ import (
 	"github.com/resurgentech/icbfs/internal/pb"
 )
 
-// ErrLocked is returned by TryAcquireLock when the lock is currently
-// held by a different holder and its lease hasn't expired yet.
+// ErrLocked is returned by a non-blocking lock acquire attempt when the
+// requested range conflicts with a different holder's current,
+// unexpired claim.
 var ErrLocked = errors.New("lock is currently held")
 
-// ErrNotLockHolder is returned by ReleaseLock/RenewLock when the caller
-// is not (or is no longer) the lock's current holder — e.g. the lease
-// already expired and a different caller claimed it in the meantime.
+// ErrNotLockHolder is returned by Release/Renew when the caller does
+// not currently hold the exact (holder, range) claim being operated
+// on — e.g. the lease already expired and a different caller claimed
+// it in the meantime, or it was never held at all under that holder.
 var ErrNotLockHolder = errors.New("not the current lock holder")
 
-// maxLockCASRetries bounds the CAS retry loop in TryAcquireLock/
-// ReleaseLock/RenewLock — same shape of bound as maxTreeRetries, a
+// maxLockCASRetries bounds the CAS retry loop in the Acquire/Release/
+// Renew functions below — same shape of bound as maxTreeRetries, a
 // separate constant since it's an unrelated contention domain (lock
 // objects, not directory blocks).
 const maxLockCASRetries = 20
 
-// lockObjectKey is the dedicated side object holding a file's whole-
-// file lock state — see ARCHITECTURE.md's Locking section on why this
-// is its own object, not folded into .metadata: locks are written by a
-// different caller than stat() touches, and can churn far more
-// frequently under contention than attributes ever do.
+// lockWholeFileEnd is the "to end of file" sentinel the whole-file
+// lock wrappers use as a range's end — matching the common real-world
+// convention (e.g. flock(2)'s l_len == 0 meaning "to EOF") of a fixed
+// value rather than the file's actual current size, since a lock
+// taken now must still cover bytes appended after it was acquired.
+const lockWholeFileEnd = math.MaxInt64
+
+// lockObjectKey is the dedicated side object holding a file's lock
+// state — see ARCHITECTURE.md's Locking section on why this is its own
+// object, not folded into .metadata: locks are written by a different
+// caller than stat() touches, and can churn far more frequently under
+// contention than attributes ever do.
 func lockObjectKey(uuid string) string { return uuid + ".lock" }
 
-// readLock returns the current lock state at lockKey, or (nil, nil,
-// nil) if no lock object exists (the "free, never claimed" case,
+// readLockRanges returns the current lock state at lockKey, or (nil,
+// nil, nil) if no lock object exists (the "nothing ever claimed" case,
 // equivalent to an empty/absent object per ARCHITECTURE.md).
-func readLock(ctx context.Context, store objstore.Store, lockKey string) (*pb.Lock, *objstore.Object, error) {
+func readLockRanges(ctx context.Context, store objstore.Store, lockKey string) (*pb.Lock, *objstore.Object, error) {
 	body, obj, err := store.Get(ctx, lockKey)
 	if err != nil {
 		if objstore.IsNotFound(err) {
@@ -61,47 +71,65 @@ func readLock(ctx context.Context, store objstore.Store, lockKey string) (*pb.Lo
 	return &l, obj, nil
 }
 
-// isHeldByOther reports whether l represents a lease some other holder
-// currently holds and hasn't expired, as of now.
-func isHeldByOther(l *pb.Lock, holder string, now time.Time) bool {
-	if l == nil || l.Holder == "" || l.Holder == holder {
-		return false
-	}
-	return now.UnixMilli() < l.ExpiresAtUnixMs
+func rangeExpired(e *pb.LockRange, now time.Time) bool {
+	return now.UnixMilli() >= e.ExpiresAtUnixMs
 }
 
-// TryAcquireLock attempts to claim key's whole-file lock for holder,
-// non-blocking: if it's currently held by a different holder and not
-// expired, it returns ErrLocked immediately rather than waiting (task
-// B3 builds a blocking wrapper on top of this). A missing lock object,
-// an expired lease, or a lease already held by the same holder
-// (idempotent re-acquire) are all treated as free to claim.
+func rangesOverlap(aStart, aEnd, bStart, bEnd int64) bool {
+	return aStart < bEnd && bStart < aEnd
+}
+
+// TryAcquireLockRange attempts to claim [start, end) of key for
+// holder, non-blocking: checked against every other holder's current,
+// unexpired range entries for overlap (task B4's generalization of
+// task B2's single-holder body to a list). If any conflicting range is
+// actually held and unexpired, it returns ErrLocked immediately rather
+// than waiting (task B3's AcquireLockRange builds a blocking wrapper on
+// top of this). A missing lock object, an expired entry, or an entry
+// already held by the same holder (idempotent re-acquire/replace) are
+// all treated as non-conflicting. A holder may hold several disjoint
+// ranges simultaneously — acquiring a new range never conflicts with
+// that same holder's own existing entries, and leaves them untouched;
+// only the exact (holder, start, end) entry being reacquired here is
+// replaced.
 //
 // expires_at is computed from this acquiring client's own local clock
-// plus ttl, not a server-anchored timestamp — a deliberate, documented
-// simplification from ARCHITECTURE.md's stated ideal (anchoring to the
-// claiming write's own resulting Last-Modified). See ASSUMPTIONS.md:
-// capturing your own Put's resulting Last-Modified *before* that same
-// Put's body is constructed is not actually possible in one round
-// trip, and ARCHITECTURE.md itself treats the fully-precise version
-// (raw HTTP Date-header capture) as a soft edge "not worth building."
-// The actual safety property — at most one concurrent claim ever wins —
-// comes from the CAS write below, not from whose clock set expires_at,
-// exactly as ARCHITECTURE.md says.
-func (f *Filesystem) TryAcquireLock(ctx context.Context, key, holder string, ttl time.Duration) error {
+// plus ttl, not a server-anchored timestamp — see ASSUMPTIONS.md's B2
+// entry for why, which still applies unchanged to the generalized
+// byte-range form here: the safety property (at most one conflicting
+// claim ever wins) comes from the CAS write below, not from whose
+// clock set expires_at.
+func (f *Filesystem) TryAcquireLockRange(ctx context.Context, key string, start, end int64, holder string, ttl time.Duration) error {
 	lockKey := lockObjectKey(key)
 	for attempt := 0; attempt < maxLockCASRetries; attempt++ {
-		cur, obj, err := readLock(ctx, f.store, lockKey)
+		cur, obj, err := readLockRanges(ctx, f.store, lockKey)
 		if err != nil {
 			return err
 		}
 		now := time.Now()
-		if isHeldByOther(cur, holder, now) {
-			return ErrLocked
+
+		var kept []*pb.LockRange
+		if cur != nil {
+			for _, e := range cur.Ranges {
+				if rangeExpired(e, now) {
+					continue // pruned: an expired lease is simply gone
+				}
+				if e.Holder == holder {
+					if e.Start == start && e.End == end {
+						continue // the exact entry being replaced below
+					}
+					kept = append(kept, e) // this holder's other ranges, untouched
+					continue
+				}
+				if rangesOverlap(start, end, e.Start, e.End) {
+					return ErrLocked
+				}
+				kept = append(kept, e)
+			}
 		}
 
-		claim := &pb.Lock{Holder: holder, ExpiresAtUnixMs: now.Add(ttl).UnixMilli()}
-		data, err := proto.Marshal(claim)
+		claim := &pb.LockRange{Start: start, End: end, Holder: holder, ExpiresAtUnixMs: now.Add(ttl).UnixMilli()}
+		data, err := proto.Marshal(&pb.Lock{Ranges: append(kept, claim)})
 		if err != nil {
 			return err
 		}
@@ -121,52 +149,52 @@ func (f *Filesystem) TryAcquireLock(ctx context.Context, key, holder string, ttl
 		}
 		return err
 	}
-	return fmt.Errorf("acquire lock %q: exceeded %d retries under contention", key, maxLockCASRetries)
+	return fmt.Errorf("acquire lock %q [%d,%d): exceeded %d retries under contention", key, start, end, maxLockCASRetries)
 }
 
-// ReleaseLock releases key's whole-file lock, but only if holder is
-// still the current holder — a holder whose lease already expired and
-// was stolen by someone else must not release the new holder's claim
-// out from under them. Releasing an already-free lock is a no-op, not
-// an error.
-func (f *Filesystem) ReleaseLock(ctx context.Context, key, holder string) error {
+// ReleaseLockRange releases the exact [start, end) claim holder holds
+// on key, but only if holder is still its current holder — a holder
+// whose lease already expired and was stolen by someone else must not
+// release the new holder's claim out from under them. Releasing a
+// range that's already free (never claimed, or already released) is a
+// no-op, not an error. Other ranges this or any other holder holds on
+// the same file are untouched.
+func (f *Filesystem) ReleaseLockRange(ctx context.Context, key string, start, end int64, holder string) error {
 	lockKey := lockObjectKey(key)
 	for attempt := 0; attempt < maxLockCASRetries; attempt++ {
-		cur, obj, err := readLock(ctx, f.store, lockKey)
+		cur, obj, err := readLockRanges(ctx, f.store, lockKey)
 		if err != nil {
 			return err
 		}
-		if cur == nil || cur.Holder == "" {
+		if cur == nil || len(cur.Ranges) == 0 {
 			return nil
 		}
-		if cur.Holder != holder {
-			return ErrNotLockHolder
-		}
-		err = f.store.Delete(ctx, lockKey, obj.ETag)
-		if objstore.IsPreconditionFailed(err) {
-			continue
-		}
-		return err
-	}
-	return fmt.Errorf("release lock %q: exceeded %d retries under contention", key, maxLockCASRetries)
-}
 
-// RenewLock extends key's whole-file lock, but only succeeds if holder
-// is still the current holder — renewing after your lease already
-// expired and was stolen must fail, not resurrect a claim you no
-// longer actually hold.
-func (f *Filesystem) RenewLock(ctx context.Context, key, holder string, ttl time.Duration) error {
-	lockKey := lockObjectKey(key)
-	for attempt := 0; attempt < maxLockCASRetries; attempt++ {
-		cur, obj, err := readLock(ctx, f.store, lockKey)
-		if err != nil {
-			return err
+		now := time.Now()
+		var kept []*pb.LockRange
+		found := false
+		conflictingOtherHolder := false
+		for _, e := range cur.Ranges {
+			if rangeExpired(e, now) {
+				continue
+			}
+			if e.Start == start && e.End == end {
+				if e.Holder == holder {
+					found = true
+					continue // dropped: this is the release
+				}
+				conflictingOtherHolder = true
+			}
+			kept = append(kept, e)
 		}
-		if cur == nil || cur.Holder != holder {
-			return ErrNotLockHolder
+		if !found {
+			if conflictingOtherHolder {
+				return ErrNotLockHolder
+			}
+			return nil
 		}
-		claim := &pb.Lock{Holder: holder, ExpiresAtUnixMs: time.Now().Add(ttl).UnixMilli()}
-		data, err := proto.Marshal(claim)
+
+		data, err := proto.Marshal(&pb.Lock{Ranges: kept})
 		if err != nil {
 			return err
 		}
@@ -176,38 +204,84 @@ func (f *Filesystem) RenewLock(ctx context.Context, key, holder string, ttl time
 		}
 		return err
 	}
-	return fmt.Errorf("renew lock %q: exceeded %d retries under contention", key, maxLockCASRetries)
+	return fmt.Errorf("release lock %q [%d,%d): exceeded %d retries under contention", key, start, end, maxLockCASRetries)
 }
 
-// lockPollMinInterval/lockPollMaxInterval bound AcquireLock's polling
-// backoff — per ARCHITECTURE.md's Locking section, blocking acquisition
-// is client-side polling, not true wake-on-release (object storage has
-// no such primitive), so a waiter sleeps with exponential backoff
-// between non-blocking attempts rather than hammering the store at a
-// fixed tight interval.
+// RenewLockRange extends holder's exact [start, end) claim on key, but
+// only succeeds if holder is still its current holder — renewing after
+// your lease already expired and was stolen must fail, not resurrect a
+// claim you no longer actually hold.
+func (f *Filesystem) RenewLockRange(ctx context.Context, key string, start, end int64, holder string, ttl time.Duration) error {
+	lockKey := lockObjectKey(key)
+	for attempt := 0; attempt < maxLockCASRetries; attempt++ {
+		cur, obj, err := readLockRanges(ctx, f.store, lockKey)
+		if err != nil {
+			return err
+		}
+		if cur == nil {
+			return ErrNotLockHolder
+		}
+
+		now := time.Now()
+		var kept []*pb.LockRange
+		found := false
+		for _, e := range cur.Ranges {
+			if rangeExpired(e, now) {
+				continue
+			}
+			if e.Start == start && e.End == end && e.Holder == holder {
+				found = true
+				continue // replaced below with the renewed expiry
+			}
+			kept = append(kept, e)
+		}
+		if !found {
+			return ErrNotLockHolder
+		}
+
+		renewed := &pb.LockRange{Start: start, End: end, Holder: holder, ExpiresAtUnixMs: now.Add(ttl).UnixMilli()}
+		data, err := proto.Marshal(&pb.Lock{Ranges: append(kept, renewed)})
+		if err != nil {
+			return err
+		}
+		_, err = f.store.Put(ctx, lockKey, bytes.NewReader(data), nil, obj.ETag)
+		if objstore.IsPreconditionFailed(err) {
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("renew lock %q [%d,%d): exceeded %d retries under contention", key, start, end, maxLockCASRetries)
+}
+
+// lockPollMinInterval/lockPollMaxInterval bound AcquireLockRange's
+// polling backoff — per ARCHITECTURE.md's Locking section, blocking
+// acquisition is client-side polling, not true wake-on-release (object
+// storage has no such primitive), so a waiter sleeps with exponential
+// backoff between non-blocking attempts rather than hammering the
+// store at a fixed tight interval.
 const (
 	lockPollMinInterval = 20 * time.Millisecond
 	lockPollMaxInterval = 1 * time.Second
 )
 
-// AcquireLock blocks until it acquires key's whole-file lock for
+// AcquireLockRange blocks until it acquires [start, end) of key for
 // holder, or ctx is done — the blocking (LOCK_NB-equivalent-absent)
-// counterpart to TryAcquireLock's non-blocking primitive. Callers that
-// want a bounded wait pass a ctx with a deadline/timeout
+// counterpart to TryAcquireLockRange's non-blocking primitive. Callers
+// that want a bounded wait pass a ctx with a deadline/timeout
 // (context.WithTimeout); passing context.Background() waits
 // indefinitely.
 //
-// This loops TryAcquireLock with exponential backoff between attempts
-// (task B3) — see ARCHITECTURE.md: object storage has no wake-on-
-// release primitive, so "wait for the lock" can only mean "retry the
-// CAS-acquire in a loop." Task B10 may later let Change Notifications
-// sharpen this loop's trigger on backends where that's a real win,
-// without changing the fallback behavior here, which must stay correct
-// on its own regardless.
-func (f *Filesystem) AcquireLock(ctx context.Context, key, holder string, ttl time.Duration) error {
+// This loops TryAcquireLockRange with exponential backoff between
+// attempts (task B3) — see ARCHITECTURE.md: object storage has no
+// wake-on-release primitive, so "wait for the lock" can only mean
+// "retry the CAS-acquire in a loop." Task B10 may later let Change
+// Notifications sharpen this loop's trigger on backends where that's a
+// real win, without changing the fallback behavior here, which must
+// stay correct on its own regardless.
+func (f *Filesystem) AcquireLockRange(ctx context.Context, key string, start, end int64, holder string, ttl time.Duration) error {
 	backoff := lockPollMinInterval
 	for {
-		err := f.TryAcquireLock(ctx, key, holder, ttl)
+		err := f.TryAcquireLockRange(ctx, key, start, end, holder, ttl)
 		if err == nil {
 			return nil
 		}
@@ -224,4 +298,25 @@ func (f *Filesystem) AcquireLock(ctx context.Context, key, holder string, ttl ti
 			backoff = lockPollMaxInterval
 		}
 	}
+}
+
+// TryAcquireLock, ReleaseLock, RenewLock, and AcquireLock are the
+// whole-file convenience wrappers task B2 originally shipped, now
+// implemented as the [0, lockWholeFileEnd) special case of task B4's
+// byte-range primitives — see lockWholeFileEnd's doc comment.
+
+func (f *Filesystem) TryAcquireLock(ctx context.Context, key, holder string, ttl time.Duration) error {
+	return f.TryAcquireLockRange(ctx, key, 0, lockWholeFileEnd, holder, ttl)
+}
+
+func (f *Filesystem) ReleaseLock(ctx context.Context, key, holder string) error {
+	return f.ReleaseLockRange(ctx, key, 0, lockWholeFileEnd, holder)
+}
+
+func (f *Filesystem) RenewLock(ctx context.Context, key, holder string, ttl time.Duration) error {
+	return f.RenewLockRange(ctx, key, 0, lockWholeFileEnd, holder, ttl)
+}
+
+func (f *Filesystem) AcquireLock(ctx context.Context, key, holder string, ttl time.Duration) error {
+	return f.AcquireLockRange(ctx, key, 0, lockWholeFileEnd, holder, ttl)
 }

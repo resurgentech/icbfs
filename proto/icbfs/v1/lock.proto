@@ -4,10 +4,20 @@ package icbfs.v1;
 
 option go_package = "github.com/resurgentech/icbfs/internal/pb";
 
-// Lock is the whole-file lock object body — see ARCHITECTURE.md's
-// Locking section and ROADMAP.md's task B2. Generalized to a list of
-// byte-range entries in task B4; this message covers whole-file only.
+// LockRange is one held (or recently held) byte-range claim within a
+// file's lock object — see ARCHITECTURE.md's Locking section and
+// ROADMAP.md's tasks B2/B4. A whole-file lock is represented as the
+// range [0, lockWholeFileEnd) (internal/icbfs/lock.go) — not a
+// separate case.
+message LockRange {
+  int64 start = 1;
+  int64 end = 2; // exclusive, like a Go slice bound
+  string holder = 3;
+  int64 expires_at_unix_ms = 4;
+}
+
+// Lock is the whole <uuid>.lock object body: every currently-claimed
+// range across every holder.
 message Lock {
-  string holder = 1;
-  int64 expires_at_unix_ms = 2;
+  repeated LockRange ranges = 1;
 }

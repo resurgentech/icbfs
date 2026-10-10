@@ -21,20 +21,91 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// Lock is the whole-file lock object body — see ARCHITECTURE.md's
-// Locking section and ROADMAP.md's task B2. Generalized to a list of
-// byte-range entries in task B4; this message covers whole-file only.
-type Lock struct {
+// LockRange is one held (or recently held) byte-range claim within a
+// file's lock object — see ARCHITECTURE.md's Locking section and
+// ROADMAP.md's tasks B2/B4. A whole-file lock is represented as the
+// range [0, lockWholeFileEnd) (internal/icbfs/lock.go) — not a
+// separate case.
+type LockRange struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
-	Holder          string                 `protobuf:"bytes,1,opt,name=holder,proto3" json:"holder,omitempty"`
-	ExpiresAtUnixMs int64                  `protobuf:"varint,2,opt,name=expires_at_unix_ms,json=expiresAtUnixMs,proto3" json:"expires_at_unix_ms,omitempty"`
+	Start           int64                  `protobuf:"varint,1,opt,name=start,proto3" json:"start,omitempty"`
+	End             int64                  `protobuf:"varint,2,opt,name=end,proto3" json:"end,omitempty"` // exclusive, like a Go slice bound
+	Holder          string                 `protobuf:"bytes,3,opt,name=holder,proto3" json:"holder,omitempty"`
+	ExpiresAtUnixMs int64                  `protobuf:"varint,4,opt,name=expires_at_unix_ms,json=expiresAtUnixMs,proto3" json:"expires_at_unix_ms,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
 
+func (x *LockRange) Reset() {
+	*x = LockRange{}
+	mi := &file_proto_icbfs_v1_lock_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LockRange) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LockRange) ProtoMessage() {}
+
+func (x *LockRange) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_icbfs_v1_lock_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LockRange.ProtoReflect.Descriptor instead.
+func (*LockRange) Descriptor() ([]byte, []int) {
+	return file_proto_icbfs_v1_lock_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *LockRange) GetStart() int64 {
+	if x != nil {
+		return x.Start
+	}
+	return 0
+}
+
+func (x *LockRange) GetEnd() int64 {
+	if x != nil {
+		return x.End
+	}
+	return 0
+}
+
+func (x *LockRange) GetHolder() string {
+	if x != nil {
+		return x.Holder
+	}
+	return ""
+}
+
+func (x *LockRange) GetExpiresAtUnixMs() int64 {
+	if x != nil {
+		return x.ExpiresAtUnixMs
+	}
+	return 0
+}
+
+// Lock is the whole <uuid>.lock object body: every currently-claimed
+// range across every holder.
+type Lock struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ranges        []*LockRange           `protobuf:"bytes,1,rep,name=ranges,proto3" json:"ranges,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
 func (x *Lock) Reset() {
 	*x = Lock{}
-	mi := &file_proto_icbfs_v1_lock_proto_msgTypes[0]
+	mi := &file_proto_icbfs_v1_lock_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -46,7 +117,7 @@ func (x *Lock) String() string {
 func (*Lock) ProtoMessage() {}
 
 func (x *Lock) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_icbfs_v1_lock_proto_msgTypes[0]
+	mi := &file_proto_icbfs_v1_lock_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -59,31 +130,28 @@ func (x *Lock) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Lock.ProtoReflect.Descriptor instead.
 func (*Lock) Descriptor() ([]byte, []int) {
-	return file_proto_icbfs_v1_lock_proto_rawDescGZIP(), []int{0}
+	return file_proto_icbfs_v1_lock_proto_rawDescGZIP(), []int{1}
 }
 
-func (x *Lock) GetHolder() string {
+func (x *Lock) GetRanges() []*LockRange {
 	if x != nil {
-		return x.Holder
+		return x.Ranges
 	}
-	return ""
-}
-
-func (x *Lock) GetExpiresAtUnixMs() int64 {
-	if x != nil {
-		return x.ExpiresAtUnixMs
-	}
-	return 0
+	return nil
 }
 
 var File_proto_icbfs_v1_lock_proto protoreflect.FileDescriptor
 
 const file_proto_icbfs_v1_lock_proto_rawDesc = "" +
 	"\n" +
-	"\x19proto/icbfs/v1/lock.proto\x12\bicbfs.v1\"K\n" +
-	"\x04Lock\x12\x16\n" +
-	"\x06holder\x18\x01 \x01(\tR\x06holder\x12+\n" +
-	"\x12expires_at_unix_ms\x18\x02 \x01(\x03R\x0fexpiresAtUnixMsB+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
+	"\x19proto/icbfs/v1/lock.proto\x12\bicbfs.v1\"x\n" +
+	"\tLockRange\x12\x14\n" +
+	"\x05start\x18\x01 \x01(\x03R\x05start\x12\x10\n" +
+	"\x03end\x18\x02 \x01(\x03R\x03end\x12\x16\n" +
+	"\x06holder\x18\x03 \x01(\tR\x06holder\x12+\n" +
+	"\x12expires_at_unix_ms\x18\x04 \x01(\x03R\x0fexpiresAtUnixMs\"3\n" +
+	"\x04Lock\x12+\n" +
+	"\x06ranges\x18\x01 \x03(\v2\x13.icbfs.v1.LockRangeR\x06rangesB+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
 
 var (
 	file_proto_icbfs_v1_lock_proto_rawDescOnce sync.Once
@@ -97,16 +165,18 @@ func file_proto_icbfs_v1_lock_proto_rawDescGZIP() []byte {
 	return file_proto_icbfs_v1_lock_proto_rawDescData
 }
 
-var file_proto_icbfs_v1_lock_proto_msgTypes = make([]protoimpl.MessageInfo, 1)
+var file_proto_icbfs_v1_lock_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
 var file_proto_icbfs_v1_lock_proto_goTypes = []any{
-	(*Lock)(nil), // 0: icbfs.v1.Lock
+	(*LockRange)(nil), // 0: icbfs.v1.LockRange
+	(*Lock)(nil),      // 1: icbfs.v1.Lock
 }
 var file_proto_icbfs_v1_lock_proto_depIdxs = []int32{
-	0, // [0:0] is the sub-list for method output_type
-	0, // [0:0] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	0, // 0: icbfs.v1.Lock.ranges:type_name -> icbfs.v1.LockRange
+	1, // [1:1] is the sub-list for method output_type
+	1, // [1:1] is the sub-list for method input_type
+	1, // [1:1] is the sub-list for extension type_name
+	1, // [1:1] is the sub-list for extension extendee
+	0, // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_proto_icbfs_v1_lock_proto_init() }
@@ -120,7 +190,7 @@ func file_proto_icbfs_v1_lock_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_icbfs_v1_lock_proto_rawDesc), len(file_proto_icbfs_v1_lock_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   1,
+			NumMessages:   2,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

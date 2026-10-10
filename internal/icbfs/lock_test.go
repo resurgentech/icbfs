@@ -212,6 +212,100 @@ func TestBlockingAcquireCompletesPromptlyAfterRelease(t *testing.T) {
 	}
 }
 
+// TestByteRangeLocksNonOverlappingRangesCoexist covers B4's "Done
+// when": two non-overlapping ranges can be held concurrently by
+// different holders.
+func TestByteRangeLocksNonOverlappingRangesCoexist(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	key := createLockTestFile(t, fsys)
+
+	if err := fsys.TryAcquireLockRange(ctx, key, 0, 100, "holder-a", 30*time.Second); err != nil {
+		t.Fatalf("acquire [0,100): %v", err)
+	}
+	if err := fsys.TryAcquireLockRange(ctx, key, 100, 200, "holder-b", 30*time.Second); err != nil {
+		t.Fatalf("acquire [100,200), non-overlapping with [0,100): %v", err)
+	}
+}
+
+// TestByteRangeLocksOverlappingRangeRejectedThenSucceedsAfterExpiry
+// covers B4's "Done when": a request for an overlapping range is
+// rejected while the conflicting range is held, then succeeds once
+// that range's lease expires.
+func TestByteRangeLocksOverlappingRangeRejectedThenSucceedsAfterExpiry(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	key := createLockTestFile(t, fsys)
+
+	if err := fsys.TryAcquireLockRange(ctx, key, 0, 100, "holder-a", 150*time.Millisecond); err != nil {
+		t.Fatalf("acquire [0,100): %v", err)
+	}
+	if err := fsys.TryAcquireLockRange(ctx, key, 50, 150, "holder-b", 30*time.Second); err != ErrLocked {
+		t.Fatalf("overlapping acquire [50,150) while [0,100) held = %v, want ErrLocked", err)
+	}
+
+	time.Sleep(250 * time.Millisecond)
+	if err := fsys.TryAcquireLockRange(ctx, key, 50, 150, "holder-b", 30*time.Second); err != nil {
+		t.Fatalf("overlapping acquire after expiry = %v, want nil", err)
+	}
+}
+
+// TestByteRangeLocksOverlappingRangeSucceedsAfterRelease covers the
+// same "Done when" requirement via explicit release instead of expiry.
+func TestByteRangeLocksOverlappingRangeSucceedsAfterRelease(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	key := createLockTestFile(t, fsys)
+
+	if err := fsys.TryAcquireLockRange(ctx, key, 0, 100, "holder-a", 30*time.Second); err != nil {
+		t.Fatalf("acquire [0,100): %v", err)
+	}
+	if err := fsys.TryAcquireLockRange(ctx, key, 50, 150, "holder-b", 30*time.Second); err != ErrLocked {
+		t.Fatalf("overlapping acquire while held = %v, want ErrLocked", err)
+	}
+	if err := fsys.ReleaseLockRange(ctx, key, 0, 100, "holder-a"); err != nil {
+		t.Fatalf("release [0,100): %v", err)
+	}
+	if err := fsys.TryAcquireLockRange(ctx, key, 50, 150, "holder-b", 30*time.Second); err != nil {
+		t.Fatalf("overlapping acquire after release = %v, want nil", err)
+	}
+}
+
+// TestByteRangeLocksSameHolderCanHoldMultipleDisjointRanges confirms
+// the byte-range generalization doesn't regress to "one claim per
+// holder per file": a holder can hold several disjoint ranges on the
+// same file simultaneously, each independently released, without
+// disturbing the others.
+func TestByteRangeLocksSameHolderCanHoldMultipleDisjointRanges(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	key := createLockTestFile(t, fsys)
+
+	if err := fsys.TryAcquireLockRange(ctx, key, 0, 10, "holder-a", 30*time.Second); err != nil {
+		t.Fatalf("acquire [0,10): %v", err)
+	}
+	if err := fsys.TryAcquireLockRange(ctx, key, 20, 30, "holder-a", 30*time.Second); err != nil {
+		t.Fatalf("acquire second disjoint range [20,30) for the same holder = %v, want nil", err)
+	}
+
+	if err := fsys.TryAcquireLockRange(ctx, key, 0, 10, "holder-b", 30*time.Second); err != ErrLocked {
+		t.Fatalf("[0,10) should still be held by holder-a: got %v", err)
+	}
+	if err := fsys.TryAcquireLockRange(ctx, key, 20, 30, "holder-b", 30*time.Second); err != ErrLocked {
+		t.Fatalf("[20,30) should still be held by holder-a: got %v", err)
+	}
+
+	if err := fsys.ReleaseLockRange(ctx, key, 0, 10, "holder-a"); err != nil {
+		t.Fatalf("release [0,10): %v", err)
+	}
+	if err := fsys.TryAcquireLockRange(ctx, key, 0, 10, "holder-b", 30*time.Second); err != nil {
+		t.Fatalf("[0,10) should now be free: got %v", err)
+	}
+	if err := fsys.TryAcquireLockRange(ctx, key, 20, 30, "holder-b", 30*time.Second); err != ErrLocked {
+		t.Fatalf("[20,30) should still be held by holder-a after releasing only [0,10): got %v", err)
+	}
+}
+
 // TestBlockingAcquireRespectsContextDeadline confirms AcquireLock
 // actually stops waiting (rather than blocking forever) once its ctx
 // is done, when the lock is never released.
