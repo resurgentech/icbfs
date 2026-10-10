@@ -2,6 +2,7 @@ package icbfs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -164,5 +165,73 @@ func TestLockReleaseOfAlreadyFreeLockIsNoop(t *testing.T) {
 
 	if err := fsys.ReleaseLock(ctx, key, "holder-a"); err != nil {
 		t.Fatalf("release of never-acquired lock = %v, want nil", err)
+	}
+}
+
+// TestBlockingAcquireCompletesPromptlyAfterRelease covers B3's "Done
+// when": a blocking acquire from a second holder, started while the
+// first holder's lease is still valid, completes promptly after the
+// first holder releases — not just eventually, and definitely before
+// the lease's own TTL would have expired on its own (proving it's
+// reacting to the release via polling, not just waiting out the lease).
+func TestBlockingAcquireCompletesPromptlyAfterRelease(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	key := createLockTestFile(t, fsys)
+
+	const ttl = 10 * time.Second
+	if err := fsys.TryAcquireLock(ctx, key, "holder-a", ttl); err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		blockCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		done <- fsys.AcquireLock(blockCtx, key, "holder-b", ttl)
+	}()
+
+	// Give the blocking acquire time to start polling and observe the
+	// lock as held before we release it.
+	time.Sleep(200 * time.Millisecond)
+	if err := fsys.ReleaseLock(ctx, key, "holder-a"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("blocking acquire: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed >= ttl {
+			t.Fatalf("blocking acquire took %v, which is >= the lease TTL (%v) — looks like it waited out the lease instead of reacting to the release", elapsed, ttl)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("blocking acquire did not complete within 5s of the release")
+	}
+}
+
+// TestBlockingAcquireRespectsContextDeadline confirms AcquireLock
+// actually stops waiting (rather than blocking forever) once its ctx
+// is done, when the lock is never released.
+func TestBlockingAcquireRespectsContextDeadline(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	key := createLockTestFile(t, fsys)
+
+	if err := fsys.TryAcquireLock(ctx, key, "holder-a", 30*time.Second); err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+
+	blockCtx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := fsys.AcquireLock(blockCtx, key, "holder-b", 30*time.Second)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("blocking acquire with no release = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("blocking acquire took %v to give up after a 300ms deadline — not actually bounded", elapsed)
 	}
 }

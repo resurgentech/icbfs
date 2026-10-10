@@ -178,3 +178,50 @@ func (f *Filesystem) RenewLock(ctx context.Context, key, holder string, ttl time
 	}
 	return fmt.Errorf("renew lock %q: exceeded %d retries under contention", key, maxLockCASRetries)
 }
+
+// lockPollMinInterval/lockPollMaxInterval bound AcquireLock's polling
+// backoff — per ARCHITECTURE.md's Locking section, blocking acquisition
+// is client-side polling, not true wake-on-release (object storage has
+// no such primitive), so a waiter sleeps with exponential backoff
+// between non-blocking attempts rather than hammering the store at a
+// fixed tight interval.
+const (
+	lockPollMinInterval = 20 * time.Millisecond
+	lockPollMaxInterval = 1 * time.Second
+)
+
+// AcquireLock blocks until it acquires key's whole-file lock for
+// holder, or ctx is done — the blocking (LOCK_NB-equivalent-absent)
+// counterpart to TryAcquireLock's non-blocking primitive. Callers that
+// want a bounded wait pass a ctx with a deadline/timeout
+// (context.WithTimeout); passing context.Background() waits
+// indefinitely.
+//
+// This loops TryAcquireLock with exponential backoff between attempts
+// (task B3) — see ARCHITECTURE.md: object storage has no wake-on-
+// release primitive, so "wait for the lock" can only mean "retry the
+// CAS-acquire in a loop." Task B10 may later let Change Notifications
+// sharpen this loop's trigger on backends where that's a real win,
+// without changing the fallback behavior here, which must stay correct
+// on its own regardless.
+func (f *Filesystem) AcquireLock(ctx context.Context, key, holder string, ttl time.Duration) error {
+	backoff := lockPollMinInterval
+	for {
+		err := f.TryAcquireLock(ctx, key, holder, ttl)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, ErrLocked) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+		if backoff > lockPollMaxInterval {
+			backoff = lockPollMaxInterval
+		}
+	}
+}
