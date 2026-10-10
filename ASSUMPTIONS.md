@@ -254,3 +254,58 @@ implementation does not attempt; it was out of scope for B4's stated
 "Done when" and would be a real, separate feature if ever needed.
 
 ---
+
+## B5: escalation range, lease TTL, and how the "Done when" test was actually provable
+
+**Question I'd have asked:** when `OpenFile.Flush`'s plain CAS-retry
+budget is exhausted, what range should the escalation lock cover (the
+ROADMAP text explicitly allows whole-file as a simpler first cut), and
+what lease TTL should it request?
+
+**Assumed:**
+- The escalation lock covers the actual touched byte range (the
+  min/max span of every recorded edit in the session, same
+  over-approximation reasoning ARCHITECTURE.md gives for task B6's
+  diff-based enforcement), not the whole file — it wasn't materially
+  harder than whole-file once `AcquireLockRange` already existed from
+  task B4, and it's the more useful default (two sessions editing
+  disjoint parts of a large file under contention don't serialize
+  against each other during escalation either).
+- The escalation lock's lease TTL is `lockEscalationLeaseTTL = 30s`,
+  matching ARCHITECTURE.md's general "30+ seconds" guidance for lease
+  TTLs rather than a short one — Flush always releases promptly once
+  its one final attempt completes (success or failure), so a generous
+  TTL only matters if a holder crashes mid-escalation, same trade-off
+  ARCHITECTURE.md already accepts for locks generally.
+- Each `OpenFile` gets its own unique `holder` identity (a fresh
+  UUIDv7, generated once at `Open`/`NewOpenFile` time) purely for this
+  escalation lock — reusing one fixed holder string across all
+  escalating writers would have been a real bug: `TryAcquireLockRange`
+  treats same-holder claims as always non-conflicting, so a shared
+  holder identity would have let every escalating writer "steal" the
+  lock from every other one instantly, defeating the whole point.
+
+**How B5's "Done when" was actually tested:** the literal scenario
+("two goroutines repeatedly writing as fast as possible") turned out
+to be a bad test in practice — tried first, verified empirically that
+local MinIO over Docker is fast enough that even an artificially tiny
+retry budget (down to 1ms, up to 8 concurrent writers) never reliably
+starved any single writer to zero successes, with or without
+escalation actually wired in — so that version of the test passed
+vacuously both ways and proved nothing. Replaced it with a
+deterministic version (`TestFlushEscalatesWhenPlainRetryBudgetIsExhausted`):
+force `contentWriteRetryBudget` to `0` and land one concurrent write on
+the object before calling `Flush`, guaranteeing its one and only plain
+CAS attempt fails with zero budget left to retry. Verified by hand
+(reverting the escalation branch temporarily) that this version fails
+3/3 without escalation and passes 3/3 with it — an actual
+discriminating regression test, unlike the timing-based one.
+
+**Check this if:** a future contributor is tempted to write a
+"simulate N goroutines hammering a file" style test for similar
+contention logic — confirm first (as done here) that it actually
+fails on the pre-fix code before trusting it as a regression test;
+against fast local infrastructure, these can pass vacuously on both
+sides of a real bug.
+
+---
