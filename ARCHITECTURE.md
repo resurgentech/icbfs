@@ -38,61 +38,101 @@ abstraction is being built.
 - **Hard links** are simply multiple directory rows pointing at the same
   UUID — this falls out of the model for free, with no special-casing,
   because identity (UUID) is already decoupled from name. The link count
-  (nlink) itself, however, needs real compare-and-swap protection against
-  concurrent Link/Unlink calls, and — per the ETag limitation in the
-  Concurrency section below — that can't live in the target's own object
-  metadata the way the rest of this section implies. It lives instead in
-  a tiny dedicated side object (`<uuid>.nlink`) whose *body* is the
-  decimal count, so every change is a real content write and ETag CAS is
-  meaningful again; reaching zero writes a tombstone value under the same
-  CAS check before the target is physically deleted, so a concurrent Link
-  can never race past a decrement that's already decided to delete. The
-  target's own object metadata still carries a best-effort cached copy of
-  nlink so `stat()` stays a single round trip in the common (never
-  hardlinked) case.
+  (nlink) itself needs real compare-and-swap protection against
+  concurrent Link/Unlink calls — see the Metadata model section below for
+  where it actually lives and why.
 - **Symlinks** store their target as the object's *content* (same shape as
   a tiny regular file); the row's type flag marks it as a symlink.
 
 ## Metadata model
 
-Mutable POSIX metadata — **mode, uid, gid, nlink, ctime** — lives in the
-blob's own **native object metadata** (S3/MinIO user-metadata via
-`x-amz-meta-*`, Azure Blob metadata), not in the directory row and not
-encoded in the key.
+Every file/symlink has **two objects, not one**: the content object (the
+actual bytes a reader gets back) and a dedicated `<uuid>.metadata` side
+object holding every mutable attribute — mode, uid, gid, nlink, and any
+future Windows-compatibility fields (ACL, file attribute bits). The
+content object never carries any attribute metadata at all. Directories
+don't get a `.metadata` object — they aren't hard-linkable, so "last
+writer wins" on a directory's own mode/uid/gid is an accepted
+simplification, and their attributes stay in native object metadata on
+the directory block object itself, same as before.
 
-This single decision resolves several things at once:
+**Why two objects instead of native object-store metadata on the content
+object itself (the original design):** discovered empirically, not
+foreseen — ETag on an S3-compatible store is a hash of the object's
+*body*. A metadata-only update doesn't touch the body, so it doesn't
+change the ETag, which means ETag-based CAS (the mechanism this whole
+design relies on) gives **zero protection** to anything stored as native
+metadata on an object whose body isn't otherwise changing. `.metadata`'s
+own body *is* the attribute data (a small encoded record), so any real
+change to it is a real content write, and ETag CAS becomes meaningful
+again. Reaching nlink == 0 writes a tombstone value under that same CAS
+check before the target is physically deleted, so a concurrent `Link`
+can never race past a decrement that's already decided to delete.
 
-- **Hard links stay consistent.** nlink and permissions live with the
-  shared UUID, so multiple names pointing at one object can't drift out of
-  sync the way per-row-duplicated metadata could.
-- **Metadata changes don't propagate up the tree.** A `chmod`/`chown` is a
-  metadata-only operation on the object itself (S3: `CopyObject` with
-  `x-amz-metadata-directive: REPLACE`; Azure: `Set Blob Metadata`) — neither
-  requires rewriting the object body, and neither touches the parent
-  directory block.
-- **ctime rides the snapshot mechanism for free.** On both backends, a
-  metadata-only update creates a new object version when versioning is
-  enabled — exactly like a content write — so permission/ownership changes
-  show up in version history automatically, with no separate side channel.
-- **Size isn't stored redundantly.** Size is the object's `Content-Length`.
-  A single HEAD request returns size + all custom metadata together.
-- **mtime and ctime are distinct fields, not the same value reported
-  twice.** ctime (POSIX: "any change, content or metadata") is exactly
-  the current version's `Last-Modified`, since a metadata-only update
-  bumps it the same way a content write does. mtime (POSIX: "content
-  changed") is *not* the same thing and needs its own explicitly stored
-  field, set only by operations that actually rewrite content — otherwise
-  a `chmod` would incorrectly look like a content change too. This was a
-  bug in the first implementation pass (both were reported as the same
-  value) caught by testing, not foreseen at design time.
-- **atime is not tracked.** Neither backend bumps a timestamp on read, and
-  tracking it ourselves would require a write on every read — exactly the
-  propagation cost this model avoids elsewhere. Report it as equal to mtime.
+**Why one consolidated object instead of a separate side object per
+field** (e.g. `.nlink`, `.acl`, separately): CAS protects an object's
+*state as a whole*, not a single field in isolation — any change to
+*any* field in `.metadata` moves its ETag, so concurrent writers touching
+different fields of the same inode (a `chmod` racing a `Link`) still
+correctly serialize via the normal CAS-retry loop, just against one
+shared object instead of several. The right test for whether two kinds of
+data belong in the same object isn't "could two unrelated operations
+coincidentally collide" — it's whether they're read together by the same
+caller and change at a similar rate. mode/uid/gid/nlink pass both tests
+(`stat()` wants all of them together, and all of them change rarely), so
+they're consolidated. Locking (see below) and extended attributes/ACLs
+fail at least one of those tests — different caller, and potentially
+much higher change frequency for locks — so they get their own objects
+instead, for the same reason `.nlink` was originally split out.
 
-Field size budget: mode/uid/gid/nlink/ctime/birthtime easily fit in a few
-hundred bytes — well under S3's 2KB user-metadata cap and Azure's ~8KB
-metadata cap. Generic, unbounded user xattrs are out of scope; this channel
-is sized for the fixed POSIX field set, not arbitrary attribute storage.
+**What's derived from the content object, never duplicated into
+`.metadata`:**
+- **Size** is the content object's own `Content-Length` — storing it
+  separately would mean two non-atomic writes (content, then a metadata
+  update) that could disagree if one succeeds and the other doesn't, for
+  a field the object store already gives us for free, authoritatively,
+  at zero cost.
+- **mtime** (POSIX: "content changed") is the content object's own
+  `Last-Modified`. This is actually *correct* now in a way it wasn't in
+  the original single-object design: since nothing but a real content
+  write ever touches the content object anymore (all metadata changes
+  go to `.metadata` instead), its `Last-Modified` can no longer be
+  bumped by a `chmod`/`chown`/`Link`/`Unlink` — it only reflects real
+  content changes, which is exactly what mtime is supposed to mean. (The
+  original design had mtime and ctime conflated as the same value,
+  caught by testing, not foreseen at design time — this consolidation
+  is what actually resolves that for good, rather than papering over it
+  with a separately-tracked mtime field.)
+- **ctime** (POSIX: "*any* change, content or metadata") is
+  `max(contentObject.LastModified, metadataObject.LastModified)` — since
+  either object changing counts as "something changed," and both values
+  are already in hand from the two fetches a full `stat()` needs anyway
+  (see below), this costs nothing extra to compute.
+- **atime** is still not tracked at all (no backend bumps a timestamp on
+  read), reported as equal to mtime.
+- **birthtime** is still free, decoded from the content object's own
+  UUIDv7 key.
+
+**Cost of a full `stat()`:** two independent object-store calls — one
+`HEAD`/`GET` on `.metadata` (mode/uid/gid/nlink), one `HEAD` on the
+content object (size, mtime, and btime via its key) — issued
+concurrently, since neither depends on the other's result; the wall-clock
+cost is `max()` of the two, not the sum, though it's still two requests
+(two connections, 2x cost on a per-request-billed backend). No
+best-effort cache was added to avoid this — the earlier instinct to mirror
+a cached copy of attributes back onto the content object (mirroring the
+original `.nlink` cache trick) was deliberately not taken, specifically
+to avoid reintroducing a second, non-atomic copy of data that could drift
+out of sync; two always-correct parallel fetches were judged better than
+one fast, occasionally-stale one.
+
+Field size: mode/uid/gid/nlink easily fit in a few hundred bytes even as
+a small encoded record — no cap exists now that the ceiling is the
+content-free `.metadata` object's own size, not S3's 2KB/Azure's ~8KB
+native-metadata limits, which was the original constraint this design
+was built under. Whether extended attributes and Windows ACLs also live
+in `.metadata` or their own object is not yet decided — see
+`MISSING_FEATURES.md`.
 
 ## Concurrency: compare-and-swap on writes
 
@@ -117,7 +157,56 @@ changes). It was also confirmed that MinIO does not enforce
 a deliberately stale ETag still succeeds. Directory/root block writes are
 unaffected (every mutation there is a real content write, so ETag always
 moves), but this ruled out using the same ifMatch mechanism for
-metadata-only fields — see hard links, below, for the actual fix.
+metadata-only fields — see the Metadata model section above for the
+actual fix (a dedicated `.metadata` object whose body really does change).
+
+## Content writes: CAS, bounded retry, and escalation to locking
+
+**Content writes are CAS-protected, not unconditional.** A client opens a
+file, remembers the version (ETag) it read, makes its edit in memory, and
+on flush writes the whole object back conditioned on that ETag. If
+rejected (someone else wrote first), the client does not resubmit its
+stale buffer — it re-fetches the current content, re-applies *only its
+own specific edit* (the offset/length/data it was asked to write) onto
+that fresh copy, and retries the conditional write against the new
+version. This fixes a real lost-update case that the whole-object write
+model is otherwise exposed to and a real local filesystem isn't: on a
+real filesystem, a low-level `pwrite(offset, length)` only ever touches
+exactly those bytes, so two processes writing different, non-overlapping
+ranges of the same file never lose each other's change. icbfs can't do
+a true partial write — every flush rewrites the entire object — so
+without this retry-and-reapply step, two non-conflicting concurrent
+writers could silently destroy each other's edit purely because the
+second one's write was based on stale content, not because anything
+actually overlapped.
+
+**Retries are bounded, and exhausting the budget escalates to the
+locking mechanism below, rather than retrying forever.** This is the
+standard optimistic-with-pessimistic-fallback pattern: stay lock-free for
+the common case (most writes never collide, so well-behaved writers never
+pay locking overhead), but under sustained contention between two
+genuinely concurrent writers, don't let CAS retries thrash indefinitely —
+after a bounded number of failed attempts (a count or time budget; tuned
+separately from the directory/nlink retry budget, since a content-write
+retry can mean re-sending a potentially large object, unlike a small
+block), fall back to acquiring the file's lock (see Locking, below) and
+make one final attempt while holding it. That final attempt should still
+be CAS-protected, as a cheap defensive backstop, even though a
+*cooperating* concurrent writer can no longer be racing it at that point.
+
+**This is a cross-client requirement, not an implementation detail of
+one driver.** The guarantee "a writer under contention eventually makes
+progress" only holds if *every* client write path follows this same
+protocol — a writer that keeps blindly retrying CAS forever, never
+escalating, could starve a writer that does escalate correctly. This
+holds today only because the FUSE driver is the only way to write to
+icbfs; it must continue to hold for the WinFsp driver and any future
+access layer (a REST API, etc.) — each new client implementation **must**
+implement this same CAS-retry-reapply-escalate sequence, and each should
+carry its own test proving it (reject-on-stale-ETag, correct reapply of
+the caller's specific edit on retry, and actual escalation once the
+retry budget is exhausted), the same way `internal/fuseserver`'s mount
+tests prove it for the FUSE path today.
 
 ## Snapshots: point-in-time reconstruction
 
@@ -220,13 +309,99 @@ benefits any tooling that persists and compares inode numbers over time.
   S3's filename constraints) are both **deferred** — acknowledged as needed
   eventually, not designed yet.
 
-Locking (POSIX advisory or Windows mandatory share-mode/byte-range) is
-**explicitly out of scope for v1** — not a priority for this use case. If
-ever needed, the right place for it is emulation local to the WinFsp driver
-process, not a true cross-client distributed lock — a real distributed
-lock (the JuiceFS model) would require a shared, strongly-consistent
-coordination point, which this design has deliberately avoided adding on
-top of plain object storage.
+Locking is addressed below, not out of scope — superseding the earlier
+decision to defer it entirely.
+
+## Locking
+
+Self-contained, optional, best-effort — not a real distributed lock
+service. A genuinely strongly-consistent distributed lock (the JuiceFS
+model: a separate coordination service like Redis or etcd) remains
+explicitly out of scope; what's described here is built entirely from
+object-store primitives already in use elsewhere in this design, with
+real, named limitations rather than a false promise of full correctness.
+If this ever proves inadequate in practice, wrapping a real coordination
+service is the escalation path — deliberately not built up front.
+
+- **Off by default, a mount-time flag.** Locking has real costs (polling,
+  an extra object per lock-holding file) for a feature most mounts won't
+  use; it's opt-in, not a default burden on every filesystem.
+- **State lives in its own `<uuid>.lock` object**, not in `.metadata` —
+  same reasoning as why `.metadata` itself is separate from the content
+  object: locks are read/written by a different caller than `stat()`
+  ever touches, and can churn far more frequently under real contention
+  (e.g. a database doing per-transaction byte-range locks) than
+  attributes ever do. Mixing them would mean routine `chmod` calls
+  compete for writes against lock churn for as long as any workload is
+  using locks heavily — not a rare coincidence, sustained avoidable
+  contention.
+- **Every lock has a TTL/lease — multiple seconds, not milliseconds** (on
+  the order of 30+ seconds). A lease, not a bare flag, so a holder that
+  crashes or disconnects before releasing doesn't lock a file forever;
+  anyone else can treat an expired lease as free.
+- **Lease timestamps are anchored to the object store's clock, not the
+  client's, where it matters for safety.** At acquire/renew time,
+  `expires_at` is computed from the lock write's own resulting
+  `Last-Modified` (server-assigned, already fetched as part of every
+  write in this codebase) plus the TTL — not the acquiring client's local
+  "now," which could be skewed relative to other clients. At
+  steal/expiry-check time, the checking client's own local clock is used
+  to compare against that `expires_at`; this is accepted rather than
+  closed, because clock skew here can only shift *when* a lease looks
+  expired by a few seconds, never cause two clients to both successfully
+  steal it — the steal itself is still a CAS write, so only one can land
+  regardless of whose clock said what. (Closing this fully would mean
+  capturing the raw HTTP `Date` response header via SDK middleware rather
+  than relying on typed fields like `LastModified` — verified not to be
+  exposed by the normal typed S3 calls already in use; not worth building
+  until the soft edge above actually matters.)
+- **Blocking lock acquisition is implemented as client-side polling, not
+  true wake-on-release — a known, accepted performance cost, not an
+  oversight.** Object storage has no notification/pub-sub/long-poll
+  primitive; "wait for the lock" can only mean "retry the CAS-acquire in
+  a loop." This converges correctly but means handoff latency is bounded
+  by the poll interval rather than being instant, and every waiter burns
+  real API calls for as long as it waits. Accepted explicitly: this
+  feature prioritizes correctness over performance, for an expected small
+  number of users, with the real coordination-service escalation path
+  above if that tradeoff ever stops being acceptable.
+- **Byte-range locks are a list, not a single holder field:**
+  `.lock`'s body holds `{range, holder, expires_at}` entries; acquiring a
+  range means checking it against every existing entry for overlap before
+  CAS-writing your own claim in. This is advisory, same as a whole-file
+  lock — nothing stops an uncooperative writer from ignoring it, which is
+  fine, since POSIX `fcntl` locks are advisory by definition. Treating
+  every byte-range request as if it were a whole-file lock was considered
+  and rejected: it would defeat the actual reason an application reaches
+  for byte-range locks in the first place (letting different processes
+  work different parts of a shared file concurrently) by serializing
+  exactly the access pattern the feature exists to avoid serializing.
+- **Stronger-than-advisory enforcement, applicable to both FUSE and
+  WinFsp, same mechanism:** before issuing a content write, the client
+  diffs its modified buffer against the version it originally read (a
+  conservative single contiguous span covering the first-to-last differing
+  byte is enough — over-approximating the touched range can only make a
+  conflict check *more* likely to catch something real, never less),
+  re-fetches current lock state, and refuses the write if its touched
+  range overlaps a held lock. This is not full mandatory enforcement — a
+  narrow window remains between that re-check and the write actually
+  landing, during which a brand-new conflicting lock could in principle
+  be acquired, since there is no way to atomically check one object and
+  write another across S3/Azure. Accepted as a bounded, sub-round-trip
+  gap given the feature's explicit correctness-over-performance,
+  best-effort framing throughout — not a real guarantee at the level a
+  local filesystem's kernel-enforced locking gives you. True OS-level
+  *mandatory* byte-range enforcement (Windows' `LockFileEx` as the OS
+  itself would enforce it) is not attempted; this client-side check is
+  the closest practical approximation given a whole-object write model.
+- **One mechanism, two triggers.** The same `.lock` object and
+  acquire/release/lease logic serves both an application's explicit lock
+  request (`fcntl`/`LockFileEx`) and the internal escalation path from
+  the Content writes section above, where the driver grabs a lock purely
+  to guarantee forward progress under CAS contention, with no application
+  having asked for a lock at all.
+
+See `ROADMAP.md` for this broken into concrete implementation tasks.
 
 ## Windows compatibility: primary mode
 
@@ -272,7 +447,10 @@ Applied:
 - **Alternate Data Streams** — not supported. Technically feasible at
   fairly low cost given the object model (each stream would just be
   another UUID-prefixed blob plus one WinFsp callback), but declined.
-- **True distributed locking** — not supported (see Access layers above).
+- **A true, strongly-consistent distributed lock service** (a separate
+  coordination service like Redis or etcd, the JuiceFS model) — not
+  built; see the Locking section above for the self-contained,
+  weaker-but-real alternative that *is* planned.
 - **Generic multi-cloud object store abstraction** — only MinIO (S3 API)
   and Azure Blob are supported.
 - **Views and the REST API** — acknowledged as wanted, not yet designed.
