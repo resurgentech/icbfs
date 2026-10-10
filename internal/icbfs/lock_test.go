@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/resurgentech/icbfs/internal/notify"
 )
 
 func createLockTestFile(t *testing.T, fsys *Filesystem) string {
@@ -369,5 +371,173 @@ func TestBlockingAcquireRespectsContextDeadline(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("blocking acquire took %v to give up after a 300ms deadline — not actually bounded", elapsed)
+	}
+}
+
+// TestChangeNotificationsAcceleratesWaitBackoffOrSignal covers half of
+// ROADMAP.md's task B10 "Done when": a matching Change-notifications
+// signal makes a blocking acquire's wait return promptly, measurably
+// faster than the current backoff interval it would otherwise have
+// waited out. Tested directly against waitBackoffOrSignal (not a full
+// AcquireLockRange round trip against MinIO) specifically to get a
+// deterministic, non-flaky comparison: a real end-to-end test would
+// have to race against this project's already-fast 20ms-1s polling
+// baseline, where "measurably better" is hard to distinguish from
+// scheduler noise. Picking a deliberately large backoff here (5s) and
+// confirming the signal still returns in well under it is the
+// unambiguous version of the same proof.
+func TestChangeNotificationsAcceleratesWaitBackoffOrSignal(t *testing.T) {
+	signals := make(chan notify.Signal, 1)
+	fsys := &Filesystem{}
+	fsys.EnableChangeNotifications(signals)
+
+	const longBackoff = 5 * time.Second
+	const wantKey = "0000-target.lock"
+
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		done <- fsys.waitBackoffOrSignal(context.Background(), longBackoff, wantKey)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	signals <- notify.Signal{Key: wantKey}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("waitBackoffOrSignal: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed >= longBackoff {
+			t.Fatalf("waitBackoffOrSignal took %v, want well under the %v backoff — the matching signal should have short-circuited it", elapsed, longBackoff)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for the matching signal to short-circuit the wait")
+	}
+}
+
+// TestChangeNotificationsIgnoresNonMatchingSignal confirms
+// waitBackoffOrSignal doesn't return early for a signal naming a
+// different key — only an exact match on the specific .lock object
+// this wait cares about should accelerate it.
+func TestChangeNotificationsIgnoresNonMatchingSignal(t *testing.T) {
+	signals := make(chan notify.Signal, 1)
+	fsys := &Filesystem{}
+	fsys.EnableChangeNotifications(signals)
+
+	const shortBackoff = 100 * time.Millisecond
+	start := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		done <- fsys.waitBackoffOrSignal(context.Background(), shortBackoff, "0000-target.lock")
+	}()
+
+	signals <- notify.Signal{Key: "0000-some-other-key.lock"}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("waitBackoffOrSignal: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed < shortBackoff {
+			t.Fatalf("waitBackoffOrSignal returned after %v, before the %v backoff elapsed — a non-matching signal should not have short-circuited it", elapsed, shortBackoff)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out — a non-matching signal may have wedged the wait instead of just being ignored")
+	}
+}
+
+// TestBlockingAcquireConvergesWithoutChangeNotifications covers the
+// other half of ROADMAP.md's task B10 "Done when": with Change
+// notifications never enabled for this Filesystem at all (the default
+// — EnableChangeNotifications is never called), blocking acquisition
+// must still converge correctly via task B3's plain-polling fallback,
+// proving the B10 dependency is genuinely optional rather than
+// load-bearing. Same scenario as
+// TestBlockingAcquireCompletesPromptlyAfterRelease, named and framed
+// explicitly around this requirement rather than left as incidental
+// coverage.
+func TestBlockingAcquireConvergesWithoutChangeNotifications(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
+	ctx := context.Background()
+	key := createLockTestFile(t, fsys)
+
+	const ttl = 10 * time.Second
+	if err := fsys.TryAcquireLock(ctx, key, "holder-a", ttl); err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		blockCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		done <- fsys.AcquireLock(blockCtx, key, "holder-b", ttl)
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	if err := fsys.ReleaseLock(ctx, key, "holder-a"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("blocking acquire without Change notifications: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("blocking acquire did not converge via plain polling within 5s of the release")
+	}
+}
+
+// TestBlockingAcquireWithChangeNotificationsEnabledAgainstRealFilesystem
+// is task B10's end-to-end sanity check against a real Filesystem (a
+// real MinIO-backed store, per ROADMAP.md's literal "against MinIO"
+// wording for this task's "Done when") with EnableChangeNotifications
+// actually wired up: a waiter whose wait is accelerated by a matching
+// signal still converges to a successful acquire once the holder
+// releases, through the full real AcquireLockRange path (not the
+// waitBackoffOrSignal-only unit tests above, which are what actually
+// prove the latency improvement deterministically — see their own
+// doc comments for why this level isn't a good place to measure that
+// precisely, given this project's already-fast 20ms-1s polling
+// baseline).
+func TestBlockingAcquireWithChangeNotificationsEnabledAgainstRealFilesystem(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
+	ctx := context.Background()
+	key := createLockTestFile(t, fsys)
+
+	src := notify.NewFakeSource(4)
+	defer src.Close()
+	fsys.EnableChangeNotifications(src.Signals())
+
+	const ttl = 10 * time.Second
+	if err := fsys.TryAcquireLock(ctx, key, "holder-a", ttl); err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		blockCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		done <- fsys.AcquireLock(blockCtx, key, "holder-b", ttl)
+	}()
+
+	time.Sleep(200 * time.Millisecond)
+	if err := fsys.ReleaseLock(ctx, key, "holder-a"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	// Simulate the real backend adapter (task E4) having observed the
+	// release and delivered a signal for this exact .lock key.
+	src.Emit(notify.Signal{Key: key + ".lock"})
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("blocking acquire with Change notifications enabled: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("blocking acquire did not converge within 5s of the release")
 	}
 }

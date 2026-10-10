@@ -327,6 +327,7 @@ func (f *Filesystem) acquireEscalationLockRange(ctx context.Context, key string,
 
 func (f *Filesystem) acquireLockRange(ctx context.Context, key string, start, end int64, holder string, ttl time.Duration, escalationOnly bool) error {
 	backoff := lockPollMinInterval
+	wantKey := lockObjectKey(key)
 	for {
 		err := f.tryAcquireLockRange(ctx, key, start, end, holder, ttl, escalationOnly)
 		if err == nil {
@@ -335,14 +336,61 @@ func (f *Filesystem) acquireLockRange(ctx context.Context, key string, start, en
 		if !errors.Is(err, ErrLocked) {
 			return err
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(backoff):
+		if err := f.waitBackoffOrSignal(ctx, backoff, wantKey); err != nil {
+			return err
 		}
 		backoff *= 2
 		if backoff > lockPollMaxInterval {
 			backoff = lockPollMaxInterval
+		}
+	}
+}
+
+// waitBackoffOrSignal waits for backoff to elapse, or (task B10) for
+// a Change-notifications signal naming wantKey (the exact .lock
+// object this acquire is waiting on) to arrive first on f.lockNotify,
+// whichever comes first.
+//
+// If f.lockNotify is nil (EnableChangeNotifications was never called,
+// or Change notifications just isn't enabled for this mount at all),
+// this reduces to a plain, fixed backoff wait with no special-casing
+// needed: a nil channel's select case never becomes ready, so it
+// simply never fires.
+//
+// A non-matching signal (some other key changed) is not an error —
+// it's just ignored, and this keeps waiting for the timer or a real
+// match. This is why the accelerator is a pure latency improvement,
+// never a correctness dependency: even a backend (task E4's MinIO
+// adapter is the only one actually this fast) that reliably delivers
+// matching signals still has this same plain-polling fallback sitting
+// underneath it for every case a signal is missed, delayed, or never
+// enabled at all.
+func (f *Filesystem) waitBackoffOrSignal(ctx context.Context, backoff time.Duration, wantKey string) error {
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return nil
+		case sig, ok := <-f.lockNotify:
+			if !ok {
+				// The underlying signal stream ended (e.g. Close was
+				// called on the backend Source) — fall back to a
+				// plain wait for the rest of this backoff rather than
+				// re-entering a select where this case, now
+				// permanently ready on a closed channel, would spin.
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-timer.C:
+				}
+				return nil
+			}
+			if sig.Key == wantKey {
+				return nil
+			}
 		}
 	}
 }
