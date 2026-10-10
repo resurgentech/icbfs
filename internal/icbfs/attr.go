@@ -11,8 +11,10 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/resurgentech/icbfs/internal/block"
+	"github.com/resurgentech/icbfs/internal/pb"
 )
 
 // Sentinel errors filesystem operations return, so access layers can map
@@ -25,51 +27,59 @@ var (
 	ErrIsDir    = errors.New("is a directory")
 )
 
-// Attr is the POSIX-ish attribute set for one inode, assembled from the
-// blob's own object metadata (mode/uid/gid/nlink/mtime) plus properties
-// the object store gives us for free (size, ctime). See ARCHITECTURE.md's
-// metadata model for why mode/uid/gid/nlink live in object metadata rather
-// than the directory row.
+// Attr is the POSIX-ish attribute set for one inode. Where it comes from
+// differs by type — see ARCHITECTURE.md's Metadata model and Multiple
+// filesystems per bucket sections:
 //
-// mtime and ctime are deliberately distinct fields, not the same value
-// reported twice: ctime (POSIX "any change at all, content or metadata")
-// is exactly what the current version's LastModified already measures,
-// since a metadata-only update bumps it the same way a content write
-// does. mtime (POSIX "content changed") is not — it needs its own stored
-// field, set only by operations that actually rewrite content, or a
-// chmod/chown would incorrectly look like a content change too.
+//   - For a file or symlink: mode/uid/gid/nlink/xattrs come from the
+//     dedicated <uuid>.metadata object's body (Protobuf-encoded, below);
+//     size/mtime/btime come from the content object itself; ctime is
+//     max(contentObject.LastModified, metadataObject.LastModified).
+//   - For a directory (root included): mode/uid/gid live in native
+//     object metadata on the directory block object itself (no
+//     .metadata object — directories aren't hard-linkable, so the
+//     real-CAS-protection reason files/symlinks need one doesn't apply);
+//     mtime is tracked explicitly there too (see dirMetadataFromAttr,
+//     below), since a directory's own body (its entries) and its
+//     attributes share one object, the same conflation problem a
+//     .metadata split fixes for files would otherwise reappear.
 type Attr struct {
-	Mode  uint32 // permission bits only (e.g. 0644) — type bits are not stored here
-	Uid   uint32
-	Gid   uint32
-	Nlink uint32
-	Size  int64
-	Mtime time.Time // stored explicitly; bumped only on a content write
-	Ctime time.Time // derived from the current version's LastModified
-	Btime time.Time // derived from the UUIDv7 key; zero if the key isn't a UUIDv7
+	Mode   uint32 // permission bits only (e.g. 0644) — type bits are not stored here
+	Uid    uint32
+	Gid    uint32
+	Nlink  uint32
+	Size   int64
+	Mtime  time.Time
+	Ctime  time.Time
+	Btime  time.Time         // derived from the UUIDv7 key; zero if the key isn't a UUIDv7
+	Xattrs map[string][]byte // file/symlink only; nil for directories
 }
 
+// --- Directory attributes: native object metadata on the block object
+// itself (unchanged by the .metadata migration — see Attr's doc comment
+// for why directories stay on this older, simpler mechanism). ---
+
 const (
-	metaMode  = "mode"
-	metaUid   = "uid"
-	metaGid   = "gid"
-	metaNlink = "nlink"
-	metaMtime = "mtime"
+	dirMetaMode  = "mode"
+	dirMetaUid   = "uid"
+	dirMetaGid   = "gid"
+	dirMetaNlink = "nlink"
+	dirMetaMtime = "mtime"
 )
 
-// metadataFromAttr builds the object-metadata map Attr's mutable fields are
-// stored as.
-func metadataFromAttr(a Attr) map[string]string {
+// dirMetadataFromAttr builds the object-metadata map a directory block
+// object's mode/uid/gid/nlink/mtime are stored as.
+func dirMetadataFromAttr(a Attr) map[string]string {
 	mtime := a.Mtime
 	if mtime.IsZero() {
 		mtime = time.Now()
 	}
 	return map[string]string{
-		metaMode:  strconv.FormatUint(uint64(a.Mode), 10),
-		metaUid:   strconv.FormatUint(uint64(a.Uid), 10),
-		metaGid:   strconv.FormatUint(uint64(a.Gid), 10),
-		metaNlink: strconv.FormatUint(uint64(a.Nlink), 10),
-		metaMtime: strconv.FormatInt(mtime.UnixNano(), 10),
+		dirMetaMode:  strconv.FormatUint(uint64(a.Mode), 10),
+		dirMetaUid:   strconv.FormatUint(uint64(a.Uid), 10),
+		dirMetaGid:   strconv.FormatUint(uint64(a.Gid), 10),
+		dirMetaNlink: strconv.FormatUint(uint64(a.Nlink), 10),
+		dirMetaMtime: strconv.FormatInt(mtime.UnixNano(), 10),
 	}
 }
 
@@ -84,6 +94,60 @@ func parseMetaTime(m map[string]string, key string) time.Time {
 		return time.Time{}
 	}
 	return time.Unix(0, v).UTC()
+}
+
+// --- File/symlink attributes: the dedicated <uuid>.metadata object,
+// Protobuf-encoded (proto/icbfs/v1/metadata.proto). ---
+
+// metadataObjectKey is the dedicated side object holding a file or
+// symlink's mode/uid/gid/nlink/xattrs.
+//
+// This exists because of a hard limitation discovered empirically
+// against real MinIO, not assumed: ETag on an S3-compatible store is a
+// hash of the object's *body*, so a metadata-only update to native
+// object metadata never changes the ETag when the body is unchanged —
+// which means ETag-based CAS gives zero protection to fields stored that
+// way. metadataObjectKey's own body *is* the attribute data, so any real
+// change to it is a real content write, and ETag CAS becomes meaningful
+// again — for every field here, not just nlink, which is what makes
+// consolidating mode/uid/gid/nlink into one object (rather than keeping
+// them on native metadata and only nlink in its own side object, the
+// first iteration of this fix) also quietly close the chmod/chown race
+// gap, as a side effect of the consolidation rather than a separate fix.
+func metadataObjectKey(uuid string) string { return uuid + ".metadata" }
+
+// encodeFileMetadata serializes mode/uid/gid/nlink/xattrs to the wire
+// format stored at metadataObjectKey.
+func encodeFileMetadata(a Attr) ([]byte, error) {
+	return proto.Marshal(&pb.Metadata{
+		Mode:   a.Mode,
+		Uid:    a.Uid,
+		Gid:    a.Gid,
+		Nlink:  a.Nlink,
+		Xattrs: a.Xattrs,
+	})
+}
+
+// decodeFileMetadata parses metadataObjectKey's body. Empty input
+// decodes to all-zero fields (mode/uid/gid/nlink all 0, no xattrs) —
+// callers should not encounter this in practice, since the object is
+// always written with real content at creation, but it's a safe,
+// unsurprising zero value rather than an error if they ever do.
+func decodeFileMetadata(data []byte) (Attr, error) {
+	if len(data) == 0 {
+		return Attr{}, nil
+	}
+	var m pb.Metadata
+	if err := proto.Unmarshal(data, &m); err != nil {
+		return Attr{}, err
+	}
+	return Attr{
+		Mode:   m.Mode,
+		Uid:    m.Uid,
+		Gid:    m.Gid,
+		Nlink:  m.Nlink,
+		Xattrs: m.Xattrs,
+	}, nil
 }
 
 // NewUUIDv7 generates a new blob identifier. Using UUIDv7 means every new

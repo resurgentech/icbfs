@@ -6,19 +6,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
-	"strings"
+	"sync"
 	"time"
 
 	"github.com/resurgentech/icbfs/internal/block"
 	"github.com/resurgentech/icbfs/internal/objstore"
 )
 
-// maxTreeRetries bounds the whole-operation retry loop for both the flat
-// nlink CAS helper and the tree-aware insert/remove helpers: on a lost
-// race (a concurrent writer touching the same node), the whole top-down
+// maxTreeRetries bounds the whole-operation retry loop for the tree-aware
+// insert/remove helpers and the file-metadata CAS helpers: on a lost race
+// (a concurrent writer touching the same node), the whole top-down
 // operation is retried from scratch rather than retried node-by-node. See
-// insertEntry/removeEntry.
+// insertEntry/removeEntry/adjustNlink/updateFileMetadata.
 const maxTreeRetries = 20
 
 // maxEntriesPerBlock/maxChildrenPerBlock are deliberately small so tests
@@ -61,7 +60,7 @@ func (f *Filesystem) Bootstrap(ctx context.Context, mode, uid, gid uint32) error
 		return err
 	}
 	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1, Mtime: time.Now()}
-	_, err = f.store.Put(ctx, f.rootKey, bytes.NewReader(empty), metadataFromAttr(attr), "")
+	_, err = f.store.Put(ctx, f.rootKey, bytes.NewReader(empty), dirMetadataFromAttr(attr), "")
 	return err
 }
 
@@ -85,16 +84,18 @@ func (f *Filesystem) readBlock(ctx context.Context, key string) (*block.Block, *
 	return blk, obj, nil
 }
 
-func attrFromObject(key string, obj *objstore.Object) Attr {
-	mtime := parseMetaTime(obj.Metadata, metaMtime)
+// dirAttrFromObject assembles a directory's Attr from its own block
+// object's native metadata (see Attr's doc comment).
+func dirAttrFromObject(key string, obj *objstore.Object) Attr {
+	mtime := parseMetaTime(obj.Metadata, dirMetaMtime)
 	if mtime.IsZero() {
 		mtime = obj.LastModified // fallback for objects written before mtime tracking existed
 	}
 	return Attr{
-		Mode:  parseMetaUint(obj.Metadata, metaMode),
-		Uid:   parseMetaUint(obj.Metadata, metaUid),
-		Gid:   parseMetaUint(obj.Metadata, metaGid),
-		Nlink: parseMetaUint(obj.Metadata, metaNlink),
+		Mode:  parseMetaUint(obj.Metadata, dirMetaMode),
+		Uid:   parseMetaUint(obj.Metadata, dirMetaUid),
+		Gid:   parseMetaUint(obj.Metadata, dirMetaGid),
+		Nlink: parseMetaUint(obj.Metadata, dirMetaNlink),
 		Size:  obj.Size,
 		Mtime: mtime,
 		Ctime: obj.LastModified,
@@ -102,14 +103,78 @@ func attrFromObject(key string, obj *objstore.Object) Attr {
 	}
 }
 
-// Stat returns the attributes of the node identified by key (a UUID, or
-// this filesystem's root key).
-func (f *Filesystem) Stat(ctx context.Context, key string) (Attr, error) {
-	obj, err := f.store.Head(ctx, key)
+// combineFileAttr assembles a file/symlink's Attr from its two parts,
+// already fetched by the caller: metaData is .metadata's raw body,
+// metaLastModified is .metadata's own version timestamp, and contentObj
+// is the content object's Head/Get result.
+func combineFileAttr(key string, metaData []byte, metaLastModified time.Time, contentObj *objstore.Object) (Attr, error) {
+	attr, err := decodeFileMetadata(metaData)
 	if err != nil {
-		return Attr{}, mapNotFound(err)
+		return Attr{}, err
 	}
-	return attrFromObject(key, obj), nil
+	ctime := metaLastModified
+	if contentObj.LastModified.After(ctime) {
+		ctime = contentObj.LastModified
+	}
+	attr.Size = contentObj.Size
+	attr.Mtime = contentObj.LastModified
+	attr.Ctime = ctime
+	attr.Btime = Btime(key)
+	return attr, nil
+}
+
+// statFile fetches a file/symlink's two objects concurrently — per
+// ARCHITECTURE.md, this is two requests either way, so the latency cost
+// is max() of the two, not the sum.
+func (f *Filesystem) statFile(ctx context.Context, key string) (Attr, error) {
+	var metaData []byte
+	var metaLastModified time.Time
+	var contentObj *objstore.Object
+	var metaErr, contentErr error
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		body, obj, err := f.store.Get(ctx, metadataObjectKey(key))
+		if err != nil {
+			metaErr = mapNotFound(err)
+			return
+		}
+		defer body.Close()
+		metaData, metaErr = io.ReadAll(body)
+		metaLastModified = obj.LastModified
+	}()
+	go func() {
+		defer wg.Done()
+		contentObj, contentErr = f.store.Head(ctx, key)
+		contentErr = mapNotFound(contentErr)
+	}()
+	wg.Wait()
+
+	if metaErr != nil {
+		return Attr{}, metaErr
+	}
+	if contentErr != nil {
+		return Attr{}, contentErr
+	}
+	return combineFileAttr(key, metaData, metaLastModified, contentObj)
+}
+
+// Stat returns the attributes of the node identified by key (a UUID, or
+// this filesystem's root key). typ must be the node's actual type — a
+// directory's attributes live in a completely different place than a
+// file/symlink's (see Attr's doc comment), so the caller must already
+// know which it's asking about.
+func (f *Filesystem) Stat(ctx context.Context, key string, typ EntryType) (Attr, error) {
+	if typ == TypeDir {
+		obj, err := f.store.Head(ctx, key)
+		if err != nil {
+			return Attr{}, mapNotFound(err)
+		}
+		return dirAttrFromObject(key, obj), nil
+	}
+	return f.statFile(ctx, key)
 }
 
 // --- Directory tree traversal (median-key B-tree; see internal/block) ---
@@ -356,7 +421,7 @@ func (f *Filesystem) Lookup(ctx context.Context, dirKey, name string) (block.Ent
 	if !ok {
 		return block.Entry{}, Attr{}, ErrNotFound
 	}
-	attr, err := f.Stat(ctx, entry.UUID)
+	attr, err := f.Stat(ctx, entry.UUID, entry.Type)
 	if err != nil {
 		return block.Entry{}, Attr{}, err
 	}
@@ -370,6 +435,9 @@ func (f *Filesystem) ReadDir(ctx context.Context, dirKey string) ([]block.Entry,
 }
 
 // Mkdir creates a new, empty directory named name inside dirKey.
+// Directories keep attributes as native object metadata on their own
+// block object — see Attr's doc comment — unaffected by the .metadata
+// split that applies to files/symlinks below.
 func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, gid uint32) (string, Attr, error) {
 	newUUID, err := NewUUIDv7()
 	if err != nil {
@@ -380,7 +448,7 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 		return "", Attr{}, err
 	}
 	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1, Mtime: time.Now()}
-	if _, err := f.store.Put(ctx, newUUID, bytes.NewReader(empty), metadataFromAttr(attr), ""); err != nil {
+	if _, err := f.store.Put(ctx, newUUID, bytes.NewReader(empty), dirMetadataFromAttr(attr), ""); err != nil {
 		return "", Attr{}, err
 	}
 
@@ -392,53 +460,76 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 	return newUUID, attr, nil
 }
 
-// Create makes a new, empty regular file named name inside dirKey.
+// Create makes a new, empty regular file named name inside dirKey. The
+// content object carries no attribute metadata at all — mode/uid/gid/
+// nlink live entirely in the new metadataObjectKey side object.
 func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid, gid uint32) (string, Attr, error) {
 	newUUID, err := NewUUIDv7()
 	if err != nil {
 		return "", Attr{}, err
 	}
-	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1, Mtime: time.Now()}
-	if _, err := f.store.Put(ctx, newUUID, bytes.NewReader(nil), metadataFromAttr(attr), ""); err != nil {
+	contentObj, err := f.store.Put(ctx, newUUID, bytes.NewReader(nil), nil, "")
+	if err != nil {
 		return "", Attr{}, err
 	}
-	if _, err := f.store.Put(ctx, nlinkKey(newUUID), strings.NewReader("1"), nil, ""); err != nil {
+
+	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1}
+	metaData, err := encodeFileMetadata(attr)
+	if err != nil {
+		_ = f.store.Delete(ctx, newUUID, "")
+		return "", Attr{}, err
+	}
+	metaObj, err := f.store.Put(ctx, metadataObjectKey(newUUID), bytes.NewReader(metaData), nil, "")
+	if err != nil {
 		_ = f.store.Delete(ctx, newUUID, "")
 		return "", Attr{}, err
 	}
 
 	if err := f.insertEntry(ctx, dirKey, name, newUUID, TypeFile); err != nil {
 		_ = f.store.Delete(ctx, newUUID, "")
-		_ = f.store.Delete(ctx, nlinkKey(newUUID), "")
+		_ = f.store.Delete(ctx, metadataObjectKey(newUUID), "")
 		return "", Attr{}, err
 	}
 	attr.Btime = Btime(newUUID)
+	attr.Mtime = contentObj.LastModified
+	attr.Ctime = metaObj.LastModified
 	return newUUID, attr, nil
 }
 
 // Symlink creates a new symlink named name inside dirKey, pointing at
-// target. The target string is stored as the object's content.
+// target. The target string is stored as the object's content; mode/
+// uid/gid/nlink live in metadataObjectKey, same as for a regular file.
 func (f *Filesystem) Symlink(ctx context.Context, dirKey, name, target string, uid, gid uint32) (string, Attr, error) {
 	newUUID, err := NewUUIDv7()
 	if err != nil {
 		return "", Attr{}, err
 	}
-	attr := Attr{Mode: 0777, Uid: uid, Gid: gid, Nlink: 1, Mtime: time.Now()}
-	if _, err := f.store.Put(ctx, newUUID, bytes.NewReader([]byte(target)), metadataFromAttr(attr), ""); err != nil {
+	contentObj, err := f.store.Put(ctx, newUUID, bytes.NewReader([]byte(target)), nil, "")
+	if err != nil {
 		return "", Attr{}, err
 	}
-	if _, err := f.store.Put(ctx, nlinkKey(newUUID), strings.NewReader("1"), nil, ""); err != nil {
+
+	attr := Attr{Mode: 0777, Uid: uid, Gid: gid, Nlink: 1}
+	metaData, err := encodeFileMetadata(attr)
+	if err != nil {
+		_ = f.store.Delete(ctx, newUUID, "")
+		return "", Attr{}, err
+	}
+	metaObj, err := f.store.Put(ctx, metadataObjectKey(newUUID), bytes.NewReader(metaData), nil, "")
+	if err != nil {
 		_ = f.store.Delete(ctx, newUUID, "")
 		return "", Attr{}, err
 	}
 
 	if err := f.insertEntry(ctx, dirKey, name, newUUID, TypeSymlink); err != nil {
 		_ = f.store.Delete(ctx, newUUID, "")
-		_ = f.store.Delete(ctx, nlinkKey(newUUID), "")
+		_ = f.store.Delete(ctx, metadataObjectKey(newUUID), "")
 		return "", Attr{}, err
 	}
 	attr.Size = int64(len(target))
 	attr.Btime = Btime(newUUID)
+	attr.Mtime = contentObj.LastModified
+	attr.Ctime = metaObj.LastModified
 	return newUUID, attr, nil
 }
 
@@ -456,42 +547,19 @@ func (f *Filesystem) Readlink(ctx context.Context, key string) (string, error) {
 	return string(data), nil
 }
 
-// nlinkKey is the dedicated side object tracking a file/symlink's hard
-// link count.
-//
-// This exists because of a hard limitation discovered empirically against
-// real MinIO, not assumed: ETag on an S3-compatible store is a hash of
-// the object's *body*, so a metadata-only update (nlink living in object
-// metadata, per ARCHITECTURE.md's general metadata model) never changes
-// the ETag when the body is unchanged — which means ETag-based CAS
-// (Put/UpdateMetadata's ifMatch) provides zero protection for exactly the
-// concurrent-nlink-update case it was meant to guard. It was also
-// confirmed that MinIO does not enforce DeleteObject's If-Match at all,
-// so a conditional delete isn't available as a fallback either.
-//
-// The fix: nlink for a hardlink-capable node lives in a tiny side object
-// whose *body* is the decimal count, so every change is a real content
-// write and ETag-based CAS (proven to work for content writes) is
-// meaningful again. The main object's metadata nlink field is kept as a
-// best-effort cache so Stat()/Getattr stay single-round-trip in the
-// common (never-hardlinked) case; adjustNlink, below, is the only
-// authoritative source, and the only thing that decides whether the main
-// object is actually deleted.
-func nlinkKey(uuid string) string { return uuid + ".nlink" }
+const nlinkZero = 0
 
-const nlinkTombstone = "0"
-
-// adjustNlink changes uuid's hard link count by delta via the CAS-
-// protected side object described above. If the count reaches zero, it
-// writes the tombstone value under the same CAS check (so a concurrent
-// Link racing to increment at the same moment necessarily loses the race
-// at this Put and retries against the fresh state, never silently
-// resurrecting a target this call just decided to delete), then deletes
-// both the side object and the main object.
+// adjustNlink changes uuid's hard link count by delta via a CAS read-
+// modify-write of metadataObjectKey. If the count reaches zero, it
+// writes nlink=0 under the same CAS check (so a concurrent Link racing
+// to increment at the same moment necessarily loses the race at this Put
+// and retries against the fresh state, never silently resurrecting a
+// target this call just decided to delete), then deletes both the
+// metadata object and the content object.
 func (f *Filesystem) adjustNlink(ctx context.Context, uuid string, delta int) error {
-	nk := nlinkKey(uuid)
+	mk := metadataObjectKey(uuid)
 	for attempt := 0; attempt < maxTreeRetries; attempt++ {
-		body, obj, err := f.store.Get(ctx, nk)
+		body, obj, err := f.store.Get(ctx, mk)
 		if err != nil {
 			return mapNotFound(err)
 		}
@@ -500,16 +568,24 @@ func (f *Filesystem) adjustNlink(ctx context.Context, uuid string, delta int) er
 		if readErr != nil {
 			return readErr
 		}
-		count, _ := strconv.Atoi(strings.TrimSpace(string(data)))
-		if count <= 0 {
+		attr, err := decodeFileMetadata(data)
+		if err != nil {
+			return err
+		}
+		if attr.Nlink == nlinkZero {
 			// Already tombstoned by a prior/concurrent Unlink; nothing to
 			// resurrect, and nothing further for a decrement to do either.
 			return ErrNotFound
 		}
-		newCount := count + delta
+		newNlink := int(attr.Nlink) + delta
 
-		if newCount <= 0 {
-			_, err := f.store.Put(ctx, nk, strings.NewReader(nlinkTombstone), nil, obj.ETag)
+		if newNlink <= 0 {
+			attr.Nlink = nlinkZero
+			tomb, err := encodeFileMetadata(attr)
+			if err != nil {
+				return err
+			}
+			_, err = f.store.Put(ctx, mk, bytes.NewReader(tomb), nil, obj.ETag)
 			if objstore.IsPreconditionFailed(err) {
 				continue
 			}
@@ -521,35 +597,68 @@ func (f *Filesystem) adjustNlink(ctx context.Context, uuid string, delta int) er
 			// have raced past this point, since it would have observed
 			// either our tombstone (and bailed, above) or lost its own
 			// CAS race against it. Safe to physically delete now.
-			_ = f.store.Delete(ctx, nk, "")
+			_ = f.store.Delete(ctx, mk, "")
 			_ = f.store.Delete(ctx, uuid, "")
 			return nil
 		}
 
-		_, err = f.store.Put(ctx, nk, strings.NewReader(strconv.Itoa(newCount)), nil, obj.ETag)
-		if objstore.IsPreconditionFailed(err) {
-			continue
-		}
+		attr.Nlink = uint32(newNlink)
+		updated, err := encodeFileMetadata(attr)
 		if err != nil {
 			return err
 		}
-		// Best-effort cache refresh, not itself CAS-protected: the side
-		// object above is already the sole source of truth for
-		// correctness, so a race here can only make Stat() briefly
-		// report a stale count, never corrupt the real decision.
-		if cur, err := f.store.Head(ctx, uuid); err == nil {
-			attr := attrFromObject(uuid, cur)
-			attr.Nlink = uint32(newCount)
-			_, _ = f.store.UpdateMetadata(ctx, uuid, metadataFromAttr(attr), "")
+		_, err = f.store.Put(ctx, mk, bytes.NewReader(updated), nil, obj.ETag)
+		if objstore.IsPreconditionFailed(err) {
+			continue
 		}
-		return nil
+		return err
 	}
 	return fmt.Errorf("adjust nlink %s: exceeded %d retries", uuid, maxTreeRetries)
 }
 
+// updateFileMetadata applies mutate to a file/symlink's metadataObjectKey
+// under CAS, retrying on a lost race. This is what makes chmod/chown on a
+// file real-CAS-protected rather than last-writer-wins: consolidating
+// mode/uid/gid/nlink into one object (rather than leaving mode/uid/gid on
+// native metadata, as the pre-.metadata design did) means a concurrent
+// chmod and a concurrent Link now correctly serialize against each other
+// through the same mechanism, as a side effect of the consolidation.
+func (f *Filesystem) updateFileMetadata(ctx context.Context, uuid string, mutate func(*Attr)) (Attr, error) {
+	mk := metadataObjectKey(uuid)
+	for attempt := 0; attempt < maxTreeRetries; attempt++ {
+		body, obj, err := f.store.Get(ctx, mk)
+		if err != nil {
+			return Attr{}, mapNotFound(err)
+		}
+		data, readErr := io.ReadAll(body)
+		body.Close()
+		if readErr != nil {
+			return Attr{}, readErr
+		}
+		attr, err := decodeFileMetadata(data)
+		if err != nil {
+			return Attr{}, err
+		}
+		mutate(&attr)
+		newData, err := encodeFileMetadata(attr)
+		if err != nil {
+			return Attr{}, err
+		}
+		_, err = f.store.Put(ctx, mk, bytes.NewReader(newData), nil, obj.ETag)
+		if objstore.IsPreconditionFailed(err) {
+			continue
+		}
+		if err != nil {
+			return Attr{}, err
+		}
+		return f.statFile(ctx, uuid)
+	}
+	return Attr{}, fmt.Errorf("update metadata %s: exceeded %d retries", uuid, maxTreeRetries)
+}
+
 // Link creates a hard link named name inside dirKey, pointing at the
 // existing node targetUUID/targetType, incrementing its nlink via the
-// CAS-protected side object.
+// CAS-protected metadataObjectKey object.
 func (f *Filesystem) Link(ctx context.Context, dirKey, name, targetUUID string, targetType EntryType) (Attr, error) {
 	if err := f.adjustNlink(ctx, targetUUID, +1); err != nil {
 		return Attr{}, err
@@ -559,12 +668,12 @@ func (f *Filesystem) Link(ctx context.Context, dirKey, name, targetUUID string, 
 		_ = f.adjustNlink(ctx, targetUUID, -1) // best-effort rollback
 		return Attr{}, err
 	}
-	return f.Stat(ctx, targetUUID)
+	return f.Stat(ctx, targetUUID, targetType)
 }
 
 // Unlink removes a non-directory entry named name from dirKey,
-// decrementing the target's nlink via the CAS-protected side object and
-// deleting its blob once the count reaches zero.
+// decrementing the target's nlink via the CAS-protected metadataObjectKey
+// object and deleting its blob once the count reaches zero.
 func (f *Filesystem) Unlink(ctx context.Context, dirKey, name string) error {
 	entry, ok, err := f.findInTree(ctx, dirKey, name)
 	if err != nil {
@@ -614,68 +723,130 @@ func (f *Filesystem) Rmdir(ctx context.Context, dirKey, name string) error {
 	return f.store.Delete(ctx, entry.UUID, "")
 }
 
-// ReadFile returns a regular file's whole content.
+// ReadFile returns a regular file's whole content and its attributes,
+// fetching the content and metadataObjectKey objects concurrently.
 func (f *Filesystem) ReadFile(ctx context.Context, key string) ([]byte, Attr, error) {
-	body, obj, err := f.store.Get(ctx, key)
-	if err != nil {
-		return nil, Attr{}, mapNotFound(err)
+	var data []byte
+	var metaData []byte
+	var metaLastModified time.Time
+	var contentObj *objstore.Object
+	var contentErr, metaErr error
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		body, obj, err := f.store.Get(ctx, key)
+		if err != nil {
+			contentErr = mapNotFound(err)
+			return
+		}
+		defer body.Close()
+		data, contentErr = io.ReadAll(body)
+		contentObj = obj
+	}()
+	go func() {
+		defer wg.Done()
+		body, obj, err := f.store.Get(ctx, metadataObjectKey(key))
+		if err != nil {
+			metaErr = mapNotFound(err)
+			return
+		}
+		defer body.Close()
+		metaData, metaErr = io.ReadAll(body)
+		metaLastModified = obj.LastModified
+	}()
+	wg.Wait()
+
+	if contentErr != nil {
+		return nil, Attr{}, contentErr
 	}
-	defer body.Close()
-	data, err := io.ReadAll(body)
+	if metaErr != nil {
+		return nil, Attr{}, metaErr
+	}
+	attr, err := combineFileAttr(key, metaData, metaLastModified, contentObj)
 	if err != nil {
 		return nil, Attr{}, err
 	}
-	return data, attrFromObject(key, obj), nil
+	return data, attr, nil
 }
 
-// WriteFile replaces a regular file's whole content, preserving its
-// existing mode/uid/gid/nlink and stamping a fresh mtime (this is a
-// content write, by definition).
-func (f *Filesystem) WriteFile(ctx context.Context, key string, data []byte, attr Attr) (Attr, error) {
-	attr.Size = int64(len(data))
-	attr.Mtime = time.Now()
-	if _, err := f.store.Put(ctx, key, bytes.NewReader(data), metadataFromAttr(attr), ""); err != nil {
+// WriteFile replaces a regular file's whole content. The content object
+// carries no attribute metadata — mode/uid/gid/nlink live in
+// metadataObjectKey and are untouched by a content write, which is what
+// makes the content object's own LastModified a correct, uncorrupted
+// mtime (see Attr's doc comment).
+func (f *Filesystem) WriteFile(ctx context.Context, key string, data []byte) (Attr, error) {
+	if _, err := f.store.Put(ctx, key, bytes.NewReader(data), nil, ""); err != nil {
 		return Attr{}, err
 	}
-	return f.Stat(ctx, key)
+	return f.statFile(ctx, key)
 }
 
 // SetAttr applies the given field changes (any of which may be nil/unset)
-// to the node at key. A mode/uid/gid-only change is a metadata-only
-// update (ARCHITECTURE.md: this rides the version history as ctime, for
-// free, and never touches the parent directory, and does not disturb
-// mtime); a size change rewrites content via WriteFile, which does bump
-// mtime.
-func (f *Filesystem) SetAttr(ctx context.Context, key string, mode, uid, gid *uint32, size *int64) (Attr, error) {
-	attr, err := f.Stat(ctx, key)
-	if err != nil {
-		return Attr{}, err
-	}
-	if mode != nil {
-		attr.Mode = *mode
-	}
-	if uid != nil {
-		attr.Uid = *uid
-	}
-	if gid != nil {
-		attr.Gid = *gid
+// to the node at key. typ must be the node's actual type (see Stat).
+//
+// For a directory, mode/uid/gid is a metadata-only native-object-metadata
+// update (not CAS-protected — "last writer wins" is an accepted
+// simplification for directories, see Attr's doc comment); size is
+// ignored, since truncating a directory block doesn't mean anything.
+//
+// For a file or symlink, a size change rewrites content via WriteFile
+// (which bumps mtime, correctly, since it's a real content change); a
+// mode/uid/gid change goes through updateFileMetadata, which — unlike
+// the directory case — *is* real-CAS-protected, a quiet benefit of the
+// .metadata consolidation.
+func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mode, uid, gid *uint32, size *int64) (Attr, error) {
+	if typ == TypeDir {
+		attr, err := f.Stat(ctx, key, TypeDir)
+		if err != nil {
+			return Attr{}, err
+		}
+		if mode != nil {
+			attr.Mode = *mode
+		}
+		if uid != nil {
+			attr.Uid = *uid
+		}
+		if gid != nil {
+			attr.Gid = *gid
+		}
+		obj, err := f.store.UpdateMetadata(ctx, key, dirMetadataFromAttr(attr), "")
+		if err != nil {
+			return Attr{}, err
+		}
+		return dirAttrFromObject(key, obj), nil
 	}
 
-	if size != nil && *size != attr.Size {
+	if size != nil {
 		data, _, err := f.ReadFile(ctx, key)
 		if err != nil {
 			return Attr{}, err
 		}
-		resized := make([]byte, *size)
-		copy(resized, data)
-		return f.WriteFile(ctx, key, resized, attr)
+		if *size != int64(len(data)) {
+			resized := make([]byte, *size)
+			copy(resized, data)
+			if _, err := f.WriteFile(ctx, key, resized); err != nil {
+				return Attr{}, err
+			}
+		}
 	}
 
-	obj, err := f.store.UpdateMetadata(ctx, key, metadataFromAttr(attr), "")
-	if err != nil {
-		return Attr{}, err
+	if mode != nil || uid != nil || gid != nil {
+		return f.updateFileMetadata(ctx, key, func(a *Attr) {
+			if mode != nil {
+				a.Mode = *mode
+			}
+			if uid != nil {
+				a.Uid = *uid
+			}
+			if gid != nil {
+				a.Gid = *gid
+			}
+		})
 	}
-	return attrFromObject(key, obj), nil
+
+	return f.Stat(ctx, key, typ)
 }
 
 func mapNotFound(err error) error {

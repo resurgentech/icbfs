@@ -1,6 +1,7 @@
 package icbfs
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -233,16 +234,149 @@ func TestConcurrentLinkRaceDoesNotLoseUpdates(t *testing.T) {
 
 func mustReadNlinkSideObject(t *testing.T, ctx context.Context, store objstore.Store, uuid string) int {
 	t.Helper()
-	body, _, err := store.Get(ctx, nlinkKey(uuid))
+	body, _, err := store.Get(ctx, metadataObjectKey(uuid))
 	if err != nil {
-		t.Fatalf("get nlink side object: %v", err)
+		t.Fatalf("get .metadata object: %v", err)
 	}
 	defer body.Close()
 	data, err := io.ReadAll(body)
 	if err != nil {
-		t.Fatalf("read nlink side object: %v", err)
+		t.Fatalf("read .metadata object: %v", err)
 	}
-	var n int
-	fmt.Sscanf(string(data), "%d", &n)
-	return n
+	attr, err := decodeFileMetadata(data)
+	if err != nil {
+		t.Fatalf("decode .metadata object: %v", err)
+	}
+	return int(attr.Nlink)
+}
+
+// TestXattrsRoundTripArbitraryBinaryValues proves the ROADMAP-called-for
+// property directly against real MinIO: xattrs is a generic
+// map[string][]byte, and arbitrary binary content — not just printable
+// text — round-trips through the real Protobuf-encoded .metadata object
+// without corruption or truncation. There's no public Filesystem API for
+// setting xattrs yet (nothing consumes it — no FUSE getxattr/setxattr
+// wiring exists), so this writes directly to the real .metadata object
+// via the same encodeFileMetadata/decodeFileMetadata functions Create/
+// Stat/SetAttr already use internally, proving the wire format itself
+// is correct ahead of any caller needing it.
+func TestXattrsRoundTripArbitraryBinaryValues(t *testing.T) {
+	fsys, store := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+
+	uuid, _, err := fsys.Create(ctx, root, "has-xattrs.txt", 0644, 1000, 1000)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Arbitrary binary content: not valid UTF-8, includes null bytes and
+	// high bytes — exactly the kind of thing base64-in-JSON would have
+	// needed encoding for, and Protobuf's native bytes type shouldn't
+	// care about at all.
+	binaryValue := []byte{0x00, 0xFF, 0x01, 0xFE, 'h', 'i', 0x00, 0x80, 0x7F}
+
+	mk := metadataObjectKey(uuid)
+	body, obj, err := store.Get(ctx, mk)
+	if err != nil {
+		t.Fatalf("get .metadata: %v", err)
+	}
+	data, err := io.ReadAll(body)
+	body.Close()
+	if err != nil {
+		t.Fatalf("read .metadata: %v", err)
+	}
+	attr, err := decodeFileMetadata(data)
+	if err != nil {
+		t.Fatalf("decode .metadata: %v", err)
+	}
+	attr.Xattrs = map[string][]byte{"user.binary-blob": binaryValue}
+	newData, err := encodeFileMetadata(attr)
+	if err != nil {
+		t.Fatalf("encode .metadata: %v", err)
+	}
+	if _, err := store.Put(ctx, mk, bytes.NewReader(newData), nil, obj.ETag); err != nil {
+		t.Fatalf("put .metadata: %v", err)
+	}
+
+	_, got, err := fsys.ReadFile(ctx, uuid)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	roundTripped, ok := got.Xattrs["user.binary-blob"]
+	if !ok {
+		t.Fatal("xattr missing after round trip")
+	}
+	if !bytes.Equal(roundTripped, binaryValue) {
+		t.Fatalf("xattr corrupted: got %v, want %v", roundTripped, binaryValue)
+	}
+	// Confirm mode/uid/gid/nlink weren't disturbed by writing xattrs —
+	// the map lives alongside them in the same message, not atop them.
+	if got.Mode != 0644 || got.Uid != 1000 || got.Gid != 1000 || got.Nlink != 1 {
+		t.Fatalf("other fields disturbed by xattrs: %+v", got)
+	}
+}
+
+// TestXattrsPosixAndWindowsACLsCoexist proves the union-map design from
+// ARCHITECTURE.md directly: a POSIX ACL entry (the real well-known key
+// Linux's own getfacl/setfacl use) and a Windows ACL entry (the reserved
+// key this project chose) live in the same xattrs map without
+// interfering with each other — no special-casing at the storage layer,
+// exactly as designed.
+func TestXattrsPosixAndWindowsACLsCoexist(t *testing.T) {
+	fsys, store := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+
+	uuid, _, err := fsys.Create(ctx, root, "has-acls.txt", 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	posixACL := []byte{0x02, 0x00, 0x00, 0x00 /* a plausible posix_acl binary header shape */}
+	windowsACL := []byte("\x01\x00\x04\x80fake-security-descriptor-bytes")
+
+	mk := metadataObjectKey(uuid)
+	body, obj, err := store.Get(ctx, mk)
+	if err != nil {
+		t.Fatalf("get .metadata: %v", err)
+	}
+	data, err := io.ReadAll(body)
+	body.Close()
+	if err != nil {
+		t.Fatalf("read .metadata: %v", err)
+	}
+	attr, err := decodeFileMetadata(data)
+	if err != nil {
+		t.Fatalf("decode .metadata: %v", err)
+	}
+	attr.Xattrs = map[string][]byte{
+		"system.posix_acl_access": posixACL,
+		"windows.acl":             windowsACL,
+		"user.unrelated-tag":      []byte("just a tag"),
+	}
+	newData, err := encodeFileMetadata(attr)
+	if err != nil {
+		t.Fatalf("encode .metadata: %v", err)
+	}
+	if _, err := store.Put(ctx, mk, bytes.NewReader(newData), nil, obj.ETag); err != nil {
+		t.Fatalf("put .metadata: %v", err)
+	}
+
+	got, err := fsys.Stat(ctx, uuid, TypeFile)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if !bytes.Equal(got.Xattrs["system.posix_acl_access"], posixACL) {
+		t.Fatalf("posix ACL corrupted or missing: %v", got.Xattrs["system.posix_acl_access"])
+	}
+	if !bytes.Equal(got.Xattrs["windows.acl"], windowsACL) {
+		t.Fatalf("windows ACL corrupted or missing: %v", got.Xattrs["windows.acl"])
+	}
+	if string(got.Xattrs["user.unrelated-tag"]) != "just a tag" {
+		t.Fatalf("unrelated tag disturbed: %v", got.Xattrs["user.unrelated-tag"])
+	}
+	if len(got.Xattrs) != 3 {
+		t.Fatalf("got %d xattrs entries, want exactly 3 (no cross-contamination): %v", len(got.Xattrs), got.Xattrs)
+	}
 }

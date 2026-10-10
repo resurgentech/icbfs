@@ -136,7 +136,7 @@ func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 }
 
 func (n *Node) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	attr, err := n.fsys.Stat(ctx, n.key)
+	attr, err := n.fsys.Stat(ctx, n.key, n.typ)
 	if err != nil {
 		return errnoFromErr(err)
 	}
@@ -162,7 +162,7 @@ func (n *Node) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn,
 		sizeP = &ss
 	}
 
-	attr, err := n.fsys.SetAttr(ctx, n.key, modeP, uidP, gidP, sizeP)
+	attr, err := n.fsys.SetAttr(ctx, n.key, n.typ, modeP, uidP, gidP, sizeP)
 	if err != nil {
 		return errnoFromErr(err)
 	}
@@ -203,16 +203,16 @@ func (n *Node) Create(ctx context.Context, name string, flags uint32, mode uint3
 		return nil, nil, 0, errnoFromErr(err)
 	}
 	fillAttr(&out.Attr, newUUID, icbfs.TypeFile, attr)
-	fh := &FileHandle{fsys: n.fsys, key: newUUID, attr: attr}
+	fh := &FileHandle{fsys: n.fsys, key: newUUID}
 	return n.newChild(ctx, newUUID, icbfs.TypeFile), fh, 0, 0
 }
 
 func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	data, attr, err := n.fsys.ReadFile(ctx, n.key)
+	data, _, err := n.fsys.ReadFile(ctx, n.key)
 	if err != nil {
 		return nil, 0, errnoFromErr(err)
 	}
-	return &FileHandle{fsys: n.fsys, key: n.key, data: data, attr: attr}, 0, 0
+	return &FileHandle{fsys: n.fsys, key: n.key, data: data}, 0, 0
 }
 
 func (n *Node) Unlink(ctx context.Context, name string) syscall.Errno {
@@ -263,7 +263,6 @@ type FileHandle struct {
 	fsys  *icbfs.Filesystem
 	key   string
 	data  []byte
-	attr  icbfs.Attr
 	dirty bool
 }
 
@@ -307,11 +306,9 @@ func (h *FileHandle) Flush(ctx context.Context) syscall.Errno {
 	if !h.dirty {
 		return 0
 	}
-	attr, err := h.fsys.WriteFile(ctx, h.key, h.data, h.attr)
-	if err != nil {
+	if _, err := h.fsys.WriteFile(ctx, h.key, h.data); err != nil {
 		return errnoFromErr(err)
 	}
-	h.attr = attr
 	h.dirty = false
 	return 0
 }
