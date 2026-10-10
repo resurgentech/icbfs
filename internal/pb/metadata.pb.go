@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.12
 // 	protoc        v7.36.1
-// source: proto/icbfs/v1/metadata.proto
+// source: spec/proto/icbfs/v1/metadata.proto
 
 package pb
 
@@ -45,7 +45,7 @@ type Metadata struct {
 
 func (x *Metadata) Reset() {
 	*x = Metadata{}
-	mi := &file_proto_icbfs_v1_metadata_proto_msgTypes[0]
+	mi := &file_spec_proto_icbfs_v1_metadata_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -57,7 +57,7 @@ func (x *Metadata) String() string {
 func (*Metadata) ProtoMessage() {}
 
 func (x *Metadata) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_icbfs_v1_metadata_proto_msgTypes[0]
+	mi := &file_spec_proto_icbfs_v1_metadata_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -70,7 +70,7 @@ func (x *Metadata) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Metadata.ProtoReflect.Descriptor instead.
 func (*Metadata) Descriptor() ([]byte, []int) {
-	return file_proto_icbfs_v1_metadata_proto_rawDescGZIP(), []int{0}
+	return file_spec_proto_icbfs_v1_metadata_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Metadata) GetMode() uint32 {
@@ -108,11 +108,11 @@ func (x *Metadata) GetXattrs() map[string][]byte {
 	return nil
 }
 
-var File_proto_icbfs_v1_metadata_proto protoreflect.FileDescriptor
+var File_spec_proto_icbfs_v1_metadata_proto protoreflect.FileDescriptor
 
-const file_proto_icbfs_v1_metadata_proto_rawDesc = "" +
+const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\n" +
-	"\x1dproto/icbfs/v1/metadata.proto\x12\bicbfs.v1\"\xcb\x01\n" +
+	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\"\xcb\x01\n" +
 	"\bMetadata\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\rR\x04mode\x12\x10\n" +
 	"\x03uid\x18\x02 \x01(\rR\x03uid\x12\x10\n" +
@@ -124,23 +124,23 @@ const file_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01B+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
 
 var (
-	file_proto_icbfs_v1_metadata_proto_rawDescOnce sync.Once
-	file_proto_icbfs_v1_metadata_proto_rawDescData []byte
+	file_spec_proto_icbfs_v1_metadata_proto_rawDescOnce sync.Once
+	file_spec_proto_icbfs_v1_metadata_proto_rawDescData []byte
 )
 
-func file_proto_icbfs_v1_metadata_proto_rawDescGZIP() []byte {
-	file_proto_icbfs_v1_metadata_proto_rawDescOnce.Do(func() {
-		file_proto_icbfs_v1_metadata_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_icbfs_v1_metadata_proto_rawDesc), len(file_proto_icbfs_v1_metadata_proto_rawDesc)))
+func file_spec_proto_icbfs_v1_metadata_proto_rawDescGZIP() []byte {
+	file_spec_proto_icbfs_v1_metadata_proto_rawDescOnce.Do(func() {
+		file_spec_proto_icbfs_v1_metadata_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_spec_proto_icbfs_v1_metadata_proto_rawDesc), len(file_spec_proto_icbfs_v1_metadata_proto_rawDesc)))
 	})
-	return file_proto_icbfs_v1_metadata_proto_rawDescData
+	return file_spec_proto_icbfs_v1_metadata_proto_rawDescData
 }
 
-var file_proto_icbfs_v1_metadata_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
-var file_proto_icbfs_v1_metadata_proto_goTypes = []any{
+var file_spec_proto_icbfs_v1_metadata_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_spec_proto_icbfs_v1_metadata_proto_goTypes = []any{
 	(*Metadata)(nil), // 0: icbfs.v1.Metadata
 	nil,              // 1: icbfs.v1.Metadata.XattrsEntry
 }
-var file_proto_icbfs_v1_metadata_proto_depIdxs = []int32{
+var file_spec_proto_icbfs_v1_metadata_proto_depIdxs = []int32{
 	1, // 0: icbfs.v1.Metadata.xattrs:type_name -> icbfs.v1.Metadata.XattrsEntry
 	1, // [1:1] is the sub-list for method output_type
 	1, // [1:1] is the sub-list for method input_type
@@ -149,26 +149,26 @@ var file_proto_icbfs_v1_metadata_proto_depIdxs = []int32{
 	0, // [0:1] is the sub-list for field type_name
 }
 
-func init() { file_proto_icbfs_v1_metadata_proto_init() }
-func file_proto_icbfs_v1_metadata_proto_init() {
-	if File_proto_icbfs_v1_metadata_proto != nil {
+func init() { file_spec_proto_icbfs_v1_metadata_proto_init() }
+func file_spec_proto_icbfs_v1_metadata_proto_init() {
+	if File_spec_proto_icbfs_v1_metadata_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_icbfs_v1_metadata_proto_rawDesc), len(file_proto_icbfs_v1_metadata_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_spec_proto_icbfs_v1_metadata_proto_rawDesc), len(file_spec_proto_icbfs_v1_metadata_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   2,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
-		GoTypes:           file_proto_icbfs_v1_metadata_proto_goTypes,
-		DependencyIndexes: file_proto_icbfs_v1_metadata_proto_depIdxs,
-		MessageInfos:      file_proto_icbfs_v1_metadata_proto_msgTypes,
+		GoTypes:           file_spec_proto_icbfs_v1_metadata_proto_goTypes,
+		DependencyIndexes: file_spec_proto_icbfs_v1_metadata_proto_depIdxs,
+		MessageInfos:      file_spec_proto_icbfs_v1_metadata_proto_msgTypes,
 	}.Build()
-	File_proto_icbfs_v1_metadata_proto = out.File
-	file_proto_icbfs_v1_metadata_proto_goTypes = nil
-	file_proto_icbfs_v1_metadata_proto_depIdxs = nil
+	File_spec_proto_icbfs_v1_metadata_proto = out.File
+	file_spec_proto_icbfs_v1_metadata_proto_goTypes = nil
+	file_spec_proto_icbfs_v1_metadata_proto_depIdxs = nil
 }

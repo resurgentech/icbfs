@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.12
 // 	protoc        v7.36.1
-// source: proto/icbfs/v1/lock.proto
+// source: spec/proto/icbfs/v1/lock.proto
 
 package pb
 
@@ -48,7 +48,7 @@ type LockRange struct {
 
 func (x *LockRange) Reset() {
 	*x = LockRange{}
-	mi := &file_proto_icbfs_v1_lock_proto_msgTypes[0]
+	mi := &file_spec_proto_icbfs_v1_lock_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -60,7 +60,7 @@ func (x *LockRange) String() string {
 func (*LockRange) ProtoMessage() {}
 
 func (x *LockRange) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_icbfs_v1_lock_proto_msgTypes[0]
+	mi := &file_spec_proto_icbfs_v1_lock_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -73,7 +73,7 @@ func (x *LockRange) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LockRange.ProtoReflect.Descriptor instead.
 func (*LockRange) Descriptor() ([]byte, []int) {
-	return file_proto_icbfs_v1_lock_proto_rawDescGZIP(), []int{0}
+	return file_spec_proto_icbfs_v1_lock_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *LockRange) GetStart() int64 {
@@ -122,7 +122,7 @@ type Lock struct {
 
 func (x *Lock) Reset() {
 	*x = Lock{}
-	mi := &file_proto_icbfs_v1_lock_proto_msgTypes[1]
+	mi := &file_spec_proto_icbfs_v1_lock_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -134,7 +134,7 @@ func (x *Lock) String() string {
 func (*Lock) ProtoMessage() {}
 
 func (x *Lock) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_icbfs_v1_lock_proto_msgTypes[1]
+	mi := &file_spec_proto_icbfs_v1_lock_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -147,7 +147,7 @@ func (x *Lock) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Lock.ProtoReflect.Descriptor instead.
 func (*Lock) Descriptor() ([]byte, []int) {
-	return file_proto_icbfs_v1_lock_proto_rawDescGZIP(), []int{1}
+	return file_spec_proto_icbfs_v1_lock_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *Lock) GetRanges() []*LockRange {
@@ -157,11 +157,11 @@ func (x *Lock) GetRanges() []*LockRange {
 	return nil
 }
 
-var File_proto_icbfs_v1_lock_proto protoreflect.FileDescriptor
+var File_spec_proto_icbfs_v1_lock_proto protoreflect.FileDescriptor
 
-const file_proto_icbfs_v1_lock_proto_rawDesc = "" +
+const file_spec_proto_icbfs_v1_lock_proto_rawDesc = "" +
 	"\n" +
-	"\x19proto/icbfs/v1/lock.proto\x12\bicbfs.v1\"\xa1\x01\n" +
+	"\x1espec/proto/icbfs/v1/lock.proto\x12\bicbfs.v1\"\xa1\x01\n" +
 	"\tLockRange\x12\x14\n" +
 	"\x05start\x18\x01 \x01(\x03R\x05start\x12\x10\n" +
 	"\x03end\x18\x02 \x01(\x03R\x03end\x12\x16\n" +
@@ -172,23 +172,23 @@ const file_proto_icbfs_v1_lock_proto_rawDesc = "" +
 	"\x06ranges\x18\x01 \x03(\v2\x13.icbfs.v1.LockRangeR\x06rangesB+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
 
 var (
-	file_proto_icbfs_v1_lock_proto_rawDescOnce sync.Once
-	file_proto_icbfs_v1_lock_proto_rawDescData []byte
+	file_spec_proto_icbfs_v1_lock_proto_rawDescOnce sync.Once
+	file_spec_proto_icbfs_v1_lock_proto_rawDescData []byte
 )
 
-func file_proto_icbfs_v1_lock_proto_rawDescGZIP() []byte {
-	file_proto_icbfs_v1_lock_proto_rawDescOnce.Do(func() {
-		file_proto_icbfs_v1_lock_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_icbfs_v1_lock_proto_rawDesc), len(file_proto_icbfs_v1_lock_proto_rawDesc)))
+func file_spec_proto_icbfs_v1_lock_proto_rawDescGZIP() []byte {
+	file_spec_proto_icbfs_v1_lock_proto_rawDescOnce.Do(func() {
+		file_spec_proto_icbfs_v1_lock_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_spec_proto_icbfs_v1_lock_proto_rawDesc), len(file_spec_proto_icbfs_v1_lock_proto_rawDesc)))
 	})
-	return file_proto_icbfs_v1_lock_proto_rawDescData
+	return file_spec_proto_icbfs_v1_lock_proto_rawDescData
 }
 
-var file_proto_icbfs_v1_lock_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
-var file_proto_icbfs_v1_lock_proto_goTypes = []any{
+var file_spec_proto_icbfs_v1_lock_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_spec_proto_icbfs_v1_lock_proto_goTypes = []any{
 	(*LockRange)(nil), // 0: icbfs.v1.LockRange
 	(*Lock)(nil),      // 1: icbfs.v1.Lock
 }
-var file_proto_icbfs_v1_lock_proto_depIdxs = []int32{
+var file_spec_proto_icbfs_v1_lock_proto_depIdxs = []int32{
 	0, // 0: icbfs.v1.Lock.ranges:type_name -> icbfs.v1.LockRange
 	1, // [1:1] is the sub-list for method output_type
 	1, // [1:1] is the sub-list for method input_type
@@ -197,26 +197,26 @@ var file_proto_icbfs_v1_lock_proto_depIdxs = []int32{
 	0, // [0:1] is the sub-list for field type_name
 }
 
-func init() { file_proto_icbfs_v1_lock_proto_init() }
-func file_proto_icbfs_v1_lock_proto_init() {
-	if File_proto_icbfs_v1_lock_proto != nil {
+func init() { file_spec_proto_icbfs_v1_lock_proto_init() }
+func file_spec_proto_icbfs_v1_lock_proto_init() {
+	if File_spec_proto_icbfs_v1_lock_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_icbfs_v1_lock_proto_rawDesc), len(file_proto_icbfs_v1_lock_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_spec_proto_icbfs_v1_lock_proto_rawDesc), len(file_spec_proto_icbfs_v1_lock_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   2,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
-		GoTypes:           file_proto_icbfs_v1_lock_proto_goTypes,
-		DependencyIndexes: file_proto_icbfs_v1_lock_proto_depIdxs,
-		MessageInfos:      file_proto_icbfs_v1_lock_proto_msgTypes,
+		GoTypes:           file_spec_proto_icbfs_v1_lock_proto_goTypes,
+		DependencyIndexes: file_spec_proto_icbfs_v1_lock_proto_depIdxs,
+		MessageInfos:      file_spec_proto_icbfs_v1_lock_proto_msgTypes,
 	}.Build()
-	File_proto_icbfs_v1_lock_proto = out.File
-	file_proto_icbfs_v1_lock_proto_goTypes = nil
-	file_proto_icbfs_v1_lock_proto_depIdxs = nil
+	File_spec_proto_icbfs_v1_lock_proto = out.File
+	file_spec_proto_icbfs_v1_lock_proto_goTypes = nil
+	file_spec_proto_icbfs_v1_lock_proto_depIdxs = nil
 }

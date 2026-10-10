@@ -97,7 +97,7 @@ func parseMetaTime(m map[string]string, key string) time.Time {
 }
 
 // --- File/symlink attributes: the dedicated <uuid>.metadata object,
-// Protobuf-encoded (proto/icbfs/v1/metadata.proto). ---
+// Protobuf-encoded (spec/proto/icbfs/v1/metadata.proto). ---
 
 // metadataObjectKey is the dedicated side object holding a file or
 // symlink's mode/uid/gid/nlink/xattrs.

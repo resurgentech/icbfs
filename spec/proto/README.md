@@ -1,10 +1,10 @@
 # Protobuf sources
 
 `.proto` files here define the wire format for this project's own
-object bodies (directory/root blocks, `.metadata`, and — once built —
-`.lock` and the master block). Generated Go code lives in
-`internal/pb/` and is **checked into git**: `go build`/`go test` never
-need `protoc` installed, only regenerating after a schema change does.
+object bodies (directory/root blocks, `.metadata`, `.lock`, and the
+master block). Generated Go code lives in `internal/pb/` and is
+**checked into git**: `go build`/`go test` never need `protoc`
+installed, only regenerating after a schema change does.
 
 ## Regenerating after editing a `.proto` file
 
@@ -13,7 +13,7 @@ go install google.golang.org/protobuf/cmd/protoc-gen-go@latest   # once
 export PATH="$PATH:$(go env GOPATH)/bin"                          # once per shell
 
 protoc --go_out=. --go_opt=module=github.com/resurgentech/icbfs \
-  proto/icbfs/v1/<the-file-you-changed>.proto
+  spec/proto/icbfs/v1/<the-file-you-changed>.proto
 ```
 
 Requires `protoc` itself (the compiler binary, not the Go plugin) to
