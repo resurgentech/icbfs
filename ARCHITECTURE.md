@@ -1,8 +1,9 @@
 # icbfs architecture
 
-This is the settled design, synthesized from the discussion in
-`questions.md`. That file has the rationale, pros/cons, and rejected
-alternatives for each decision; this document states what was decided.
+This is the settled design. It states what was decided, and the
+reasoning behind each decision where that reasoning matters for
+understanding the design — not every rejected alternative that was ever
+considered along the way.
 
 ## Goals and scope
 
@@ -18,9 +19,7 @@ object is an object. The two things it's built around:
 
 **Backend scope is deliberately narrow:** AWS S3, Azure Blob Storage, and
 MinIO (S3 API) are the three canonical first-class object stores. No
-generic multi-cloud abstraction is being built. (Earlier revisions of
-this document said "MinIO and Azure" only — that was a misreading of the
-original scoping note, not a deliberate narrowing; corrected here.)
+generic multi-cloud abstraction is being built.
 
 ## Core object model
 
@@ -99,11 +98,11 @@ captures a filesystem's *entire* footprint, root included, with nothing
 left uncounted.
 
 **Why uniform prefixing, concretely — `df`/`du` without a fast primitive
-in either backend's API:** neither S3/MinIO nor Azure Blob has a
-real-time, O(1) "total size of this bucket/container" call (both expose
-only slow, stale, batch-computed account-or-bucket-level metrics —
-CloudWatch-style and Azure-Monitor-style respectively — unsuitable for a
-live `df`). `du` was already free: it's a tree walk scoped to one
+in any of the three backends' APIs:** none of AWS S3, MinIO, or Azure
+Blob has a real-time, O(1) "total size of this bucket/container" call
+(each exposes only slow, stale, batch-computed account-or-bucket-level
+metrics — CloudWatch for AWS, Azure Monitor for Azure, MinIO's own admin
+API for MinIO — unsuitable for a live `df`). `du` was already free: it's a tree walk scoped to one
 filesystem's own root by construction. `df`'s "Used" needed the same
 scoping for a bucket shared by multiple filesystems, and that's exactly
 what the ID prefix buys: `ListObjectsV2`/`List Blobs` with the filesystem's
@@ -167,10 +166,12 @@ data belong in the same object isn't "could two unrelated operations
 coincidentally collide" — it's whether they're read together by the same
 caller and change at a similar rate. mode/uid/gid/nlink pass both tests
 (`stat()` wants all of them together, and all of them change rarely), so
-they're consolidated. Locking (see below) and extended attributes/ACLs
-fail at least one of those tests — different caller, and potentially
-much higher change frequency for locks — so they get their own objects
-instead, for the same reason `.nlink` was originally split out.
+they're consolidated. Locking (see below) fails both tests — a
+different caller than `stat()`, and potentially much higher change
+frequency under real use — so it gets its own object instead, for the
+same reason `.nlink` was originally split out. Extended attributes and
+ACLs are a different case: see below for why they end up inside
+`.metadata` after all, despite failing the same-caller test.
 
 **What's derived from the content object, never duplicated into
 `.metadata`:**
@@ -253,13 +254,16 @@ justify a separate object.
 ## Concurrency: compare-and-swap on writes
 
 All directory block and root block writes use **conditional PUT via ETag**
-(`If-Match` on S3/MinIO and Azure Blob, both natively). A client reads a
-block, modifies it, and writes back conditioned on the ETag it read; a
-mismatch (someone else wrote first) is rejected and the client re-reads and
-retries. No external lock service, no new infrastructure — both target
-backends support this as a first-class primitive. This is proven correct
-against real MinIO (not just assumed): a conditional write with a stale
-ETag is rejected with 412, and the rejected write never applies.
+(`If-Match`, natively supported by all three target backends). A client
+reads a block, modifies it, and writes back conditioned on the ETag it
+read; a mismatch (someone else wrote first) is rejected and the client
+re-reads and retries. No external lock service, no new infrastructure.
+This is proven correct against real MinIO specifically (not just
+assumed): a conditional write with a stale ETag is rejected with 412,
+and the rejected write never applies. AWS S3 and Azure are not
+independently verified against this project's own test suite — same
+testing-reality gap noted in Change notifications, below — though both
+are documented to support `If-Match` natively.
 
 **Important limitation, discovered through that same testing, not
 foreseen at design time: ETag is a hash of the object's *body*.** A
@@ -333,7 +337,10 @@ then descend into that version's children and repeat.
 
 This works because:
 - Every mutation — content or metadata-only — creates a new version with a
-  server-assigned timestamp, on both backends.
+  **server-assigned** timestamp, on all three target backends — never
+  client-supplied, so there's no client clock-skew risk corrupting the
+  ordering a walk depends on. (Azure makes this literal: a version ID
+  *is* a timestamp string, not just accompanied by one.)
 - Deletes are generally non-destructive under versioning (S3 delete
   markers, Azure's version retention on delete), so a T before a later
   delete still resolves correctly.
@@ -342,8 +349,9 @@ Cost model, explicitly accepted:
 - A single-path lookup (what did `/a/b/c.txt` look like at T) costs
   O(depth) — one version-list-and-scan per level. Cheap.
 - Reconstructing the **entire** tree at T costs O(tree size) — there's no
-  native "give me the version as of T" filter on either backend, so this
-  is proportional to a full walk, not a cheap pointer dereference.
+  native "give me the version as of T" filter on any of the three
+  backends, so this is proportional to a full walk, not a cheap pointer
+  dereference.
 - Fallback if this proves too slow in practice: bolt on an external
   optimization (e.g. a cache of resolved as-of-T lookups, or
   periodically-materialized snapshot indexes) rather than changing the
@@ -393,7 +401,8 @@ half.
   abandoned attempt (harmless: nothing ever comes to reference it).
 - What this actually solves is **write amplification**, not storage
   capacity — a directory block is cheap to store even at a million rows
-  (~50-100 bytes/row, well within either backend's object size limits); the
+  (~50-100 bytes/row, well within any of the three backends' object size
+  limits); the
   real cost is rewriting a whole large block for one small change. Split
   thresholds should be tuned around mutation cost, not object size — the
   current threshold is deliberately small (8 entries) to make splitting
@@ -505,7 +514,7 @@ service is the escalation path — deliberately not built up front.
   narrow window remains between that re-check and the write actually
   landing, during which a brand-new conflicting lock could in principle
   be acquired, since there is no way to atomically check one object and
-  write another across S3/Azure. Accepted as a bounded, sub-round-trip
+  write another across any of these backends. Accepted as a bounded, sub-round-trip
   gap given the feature's explicit correctness-over-performance,
   best-effort framing throughout — not a real guarantee at the level a
   local filesystem's kernel-enforced locking gives you. True OS-level

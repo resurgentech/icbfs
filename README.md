@@ -13,8 +13,8 @@ format. An object is an object.
   rather than building a separate versioning layer on top.
 - **A full POSIX-like metadata set** — permissions, ownership, timestamps,
   hard links, symlinks — plus a parallel path to solid Windows support.
-- **Only two backends, on purpose**: MinIO (S3 API) and Azure Blob Storage.
-  No generic multi-cloud abstraction.
+- **Three backends, on purpose**: AWS S3, Azure Blob Storage, and MinIO
+  (S3 API). No generic multi-cloud abstraction.
 
 Files are never named by their filename in the underlying store. Every
 file and directory is a plain object addressed by UUID; directories are
@@ -25,20 +25,27 @@ why that one choice is what makes the rest of the design work.
 
 ## Status
 
-Design phase is complete. See:
+Design is settled; implementation is in progress, and the two aren't
+fully in step yet. See:
 
 - **`ARCHITECTURE.md`** — the settled design: object model, metadata
-  placement, concurrency, snapshotting, directory sharding, FUSE/WinFsp
-  access layers, and Windows compatibility.
-- **`questions.md`** — historical design log. Full rationale, options
-  considered, and tradeoffs behind each decision in `ARCHITECTURE.md`.
-
-Implementation is starting now.
+  placement, concurrency, snapshotting, directory sharding, locking,
+  change notifications, multi-filesystem support, FUSE/WinFsp access
+  layers, and Windows compatibility.
+- **`ROADMAP.md`** — concrete, sequenced development tasks closing the
+  gap between what's shipped and what `ARCHITECTURE.md` describes. A
+  working FUSE driver, object-store layer, and directory-sharding logic
+  already exist and are tested — but they predate several decisions the
+  design has since evolved to (Protobuf instead of JSON, the `.metadata`
+  consolidation, the master block for multi-filesystem support), so the
+  code and the architecture doc are not currently describing the exact
+  same thing. `ROADMAP.md` is what closes that gap.
 
 ## Supported object stores
 
+- AWS S3
 - MinIO (S3 API)
 - Azure Blob Storage
 
-Both require object versioning enabled on the bucket/container — that's
-the mechanism snapshotting is built on.
+All three require object versioning enabled on the bucket/container —
+that's the mechanism snapshotting is built on.
