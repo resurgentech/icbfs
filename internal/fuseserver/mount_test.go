@@ -21,8 +21,8 @@ import (
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/notify"
-	"github.com/resurgentech/icbfs/internal/testutil"
 	"github.com/resurgentech/icbfs/internal/objstore"
+	"github.com/resurgentech/icbfs/internal/testutil"
 )
 
 // newMountTestStore spins up a real MinIO container and a versioned
@@ -643,7 +643,6 @@ func TestMountFlockWholeFileExclusive(t *testing.T) {
 	}
 }
 
-
 // TestMain intercepts the test binary's own invocation when re-exec'd
 // as a cross-process fcntl lock holder (see runFcntlLockHolderHelper)
 // — a real, separate OS process is required to exercise fcntl(2)'s
@@ -668,22 +667,28 @@ func TestMain(m *testing.M) {
 // an already-mounted icbfs FUSE mount, inherited from the parent
 // process — no testcontainers/mount setup of its own needed, since it
 // operates on the mount the same way any other real process accessing
-// an already-mounted filesystem would), takes an F_SETLK on [0,10),
-// signals readiness by creating ICBFS_FCNTL_HELPER_READY, then waits
-// for ICBFS_FCNTL_HELPER_RELEASE to appear before exiting (releasing
-// the lock as a side effect of process exit, same as a real
-// application would).
+// an already-mounted filesystem would), takes an F_SETLK on [0,10) of
+// the type named by ICBFS_FCNTL_HELPER_TYPE ("F_RDLCK" or "F_WRLCK",
+// default F_WRLCK), signals readiness by creating
+// ICBFS_FCNTL_HELPER_READY, then waits for ICBFS_FCNTL_HELPER_RELEASE
+// to appear before exiting (releasing the lock as a side effect of
+// process exit, same as a real application would).
 func runFcntlLockHolderHelper() {
 	path := os.Getenv("ICBFS_FCNTL_HELPER_PATH")
 	readyPath := os.Getenv("ICBFS_FCNTL_HELPER_READY")
 	releasePath := os.Getenv("ICBFS_FCNTL_HELPER_RELEASE")
+
+	lockType := int16(syscall.F_WRLCK)
+	if os.Getenv("ICBFS_FCNTL_HELPER_TYPE") == "F_RDLCK" {
+		lockType = syscall.F_RDLCK
+	}
 
 	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "helper: open:", err)
 		os.Exit(1)
 	}
-	lk := syscall.Flock_t{Type: syscall.F_WRLCK, Whence: 0, Start: 0, Len: 10}
+	lk := syscall.Flock_t{Type: lockType, Whence: 0, Start: 0, Len: 10}
 	if err := syscall.FcntlFlock(f.Fd(), syscall.F_SETLK, &lk); err != nil {
 		fmt.Fprintln(os.Stderr, "helper: F_SETLK [0,10):", err)
 		os.Exit(1)
@@ -951,5 +956,135 @@ func TestMountNotifyDispatchesSignalToCorrectInode(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for the signal to be dispatched")
+	}
+}
+
+// TestMountFcntlSharedLocksCoexistAcrossProcesses covers real POSIX
+// shared/exclusive fcntl semantics through actual kernel syscalls
+// against a real mount, using a genuine second OS process (fcntl
+// locks are owned per-(process, inode), not per-fd — see
+// TestMain/runFcntlLockHolderHelper's doc comments): a shared
+// (F_RDLCK) lock held by a helper process does not block this
+// process's own F_RDLCK on the same range (shared locks from
+// different holders coexist), but does block this process's F_WRLCK
+// on that range (an exclusive request conflicts with any other
+// holder's claim, shared or exclusive) — and that F_WRLCK succeeds
+// once the helper's shared lock is released.
+func TestMountFcntlSharedLocksCoexistAcrossProcesses(t *testing.T) {
+	mnt := mountTestFSWithLocking(t)
+	path := filepath.Join(mnt, "fcntl-shared-cross-process.bin")
+	if err := os.WriteFile(path, make([]byte, 100), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	signalDir := t.TempDir()
+	readyPath := filepath.Join(signalDir, "ready")
+	releasePath := filepath.Join(signalDir, "release")
+
+	cmd := exec.Command(os.Args[0], "-test.run=NoSuchTest")
+	cmd.Env = append(os.Environ(),
+		"ICBFS_FCNTL_HELPER=1",
+		"ICBFS_FCNTL_HELPER_PATH="+path,
+		"ICBFS_FCNTL_HELPER_READY="+readyPath,
+		"ICBFS_FCNTL_HELPER_RELEASE="+releasePath,
+		"ICBFS_FCNTL_HELPER_TYPE=F_RDLCK",
+	)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper process: %v", err)
+	}
+	released := false
+	release := func() {
+		if released {
+			return
+		}
+		released = true
+		_ = os.WriteFile(releasePath, []byte("release"), 0644)
+		_ = cmd.Wait()
+	}
+	defer release()
+
+	waitForFileOrFail(t, readyPath, 5*time.Second)
+
+	f2, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open f2: %v", err)
+	}
+	defer f2.Close()
+
+	readLock := syscall.Flock_t{Type: syscall.F_RDLCK, Whence: 0, Start: 0, Len: 10}
+	if err := syscall.FcntlFlock(f2.Fd(), syscall.F_SETLK, &readLock); err != nil {
+		t.Fatalf("F_SETLK F_RDLCK [0,10) while helper process holds F_RDLCK = %v, want nil (shared locks from different holders coexist)", err)
+	}
+
+	writeLock := syscall.Flock_t{Type: syscall.F_WRLCK, Whence: 0, Start: 0, Len: 10}
+	if err := syscall.FcntlFlock(f2.Fd(), syscall.F_SETLK, &writeLock); !errors.Is(err, syscall.EAGAIN) {
+		t.Fatalf("F_SETLK F_WRLCK [0,10) while helper process holds F_RDLCK = %v, want EAGAIN", err)
+	}
+
+	release()
+
+	if err := syscall.FcntlFlock(f2.Fd(), syscall.F_SETLK, &writeLock); err != nil {
+		t.Fatalf("F_SETLK F_WRLCK [0,10) after helper process released its F_RDLCK = %v, want nil", err)
+	}
+}
+
+// TestMountFcntlGetlkReportsSharedType covers F_GETLK's own
+// shared/exclusive awareness through a real mount: querying with
+// F_RDLCK against another process's F_RDLCK reports no conflict
+// (L_UNLCK), but querying with F_WRLCK against that same F_RDLCK
+// reports a real conflict and correctly identifies it as F_RDLCK, not
+// a generic "write lock" the way an earlier, type-insensitive version
+// of this lock model would have.
+func TestMountFcntlGetlkReportsSharedType(t *testing.T) {
+	mnt := mountTestFSWithLocking(t)
+	path := filepath.Join(mnt, "fcntl-getlk-shared.bin")
+	if err := os.WriteFile(path, make([]byte, 100), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	signalDir := t.TempDir()
+	readyPath := filepath.Join(signalDir, "ready")
+	releasePath := filepath.Join(signalDir, "release")
+
+	cmd := exec.Command(os.Args[0], "-test.run=NoSuchTest")
+	cmd.Env = append(os.Environ(),
+		"ICBFS_FCNTL_HELPER=1",
+		"ICBFS_FCNTL_HELPER_PATH="+path,
+		"ICBFS_FCNTL_HELPER_READY="+readyPath,
+		"ICBFS_FCNTL_HELPER_RELEASE="+releasePath,
+		"ICBFS_FCNTL_HELPER_TYPE=F_RDLCK",
+	)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper process: %v", err)
+	}
+	defer func() {
+		_ = os.WriteFile(releasePath, []byte("release"), 0644)
+		_ = cmd.Wait()
+	}()
+
+	waitForFileOrFail(t, readyPath, 5*time.Second)
+
+	f2, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open f2: %v", err)
+	}
+	defer f2.Close()
+
+	sharedQuery := syscall.Flock_t{Type: syscall.F_RDLCK, Whence: 0, Start: 0, Len: 10}
+	if err := syscall.FcntlFlock(f2.Fd(), syscall.F_GETLK, &sharedQuery); err != nil {
+		t.Fatalf("F_GETLK (shared query): %v", err)
+	}
+	if sharedQuery.Type != syscall.F_UNLCK {
+		t.Fatalf("F_GETLK shared query against another process's F_RDLCK reported Type=%d, want F_UNLCK (no conflict)", sharedQuery.Type)
+	}
+
+	exclusiveQuery := syscall.Flock_t{Type: syscall.F_WRLCK, Whence: 0, Start: 0, Len: 10}
+	if err := syscall.FcntlFlock(f2.Fd(), syscall.F_GETLK, &exclusiveQuery); err != nil {
+		t.Fatalf("F_GETLK (exclusive query): %v", err)
+	}
+	if exclusiveQuery.Type != syscall.F_RDLCK {
+		t.Fatalf("F_GETLK exclusive query against another process's F_RDLCK reported Type=%d, want F_RDLCK", exclusiveQuery.Type)
 	}
 }

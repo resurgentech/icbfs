@@ -42,8 +42,16 @@ type LockRange struct {
 	// treating it as an external lock would spuriously refuse writes
 	// that would otherwise just succeed shortly after.
 	EscalationOnly bool `protobuf:"varint,5,opt,name=escalation_only,json=escalationOnly,proto3" json:"escalation_only,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// shared marks this claim as a POSIX shared/read lock (F_RDLCK) —
+	// multiple different holders may hold overlapping shared claims on
+	// the same range simultaneously. The default (false) is an
+	// exclusive/write lock (F_WRLCK), which conflicts with any other
+	// holder's claim on an overlapping range regardless of that claim's
+	// own type. Two claims only ever coexist on an overlapping range
+	// when both are shared.
+	Shared        bool `protobuf:"varint,6,opt,name=shared,proto3" json:"shared,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *LockRange) Reset() {
@@ -111,6 +119,13 @@ func (x *LockRange) GetEscalationOnly() bool {
 	return false
 }
 
+func (x *LockRange) GetShared() bool {
+	if x != nil {
+		return x.Shared
+	}
+	return false
+}
+
 // Lock is the whole <uuid>.lock object body: every currently-claimed
 // range across every holder.
 type Lock struct {
@@ -161,13 +176,14 @@ var File_spec_proto_icbfs_v1_lock_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_lock_proto_rawDesc = "" +
 	"\n" +
-	"\x1espec/proto/icbfs/v1/lock.proto\x12\bicbfs.v1\"\xa1\x01\n" +
+	"\x1espec/proto/icbfs/v1/lock.proto\x12\bicbfs.v1\"\xb9\x01\n" +
 	"\tLockRange\x12\x14\n" +
 	"\x05start\x18\x01 \x01(\x03R\x05start\x12\x10\n" +
 	"\x03end\x18\x02 \x01(\x03R\x03end\x12\x16\n" +
 	"\x06holder\x18\x03 \x01(\tR\x06holder\x12+\n" +
 	"\x12expires_at_unix_ms\x18\x04 \x01(\x03R\x0fexpiresAtUnixMs\x12'\n" +
-	"\x0fescalation_only\x18\x05 \x01(\bR\x0eescalationOnly\"3\n" +
+	"\x0fescalation_only\x18\x05 \x01(\bR\x0eescalationOnly\x12\x16\n" +
+	"\x06shared\x18\x06 \x01(\bR\x06shared\"3\n" +
 	"\x04Lock\x12+\n" +
 	"\x06ranges\x18\x01 \x03(\v2\x13.icbfs.v1.LockRangeR\x06rangesB+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
 

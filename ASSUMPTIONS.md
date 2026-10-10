@@ -419,27 +419,28 @@ rather than shared.
 
 ---
 
-## B8: no shared/exclusive lock types, a fixed 24h lease with no renewal, and the cross-process test discovery
+## B8: a fixed 24h lease with no renewal, and the cross-process test discovery
+
+**Correction, at Jared's direction — see the standalone "shared/
+exclusive lock semantics" entry below for the fix:** this entry
+originally also recorded a decision to map `F_RDLCK` and `F_WRLCK`
+onto the same exclusive-only primitive, reasoning that "building real
+reader-writer semantics into the lock data model was never asked
+for." That reasoning was wrong: the actual ask throughout this whole
+effort is a POSIX-compatible filesystem, which already implies real
+`fcntl`/`flock` shared-vs-exclusive semantics — it isn't a separate
+feature someone has to request. Fixed for real; the remaining
+decisions below (lease TTL, `owner` mapping) still stand unchanged.
 
 **Question I'd have asked:** go-fuse's `Getlk`/`Setlk`/`Setlkw` pass a
 real POSIX `Typ` (`F_RDLCK`/`F_WRLCK`/`F_UNLCK`) and a lock `owner`
 token, plus the real kernel enforces real POSIX lock-ownership rules
 (fcntl locks are per-(process, inode); flock locks are per-open-file-
-description) — but ARCHITECTURE.md/ROADMAP.md's Locking design never
-mentions a shared-vs-exclusive distinction, and a lease-based model has
-no "held until explicitly released" concept real POSIX locks have. How
-should the FUSE wiring reconcile these?
+description) — but a lease-based model has no "held until explicitly
+released" concept real POSIX locks have. How should the FUSE wiring
+reconcile these?
 
 **Assumed:**
-- `F_RDLCK` and `F_WRLCK` are both mapped onto the exact same
-  `TryAcquireLockRange`/`AcquireLockRange` call — every claim in this
-  codebase's model is exclusive, full stop. Rationale: neither design
-  document mentions shared/read locks anywhere; building real
-  reader-writer semantics into the lock data model was never asked
-  for and wasn't attempted. **Real consequence:** two cooperating
-  readers that both only wanted a `F_RDLCK` (shared) lock on the same
-  range will find the second one refused/blocked by the first, unlike
-  real POSIX fcntl semantics.
 - FUSE-sourced locks get a fixed `lockLeaseTTL = 24h`, with **no
   background renewal** for as long an application holds the lock.
   Rationale: this project's lease model has no "forever" concept at
@@ -762,5 +763,64 @@ feature — never a correctness problem, just a slower wake-up.
 and B10's accelerator) gets added — it should get its own
 `Subscribe()` too, never share a channel with an existing consumer,
 or this exact bug reappears for that new pair.
+
+---
+
+## Real POSIX shared/exclusive lock semantics (correcting the B8 misstep above)
+
+Added for real, at Jared's direction, after the earlier B8 entry
+wrongly treated this as out of scope. `LockRange` (lock.proto) gained
+a `shared bool` field (default false = exclusive, so every existing
+B2-B6 caller's behavior is unchanged unless it explicitly asks for
+shared). The conflict rule everywhere a *new claim* is being acquired
+(`tryAcquireLockRange`, and `FindConflictingLockRange`'s simulation of
+"would this request conflict," for `F_GETLK`) is real `fcntl`
+semantics: two shared claims from different holders never conflict;
+anything else (shared vs. exclusive, exclusive vs. exclusive) does.
+New public API: `TryAcquireSharedLockRange`/`AcquireSharedLockRange`/
+`TryAcquireSharedLock`/`AcquireSharedLock` alongside the existing
+exclusive-only names, rather than adding a parameter to those and
+touching every existing call site — lower blast radius, and reads
+clearly at each call site which kind is being requested.
+`RenewLockRange` preserves `Shared` across renewal, the same way it
+already preserved `EscalationOnly`.
+
+**One deliberate exception, not an oversight:** `CheckRangeLockConflict`
+(task B6's stronger-than-advisory write check) stays
+type-*insensitive* — a content write conflicts with *any* other
+holder's claim, shared or exclusive. A shared-lock holder expects a
+stable view of the data for as long as they hold it; letting an
+uncoordinated write land underneath them because "shared locks don't
+conflict with each other" would violate exactly that expectation,
+even though two concurrent *readers* are genuinely compatible with
+each other. Only the acquire-time conflict check (and `F_GETLK`'s
+simulation of it) gets the shared-vs-shared exception.
+
+FUSE wiring (`node.go`'s `setlk`/`Getlk`): `F_RDLCK` now routes to the
+shared primitives, `F_WRLCK` to the exclusive ones; `Getlk` reports
+back the real type of whatever it finds conflicting (`F_RDLCK` if the
+holder's claim was shared, `F_WRLCK` otherwise) instead of always
+claiming `F_WRLCK`. Verified through real kernel `fcntl`/`flock`
+syscalls against a real mount, using the same cross-process helper
+B8 built (shared locks are still owned per-(process, inode), so a
+second real OS process is still required to prove two different
+holders coexist, not just two fds in one process).
+
+---
+
+## Docker container readiness (the other direction B8/E4/etc.'s flakiness note should have gone)
+
+An earlier session logged `internal/fuseserver`'s intermittent
+container-related test failures as an accepted, documented flake
+rather than fixing it — the wrong call, raised directly. Root cause:
+`testcontainers-go`'s MinIO module waits on MinIO's own
+`/minio/health/live` endpoint, a *liveness* probe ("the process
+started"), not a readiness one — a real S3 API call immediately after
+that succeeds can still intermittently fail for a brief window.
+Fixed with `internal/testutil.RetryUntilReady`, wrapping the first
+real API call (bucket creation) in all four MinIO-container test
+helpers (`internal/objstore`, `internal/icbfs`, `internal/fuseserver`,
+`internal/notify/miniosrc`) in a short retry instead of trusting the
+container's own "ready" signal.
 
 ---

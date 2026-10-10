@@ -417,7 +417,13 @@ func (h *FileHandle) Getlk(ctx context.Context, owner uint64, lk *fuse.FileLock,
 		return 0
 	}
 	start, end := lockRangeFromFileLock(lk, flags)
-	info, conflict, err := h.open.FindConflictingLockRange(ctx, start, end, lockHolderFromOwner(owner))
+	// The query's own requested type matters here, real fcntl(F_GETLK)
+	// semantics: querying as F_RDLCK should not report another
+	// holder's shared claim as a conflict, only an exclusive one —
+	// FindConflictingLockRange's querySharedType applies the same
+	// locksConflict rule TryAcquireLockRange/TryAcquireSharedLockRange
+	// use when actually acquiring.
+	info, conflict, err := h.open.FindConflictingLockRange(ctx, start, end, lockHolderFromOwner(owner), lk.Typ == syscall.F_RDLCK)
 	if err != nil {
 		return errnoFromErr(err)
 	}
@@ -431,11 +437,14 @@ func (h *FileHandle) Getlk(ctx context.Context, owner uint64, lk *fuse.FileLock,
 	} else {
 		out.End = uint64(info.End - 1)
 	}
-	// This codebase's lock model has no shared/exclusive distinction
-	// (see setlk's doc comment) — every held claim is reported back as
-	// a write lock, regardless of what type the original holder asked
-	// for.
-	out.Typ = syscall.F_WRLCK
+	// Reports the conflicting claim's *actual* type, not just
+	// F_WRLCK — this codebase's lock model does distinguish
+	// shared/exclusive now (see setlk's doc comment).
+	if info.Shared {
+		out.Typ = syscall.F_RDLCK
+	} else {
+		out.Typ = syscall.F_WRLCK
+	}
 	return 0
 }
 
@@ -451,26 +460,28 @@ func (h *FileHandle) Setlkw(ctx context.Context, owner uint64, lk *fuse.FileLock
 	return h.setlk(ctx, owner, lk, flags, true)
 }
 
-// setlk is Setlk/Setlkw's shared implementation.
-//
-// F_RDLCK and F_WRLCK are both mapped onto the same underlying
-// TryAcquireLockRange/AcquireLockRange call — this codebase's Locking
-// model (ARCHITECTURE.md, ROADMAP.md tasks B2-B6) has no shared
-// (read) vs. exclusive (write) distinction at all, only "claimed by
-// exactly one holder at a time, overlap or not"; neither document
-// mentions one anywhere, and adding real reader/writer semantics would
-// mean redesigning the core lock data model for something never
-// actually asked for. Documented deliberate simplification, logged to
-// ASSUMPTIONS.md: two cooperating readers that both only wanted a
-// shared lock will find the second one refused/blocked by the first,
-// unlike real POSIX fcntl semantics.
+// setlk is Setlk/Setlkw's shared implementation. F_RDLCK routes to the
+// shared (read) lock primitives, F_WRLCK to the exclusive (write)
+// ones — real POSIX fcntl/flock semantics: multiple different
+// holders can hold overlapping F_RDLCK claims at once, but any
+// F_WRLCK claim conflicts with every other holder's claim regardless
+// of its type.
 func (h *FileHandle) setlk(ctx context.Context, owner uint64, lk *fuse.FileLock, flags uint32, blocking bool) syscall.Errno {
 	start, end := lockRangeFromFileLock(lk, flags)
 	holder := lockHolderFromOwner(owner)
 	switch lk.Typ {
 	case syscall.F_UNLCK:
 		return errnoFromErr(h.open.ReleaseLockRange(ctx, start, end, holder))
-	case syscall.F_RDLCK, syscall.F_WRLCK:
+	case syscall.F_RDLCK:
+		if blocking {
+			return errnoFromErr(h.open.AcquireSharedLockRange(ctx, start, end, holder, lockLeaseTTL))
+		}
+		err := h.open.TryAcquireSharedLockRange(ctx, start, end, holder, lockLeaseTTL)
+		if errors.Is(err, icbfs.ErrLocked) {
+			return syscall.EAGAIN
+		}
+		return errnoFromErr(err)
+	case syscall.F_WRLCK:
 		if blocking {
 			return errnoFromErr(h.open.AcquireLockRange(ctx, start, end, holder, lockLeaseTTL))
 		}
