@@ -31,10 +31,10 @@ abstraction is being built.
   of rows: `name → UUID (+ type: file / directory / symlink)`. Nothing more
   — metadata does not live here (see below).
 - **Root blocks are versioned objects**, same as directories and files.
-  Since a root has no parent to be referenced from, roots are discovered by
-  **naming convention** (e.g. `root/<fsname>`) rather than a random UUID.
-  This also means **one object store can host multiple independent
-  filesystems**, each anchored by its own named root.
+  One object store can host multiple independent filesystems; how they're
+  created, identified, and discovered is covered in its own section below
+  (Multiple filesystems per bucket: the master block) — it's more
+  involved than a simple naming convention.
 - **Hard links** are simply multiple directory rows pointing at the same
   UUID — this falls out of the model for free, with no special-casing,
   because identity (UUID) is already decoupled from name. The link count
@@ -43,6 +43,91 @@ abstraction is being built.
   where it actually lives and why.
 - **Symlinks** store their target as the object's *content* (same shape as
   a tiny regular file); the row's type flag marks it as a symlink.
+
+## Multiple filesystems per bucket: the master block
+
+One object store can host several independent filesystems. Discovering,
+creating, and deleting them goes through a single **master block**: one
+fixed, well-known object per bucket (bootstrapped on first use, same
+create-if-missing pattern already used for a filesystem's own root).
+
+**The master block's body is just a growable list of entries** — no
+separate ID field, no separate counter:
+
+```protobuf
+message FilesystemEntry {
+  string name = 1;     // empty = this slot is free, available for reuse
+  uint64 size = 2;      // declared max size in bytes (the df "Total")
+  bool archived = 3;    // see Lifecycle, below
+}
+message MasterBlock {
+  repeated FilesystemEntry filesystems = 1;
+}
+```
+
+**A filesystem's ID is its position in this list, not a stored value.**
+Creating a filesystem means: CAS-read the master block, scan the list
+*already in memory* (no extra round trip — this is a pure in-memory loop
+over data already fetched for the write) for the lowest-indexed free
+(`name == ""`) slot, reuse it if one exists, otherwise append; write the
+whole list back conditioned on the ETag just read, retrying on a lost
+race the same way every other CAS operation in this codebase does. The
+chosen index, zero-padded to 4 hex digits (16 bits — 65,536 *concurrently
+existing* filesystems per bucket, not a lifetime cap, since freed slots
+are reused), is that filesystem's ID.
+
+**One correctness-critical constraint this depends on: the list can only
+ever grow in length, never shrink or reorder.** Deleting a filesystem
+blanks its entry in place (`name = ""`) rather than removing it — if an
+entry's position ever moved, its ID would change out from under it, but
+every object it already created is permanently keyed with its *original*
+ID and would silently stop matching. Tombstone in place; a later
+filesystem can safely reuse a freed position, since reusing a slot
+overwrites its content without moving anyone else's position.
+
+**Every object a filesystem owns — root included — is prefixed with its
+ID.** Not just the UUID-keyed objects (files, directories, `.metadata`,
+`.lock`): the root itself, which previously lived at a bare `root/<name>`
+naming-convention key, is now keyed as `<id>-root-<name>` — a derived
+key, not separately stored anywhere, since it's always reconstructable
+from the master block entry's position (the ID) and its `name` field.
+Making root follow the same prefix convention as everything else (rather
+than being a structural exception) means a single prefix-scoped listing
+captures a filesystem's *entire* footprint, root included, with nothing
+left uncounted.
+
+**Why uniform prefixing, concretely — `df`/`du` without a fast primitive
+in either backend's API:** neither S3/MinIO nor Azure Blob has a
+real-time, O(1) "total size of this bucket/container" call (both expose
+only slow, stale, batch-computed account-or-bucket-level metrics —
+CloudWatch-style and Azure-Monitor-style respectively — unsuitable for a
+live `df`). `du` was already free: it's a tree walk scoped to one
+filesystem's own root by construction. `df`'s "Used" needed the same
+scoping for a bucket shared by multiple filesystems, and that's exactly
+what the ID prefix buys: `ListObjectsV2`/`List Blobs` with the filesystem's
+ID as the prefix returns every object it owns (lightweight listing
+metadata, no bodies fetched), summed for "Used." "Total" is just the
+master block entry's `size` field. This is O(pages in that filesystem's
+own object count) — not O(1), but correctly scoped and not proportional
+to anything *else* sharing the bucket — "slow but not unreasonable," the
+same cost class already accepted for other full-tree operations in this
+design (reconstructing a snapshot, `du` itself). Changing a filesystem's
+declared `size` after creation is expected to need a separate
+administrative tool, not a normal mount-time operation — acknowledged,
+not yet designed.
+
+**Lifecycle: active → archived → pruned.** `archived = true` means the
+filesystem and all its data still physically exist — nothing has been
+deleted — but writes are no longer allowed; it stays readable so it can
+be backed up before the next step actually destroys anything. Pruning is
+a separate, explicit operation: delete every object under the
+filesystem's ID prefix (the same prefix-scoped listing `df`/`du` uses,
+iterated and deleted rather than summed), then blank the master block
+entry. The `archived` flag is checked at mount/session start, not on
+every operation — a deliberate choice, not an oversight: checking it on
+every single write would tax the hot path for a flag that changes
+through a rare, deliberate admin action, so archiving an already-mounted
+filesystem takes effect on remount, not instantly mid-session.
 
 ## Metadata model
 
@@ -326,7 +411,9 @@ service is the escalation path — deliberately not built up front.
 - **Off by default, a mount-time flag.** Locking has real costs (polling,
   an extra object per lock-holding file) for a feature most mounts won't
   use; it's opt-in, not a default burden on every filesystem.
-- **State lives in its own `<uuid>.lock` object**, not in `.metadata` —
+- **State lives in its own `<uuid>.lock` object** (itself prefixed with
+  the owning filesystem's ID, per Multiple filesystems per bucket,
+  above, same as every other object), not in `.metadata` —
   same reasoning as why `.metadata` itself is separate from the content
   object: locks are read/written by a different caller than `stat()`
   ever touches, and can churn far more frequently under real contention
