@@ -191,167 +191,23 @@ No need for Vagrant/Packer/Terraform at this scale — it's one VM, and
 orchestration layer. Worth reaching for something heavier only if this
 grows into multiple parallel VMs or a CI fleet.
 
-### Windows: verified end to end on this machine — SSH access confirmed working, not just planned
+### Windows: verified end to end, documentation and scripts live in `test/windows/`
 
-This stopped being a plan and became a running, SSH-reachable VM
-(`icbfs-winfsp-test`, under this host's KVM/libvirt), built entirely in
-`winvm-poc/` (gitignored scratch dir). Every claim below was actually run,
-not taken on faith:
+Fully verified on this host, not just planned — real KVM/libvirt VM, fully
+unattended Windows Server 2025 install, confirmed SSH access with zero
+manual steps, a reusable snapshot, and a documented check for whether the
+eval clock still has life left before reusing vs. recreating it. Two real
+bugs were found and fixed running this for real (an answer-file mistake
+that aborted Setup outright, and a login-screen hang), plus one
+still-unexplained host issue (periodic `libvirtd` SIGTERM) that's
+mitigated with an auto-restart loop rather than solved.
 
-- `virt-install --os-variant win2k25` was accepted by this host's
-  libvirt/osinfo-db, correctly recognized `win2k25`, and auto-applied the
-  Windows-appropriate Hyper-V enlightenments and `cpu
-  mode="host-passthrough"` on its own.
-- The `virtio-win` driver ISO downloads directly, no gate — 877MB pulled
-  straight from `fedorapeople.org`, verified as a real ISO 9660
-  filesystem.
-- **The one real manual step**: the Windows Server 2025 eval *ISO* itself
-  is not a direct download — Microsoft gates it behind a genuine HTML
-  `<form>` registration (name/email/company) on
-  `info.microsoft.com`, not a curl-able redirect like `virtio-win`.
-  Jared registered and downloaded it by hand once
-  (`~/Downloads/...SERVER_EVAL_x64FRE_en-us.iso`, reflink-copied into
-  `winvm-poc/`, sha256 verified identical). That's the only step in this
-  entire flow that needs a human.
-- **A fully unattended install actually ran**: `wiminfo` against the real
-  `install.wim` confirmed image index 1 is `SERVERSTANDARDCORE`; a
-  hand-built `autounattend.xml` (BIOS/MBR partitioning, since this host's
-  `win2k25` domain profile defaults to SeaBIOS, not UEFI — confirmed by
-  the absence of a `<loader>` tag in the generated domain XML) was burned
-  onto a small ISO and attached as a second CD-ROM. `virsh screenshot`
-  confirmed Setup skipped every interactive wizard screen (language,
-  edition, EULA, disk partitioning) and went straight to "Installing
-  Windows Server... 7% complete."
-- **A real bug found running this for real, not a hypothetical**: the VM
-  installed, then sat at a `logonui.exe` "press Ctrl+Alt+Del to unlock"
-  screen indefinitely. Root cause: the original answer file put the
-  OpenSSH-enablement commands under `FirstLogonCommands` in the
-  `oobeSystem` pass, which only fire on an actual interactive logon —
-  without an `<AutoLogon>` block, nothing ever logs in to trigger them, so
-  the VM just waits at the login screen forever.
-- **First fix attempt was wrong, and failed loudly — also worth keeping
-  on record.** Moved the commands to `RunSynchronousCommand` in the
-  `specialize` pass instead (runs as SYSTEM during setup, no logon
-  needed). That traded one bug for a worse one: `specialize` runs very
-  early, before networking is reliably up, and **any** non-zero exit from
-  a `RunSynchronousCommand` there aborts Setup outright with "The computer
-  restarted unexpectedly... Click OK to restart the installation" — hit
-  that for real, on a fresh install, confirmed via `virsh screenshot`.
-  `FirstLogonCommands` doesn't have that failure mode (a failing command
-  there doesn't nuke the whole install). **Correct fix**: stay with
-  `FirstLogonCommands` in `oobeSystem` (already proven working once,
-  manually) and just add the missing `<AutoLogon>` block so a human never
-  has to trigger it — plus `-ErrorAction SilentlyContinue` and a forced
-  `; exit 0` on every command, belt-and-suspenders against this exact
-  class of failure recurring.
-- **A second, still-unexplained problem, mitigated rather than solved.**
-  Independent of the answer-file bugs above, this VM's `qemu-system-x86_64`
-  process was killed mid-install by a direct `SIGTERM` from `libvirtd`
-  itself (confirmed in `/var/log/libvirt/qemu/icbfs-winfsp-test.log`:
-  `terminating on signal 15 from pid 1067 (/usr/bin/libvirtd)`) — three
-  separate times, at different elapsed durations each time (not a fixed
-  timer), with `libvirtd` never having restarted. Ruled out: kernel
-  OOM-kill, `systemd-oomd` (active, zero log entries), `libvirt-guests`
-  (disabled), host suspend (this is a desktop, no battery, no suspend
-  events in `logind`), hook scripts (`/etc/libvirt/hooks/` doesn't exist),
-  wrapper binaries around `virsh`/`qemu-system-x86_64`, and any extra
-  watchdog process in `ps aux`. **Root cause not found.** Mitigated, per
-  Jared's direction, by making the wait-for-SSH watch auto-restart the VM
-  (`virsh start`) whenever it finds the domain shut off instead of giving
-  up — capped at 6 retries. This is a real open question about the host,
-  not about icbfs or this plan, and is worth root-causing separately if it
-  keeps happening.
-- **Fully confirmed hands-off, with the real fix in place**: destroyed and
-  recreated the VM from scratch with the corrected answer file. It hit
-  the `libvirtd`-SIGTERM issue once more (auto-restarted by the watch, no
-  human involved), then reached SSH with **zero manual steps** — no
-  login, no intervention:
-  ```
-  $ ssh Administrator@<winvm-ip>
-  PS C:\Users\Administrator> whoami
-  win-b455ggnmnur\administrator
-  PS C:\Users\Administrator> Get-Service sshd | Format-List Status,StartType
-  Status    : Running
-  StartType : Automatic
-  PS C:\Users\Administrator> Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 | Format-List Online
-  Online : True
-  ```
-  Landed in a real PowerShell prompt (the `DefaultShell` registry command
-  took effect). This is the actual, confirmed answer to "is the new flow
-  hands-off": yes, modulo the still-unexplained `libvirtd` kill, which the
-  watch now absorbs automatically rather than requiring a person to notice
-  and restart it.
-- **Snapshotted the working state**: `virsh snapshot-create-as
-  icbfs-winfsp-test clean-base` taken right after SSH was confirmed, then
-  the VM was shut down to free its 8GB — revert to the snapshot instead of
-  re-running the whole install dance.
-
-The reusable path, now verified rather than theoretical:
-
-1. **Get the Windows ISO** — the one manual step, per above.
-2. **Create the VM** (BIOS/MBR, matching this host's default `win2k25`
-   firmware profile — no UEFI/virtio driver injection needed since the
-   emulated SATA disk and e1000e NIC both work out of the box):
-   ```
-   virt-install --name icbfs-winfsp-test --memory 8192 --vcpus 4 \
-     --disk size=60,bus=sata \
-     --cdrom windows-server-2025-eval.iso \
-     --disk path=autounattend.iso,device=cdrom \
-     --os-variant win2k25 --network network=default \
-     --graphics vnc --noautoconsole
-   ```
-   (`autounattend.iso` is built with `xorriso -as mkisofs -V
-   AUTOUNATTEND -J -R -o autounattend.iso unattend-src/`, carrying the
-   `autounattend.xml` described above — Windows Setup scans attached
-   media for that filename automatically, no `--location`/PXE needed.)
-3. **Wait, and auto-restart if `libvirtd` kills it** — poll `virsh
-   domstate`/`domifaddr` for a DHCP lease, then port 22 (`nc -z <ip> 22`);
-   if `domstate` ever reports `shut off` before SSH is reachable, `virsh
-   start` the domain again and keep waiting. With the `AutoLogon` fix,
-   nothing manual is needed once the VM is actually running.
-4. **Snapshot** once SSH is confirmed, same as above.
-5. **Running winfsp-tests** (still the actual end goal, still blocked):
-   once SSH works, `scp`/`Invoke-WebRequest` the prebuilt
-   `winfsp-tests-<version>.zip` from WinFsp's GitHub releases in — no
-   Visual Studio install needed just to get the test runner — and invoke
-   it with `--external` pointed at icbfs's WinFsp mount.
-
-Everything through step 4 is now verified on this machine, hands-off
-confirmed end to end. Step 5 is the only piece still blocked — on the
-WinFsp driver existing in this codebase, which it doesn't yet.
-
-### The eval clock: checking whether `clean-base` is still usable before reusing it
-
-The eval ISO is time-bombed (180 days), so the `clean-base` snapshot above
-won't be good forever. Don't track this by computing "180 days from
-creation" ourselves — Windows' own licensing service (`slmgr`) already
-knows the real expiration, including any rearms already used, and is the
-authoritative source. Query it directly:
-
-```
-ssh Administrator@<winvm-ip> "cscript //nologo C:\Windows\System32\slmgr.vbs /xpr"
-```
-
-Confirmed live on this VM (2026-10-10): `Windows(R), ServerStandardEval
-edition: Timebased activation will expire 4/8/2027 12:08:21 AM` — i.e.
-`clean-base`, as of now, is good until **2027-04-08**. `slmgr /dlv` gives
-the longer form, including `Remaining Windows rearm count: 1` — one
-`slmgr /rearm` + reboot is available to reset the 180-day clock a second
-time (total ~360 days of life) before a from-scratch reinstall is
-mandatory.
-
-The practical check before reusing the snapshot for anything: boot it,
-run the `slmgr /xpr` one-liner above, and compare its date to today.
-- **Comfortably in the future**: just use it.
-- **Close to expiring, rearm not yet used**: `slmgr /rearm` + reboot once,
-  then re-snapshot `clean-base` with the new expiration noted.
-- **Expired, or rearm already used**: don't fight it — delete the VM
-  (`virsh destroy` + `virsh undefine --snapshots-metadata` + remove the
-  qcow2/staged ISOs, as done earlier this session) and recreate from
-  scratch via the `virt-install`/`autounattend.xml` flow above. That path
-  is now fully verified and hands-off, so a from-scratch rebuild isn't a
-  big deal when it's actually needed.
-at all, which it doesn't yet.
+See **[`test/windows/README.md`](test/windows/README.md)** for the full
+story and **`test/windows/*.sh`** for the actual runnable scripts
+(`create-vm.sh`, `wait-for-ssh.sh`, `check-eval-expiry.sh`,
+`destroy-vm.sh`). The only piece still blocked is running `winfsp-tests`
+itself, on the WinFsp driver existing in this codebase, which it doesn't
+yet.
 
 ## Automation shape
 
