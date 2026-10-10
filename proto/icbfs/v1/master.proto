@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package icbfs.v1;
+
+option go_package = "github.com/resurgentech/icbfs/internal/pb";
+
+// FilesystemEntry is one slot in the MasterBlock's list. An empty Name
+// means this slot is free, available for reuse by a later Create — see
+// ARCHITECTURE.md's Multiple filesystems per bucket section. A
+// filesystem's ID is its position (index) in MasterBlock.filesystems,
+// not a field stored here at all.
+message FilesystemEntry {
+  string name = 1;
+  uint64 size = 2;
+  bool archived = 3;
+}
+
+// MasterBlock is the body of the one, fixed, well-known master-block
+// object per bucket. The list can only ever grow in length, never
+// shrink or reorder — a deleted filesystem's entry is blanked in place
+// (Name = ""), not removed, since removing it would shift every later
+// entry's position, and therefore its ID, out from under objects that
+// are already permanently keyed with the old one.
+message MasterBlock {
+  repeated FilesystemEntry filesystems = 1;
+}

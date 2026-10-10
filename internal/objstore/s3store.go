@@ -45,6 +45,23 @@ func (s *S3Store) Put(ctx context.Context, key string, body io.Reader, metadata 
 	return s.headVersion(ctx, key, out.VersionId)
 }
 
+// PutIfAbsent implements Store.PutIfAbsent via PutObject's IfNoneMatch:
+// "*", confirmed against real MinIO to be honored (412 on conflict),
+// not assumed from the S3 API docs alone.
+func (s *S3Store) PutIfAbsent(ctx context.Context, key string, body io.Reader, metadata map[string]string) (*Object, error) {
+	out, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(s.bucket),
+		Key:         aws.String(key),
+		Body:        body,
+		Metadata:    metadata,
+		IfNoneMatch: aws.String("*"),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("put if absent %s: %w", key, err)
+	}
+	return s.headVersion(ctx, key, out.VersionId)
+}
+
 func (s *S3Store) Get(ctx context.Context, key string) (io.ReadCloser, *Object, error) {
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
@@ -155,6 +172,33 @@ func (s *S3Store) Delete(ctx context.Context, key string, ifMatch string) error 
 		return fmt.Errorf("delete %s: %w", key, err)
 	}
 	return nil
+}
+
+// ListByPrefix returns every current object under prefix, paginating
+// internally via ListObjectsV2's ContinuationToken.
+func (s *S3Store) ListByPrefix(ctx context.Context, prefix string) ([]Object, error) {
+	var all []Object
+	var token *string
+	for {
+		out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(s.bucket),
+			Prefix:            aws.String(prefix),
+			ContinuationToken: token,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list by prefix %q: %w", prefix, err)
+		}
+		for _, o := range out.Contents {
+			all = append(all, Object{
+				Key:  aws.ToString(o.Key),
+				Size: aws.ToInt64(o.Size),
+			})
+		}
+		if !aws.ToBool(out.IsTruncated) {
+			return all, nil
+		}
+		token = out.NextContinuationToken
+	}
 }
 
 // IsPreconditionFailed reports whether err is the rejection from a failed

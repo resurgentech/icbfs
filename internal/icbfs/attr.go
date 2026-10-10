@@ -160,10 +160,20 @@ func NewUUIDv7() (string, error) {
 	return id.String(), nil
 }
 
-// Btime extracts the embedded creation timestamp from a UUIDv7 string.
-// Returns the zero Time if key is not a valid UUIDv7 (e.g. a root block's
-// naming-convention key).
+// Btime extracts the embedded creation timestamp from a key. Every
+// object a filesystem owns is prefixed with its 4-hex-digit ID (see
+// ARCHITECTURE.md's Multiple filesystems per bucket section), so this
+// strips a recognized "<4-hex>-" prefix before trying to parse what
+// remains as a UUIDv7. Returns the zero Time if nothing UUIDv7-shaped is
+// found — e.g. a root key, which is "<id>-root-<name>", not a UUID at
+// all, correctly yields zero here after the prefix strip leaves
+// "root-<name>" behind.
 func Btime(key string) time.Time {
+	if len(key) > 5 && key[4] == '-' {
+		if _, err := strconv.ParseUint(key[:4], 16, 16); err == nil {
+			key = key[5:]
+		}
+	}
 	id, err := uuid.Parse(key)
 	if err != nil || id.Version() != 7 {
 		return time.Time{}

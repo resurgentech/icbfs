@@ -35,6 +35,7 @@ func main() {
 	accessKey := fset.String("access-key", "minioadmin", "access key")
 	secretKey := fset.String("secret-key", "minioadmin", "secret key")
 	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
+	size := fset.Uint64("size", 100<<30, "declared filesystem size in bytes, for df (only used the first time a filesystem name is created)")
 	debug := fset.Bool("debug", false, "log every FUSE operation")
 	if err := fset.Parse(os.Args[2:]); err != nil {
 		os.Exit(2)
@@ -56,7 +57,7 @@ func main() {
 	store := objstore.NewS3Store(client, *bucket)
 
 	fsys := icbfs.New(store, *fsName)
-	if err := fsys.Bootstrap(ctx, 0755, 0, 0); err != nil {
+	if err := fsys.Bootstrap(ctx, *size, 0755, 0, 0); err != nil {
 		log.Fatalf("bootstrap filesystem %q: %v", *fsName, err)
 	}
 
