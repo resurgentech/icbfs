@@ -221,3 +221,36 @@ would be the thing to actually build, per ARCHITECTURE.md's own
 escalation note.
 
 ---
+
+## B4: a holder can hold multiple disjoint byte ranges on one file
+
+**Question I'd have asked:** B2's whole-file model was one claim per
+holder per file. B4's "Done when" only tests different holders holding
+non-overlapping ranges — does a *single* holder acquiring a second,
+disjoint range on the same file replace its first claim (one-slot-per-
+holder, same as B2), or add a second independent entry?
+
+**Assumed:** a holder can hold several disjoint ranges simultaneously;
+`TryAcquireLockRange` never conflicts against that same holder's own
+existing entries (so a holder can never block itself), and only the
+*exact* `(holder, start, end)` tuple being reacquired is replaced —
+every other entry, including that same holder's other ranges, is left
+untouched. `ReleaseLockRange`/`RenewLockRange` likewise key off the
+exact `(holder, start, end)` tuple, not "the holder's one entry."
+Rationale: this is what the schema itself (`repeated LockRange`, each
+with its own `holder`) most naturally supports, matches real-world
+byte-range use cases (e.g. a database process locking several disjoint
+record ranges at once), and ROADMAP.md's B4 text says "Release/renew
+operate on the caller's *specific range entry*," which reads more
+naturally as "one of potentially several" than "the holder's only
+one." Covered by
+`TestByteRangeLocksSameHolderCanHoldMultipleDisjointRanges`.
+
+**Check this if:** a caller actually wants POSIX-style same-process
+lock *merging/splitting* (re-locking an overlapping-but-not-identical
+range from the same holder adjusts the existing claim rather than
+adding a second, independent one) — that's real `fcntl` semantics this
+implementation does not attempt; it was out of scope for B4's stated
+"Done when" and would be a real, separate feature if ever needed.
+
+---
