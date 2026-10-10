@@ -295,3 +295,26 @@ func (o *OpenFile) Flush(ctx context.Context) (Attr, error) {
 	o.dirty = false
 	return attr, nil
 }
+
+// TryAcquireLockRange, AcquireLockRange, ReleaseLockRange, and
+// FindConflictingLockRange are OpenFile-scoped convenience wrappers
+// over the identically-named Filesystem methods, fixed to this
+// OpenFile's own key — task B8's FUSE flock/fcntl wiring (and any
+// future WinFsp equivalent) operates per open file, so it's more
+// natural to call these on the OpenFile it already has in hand than to
+// separately track fsys/key itself.
+func (o *OpenFile) TryAcquireLockRange(ctx context.Context, start, end int64, holder string, ttl time.Duration) error {
+	return o.fsys.TryAcquireLockRange(ctx, o.key, start, end, holder, ttl)
+}
+
+func (o *OpenFile) AcquireLockRange(ctx context.Context, start, end int64, holder string, ttl time.Duration) error {
+	return o.fsys.AcquireLockRange(ctx, o.key, start, end, holder, ttl)
+}
+
+func (o *OpenFile) ReleaseLockRange(ctx context.Context, start, end int64, holder string) error {
+	return o.fsys.ReleaseLockRange(ctx, o.key, start, end, holder)
+}
+
+func (o *OpenFile) FindConflictingLockRange(ctx context.Context, start, end int64, selfHolder string) (LockRangeInfo, bool, error) {
+	return o.fsys.FindConflictingLockRange(ctx, o.key, start, end, selfHolder)
+}

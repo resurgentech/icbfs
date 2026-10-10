@@ -392,6 +392,42 @@ func (f *Filesystem) CheckRangeLockConflict(ctx context.Context, key string, sta
 	return nil
 }
 
+// LockRangeInfo describes one conflicting claim, returned by
+// FindConflictingLockRange — e.g. for FUSE's fcntl(F_GETLK), which
+// needs to report back *which* range/holder conflicts, not just
+// whether one does.
+type LockRangeInfo struct {
+	Start, End int64
+	Holder     string
+}
+
+// FindConflictingLockRange returns the first currently-held, unexpired
+// range entry on key that overlaps [start, end) and doesn't belong to
+// selfHolder (same exclusions as CheckRangeLockConflict), or ok=false
+// if none conflicts.
+func (f *Filesystem) FindConflictingLockRange(ctx context.Context, key string, start, end int64, selfHolder string) (info LockRangeInfo, ok bool, err error) {
+	if !f.lockingEnabled {
+		return LockRangeInfo{}, false, nil
+	}
+	cur, _, err := readLockRanges(ctx, f.store, lockObjectKey(key))
+	if err != nil {
+		return LockRangeInfo{}, false, err
+	}
+	if cur == nil {
+		return LockRangeInfo{}, false, nil
+	}
+	now := time.Now()
+	for _, e := range cur.Ranges {
+		if e.Holder == selfHolder || e.EscalationOnly || rangeExpired(e, now) {
+			continue
+		}
+		if rangesOverlap(start, end, e.Start, e.End) {
+			return LockRangeInfo{Start: e.Start, End: e.End, Holder: e.Holder}, true, nil
+		}
+	}
+	return LockRangeInfo{}, false, nil
+}
+
 // TryAcquireLock, ReleaseLock, RenewLock, and AcquireLock are the
 // whole-file convenience wrappers task B2 originally shipped, now
 // implemented as the [0, lockWholeFileEnd) special case of task B4's
