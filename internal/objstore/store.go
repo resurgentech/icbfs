@@ -68,4 +68,13 @@ type Store interface {
 	// O(1) — there is no faster primitive on any of the three target
 	// backends (see that section for why).
 	ListByPrefix(ctx context.Context, prefix string) ([]Object, error)
+
+	// ServerTime returns the object store's current clock, observed
+	// via a real request's raw HTTP response — not a typed field like
+	// an Object's LastModified (which only ever says when some
+	// specific object was last written, never "what time is it right
+	// now"). Used to anchor lease expiry (ARCHITECTURE.md's Locking
+	// section) to the store's clock instead of the calling client's,
+	// which could be skewed relative to other clients.
+	ServerTime(ctx context.Context) (time.Time, error)
 }

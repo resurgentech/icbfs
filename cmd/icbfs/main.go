@@ -42,6 +42,8 @@ func main() {
 	secretKey := fset.String("secret-key", "minioadmin", "secret key")
 	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
 	size := fset.Uint64("size", 100<<30, "declared filesystem size in bytes, for df (only used the first time a filesystem name is created)")
+	uidOverride := fset.Int("uid", -1, "owner uid for the filesystem root (only used the first time a filesystem name is created); defaults to the uid of the user running this command, same as every other FUSE filesystem's -o uid= override (sshfs, NFS, etc.)")
+	gidOverride := fset.Int("gid", -1, "owner gid for the filesystem root (only used the first time a filesystem name is created); defaults to the gid of the user running this command, same as every other FUSE filesystem's -o gid= override (sshfs, NFS, etc.)")
 	locking := fset.Bool("locking", false, "enable the Locking feature (flock/fcntl); off by default, per ARCHITECTURE.md's Locking section")
 	enableNotify := fset.Bool("notify", false, "enable the Change notifications feature (ROADMAP.md Part E) via MinIO's ListenBucketNotification; off by default, same opt-in reasoning as --locking. Only the MinIO backend (task E4) is wired up here — Azure/AWS S3 adapters (tasks E5/E6) aren't reachable from this flag.")
 	debug := fset.Bool("debug", false, "log every FUSE operation")
@@ -65,12 +67,22 @@ func main() {
 	store := objstore.NewS3Store(client, *bucket)
 
 	fsys := icbfs.New(store, *fsName)
-	// The root is owned by whoever runs this mount command, not a
-	// hardcoded uid/gid — necessary now that fuseMountOptions enables
-	// default_permissions (task C1): the kernel enforces this
-	// ownership for real, so a hardcoded root uid 0 would lock a
-	// non-root mounting user out of their own filesystem's root.
-	if err := fsys.Bootstrap(ctx, *size, 0755, uint32(os.Getuid()), uint32(os.Getgid())); err != nil {
+	// The root is owned by whoever runs this mount command by default
+	// — necessary now that fuseMountOptions enables default_permissions
+	// (task C1): the kernel enforces this ownership for real, so a
+	// hardcoded root uid 0 would lock a non-root mounting user out of
+	// their own filesystem's root. --uid/--gid override that default,
+	// same as every other FUSE filesystem exposes (sshfs, NFS, etc.) —
+	// a real, well-known need (e.g. mounting on behalf of a different
+	// user than the one running the mount command), not a hypothetical.
+	rootUID, rootGID := uint32(os.Getuid()), uint32(os.Getgid())
+	if *uidOverride >= 0 {
+		rootUID = uint32(*uidOverride)
+	}
+	if *gidOverride >= 0 {
+		rootGID = uint32(*gidOverride)
+	}
+	if err := fsys.Bootstrap(ctx, *size, 0755, rootUID, rootGID); err != nil {
 		log.Fatalf("bootstrap filesystem %q: %v", *fsName, err)
 	}
 	fsys.EnableLocking(*locking)

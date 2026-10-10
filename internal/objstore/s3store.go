@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	smithy "github.com/aws/smithy-go"
+	"github.com/aws/smithy-go/middleware"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
@@ -199,6 +201,50 @@ func (s *S3Store) ListByPrefix(ctx context.Context, prefix string) ([]Object, er
 		}
 		token = out.NextContinuationToken
 	}
+}
+
+// ServerTime returns the object store's current clock, observed via
+// the raw HTTP "Date" response header of a real request — not a typed
+// SDK field like an Object's LastModified, which is "when this
+// specific object was last written," not "what time is it right now."
+// Confirmed against real MinIO (not assumed): the typed S3 API doesn't
+// expose this header anywhere, so it's captured directly via a
+// deserialize-step middleware on a single lightweight HeadBucket call.
+//
+// This exists so expires_at computations (ARCHITECTURE.md's Locking
+// section) can be anchored to the object store's clock instead of the
+// calling client's, which could be skewed relative to other clients —
+// see internal/icbfs/lock.go's use of this.
+func (s *S3Store) ServerTime(ctx context.Context) (time.Time, error) {
+	var serverTime time.Time
+	var found bool
+	capture := middleware.DeserializeMiddlewareFunc("icbfsCaptureDateHeader", func(
+		ctx context.Context, in middleware.DeserializeInput, next middleware.DeserializeHandler,
+	) (middleware.DeserializeOutput, middleware.Metadata, error) {
+		out, metadata, err := next.HandleDeserialize(ctx, in)
+		if resp, ok := out.RawResponse.(*smithyhttp.Response); ok {
+			if raw := resp.Header.Get("Date"); raw != "" {
+				if t, perr := time.Parse(time.RFC1123, raw); perr == nil {
+					serverTime = t
+					found = true
+				}
+			}
+		}
+		return out, metadata, err
+	})
+
+	_, err := s.client.HeadBucket(ctx, &s3.HeadBucketInput{Bucket: aws.String(s.bucket)},
+		s3.WithAPIOptions(func(stack *middleware.Stack) error {
+			return stack.Deserialize.Add(capture, middleware.After)
+		}),
+	)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("server time: %w", err)
+	}
+	if !found {
+		return time.Time{}, errors.New("server time: response had no Date header")
+	}
+	return serverTime, nil
 }
 
 // IsPreconditionFailed reports whether err is the rejection from a failed

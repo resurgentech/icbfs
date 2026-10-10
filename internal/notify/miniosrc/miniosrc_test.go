@@ -9,6 +9,8 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	testminio "github.com/testcontainers/testcontainers-go/modules/minio"
+
+	"github.com/resurgentech/icbfs/internal/testutil"
 )
 
 // TestMinIOSourceReceivesRealNotification covers ROADMAP.md's task E4
@@ -44,9 +46,9 @@ func TestMinIOSourceReceivesRealNotification(t *testing.T) {
 	}
 
 	const bucket = "icbfs-notify-test"
-	if err := client.MakeBucket(ctx, bucket, minio.MakeBucketOptions{}); err != nil {
-		t.Fatalf("make bucket: %v", err)
-	}
+	testutil.RetryUntilReady(t, 10*time.Second, func() error {
+		return client.MakeBucket(ctx, bucket, minio.MakeBucketOptions{})
+	})
 
 	const prefix = "0000-"
 	src := New(ctx, client, bucket, prefix)

@@ -12,6 +12,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/testcontainers/testcontainers-go/modules/minio"
+
+	"github.com/resurgentech/icbfs/internal/testutil"
 )
 
 // newTestStore spins up a real MinIO container, creates a versioned bucket
@@ -45,9 +47,10 @@ func newTestStore(t *testing.T) *S3Store {
 	})
 
 	const bucket = "icbfs-test"
-	if _, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create bucket: %v", err)
-	}
+	testutil.RetryUntilReady(t, 10*time.Second, func() error {
+		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+		return err
+	})
 	// Snapshotting depends entirely on bucket versioning being enabled;
 	// this is the architectural precondition from ARCHITECTURE.md.
 	if _, err := client.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
@@ -346,5 +349,35 @@ func TestConditionalDeleteIgnoresIfMatch(t *testing.T) {
 
 	if _, err := store.Head(ctx, "file-1"); !IsNotFound(err) {
 		t.Fatalf("expected object to be gone after the unprotected delete, head error: %v", err)
+	}
+}
+
+// TestServerTimeReturnsRealClockFromDateHeader covers the fix for a
+// real misstep: lock expiry was anchored to the acquiring client's own
+// local clock instead of the object store's, exactly the thing
+// ARCHITECTURE.md's Locking section says to avoid. ServerTime closes
+// that gap by capturing the raw HTTP "Date" response header via SDK
+// middleware — confirmed here, not assumed, that real MinIO actually
+// returns one and that it parses to a value close to wall-clock time
+// (within a generous skew budget that also covers the header's own
+// whole-second — not sub-second — resolution).
+func TestServerTimeReturnsRealClockFromDateHeader(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	before := time.Now()
+	got, err := store.ServerTime(ctx)
+	after := time.Now()
+	if err != nil {
+		t.Fatalf("server time: %v", err)
+	}
+
+	// The Date header has whole-second resolution, so got can trail
+	// the true request time by nearly a full second even with zero
+	// real clock skew — budget for that plus a little round-trip
+	// slack, not an exact match.
+	const skewBudget = 2 * time.Second
+	if got.Before(before.Add(-skewBudget)) || got.After(after.Add(skewBudget)) {
+		t.Fatalf("server time %v is outside [%v, %v] (request window ± %v) — looks like real clock skew, not just Date's whole-second rounding", got, before.Add(-skewBudget), after.Add(skewBudget), skewBudget)
 	}
 }
