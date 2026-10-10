@@ -102,6 +102,7 @@ func TestFlushEscalatesWhenPlainRetryBudgetIsExhausted(t *testing.T) {
 	defer func() { contentWriteRetryBudget = orig }()
 
 	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
 	ctx := context.Background()
 	root := fsys.RootKey()
 	key, _, _, err := fsys.Create(ctx, root, "contended.bin", 0644, 0, 0)
@@ -154,6 +155,7 @@ func TestFlushEscalatesWhenPlainRetryBudgetIsExhausted(t *testing.T) {
 // normally while the first client's lock is still held.
 func TestFlushRefusedWhenTouchedRangeOverlapsExternalLock(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
 	ctx := context.Background()
 	root := fsys.RootKey()
 	key, _, _, err := fsys.Create(ctx, root, "cooperative.bin", 0644, 0, 0)
@@ -214,6 +216,7 @@ func TestFlushRefusedWhenTouchedRangeOverlapsExternalLock(t *testing.T) {
 // own shortly after.
 func TestCheckRangeLockConflictIgnoresEscalationOnlyEntries(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
 	ctx := context.Background()
 	root := fsys.RootKey()
 	key, _, _, err := fsys.Create(ctx, root, "f.bin", 0644, 0, 0)
