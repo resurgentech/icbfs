@@ -58,7 +58,12 @@ func main() {
 	store := objstore.NewS3Store(client, *bucket)
 
 	fsys := icbfs.New(store, *fsName)
-	if err := fsys.Bootstrap(ctx, *size, 0755, 0, 0); err != nil {
+	// The root is owned by whoever runs this mount command, not a
+	// hardcoded uid/gid — necessary now that fuseMountOptions enables
+	// default_permissions (task C1): the kernel enforces this
+	// ownership for real, so a hardcoded root uid 0 would lock a
+	// non-root mounting user out of their own filesystem's root.
+	if err := fsys.Bootstrap(ctx, *size, 0755, uint32(os.Getuid()), uint32(os.Getgid())); err != nil {
 		log.Fatalf("bootstrap filesystem %q: %v", *fsName, err)
 	}
 	fsys.EnableLocking(*locking)
@@ -68,7 +73,7 @@ func main() {
 		MountOptions: fuseMountOptions(*debug),
 		// Without this, go-fuse silently rewrites a real, stored "0000"
 		// mode to 0644/0755 on every Getattr — found by testing chmod 000
-		// and seeing stat report 644 back. See MISSING_FEATURES.md.
+		// and seeing stat report 644 back.
 		NullPermissions: true,
 	})
 	if err != nil {
@@ -84,5 +89,13 @@ func fuseMountOptions(debug bool) fuse.MountOptions {
 		FsName: "icbfs",
 		Name:   "icbfs",
 		Debug:  debug,
+		// Task C1 (ROADMAP.md's Permission enforcement part): defers
+		// permission enforcement (every open/read/write, not just the
+		// access(2)-triggered checks go-fuse's own default Access()
+		// fallback handles) to the kernel, which already correctly
+		// handles root bypass and full supplementary group
+		// membership — preferred over implementing NodeAccesser or
+		// manual checks ourselves.
+		Options: []string{"default_permissions"},
 	}
 }

@@ -481,3 +481,57 @@ model; a renewal mechanism tied to the FUSE file handle's lifetime)
 this session deliberately didn't attempt.
 
 ---
+
+## C1: root ownership had to change, not just the mount option
+
+**Not a question so much as a bug C1 itself surfaced:** enabling
+`default_permissions` (the literal C1 task) immediately broke every
+single existing mount test with "permission denied" — `cmd/icbfs` and
+the test helpers all hardcoded the root directory's owner to uid/gid
+`0, 0` regardless of who actually runs the mount, which was only ever
+safe because nothing enforced it before. Fixed by bootstrapping the
+root with the *real* calling process's `os.Getuid()`/`os.Getgid()` in
+both `cmd/icbfs/main.go` and `internal/fuseserver/mount_test.go`'s
+helpers, rather than adding a new flag for it — nobody asked for
+"mount as a different user," and the natural default (you own what
+you mount) is the one every other FUSE filesystem uses too.
+
+**Check this if:** a real deployment wants the root owned by someone
+other than the user running `icbfs mount` (e.g. a system service
+running as a dedicated service account that's mounting on behalf of
+other users) — that would need an actual `--uid`/`--gid` override flag,
+not currently exposed.
+
+---
+
+## C2: the decision — explicit note, not a differing-uid test
+
+**Decision ROADMAP.md explicitly asked to be made, not defaulted
+silently:** owner-bit coverage (task C1) is the automated bar; group/
+other-bit enforcement is exercised by a *different* mechanism, not a
+genuine second real identity (no root/setuid available to this
+autonomous session to actually run part of a test as a different real
+uid). `TestMountDefaultPermissionsEnforcesOtherBits` creates a file
+directly through the `Filesystem` API with a fabricated owner uid/gid
+that's deliberately not the test process's own (something no real
+`create(2)` syscall could do, but the kernel's `default_permissions`
+check doesn't care how an inode's reported ownership got that way,
+only what `Getattr` reports), then accesses it through the real
+mounted path — genuinely exercising the "other" bits kernel-enforcement
+code path, not just owner bits, without needing real privilege
+escalation.
+
+**What this does NOT cover** (documented directly in the test's own
+doc comment too, per C2's "Done when"): the "group" bits specifically
+(as distinct from "other"), and ROADMAP's called-out nuance that the
+kernel checks a caller's *full* supplementary group list, not just a
+primary gid — both would still need a genuine second real identity to
+verify.
+
+**Check this if:** this project ever gets a CI environment with real
+root/container-user-namespace capability to spawn a genuinely
+different uid — at that point the group-bits and supplementary-group
+nuances above are worth closing for real, rather than continuing to
+rely on the "other"-bits proxy this session chose.
+
+---
