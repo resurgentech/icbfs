@@ -32,8 +32,18 @@ type LockRange struct {
 	End             int64                  `protobuf:"varint,2,opt,name=end,proto3" json:"end,omitempty"` // exclusive, like a Go slice bound
 	Holder          string                 `protobuf:"bytes,3,opt,name=holder,proto3" json:"holder,omitempty"`
 	ExpiresAtUnixMs int64                  `protobuf:"varint,4,opt,name=expires_at_unix_ms,json=expiresAtUnixMs,proto3" json:"expires_at_unix_ms,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// escalation_only marks a claim made internally by OpenFile.Flush's
+	// own retry-escalation (ROADMAP.md task B5), not a real application
+	// lock placed via fcntl/LockFileEx. Task B6's stronger-than-advisory
+	// write check must skip these: a different OpenFile's own internal
+	// escalation claim is not "someone else's lock" a write needs to
+	// respect — it's this driver's own bookkeeping, already guaranteed
+	// to converge on its own via tasks B1/B5's retry mechanism, and
+	// treating it as an external lock would spuriously refuse writes
+	// that would otherwise just succeed shortly after.
+	EscalationOnly bool `protobuf:"varint,5,opt,name=escalation_only,json=escalationOnly,proto3" json:"escalation_only,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *LockRange) Reset() {
@@ -94,6 +104,13 @@ func (x *LockRange) GetExpiresAtUnixMs() int64 {
 	return 0
 }
 
+func (x *LockRange) GetEscalationOnly() bool {
+	if x != nil {
+		return x.EscalationOnly
+	}
+	return false
+}
+
 // Lock is the whole <uuid>.lock object body: every currently-claimed
 // range across every holder.
 type Lock struct {
@@ -144,12 +161,13 @@ var File_proto_icbfs_v1_lock_proto protoreflect.FileDescriptor
 
 const file_proto_icbfs_v1_lock_proto_rawDesc = "" +
 	"\n" +
-	"\x19proto/icbfs/v1/lock.proto\x12\bicbfs.v1\"x\n" +
+	"\x19proto/icbfs/v1/lock.proto\x12\bicbfs.v1\"\xa1\x01\n" +
 	"\tLockRange\x12\x14\n" +
 	"\x05start\x18\x01 \x01(\x03R\x05start\x12\x10\n" +
 	"\x03end\x18\x02 \x01(\x03R\x03end\x12\x16\n" +
 	"\x06holder\x18\x03 \x01(\tR\x06holder\x12+\n" +
-	"\x12expires_at_unix_ms\x18\x04 \x01(\x03R\x0fexpiresAtUnixMs\"3\n" +
+	"\x12expires_at_unix_ms\x18\x04 \x01(\x03R\x0fexpiresAtUnixMs\x12'\n" +
+	"\x0fescalation_only\x18\x05 \x01(\bR\x0eescalationOnly\"3\n" +
 	"\x04Lock\x12+\n" +
 	"\x06ranges\x18\x01 \x03(\v2\x13.icbfs.v1.LockRangeR\x06rangesB+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
 
