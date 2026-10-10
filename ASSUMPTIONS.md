@@ -13,7 +13,9 @@ generated code be committed, and should generated Protobuf types be the
 public API of `internal/block`/`internal/icbfs`, or wrapped?
 
 **Assumed:**
-- `.proto` sources live under `/proto/icbfs/v1/*.proto`.
+- `.proto` sources live under `/proto/icbfs/v1/*.proto` (moved to
+  `/spec/proto/icbfs/v1/*.proto` later, at Jared's direction, to nest
+  under a top-level `spec/` directory).
 - Generated `.pb.go` files are **checked into git**, in their own package
   `internal/pb`, imported by whatever package needs them. Rationale:
   `go build`/`go test` keep working for anyone without `protoc` installed

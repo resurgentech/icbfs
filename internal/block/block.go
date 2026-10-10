@@ -73,7 +73,7 @@ type Block struct {
 }
 
 // Decode parses a directory block body (Protobuf-encoded, per
-// proto/icbfs/v1/block.proto). Empty input decodes to an empty leaf
+// spec/proto/icbfs/v1/block.proto). Empty input decodes to an empty leaf
 // block, so a freshly created directory's body can just be nil bytes.
 func Decode(data []byte) (*Block, error) {
 	if len(data) == 0 {

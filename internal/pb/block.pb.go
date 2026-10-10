@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.12
 // 	protoc        v7.36.1
-// source: proto/icbfs/v1/block.proto
+// source: spec/proto/icbfs/v1/block.proto
 
 package pb
 
@@ -55,11 +55,11 @@ func (x EntryType) String() string {
 }
 
 func (EntryType) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_icbfs_v1_block_proto_enumTypes[0].Descriptor()
+	return file_spec_proto_icbfs_v1_block_proto_enumTypes[0].Descriptor()
 }
 
 func (EntryType) Type() protoreflect.EnumType {
-	return &file_proto_icbfs_v1_block_proto_enumTypes[0]
+	return &file_spec_proto_icbfs_v1_block_proto_enumTypes[0]
 }
 
 func (x EntryType) Number() protoreflect.EnumNumber {
@@ -68,7 +68,7 @@ func (x EntryType) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use EntryType.Descriptor instead.
 func (EntryType) EnumDescriptor() ([]byte, []int) {
-	return file_proto_icbfs_v1_block_proto_rawDescGZIP(), []int{0}
+	return file_spec_proto_icbfs_v1_block_proto_rawDescGZIP(), []int{0}
 }
 
 // BlockKind mirrors internal/block.Kind.
@@ -102,11 +102,11 @@ func (x BlockKind) String() string {
 }
 
 func (BlockKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_proto_icbfs_v1_block_proto_enumTypes[1].Descriptor()
+	return file_spec_proto_icbfs_v1_block_proto_enumTypes[1].Descriptor()
 }
 
 func (BlockKind) Type() protoreflect.EnumType {
-	return &file_proto_icbfs_v1_block_proto_enumTypes[1]
+	return &file_spec_proto_icbfs_v1_block_proto_enumTypes[1]
 }
 
 func (x BlockKind) Number() protoreflect.EnumNumber {
@@ -115,7 +115,7 @@ func (x BlockKind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use BlockKind.Descriptor instead.
 func (BlockKind) EnumDescriptor() ([]byte, []int) {
-	return file_proto_icbfs_v1_block_proto_rawDescGZIP(), []int{1}
+	return file_spec_proto_icbfs_v1_block_proto_rawDescGZIP(), []int{1}
 }
 
 // Entry is one row of a leaf block: a name -> UUID mapping.
@@ -130,7 +130,7 @@ type Entry struct {
 
 func (x *Entry) Reset() {
 	*x = Entry{}
-	mi := &file_proto_icbfs_v1_block_proto_msgTypes[0]
+	mi := &file_spec_proto_icbfs_v1_block_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -142,7 +142,7 @@ func (x *Entry) String() string {
 func (*Entry) ProtoMessage() {}
 
 func (x *Entry) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_icbfs_v1_block_proto_msgTypes[0]
+	mi := &file_spec_proto_icbfs_v1_block_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -155,7 +155,7 @@ func (x *Entry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Entry.ProtoReflect.Descriptor instead.
 func (*Entry) Descriptor() ([]byte, []int) {
-	return file_proto_icbfs_v1_block_proto_rawDescGZIP(), []int{0}
+	return file_spec_proto_icbfs_v1_block_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *Entry) GetName() string {
@@ -190,7 +190,7 @@ type Child struct {
 
 func (x *Child) Reset() {
 	*x = Child{}
-	mi := &file_proto_icbfs_v1_block_proto_msgTypes[1]
+	mi := &file_spec_proto_icbfs_v1_block_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -202,7 +202,7 @@ func (x *Child) String() string {
 func (*Child) ProtoMessage() {}
 
 func (x *Child) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_icbfs_v1_block_proto_msgTypes[1]
+	mi := &file_spec_proto_icbfs_v1_block_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -215,7 +215,7 @@ func (x *Child) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Child.ProtoReflect.Descriptor instead.
 func (*Child) Descriptor() ([]byte, []int) {
-	return file_proto_icbfs_v1_block_proto_rawDescGZIP(), []int{1}
+	return file_spec_proto_icbfs_v1_block_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *Child) GetMinKey() string {
@@ -245,7 +245,7 @@ type Block struct {
 
 func (x *Block) Reset() {
 	*x = Block{}
-	mi := &file_proto_icbfs_v1_block_proto_msgTypes[2]
+	mi := &file_spec_proto_icbfs_v1_block_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -257,7 +257,7 @@ func (x *Block) String() string {
 func (*Block) ProtoMessage() {}
 
 func (x *Block) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_icbfs_v1_block_proto_msgTypes[2]
+	mi := &file_spec_proto_icbfs_v1_block_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -270,7 +270,7 @@ func (x *Block) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Block.ProtoReflect.Descriptor instead.
 func (*Block) Descriptor() ([]byte, []int) {
-	return file_proto_icbfs_v1_block_proto_rawDescGZIP(), []int{2}
+	return file_spec_proto_icbfs_v1_block_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *Block) GetKind() BlockKind {
@@ -294,11 +294,11 @@ func (x *Block) GetChildren() []*Child {
 	return nil
 }
 
-var File_proto_icbfs_v1_block_proto protoreflect.FileDescriptor
+var File_spec_proto_icbfs_v1_block_proto protoreflect.FileDescriptor
 
-const file_proto_icbfs_v1_block_proto_rawDesc = "" +
+const file_spec_proto_icbfs_v1_block_proto_rawDesc = "" +
 	"\n" +
-	"\x1aproto/icbfs/v1/block.proto\x12\bicbfs.v1\"X\n" +
+	"\x1fspec/proto/icbfs/v1/block.proto\x12\bicbfs.v1\"X\n" +
 	"\x05Entry\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04uuid\x18\x02 \x01(\tR\x04uuid\x12'\n" +
@@ -319,27 +319,27 @@ const file_proto_icbfs_v1_block_proto_rawDesc = "" +
 	"\x13BLOCK_KIND_INTERNAL\x10\x01B+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
 
 var (
-	file_proto_icbfs_v1_block_proto_rawDescOnce sync.Once
-	file_proto_icbfs_v1_block_proto_rawDescData []byte
+	file_spec_proto_icbfs_v1_block_proto_rawDescOnce sync.Once
+	file_spec_proto_icbfs_v1_block_proto_rawDescData []byte
 )
 
-func file_proto_icbfs_v1_block_proto_rawDescGZIP() []byte {
-	file_proto_icbfs_v1_block_proto_rawDescOnce.Do(func() {
-		file_proto_icbfs_v1_block_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_icbfs_v1_block_proto_rawDesc), len(file_proto_icbfs_v1_block_proto_rawDesc)))
+func file_spec_proto_icbfs_v1_block_proto_rawDescGZIP() []byte {
+	file_spec_proto_icbfs_v1_block_proto_rawDescOnce.Do(func() {
+		file_spec_proto_icbfs_v1_block_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_spec_proto_icbfs_v1_block_proto_rawDesc), len(file_spec_proto_icbfs_v1_block_proto_rawDesc)))
 	})
-	return file_proto_icbfs_v1_block_proto_rawDescData
+	return file_spec_proto_icbfs_v1_block_proto_rawDescData
 }
 
-var file_proto_icbfs_v1_block_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_proto_icbfs_v1_block_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
-var file_proto_icbfs_v1_block_proto_goTypes = []any{
+var file_spec_proto_icbfs_v1_block_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
+var file_spec_proto_icbfs_v1_block_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_spec_proto_icbfs_v1_block_proto_goTypes = []any{
 	(EntryType)(0), // 0: icbfs.v1.EntryType
 	(BlockKind)(0), // 1: icbfs.v1.BlockKind
 	(*Entry)(nil),  // 2: icbfs.v1.Entry
 	(*Child)(nil),  // 3: icbfs.v1.Child
 	(*Block)(nil),  // 4: icbfs.v1.Block
 }
-var file_proto_icbfs_v1_block_proto_depIdxs = []int32{
+var file_spec_proto_icbfs_v1_block_proto_depIdxs = []int32{
 	0, // 0: icbfs.v1.Entry.type:type_name -> icbfs.v1.EntryType
 	1, // 1: icbfs.v1.Block.kind:type_name -> icbfs.v1.BlockKind
 	2, // 2: icbfs.v1.Block.entries:type_name -> icbfs.v1.Entry
@@ -351,27 +351,27 @@ var file_proto_icbfs_v1_block_proto_depIdxs = []int32{
 	0, // [0:4] is the sub-list for field type_name
 }
 
-func init() { file_proto_icbfs_v1_block_proto_init() }
-func file_proto_icbfs_v1_block_proto_init() {
-	if File_proto_icbfs_v1_block_proto != nil {
+func init() { file_spec_proto_icbfs_v1_block_proto_init() }
+func file_spec_proto_icbfs_v1_block_proto_init() {
+	if File_spec_proto_icbfs_v1_block_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_icbfs_v1_block_proto_rawDesc), len(file_proto_icbfs_v1_block_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_spec_proto_icbfs_v1_block_proto_rawDesc), len(file_spec_proto_icbfs_v1_block_proto_rawDesc)),
 			NumEnums:      2,
 			NumMessages:   3,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
-		GoTypes:           file_proto_icbfs_v1_block_proto_goTypes,
-		DependencyIndexes: file_proto_icbfs_v1_block_proto_depIdxs,
-		EnumInfos:         file_proto_icbfs_v1_block_proto_enumTypes,
-		MessageInfos:      file_proto_icbfs_v1_block_proto_msgTypes,
+		GoTypes:           file_spec_proto_icbfs_v1_block_proto_goTypes,
+		DependencyIndexes: file_spec_proto_icbfs_v1_block_proto_depIdxs,
+		EnumInfos:         file_spec_proto_icbfs_v1_block_proto_enumTypes,
+		MessageInfos:      file_spec_proto_icbfs_v1_block_proto_msgTypes,
 	}.Build()
-	File_proto_icbfs_v1_block_proto = out.File
-	file_proto_icbfs_v1_block_proto_goTypes = nil
-	file_proto_icbfs_v1_block_proto_depIdxs = nil
+	File_spec_proto_icbfs_v1_block_proto = out.File
+	file_spec_proto_icbfs_v1_block_proto_goTypes = nil
+	file_spec_proto_icbfs_v1_block_proto_depIdxs = nil
 }
