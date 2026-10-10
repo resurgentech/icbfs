@@ -16,9 +16,11 @@ object is an object. The two things it's built around:
 - **A full POSIX-like metadata set**, including hard links and symlinks,
   plus a path to good Windows support alongside the POSIX/Linux path.
 
-**Backend scope is deliberately narrow:** MinIO (S3 API) and Azure Blob
-Storage are the only first-class object stores. No generic multi-cloud
-abstraction is being built.
+**Backend scope is deliberately narrow:** AWS S3, Azure Blob Storage, and
+MinIO (S3 API) are the three canonical first-class object stores. No
+generic multi-cloud abstraction is being built. (Earlier revisions of
+this document said "MinIO and Azure" only — that was a misreading of the
+original scoping note, not a deliberate narrowing; corrected here.)
 
 ## Core object model
 
@@ -489,6 +491,70 @@ service is the escalation path — deliberately not built up front.
   having asked for a lock at all.
 
 See `ROADMAP.md` for this broken into concrete implementation tasks.
+
+## Change notifications
+
+Optional, mount-time flag, off by default — same framing as Locking, and
+for the same reason: it has real per-backend costs (a standing
+connection or polling loop, an extra dependency for some backends) that
+most mounts shouldn't pay by default. **Mounting with no notification
+backend configured must work identically to a mount that never heard of
+this feature** — this is a hard requirement, not just an expectation,
+and needs its own explicit test, not just an assumption that "optional"
+naturally holds.
+
+**Scope: this is a sync/backup trigger, not a promise of real-time
+interactive file watching.** Two of the three backends have latency
+measured in seconds-to-minutes, not milliseconds — see the table below.
+Given that, the intended consumer is something like "wake up and decide
+whether to kick off a backup," not an editor expecting instant reload.
+
+**The governing design principle: every notification is a "go check
+current state" wake-up signal, never an authoritative payload of what
+changed.** This isn't a concession specific to icbfs's latency — it's
+how a *correct* inotify consumer already has to behave on a real local
+filesystem, since the kernel itself is permitted to coalesce rapid
+writes into fewer events than actual syscalls. Treating a notification
+this way is what makes the backend differences below a non-issue for
+*correctness* (nothing is ever wrong, just sometimes slow or coarser-
+grained) rather than a compliance problem.
+
+**Per-backend mechanism**, verified against current official docs
+(MinIO's hosted "AIStor" docs page returned corrupted/injected content
+during this research and was discarded in favor of the `minio/minio`
+GitHub source directly — a reminder that even documentation fetches get
+verified here, not trusted blind):
+
+| | MinIO | Azure | AWS S3 |
+|---|---|---|---|
+| Mechanism | `ListenBucketNotification` | Change Feed | Event Notifications → SQS |
+| Push/Pull | Push (long-poll stream) | Pull (read an append-only log) | Pull (`ReceiveMessage` long-poll, up to 20s) |
+| Latency | Undocumented numerically | **"within an order of a few minutes"** (exact Microsoft wording) | **"typically... in seconds but can sometimes take a minute or longer"** (exact AWS wording) |
+| Can a genuine change produce *zero* signal? | **Yes, in async delivery mode under sustained overload** — documented queue-discard behavior (default cap 100,000 events, then silently dropped) | **No** — "each change generates exactly one transaction log entry," guaranteed | **No** — "designed to be delivered at least once" (duplicates possible, never silently dropped) |
+| Ordering | Undocumented | Guaranteed **per-blob**; **explicitly undefined across different blobs** | Not guaranteed (would need EventBridge-routed FIFO, not pursued here) |
+| Server-side prefix/suffix filtering | **Yes** | **No** — one feed per storage account; every consumer reads everything and filters client-side | Yes |
+| Go dependency | **New**: `github.com/minio/minio-go/v7` — confirmed non-standard ("this is a MinIO specific API" per its own doc comment), not reachable via `aws-sdk-go-v2` | Azure SDK for Go (new) | **None** — `aws-sdk-go-v2/service/sqs`, same SDK family already used for everything else |
+| Notable incompatibility | MinIO's **sync** delivery mode avoids the drop risk above by trading away throughput — worth preferring it here, since this feature is already latency-tolerant | **Not supported** if the storage account has hierarchical namespace (ADLS Gen2), NFS 3.0, or SFTP enabled | — |
+
+**The practical consequence of Azure's missing server-side filtering,
+given the master block's per-filesystem ID-prefix design:** on Azure,
+every mount's notification consumer necessarily reads every *other*
+tenant's raw change events too (not their content, just "object X
+changed") before discarding what doesn't match its own prefix — a
+cross-tenant visibility property MinIO and S3 avoid by filtering before
+the event ever reaches the consumer. Worth knowing, not necessarily
+worth blocking on.
+
+**Testing reality, stated plainly rather than glossed over:** MinIO can
+be tested the way everything else in this project is — a real container
+via testcontainers-go, a real `ListenBucketNotification` stream, a real
+assertion that an event arrives. Azure and AWS S3 cannot be tested that
+way in this environment at all — there's no account/credentials to spin
+up a real Storage Account or AWS account here, so anything beyond MinIO
+is necessarily verified against documentation and, if ever built,
+against a real cloud account someone has to provision by hand, not
+through the automated suite the rest of this project relies on. That
+asymmetry should stay visible, not be quietly assumed away.
 
 ## Windows compatibility: primary mode
 
