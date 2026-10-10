@@ -40,10 +40,11 @@ var errRetry = errors.New("icbfs: lost a race, retry the whole operation")
 // bucket section) — until then, a Filesystem returned by New isn't
 // usable for anything that touches the store.
 type Filesystem struct {
-	store    objstore.Store
-	fsName   string
-	id       string // 4-hex-digit prefix, set by Bootstrap
-	archived bool   // set by Bootstrap; see ErrArchived
+	store          objstore.Store
+	fsName         string
+	id             string // 4-hex-digit prefix, set by Bootstrap
+	archived       bool   // set by Bootstrap; see ErrArchived
+	lockingEnabled bool   // off by default; see EnableLocking, task B7
 }
 
 // New builds a Filesystem for the named filesystem. Call Bootstrap
@@ -51,6 +52,20 @@ type Filesystem struct {
 // doesn't know the filesystem's ID yet.
 func New(store objstore.Store, fsName string) *Filesystem {
 	return &Filesystem{store: store, fsName: fsName}
+}
+
+// EnableLocking turns on the Locking feature (tasks B2-B6) for this
+// Filesystem — off by default. Unlike archived/size, this is a
+// mount-time, local, in-memory choice, not a stored master-block
+// property: per ARCHITECTURE.md's Locking section, Locking has real
+// costs (an extra .lock object, and B5's escalation using it) "most
+// mounts won't use," so it's opt-in per mount, not a shared,
+// persisted-per-filesystem setting every other mount of the same
+// filesystem is forced into. Call this any time after New, before
+// relying on locking being available — there's no ordering requirement
+// relative to Bootstrap.
+func (f *Filesystem) EnableLocking(enabled bool) {
+	f.lockingEnabled = enabled
 }
 
 // RootKey returns the block key identifying this filesystem's root:

@@ -36,6 +36,7 @@ func main() {
 	secretKey := fset.String("secret-key", "minioadmin", "secret key")
 	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
 	size := fset.Uint64("size", 100<<30, "declared filesystem size in bytes, for df (only used the first time a filesystem name is created)")
+	locking := fset.Bool("locking", false, "enable the Locking feature (flock/fcntl); off by default, per ARCHITECTURE.md's Locking section")
 	debug := fset.Bool("debug", false, "log every FUSE operation")
 	if err := fset.Parse(os.Args[2:]); err != nil {
 		os.Exit(2)
@@ -60,6 +61,7 @@ func main() {
 	if err := fsys.Bootstrap(ctx, *size, 0755, 0, 0); err != nil {
 		log.Fatalf("bootstrap filesystem %q: %v", *fsName, err)
 	}
+	fsys.EnableLocking(*locking)
 
 	root := fuseserver.Root(fsys)
 	server, err := fs.Mount(mountpoint, root, &fs.Options{

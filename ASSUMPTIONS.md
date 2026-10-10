@@ -366,3 +366,49 @@ helpers, or investigating the container module's readiness check
 directly, rather than continuing to treat it as background noise.
 
 ---
+
+## B7: where the flag lives, and whether it also gates B5's escalation
+
+**Question I'd have asked:** should the Locking on/off flag be a
+stored, persisted master-block property (like `archived`) or a local,
+in-memory, per-mount setting? And does disabling it also disable task
+B5's internal escalation (which uses the same `.lock` object), or only
+the public B2-B4 API real applications would call?
+
+**Assumed:**
+- `Filesystem.EnableLocking(bool)` is a plain in-memory setter, not
+  threaded through `Bootstrap` or stored in the master block.
+  Rationale: ARCHITECTURE.md calls this "a mount-time flag," and unlike
+  `archived`/`size` (real, shared properties of the filesystem itself),
+  whether *this* mount wants to pay Locking's costs is a per-mount
+  choice — forcing it into shared, persisted state would mean one
+  mount's choice dictates every other concurrent mount of the same
+  filesystem.
+- Disabling Locking disables *both* the public API (`TryAcquireLockRange`
+  /`AcquireLockRange`/`ReleaseLockRange`/`RenewLockRange`, all returning
+  the new `ErrLockingDisabled`) *and* `OpenFile.Flush`'s own B5
+  escalation and B6 conflict-check — not just the former. Rationale:
+  B5's escalation and B6's check both read/write the exact same
+  `.lock` object the real feature uses, so "opting out of Locking's
+  costs" has to mean opting out of all of it; with Locking off, exhausted
+  plain-retry (task B1) simply returns `ErrWriteContention` directly,
+  exactly as it did before task B5 existed. `CheckRangeLockConflict`
+  short-circuits to `nil` (not an error) when disabled, matching "there
+  is nothing a disabled mount could ever need to respect" rather than
+  surfacing `ErrLockingDisabled` from a call site (`Flush`) that isn't
+  itself an explicit lock request.
+- `ErrLocked` (previously unmapped, falling through to a generic EIO in
+  `fuseserver.errnoFromErr`) now maps to `EAGAIN`, matching real
+  `flock(LOCK_NB)`'s `EWOULDBLOCK`/`EAGAIN` convention — done alongside
+  B7 since B6's refusal path needed *some* real errno and this was the
+  obvious match, not because B7 itself required it.
+
+**Check this if:** a real deployment wants Locking enabled on some
+mounts of a filesystem but not others and finds the resulting "lock
+placed by an opted-in mount isn't visible as 'the feature is on' to an
+opted-out mount, but its data in `.lock` is still there and still
+respected if that mount ever turns Locking on" behavior surprising —
+that's the direct consequence of this being per-mount, local state
+rather than shared.
+
+---

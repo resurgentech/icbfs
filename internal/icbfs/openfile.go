@@ -270,6 +270,14 @@ func (o *OpenFile) Flush(ctx context.Context) (Attr, error) {
 		}
 	}
 
+	if !o.fsys.lockingEnabled {
+		// Task B7: escalation itself uses the Locking feature (the
+		// same .lock object, task B5), so a mount that opted out of
+		// Locking's costs doesn't get it either — plain CAS-retry
+		// exhaustion is simply terminal, exactly as it was before
+		// task B5 existed.
+		return Attr{}, ErrWriteContention
+	}
 	if err := o.fsys.acquireEscalationLockRange(ctx, o.key, start, end, o.holder, lockEscalationLeaseTTL); err != nil {
 		return Attr{}, ErrWriteContention
 	}

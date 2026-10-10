@@ -123,6 +123,10 @@ func errnoFromErr(err error) syscall.Errno {
 		return syscall.EROFS
 	case errors.Is(err, icbfs.ErrWriteContention):
 		return syscall.EAGAIN
+	case errors.Is(err, icbfs.ErrLocked):
+		return syscall.EAGAIN
+	case errors.Is(err, icbfs.ErrLockingDisabled):
+		return syscall.ENOSYS
 	default:
 		return syscall.EIO
 	}

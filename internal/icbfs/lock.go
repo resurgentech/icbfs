@@ -26,6 +26,14 @@ var ErrLocked = errors.New("lock is currently held")
 // it in the meantime, or it was never held at all under that holder.
 var ErrNotLockHolder = errors.New("not the current lock holder")
 
+// ErrLockingDisabled is returned by every real (non-escalation) lock
+// operation when this Filesystem wasn't opted into the Locking feature
+// via EnableLocking (task B7) — ARCHITECTURE.md's Locking section
+// requires a caller that thinks it's holding a lock when it isn't to
+// get a clear error, not a silent no-op, so this is returned rather
+// than treating every acquire as if it always trivially succeeded.
+var ErrLockingDisabled = errors.New("locking is not enabled for this mount")
+
 // maxLockCASRetries bounds the CAS retry loop in the Acquire/Release/
 // Renew functions below — same shape of bound as maxTreeRetries, a
 // separate constant since it's an unrelated contention domain (lock
@@ -100,6 +108,9 @@ func rangesOverlap(aStart, aEnd, bStart, bEnd int64) bool {
 // claim ever wins) comes from the CAS write below, not from whose
 // clock set expires_at.
 func (f *Filesystem) TryAcquireLockRange(ctx context.Context, key string, start, end int64, holder string, ttl time.Duration) error {
+	if !f.lockingEnabled {
+		return ErrLockingDisabled
+	}
 	return f.tryAcquireLockRange(ctx, key, start, end, holder, ttl, false)
 }
 
@@ -174,6 +185,9 @@ func (f *Filesystem) tryAcquireLockRange(ctx context.Context, key string, start,
 // no-op, not an error. Other ranges this or any other holder holds on
 // the same file are untouched.
 func (f *Filesystem) ReleaseLockRange(ctx context.Context, key string, start, end int64, holder string) error {
+	if !f.lockingEnabled {
+		return ErrLockingDisabled
+	}
 	lockKey := lockObjectKey(key)
 	for attempt := 0; attempt < maxLockCASRetries; attempt++ {
 		cur, obj, err := readLockRanges(ctx, f.store, lockKey)
@@ -226,6 +240,9 @@ func (f *Filesystem) ReleaseLockRange(ctx context.Context, key string, start, en
 // your lease already expired and was stolen must fail, not resurrect a
 // claim you no longer actually hold.
 func (f *Filesystem) RenewLockRange(ctx context.Context, key string, start, end int64, holder string, ttl time.Duration) error {
+	if !f.lockingEnabled {
+		return ErrLockingDisabled
+	}
 	lockKey := lockObjectKey(key)
 	for attempt := 0; attempt < maxLockCASRetries; attempt++ {
 		cur, obj, err := readLockRanges(ctx, f.store, lockKey)
@@ -295,6 +312,9 @@ const (
 // real win, without changing the fallback behavior here, which must
 // stay correct on its own regardless.
 func (f *Filesystem) AcquireLockRange(ctx context.Context, key string, start, end int64, holder string, ttl time.Duration) error {
+	if !f.lockingEnabled {
+		return ErrLockingDisabled
+	}
 	return f.acquireLockRange(ctx, key, start, end, holder, ttl, false)
 }
 
@@ -345,6 +365,14 @@ func (f *Filesystem) acquireLockRange(ctx context.Context, key string, start, en
 // refuse writes that tasks B1/B5 already guarantee converge on their
 // own shortly after.
 func (f *Filesystem) CheckRangeLockConflict(ctx context.Context, key string, start, end int64, selfHolder string) error {
+	if !f.lockingEnabled {
+		// Task B7: Locking's real costs (an extra round trip here, on
+		// every write) are opt-in — a mount that never opted in never
+		// writes a real application lock either, via
+		// TryAcquireLockRange's own gate above, so there is nothing
+		// for this mount to ever need to respect.
+		return nil
+	}
 	cur, _, err := readLockRanges(ctx, f.store, lockObjectKey(key))
 	if err != nil {
 		return err

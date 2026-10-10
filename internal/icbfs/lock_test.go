@@ -24,6 +24,7 @@ func createLockTestFile(t *testing.T, fsys *Filesystem) string {
 // lease's TTL would have expired on its own).
 func TestLockAcquireReleaseRoundTrip(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
 	ctx := context.Background()
 	key := createLockTestFile(t, fsys)
 
@@ -43,6 +44,7 @@ func TestLockAcquireReleaseRoundTrip(t *testing.T) {
 // is rejected.
 func TestLockSecondAcquireWhileValidIsRejected(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
 	ctx := context.Background()
 	key := createLockTestFile(t, fsys)
 
@@ -59,6 +61,7 @@ func TestLockSecondAcquireWhileValidIsRejected(t *testing.T) {
 // explicit release (expired-lease steal).
 func TestLockAcquireAfterExpiryStealSucceeds(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
 	ctx := context.Background()
 	key := createLockTestFile(t, fsys)
 
@@ -78,6 +81,7 @@ func TestLockAcquireAfterExpiryStealSucceeds(t *testing.T) {
 // condition on) is still race-free, not just the renew/steal paths.
 func TestLockConcurrentAcquireOnFreeLockHasExactlyOneWinner(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
 	ctx := context.Background()
 	key := createLockTestFile(t, fsys)
 
@@ -114,6 +118,7 @@ func TestLockConcurrentAcquireOnFreeLockHasExactlyOneWinner(t *testing.T) {
 // cannot renew a lease it doesn't hold.
 func TestLockRenewOnlySucceedsForCurrentHolder(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
 	ctx := context.Background()
 	key := createLockTestFile(t, fsys)
 
@@ -140,6 +145,7 @@ func TestLockRenewOnlySucceedsForCurrentHolder(t *testing.T) {
 // steal) cannot release someone else's active claim.
 func TestLockReleaseFailsForNonHolder(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
 	ctx := context.Background()
 	key := createLockTestFile(t, fsys)
 
@@ -160,11 +166,41 @@ func TestLockReleaseFailsForNonHolder(t *testing.T) {
 // no-op rather than an error.
 func TestLockReleaseOfAlreadyFreeLockIsNoop(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
 	ctx := context.Background()
 	key := createLockTestFile(t, fsys)
 
 	if err := fsys.ReleaseLock(ctx, key, "holder-a"); err != nil {
 		t.Fatalf("release of never-acquired lock = %v, want nil", err)
+	}
+}
+
+// TestLockingDisabledByDefaultAndGatedByEnableLocking covers B7's
+// "Done when": lock acquisition fails cleanly when the mount wasn't
+// started with locking enabled, and succeeds once it was.
+func TestLockingDisabledByDefaultAndGatedByEnableLocking(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	key := createLockTestFile(t, fsys)
+
+	if err := fsys.TryAcquireLock(ctx, key, "holder-a", 30*time.Second); !errors.Is(err, ErrLockingDisabled) {
+		t.Fatalf("acquire with locking not enabled = %v, want ErrLockingDisabled", err)
+	}
+	if err := fsys.ReleaseLock(ctx, key, "holder-a"); !errors.Is(err, ErrLockingDisabled) {
+		t.Fatalf("release with locking not enabled = %v, want ErrLockingDisabled", err)
+	}
+	if err := fsys.RenewLock(ctx, key, "holder-a", 30*time.Second); !errors.Is(err, ErrLockingDisabled) {
+		t.Fatalf("renew with locking not enabled = %v, want ErrLockingDisabled", err)
+	}
+	blockCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := fsys.AcquireLock(blockCtx, key, "holder-a", 30*time.Second); !errors.Is(err, ErrLockingDisabled) {
+		t.Fatalf("blocking acquire with locking not enabled = %v, want ErrLockingDisabled", err)
+	}
+
+	fsys.EnableLocking(true)
+	if err := fsys.TryAcquireLock(ctx, key, "holder-a", 30*time.Second); err != nil {
+		t.Fatalf("acquire after EnableLocking(true) = %v, want nil", err)
 	}
 }
 
@@ -176,6 +212,7 @@ func TestLockReleaseOfAlreadyFreeLockIsNoop(t *testing.T) {
 // reacting to the release via polling, not just waiting out the lease).
 func TestBlockingAcquireCompletesPromptlyAfterRelease(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
 	ctx := context.Background()
 	key := createLockTestFile(t, fsys)
 
@@ -217,6 +254,7 @@ func TestBlockingAcquireCompletesPromptlyAfterRelease(t *testing.T) {
 // different holders.
 func TestByteRangeLocksNonOverlappingRangesCoexist(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
 	ctx := context.Background()
 	key := createLockTestFile(t, fsys)
 
@@ -234,6 +272,7 @@ func TestByteRangeLocksNonOverlappingRangesCoexist(t *testing.T) {
 // that range's lease expires.
 func TestByteRangeLocksOverlappingRangeRejectedThenSucceedsAfterExpiry(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
 	ctx := context.Background()
 	key := createLockTestFile(t, fsys)
 
@@ -254,6 +293,7 @@ func TestByteRangeLocksOverlappingRangeRejectedThenSucceedsAfterExpiry(t *testin
 // same "Done when" requirement via explicit release instead of expiry.
 func TestByteRangeLocksOverlappingRangeSucceedsAfterRelease(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
 	ctx := context.Background()
 	key := createLockTestFile(t, fsys)
 
@@ -278,6 +318,7 @@ func TestByteRangeLocksOverlappingRangeSucceedsAfterRelease(t *testing.T) {
 // disturbing the others.
 func TestByteRangeLocksSameHolderCanHoldMultipleDisjointRanges(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
 	ctx := context.Background()
 	key := createLockTestFile(t, fsys)
 
@@ -311,6 +352,7 @@ func TestByteRangeLocksSameHolderCanHoldMultipleDisjointRanges(t *testing.T) {
 // is done, when the lock is never released.
 func TestBlockingAcquireRespectsContextDeadline(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
 	ctx := context.Background()
 	key := createLockTestFile(t, fsys)
 
