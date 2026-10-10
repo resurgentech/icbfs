@@ -564,40 +564,44 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 // Create makes a new, empty regular file named name inside dirKey. The
 // content object carries no attribute metadata at all — mode/uid/gid/
 // nlink live entirely in the new metadataObjectKey side object.
-func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid, gid uint32) (string, Attr, error) {
+// Create's third return value is the new (empty) content object's
+// ETag — see ReadFile/WriteFile's doc comments on why callers need it
+// (seeding an OpenFile without a redundant read-back of what was just
+// written).
+func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid, gid uint32) (string, Attr, string, error) {
 	if err := f.checkWritable(); err != nil {
-		return "", Attr{}, err
+		return "", Attr{}, "", err
 	}
 	newUUID, err := f.newKey()
 	if err != nil {
-		return "", Attr{}, err
+		return "", Attr{}, "", err
 	}
 	contentObj, err := f.store.Put(ctx, newUUID, bytes.NewReader(nil), nil, "")
 	if err != nil {
-		return "", Attr{}, err
+		return "", Attr{}, "", err
 	}
 
 	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1}
 	metaData, err := encodeFileMetadata(attr)
 	if err != nil {
 		_ = f.store.Delete(ctx, newUUID, "")
-		return "", Attr{}, err
+		return "", Attr{}, "", err
 	}
 	metaObj, err := f.store.Put(ctx, metadataObjectKey(newUUID), bytes.NewReader(metaData), nil, "")
 	if err != nil {
 		_ = f.store.Delete(ctx, newUUID, "")
-		return "", Attr{}, err
+		return "", Attr{}, "", err
 	}
 
 	if err := f.insertEntry(ctx, dirKey, name, newUUID, TypeFile); err != nil {
 		_ = f.store.Delete(ctx, newUUID, "")
 		_ = f.store.Delete(ctx, metadataObjectKey(newUUID), "")
-		return "", Attr{}, err
+		return "", Attr{}, "", err
 	}
 	attr.Btime = Btime(newUUID)
 	attr.Mtime = contentObj.LastModified
 	attr.Ctime = metaObj.LastModified
-	return newUUID, attr, nil
+	return newUUID, attr, contentObj.ETag, nil
 }
 
 // Symlink creates a new symlink named name inside dirKey, pointing at
@@ -841,7 +845,11 @@ func (f *Filesystem) Rmdir(ctx context.Context, dirKey, name string) error {
 
 // ReadFile returns a regular file's whole content and its attributes,
 // fetching the content and metadataObjectKey objects concurrently.
-func (f *Filesystem) ReadFile(ctx context.Context, key string) ([]byte, Attr, error) {
+// ReadFile also returns the content object's current ETag, so a caller
+// about to edit-then-write-back (see OpenFile) can condition that write
+// on not having changed since this read — see ARCHITECTURE.md's Locking
+// section and ROADMAP.md's task B1.
+func (f *Filesystem) ReadFile(ctx context.Context, key string) ([]byte, Attr, string, error) {
 	var data []byte
 	var metaData []byte
 	var metaLastModified time.Time
@@ -875,16 +883,16 @@ func (f *Filesystem) ReadFile(ctx context.Context, key string) ([]byte, Attr, er
 	wg.Wait()
 
 	if contentErr != nil {
-		return nil, Attr{}, contentErr
+		return nil, Attr{}, "", contentErr
 	}
 	if metaErr != nil {
-		return nil, Attr{}, metaErr
+		return nil, Attr{}, "", metaErr
 	}
 	attr, err := combineFileAttr(key, metaData, metaLastModified, contentObj)
 	if err != nil {
-		return nil, Attr{}, err
+		return nil, Attr{}, "", err
 	}
-	return data, attr, nil
+	return data, attr, contentObj.ETag, nil
 }
 
 // WriteFile replaces a regular file's whole content. The content object
@@ -892,14 +900,25 @@ func (f *Filesystem) ReadFile(ctx context.Context, key string) ([]byte, Attr, er
 // metadataObjectKey and are untouched by a content write, which is what
 // makes the content object's own LastModified a correct, uncorrupted
 // mtime (see Attr's doc comment).
-func (f *Filesystem) WriteFile(ctx context.Context, key string, data []byte) (Attr, error) {
+//
+// ifMatch conditions the write on the content object's current ETag,
+// exactly like objstore.Store.Put's own ifMatch — empty means
+// unconditional. Returns the new ETag on success, so a caller doing a
+// sequence of writes (see OpenFile) can condition the next one on this
+// one without a redundant read-back.
+func (f *Filesystem) WriteFile(ctx context.Context, key string, data []byte, ifMatch string) (Attr, string, error) {
 	if err := f.checkWritable(); err != nil {
-		return Attr{}, err
+		return Attr{}, "", err
 	}
-	if _, err := f.store.Put(ctx, key, bytes.NewReader(data), nil, ""); err != nil {
-		return Attr{}, err
+	contentObj, err := f.store.Put(ctx, key, bytes.NewReader(data), nil, ifMatch)
+	if err != nil {
+		return Attr{}, "", err
 	}
-	return f.statFile(ctx, key)
+	attr, err := f.statFile(ctx, key)
+	if err != nil {
+		return Attr{}, "", err
+	}
+	return attr, contentObj.ETag, nil
 }
 
 // SetAttr applies the given field changes (any of which may be nil/unset)
@@ -941,14 +960,20 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 	}
 
 	if size != nil {
-		data, _, err := f.ReadFile(ctx, key)
+		data, _, _, err := f.ReadFile(ctx, key)
 		if err != nil {
 			return Attr{}, err
 		}
 		if *size != int64(len(data)) {
 			resized := make([]byte, *size)
 			copy(resized, data)
-			if _, err := f.WriteFile(ctx, key, resized); err != nil {
+			// Unconditional: ftruncate's "last writer wins" is an
+			// accepted simplification here, same as directory SetAttr
+			// above — task B1's CAS protection is for OpenFile's
+			// buffered-write path (the common case of a process
+			// actually editing a file), not every call that happens to
+			// replace a file's content.
+			if _, _, err := f.WriteFile(ctx, key, resized, ""); err != nil {
 				return Attr{}, err
 			}
 		}

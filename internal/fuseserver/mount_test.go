@@ -436,7 +436,7 @@ func TestMountArchivedFilesystemRejectsWritesButAllowsReads(t *testing.T) {
 	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
-	if _, _, err := fsys.Create(ctx, fsys.RootKey(), "before-archive.txt", 0644, 0, 0); err != nil {
+	if _, _, _, err := fsys.Create(ctx, fsys.RootKey(), "before-archive.txt", 0644, 0, 0); err != nil {
 		t.Fatalf("create before archive: %v", err)
 	}
 	if err := icbfs.Archive(ctx, store, "archived-mount-test"); err != nil {

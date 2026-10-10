@@ -143,3 +143,42 @@ a real instance" verification this fix got against MinIO before
 trusting it.
 
 ---
+
+## B1: retry budget, exhaustion error/errno, and where the shared logic lives
+
+**Question I'd have asked:** what exactly should bound a content
+write's CAS retry loop, what should happen when that bound is
+exhausted (before task B5's lock-escalation exists to catch it), and
+where should the buffering/retry logic itself live?
+
+**Assumed:**
+- `contentWriteRetryBudget = 5 * time.Second` (wall-clock, not an
+  attempt count) — ROADMAP.md's task B1 explicitly suggested a time
+  budget over a count for exactly this reason (large vs. small files
+  getting comparable retry *windows*, not comparable attempt counts),
+  but didn't name a number. 5 seconds is an arbitrary, unvalidated
+  round value.
+- Exhaustion returns a new sentinel, `icbfs.ErrWriteContention`,
+  mapped to `syscall.EAGAIN` in `fuseserver.errnoFromErr`. Rationale:
+  EAGAIN ("resource temporarily unavailable, try again") is the closest
+  POSIX fit for "this didn't succeed because of contention, not because
+  of a real failure" — matches the same errno `flock`'s `LOCK_NB` uses
+  for "currently held," which is the same flavor of condition.
+- The buffering/edit-log/CAS-retry machinery itself
+  (`icbfs.OpenFile`) lives in `internal/icbfs`, not in
+  `internal/fuseserver`. Rationale: ROADMAP.md's task B5 explicitly
+  requires the eventual retry-then-lock-escalation logic to be
+  implemented once and shared across access layers (FUSE today, WinFsp
+  eventually) rather than copy-pasted per driver — putting the
+  buffering/retry step itself here too, not just the future escalation
+  call, means a WinFsp driver gets the whole thing for free by using
+  `OpenFile` the same way `fuseserver.FileHandle` does, rather than
+  reimplementing buffering and only sharing the escalation step.
+
+**Check this if:** 5 seconds turns out to be badly miscalibrated once
+task B5's lock-escalation exists (e.g. it fires so late that users
+perceive a stall, or so early that it escalates to locking in cases
+that would have resolved on their own with one more retry) — this was
+never load-tested, just chosen as a reasonable round number.
+
+---
