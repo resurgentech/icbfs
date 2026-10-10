@@ -1,13 +1,13 @@
 # Roadmap
 
-Concrete development tasks, broken out by workstream. Unlike
-`MISSING_FEATURES.md`, everything in this document is already decided —
-this is sequencing and task breakdown, not open design. "Done when" is
-the acceptance bar for each task — write the test first if that's
-practical, same as the rest of this codebase's testing style (real MinIO
-via testcontainers-go, not mocks).
+Concrete development tasks, broken out by workstream, implementing the
+design already settled in `ARCHITECTURE.md` — this is sequencing and
+task breakdown, not open design. "Done when" is the acceptance bar for
+each task — write the test first if that's practical, same as the rest
+of this codebase's testing style (real MinIO via testcontainers-go, not
+mocks).
 
-Four workstreams so far:
+Five workstreams so far:
 
 - **Part A: Serialization — JSON to Protobuf.** All of this project's own
   object bodies (directory/root blocks, the not-yet-built `.metadata`
@@ -37,6 +37,14 @@ Four workstreams so far:
   for MinIO, on Part A's Protobuf toolchain not being required at all —
   this part's wire format is each backend's own event schema, not
   something icbfs defines.
+- **Part F: WinFsp driver and Windows compatibility.** Everything in
+  `ARCHITECTURE.md`'s "Windows compatibility: primary mode" section has
+  zero code behind it today — this part builds the WinFsp driver itself
+  (the largest single item in this whole roadmap) and wires the
+  already-decided primary-mode fields into it. Parts B and C each have
+  a task that's "blocked on the WinFsp driver existing" (Part B's task
+  9, Part C's task C3) — those are this part, not separately scoped
+  tasks of their own.
 
 ---
 
@@ -196,7 +204,7 @@ migrate from either, same situation as `.metadata`.
 
 ---
 
-## 1. Content writes become CAS-protected
+### 1. Content writes become CAS-protected
 
 Right now `Filesystem.WriteFile` does an unconditional `Put` (`ifMatch:
 ""`). This task makes it conditional, with retry-and-reapply on
@@ -230,7 +238,7 @@ file concurrently).
   edits survive in the final content — this test should fail against
   today's code and pass after this task.
 
-## 2. `.lock` object: non-blocking acquire/release/renew, whole-file only
+### 2. `.lock` object: non-blocking acquire/release/renew, whole-file only
 
 The core primitive, scoped to whole-file first — byte ranges come later
 (task 5) once the simple case is solid.
@@ -260,7 +268,7 @@ The core primitive, scoped to whole-file first — byte ranges come later
   acquire attempts against the same free lock result in exactly one
   winner.
 
-## 3. Blocking acquisition via polling
+### 3. Blocking acquisition via polling
 
 Layered on top of task 2's non-blocking primitive.
 
@@ -277,7 +285,7 @@ Layered on top of task 2's non-blocking primitive.
   expired on its own — proving it's reacting to the release, not just
   waiting out the lease.
 
-## 4. Byte-range locks
+### 4. Byte-range locks
 
 Generalizes task 2's single-holder body to a list, with overlap
 checking.
@@ -293,7 +301,7 @@ checking.
   is rejected while the conflicting range is held; the same request
   succeeds once that range's lease expires or is released.
 
-## 5. Escalation wiring: content-write retry exhaustion → lock → retry
+### 5. Escalation wiring: content-write retry exhaustion → lock → retry
 
 Connects task 1 to tasks 2-4.
 
@@ -315,7 +323,7 @@ Connects task 1 to tasks 2-4.
   escalation the same test would be expected to show one writer
   thrashing against the other's retries.
 
-## 6. Client-side stronger-than-advisory enforcement
+### 6. Client-side stronger-than-advisory enforcement
 
 The diff-against-what-I-read-then-check-locks mechanism from
 ARCHITECTURE.md, built on everything above.
@@ -338,7 +346,7 @@ ARCHITECTURE.md, built on everything above.
   write to a genuinely non-overlapping range from the second client
   succeeds normally while the lock is still held.
 
-## 7. Mount-time opt-in flag
+### 7. Mount-time opt-in flag
 
 - A CLI flag (`cmd/icbfs`, e.g. `--locking`) and the equivalent for
   whatever WinFsp's mount invocation ends up being, defaulting to off.
@@ -350,7 +358,7 @@ ARCHITECTURE.md, built on everything above.
 - **Done when:** a test confirms lock acquisition fails cleanly when
   the mount wasn't started with the flag, and succeeds when it was.
 
-## 8. FUSE wiring
+### 8. FUSE wiring
 
 - Investigate go-fuse's actual API surface for `flock`/`fcntl` before
   assuming a specific interface shape — not yet checked against the
@@ -362,24 +370,24 @@ ARCHITECTURE.md, built on everything above.
   through the actual kernel syscalls against a real mount, not just the
   `Filesystem`-level API directly.
 
-## 9. WinFsp wiring
+### 9. WinFsp wiring
 
-Blocked on the WinFsp driver existing at all (see `MISSING_FEATURES.md`
-— it doesn't yet). Once it does, wire its lock-related callbacks onto
-the same tasks 2-6 primitives used by FUSE. Not further broken down
-here since the driver itself isn't scoped yet.
+Blocked on the WinFsp driver existing at all — see Part F. Once it
+does, wire its lock-related callbacks onto the same tasks 2-6 primitives
+used by FUSE. Not further broken down here since Part F owns scoping
+the driver itself.
 
 ---
 
 ## Part C: Permission enforcement
 
-Implements `MISSING_FEATURES.md`'s "Permission enforcement" finding 2.
-Finding 1 (go-fuse's `NullPermissions` default silently rewriting a
-genuinely-stored `0` mode back to 644/755) is already fixed. Finding 2
-is not: mode bits are correctly stored and correctly reported via
-`stat()`, but nothing currently gates actual access against them — a
-`chmod 400` (read-only) file can still be written by its own owner,
-verified directly against a real mount, not assumed.
+Mode bits are correctly stored and correctly reported via `stat()`, but
+nothing currently gates actual access against them — a `chmod 400`
+(read-only) file can still be written by its own owner, verified
+directly against a real mount, not assumed. (A related, already-fixed
+bug: go-fuse's `NullPermissions` default used to silently rewrite a
+genuinely-stored `0` mode back to 644/755 on every `stat()` — that one's
+done; this part is about the separate, still-open enforcement gap.)
 
 ### C1. Enable kernel-level enforcement via `default_permissions`
 
@@ -422,11 +430,11 @@ verified directly against a real mount, not assumed.
 
 Windows doesn't use POSIX mode bits as its native enforcement
 mechanism — it's ACL/security-descriptor-based. Once the WinFsp driver
-exists (see `MISSING_FEATURES.md`), it needs its own enforcement path:
-real ACL checking if `ARCHITECTURE.md`'s primary-mode ACL design has
-been built by then, or at minimum an approximated mode-bit check
-equivalent to C1's for a POSIX-primary filesystem mounted on Windows.
-Not further broken down here since the driver itself isn't scoped yet.
+exists (Part F), it needs its own enforcement path: real ACL checking
+if `ARCHITECTURE.md`'s primary-mode ACL design has been built by then
+(see Part F), or at minimum an approximated mode-bit check equivalent to
+C1's for a POSIX-primary filesystem mounted on Windows. Not further
+broken down here since Part F owns scoping the driver itself.
 
 ---
 
@@ -630,3 +638,78 @@ prefix — build D's prefixing first).
   documented as a manual, not automated, gap.
 - **Done when:** the consumption logic has a passing test against a
   fake queue, same bar as E5.
+
+---
+
+## Part F: WinFsp driver and Windows compatibility
+
+Implements `ARCHITECTURE.md`'s "Windows compatibility: primary mode"
+section. The largest single workstream in this roadmap — everything
+else Windows-related (Part B's task 9, Part C's task C3) is blocked on
+F1 specifically, not separately scoped.
+
+### F1. WinFsp driver skeleton
+
+- Pick and verify a maintained Go binding for WinFsp (don't assume one
+  sight-unseen, same practice as checking go-fuse's actual API before
+  relying on it).
+- Mirror `internal/fuseserver`'s shape: a node type wrapping
+  `icbfs.Filesystem`, implementing WinFsp's callback interfaces for the
+  same basic operation set already proven on the FUSE side (lookup,
+  getattr, setattr, readdir, create, open, read, write, unlink, rmdir,
+  symlink, readlink, link).
+- **A real environment gap, worth naming plainly rather than assumed
+  away:** this development environment is Linux-only. A real WinFsp
+  mount test needs an actual Windows machine or VM — the same category
+  of gap as Part E's "no real Azure/AWS account here," just for the
+  driver itself rather than one feature of it.
+- **Done when:** basic file lifecycle (create/read/write/mkdir/rmdir)
+  works through a real WinFsp mount on an actual Windows environment —
+  not simulated, not assumed from the FUSE driver's equivalent passing.
+
+### F2. Primary-mode flag
+
+- Store whether a filesystem is primary-Windows or primary-POSIX, set
+  once at creation and immutable afterward — add this to the master
+  block's `FilesystemEntry` (Part D) or the root block; either works,
+  pick one and be consistent.
+- **Done when:** creating a filesystem lets the caller specify primary
+  mode, and it's correctly retrievable afterward.
+
+### F3. Reserved-name/character enforcement
+
+- For a primary-Windows filesystem: `Create`/`Mkdir`/`Symlink`/`Link`
+  reject Windows-reserved names and characters outright
+  (`< > : " / \ | ? *`, trailing space/period, `CON`/`AUX`/`COM1`...).
+- **The primary-POSIX behavior is currently only an inference in
+  `ARCHITECTURE.md`** ("presumably allow the write and handle
+  presentation via escaping on the Windows access path"), not a
+  confirmed decision — this task includes actually deciding it, not
+  assuming the inference holds just because it was written down.
+- **Done when:** tests cover both primary modes' actual behavior for a
+  reserved name, not just the Windows-primary rejection case.
+
+### F4. Windows file attribute bits
+
+- Hidden/System/ReadOnly/Archive — storage (likely another entry in
+  `.metadata`'s `xattrs` map, consistent with how ACLs landed there) and
+  wiring to WinFsp's `FILE_ATTRIBUTE_*` reporting/setting.
+- **Done when:** round-trips correctly through a real WinFsp mount.
+
+### F5. Delete/rename-on-open-file emulation
+
+- Windows's pending-delete and share-mode semantics around a file open
+  elsewhere, emulated at the WinFsp driver layer per `ARCHITECTURE.md`
+  — not a core object-model change.
+- **Done when:** tests cover deleting/renaming a file that's open
+  elsewhere behaving per Windows semantics, against a real mount.
+
+### F6. ACL wiring
+
+- The `xattrs` map itself is built in Part A's task A4 (`.metadata`'s
+  Protobuf schema); this task is specifically about WinFsp reading/
+  writing the `windows.acl` entry via real security-descriptor queries,
+  and (if `getfacl`/`setfacl`-style POSIX ACL support is ever built on
+  the FUSE side) the `system.posix_acl_access` entry correspondingly.
+- **Done when:** a real security descriptor round-trips through a real
+  WinFsp mount.

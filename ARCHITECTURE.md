@@ -217,9 +217,38 @@ Field size: mode/uid/gid/nlink easily fit in a few hundred bytes even as
 a small encoded record — no cap exists now that the ceiling is the
 content-free `.metadata` object's own size, not S3's 2KB/Azure's ~8KB
 native-metadata limits, which was the original constraint this design
-was built under. Whether extended attributes and Windows ACLs also live
-in `.metadata` or their own object is not yet decided — see
-`MISSING_FEATURES.md`.
+was built under.
+
+**Extended attributes and ACLs live in `.metadata` too, as a generic
+map, not a separate object or a separate schema field per kind.**
+`.metadata` gets one more field: `xattrs: map<string, bytes>`. On Linux
+this needs no special-casing at all — a POSIX ACL isn't a distinct kind
+of thing from an xattr in the first place; `getfacl`/`setfacl` already
+just read and write the well-known key `system.posix_acl_access` (and
+`system.posix_acl_default` for a directory), so storing xattrs this way
+*is* storing POSIX ACLs this way, for free. Windows ACLs (security
+descriptors — owner SID, group SID, DACL) are a genuinely different,
+Windows-specific binary format, but they go in the exact same map, under
+a reserved key like `windows.acl` — not a separate field, not a separate
+object. The storage layer never needs to understand what any of these
+bytes mean; it just reliably stores and CAS-protects named byte strings,
+exactly like it already does for mode/uid/gid. All interpretation (what
+`getxattr` should decode, what a security query should return) lives
+entirely in the access layer, which is the only place that knows which
+platform's semantics are actually being asked for.
+
+Why this doesn't get its own object the way `.lock` does: the test that
+justified consolidating mode/uid/gid/nlink into one object was "read
+together by the same caller, change at a similar rate" — xattrs/ACLs
+pass the rate test (they change about as rarely as mode/uid/gid) even
+though they fail the same-caller test (`getxattr`/a security query, not
+plain `stat()`). But at realistic sizes — a few hundred bytes to low
+single-digit KB, and real filesystems cap total xattr storage per file
+around 64KB anyway (ext4's limit, for example) — that's not a second
+network round trip, it's a slightly bigger response body on the *same*
+`GET`/`HEAD` call `.metadata` already needs. Unlike `.lock`'s real
+contention risk under heavy use, there's no comparable cost here to
+justify a separate object.
 
 ## Concurrency: compare-and-swap on writes
 
@@ -600,10 +629,33 @@ Applied:
 - **Alternate Data Streams** — not supported. Technically feasible at
   fairly low cost given the object model (each stream would just be
   another UUID-prefixed blob plus one WinFsp callback), but declined.
+- **Directory junctions / volume mount points** (beyond plain symlinks)
+  — declined as redundant given symlinks + hard links already cover the
+  real use cases.
+- **Device/special files** (block/char devices, sockets, FIFOs) — out of
+  scope from the project's original framing; this was never meant to be
+  a full root filesystem.
 - **A true, strongly-consistent distributed lock service** (a separate
   coordination service like Redis or etcd, the JuiceFS model) — not
   built; see the Locking section above for the self-contained,
   weaker-but-real alternative that *is* planned.
-- **Generic multi-cloud object store abstraction** — only MinIO (S3 API)
-  and Azure Blob are supported.
+- **Generic multi-cloud object store abstraction** — AWS S3, Azure Blob,
+  and MinIO are each supported as named, canonical backends; nothing
+  more generic than that is being built.
+- **Per-user/per-group quotas within one filesystem** — not the same
+  thing as the per-*filesystem* declared capacity the master block
+  already implements (see Multiple filesystems per bucket, above) — that
+  one is built. Finer-grained quota enforcement *within* a filesystem,
+  the traditional multi-user disk-quota sense, is not.
 - **Views and the REST API** — acknowledged as wanted, not yet designed.
+
+**Two small, untested-but-plausibly-fine behaviors, worth naming rather
+than leaving silently unverified:**
+- **`mmap`** — FUSE supports it, and since `FileHandle` already buffers
+  a file's whole content in memory, this plausibly already works with
+  no extra code — not actually tested.
+- **Sparse files** — writing past EOF then reading back will behave
+  correctly under the whole-object write model (the gap just becomes
+  real zero bytes in memory), it's just not space-efficient the way a
+  local filesystem's true sparse-file support is. Not a correctness
+  gap, just a missing optimization.
