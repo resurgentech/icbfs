@@ -124,7 +124,17 @@ func TestLockRenewOnlySucceedsForCurrentHolder(t *testing.T) {
 	ctx := context.Background()
 	key := createLockTestFile(t, fsys)
 
-	if err := fsys.TryAcquireLock(ctx, key, "holder-a", 200*time.Millisecond); err != nil {
+	// expires_at is now anchored to objstore.Store.ServerTime, a real
+	// HTTP Date header with only whole-second resolution — not this
+	// acquire's own initial TTL alone, any value under roughly a
+	// couple of seconds risks already looking expired (by local-clock
+	// comparison) the instant it's written, since the server-observed
+	// "now" it was computed from can be truncated up to just under a
+	// second behind the true moment. 3s comfortably clears that,
+	// consistent with ARCHITECTURE.md's real-world guidance that
+	// leases are "multiple seconds, not milliseconds" anyway.
+	const initialTTL = 3 * time.Second
+	if err := fsys.TryAcquireLock(ctx, key, "holder-a", initialTTL); err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
 	if err := fsys.RenewLock(ctx, key, "holder-a", 30*time.Second); err != nil {
@@ -135,8 +145,9 @@ func TestLockRenewOnlySucceedsForCurrentHolder(t *testing.T) {
 	}
 
 	// The renew should have pushed the lease well past its original
-	// 200ms TTL — confirm a third party still can't steal it yet.
-	time.Sleep(300 * time.Millisecond)
+	// TTL — confirm a third party still can't steal it once that
+	// original TTL has definitely elapsed.
+	time.Sleep(initialTTL + 500*time.Millisecond)
 	if err := fsys.TryAcquireLock(ctx, key, "holder-c", 30*time.Second); err != ErrLocked {
 		t.Fatalf("acquire after renew = %v, want ErrLocked (renew should have extended the lease)", err)
 	}
@@ -278,14 +289,19 @@ func TestByteRangeLocksOverlappingRangeRejectedThenSucceedsAfterExpiry(t *testin
 	ctx := context.Background()
 	key := createLockTestFile(t, fsys)
 
-	if err := fsys.TryAcquireLockRange(ctx, key, 0, 100, "holder-a", 150*time.Millisecond); err != nil {
+	// See TestLockRenewOnlySucceedsForCurrentHolder's comment on why
+	// this needs to clear a couple of seconds, not sub-second: expires_at
+	// is anchored to objstore.Store.ServerTime's whole-second-resolution
+	// Date header now, not purely this TTL.
+	const initialTTL = 3 * time.Second
+	if err := fsys.TryAcquireLockRange(ctx, key, 0, 100, "holder-a", initialTTL); err != nil {
 		t.Fatalf("acquire [0,100): %v", err)
 	}
 	if err := fsys.TryAcquireLockRange(ctx, key, 50, 150, "holder-b", 30*time.Second); err != ErrLocked {
 		t.Fatalf("overlapping acquire [50,150) while [0,100) held = %v, want ErrLocked", err)
 	}
 
-	time.Sleep(250 * time.Millisecond)
+	time.Sleep(initialTTL + 500*time.Millisecond)
 	if err := fsys.TryAcquireLockRange(ctx, key, 50, 150, "holder-b", 30*time.Second); err != nil {
 		t.Fatalf("overlapping acquire after expiry = %v, want nil", err)
 	}

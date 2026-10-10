@@ -21,6 +21,7 @@ import (
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/notify"
+	"github.com/resurgentech/icbfs/internal/testutil"
 	"github.com/resurgentech/icbfs/internal/objstore"
 )
 
@@ -59,9 +60,10 @@ func newMountTestStore(t *testing.T) objstore.Store {
 	})
 
 	const bucket = "icbfs-mount-test"
-	if _, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)}); err != nil {
-		t.Fatalf("create bucket: %v", err)
-	}
+	testutil.RetryUntilReady(t, 10*time.Second, func() error {
+		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+		return err
+	})
 	if _, err := client.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
 		Bucket: aws.String(bucket),
 		VersioningConfiguration: &types.VersioningConfiguration{

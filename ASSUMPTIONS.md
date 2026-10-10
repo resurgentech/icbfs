@@ -498,11 +498,13 @@ helpers, rather than adding a new flag for it — nobody asked for
 "mount as a different user," and the natural default (you own what
 you mount) is the one every other FUSE filesystem uses too.
 
-**Check this if:** a real deployment wants the root owned by someone
-other than the user running `icbfs mount` (e.g. a system service
-running as a dedicated service account that's mounting on behalf of
-other users) — that would need an actual `--uid`/`--gid` override flag,
-not currently exposed.
+**Resolved later, at Jared's direction:** the "check this if" above was
+the wrong call to leave open — a `--uid`/`--gid` override is standard,
+not a hypothetical (sshfs, NFS, and effectively every other FUSE
+filesystem expose exactly this). `cmd/icbfs` now takes `--uid`/`--gid`
+(default `-1`, meaning "use the mounting user's own," same as before),
+only consulted the first time a filesystem name is created, same as
+`--size`.
 
 ---
 

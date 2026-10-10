@@ -101,12 +101,13 @@ func rangesOverlap(aStart, aEnd, bStart, bEnd int64) bool {
 // only the exact (holder, start, end) entry being reacquired here is
 // replaced.
 //
-// expires_at is computed from this acquiring client's own local clock
-// plus ttl, not a server-anchored timestamp — see ASSUMPTIONS.md's B2
-// entry for why, which still applies unchanged to the generalized
-// byte-range form here: the safety property (at most one conflicting
-// claim ever wins) comes from the CAS write below, not from whose
-// clock set expires_at.
+// expires_at is anchored to the object store's clock (objstore.Store.
+// ServerTime, a real HTTP Date header, not a typed field — see its
+// doc comment), not this acquiring client's own local clock, per
+// ARCHITECTURE.md's Locking section: a client's local clock could be
+// skewed relative to other clients, which the store's own clock isn't
+// relative to itself. See ASSUMPTIONS.md's B2 entry for the earlier,
+// client-clock version of this and why it was replaced.
 func (f *Filesystem) TryAcquireLockRange(ctx context.Context, key string, start, end int64, holder string, ttl time.Duration) error {
 	if !f.lockingEnabled {
 		return ErrLockingDisabled
@@ -126,17 +127,33 @@ func (f *Filesystem) TryAcquireLockRange(ctx context.Context, key string, start,
 // check treats them differently.
 func (f *Filesystem) tryAcquireLockRange(ctx context.Context, key string, start, end int64, holder string, ttl time.Duration, escalationOnly bool) error {
 	lockKey := lockObjectKey(key)
+
+	// Fetched once per call, not once per retry attempt below: a real
+	// round trip to the store, so retries (expected to be fast, all
+	// within this one call) reuse it rather than each paying for their
+	// own. This is the value the new claim's expires_at is anchored
+	// to; the expiry *check* against already-held entries a few lines
+	// down deliberately keeps using the local clock (checkNow) — see
+	// ARCHITECTURE.md: clock skew there can only shift when a lease
+	// looks expired by a few seconds, never let two clients both
+	// successfully steal it, so it's accepted rather than also
+	// anchored to the store.
+	serverNow, err := f.store.ServerTime(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire lock %q: %w", key, err)
+	}
+
 	for attempt := 0; attempt < maxLockCASRetries; attempt++ {
 		cur, obj, err := readLockRanges(ctx, f.store, lockKey)
 		if err != nil {
 			return err
 		}
-		now := time.Now()
+		checkNow := time.Now()
 
 		var kept []*pb.LockRange
 		if cur != nil {
 			for _, e := range cur.Ranges {
-				if rangeExpired(e, now) {
+				if rangeExpired(e, checkNow) {
 					continue // pruned: an expired lease is simply gone
 				}
 				if e.Holder == holder {
@@ -153,7 +170,7 @@ func (f *Filesystem) tryAcquireLockRange(ctx context.Context, key string, start,
 			}
 		}
 
-		claim := &pb.LockRange{Start: start, End: end, Holder: holder, ExpiresAtUnixMs: now.Add(ttl).UnixMilli(), EscalationOnly: escalationOnly}
+		claim := &pb.LockRange{Start: start, End: end, Holder: holder, ExpiresAtUnixMs: serverNow.Add(ttl).UnixMilli(), EscalationOnly: escalationOnly}
 		data, err := proto.Marshal(&pb.Lock{Ranges: append(kept, claim)})
 		if err != nil {
 			return err
@@ -244,6 +261,15 @@ func (f *Filesystem) RenewLockRange(ctx context.Context, key string, start, end 
 		return ErrLockingDisabled
 	}
 	lockKey := lockObjectKey(key)
+
+	// See tryAcquireLockRange's identical comment: fetched once per
+	// call, anchors the renewed claim's expires_at to the store's
+	// clock, not the local one.
+	serverNow, err := f.store.ServerTime(ctx)
+	if err != nil {
+		return fmt.Errorf("renew lock %q: %w", key, err)
+	}
+
 	for attempt := 0; attempt < maxLockCASRetries; attempt++ {
 		cur, obj, err := readLockRanges(ctx, f.store, lockKey)
 		if err != nil {
@@ -253,12 +279,12 @@ func (f *Filesystem) RenewLockRange(ctx context.Context, key string, start, end 
 			return ErrNotLockHolder
 		}
 
-		now := time.Now()
+		checkNow := time.Now()
 		var kept []*pb.LockRange
 		found := false
 		escalationOnly := false
 		for _, e := range cur.Ranges {
-			if rangeExpired(e, now) {
+			if rangeExpired(e, checkNow) {
 				continue
 			}
 			if e.Start == start && e.End == end && e.Holder == holder {
@@ -272,7 +298,7 @@ func (f *Filesystem) RenewLockRange(ctx context.Context, key string, start, end 
 			return ErrNotLockHolder
 		}
 
-		renewed := &pb.LockRange{Start: start, End: end, Holder: holder, ExpiresAtUnixMs: now.Add(ttl).UnixMilli(), EscalationOnly: escalationOnly}
+		renewed := &pb.LockRange{Start: start, End: end, Holder: holder, ExpiresAtUnixMs: serverNow.Add(ttl).UnixMilli(), EscalationOnly: escalationOnly}
 		data, err := proto.Marshal(&pb.Lock{Ranges: append(kept, renewed)})
 		if err != nil {
 			return err
