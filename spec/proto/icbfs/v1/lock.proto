@@ -24,6 +24,14 @@ message LockRange {
   // treating it as an external lock would spuriously refuse writes
   // that would otherwise just succeed shortly after.
   bool escalation_only = 5;
+  // shared marks this claim as a POSIX shared/read lock (F_RDLCK) —
+  // multiple different holders may hold overlapping shared claims on
+  // the same range simultaneously. The default (false) is an
+  // exclusive/write lock (F_WRLCK), which conflicts with any other
+  // holder's claim on an overlapping range regardless of that claim's
+  // own type. Two claims only ever coexist on an overlapping range
+  // when both are shared.
+  bool shared = 6;
 }
 
 // Lock is the whole <uuid>.lock object body: every currently-claimed

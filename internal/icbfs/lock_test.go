@@ -557,3 +557,159 @@ func TestBlockingAcquireWithChangeNotificationsEnabledAgainstRealFilesystem(t *t
 		t.Fatal("blocking acquire did not converge within 5s of the release")
 	}
 }
+
+// TestSharedLocksFromDifferentHoldersCoexist is the core POSIX
+// shared/read-lock guarantee: multiple different holders can hold a
+// shared (F_RDLCK-equivalent) claim on the same overlapping range at
+// once — unlike exclusive claims, which never coexist across holders.
+func TestSharedLocksFromDifferentHoldersCoexist(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
+	ctx := context.Background()
+	key := createLockTestFile(t, fsys)
+
+	if err := fsys.TryAcquireSharedLockRange(ctx, key, 0, 100, "reader-a", 30*time.Second); err != nil {
+		t.Fatalf("reader-a shared acquire: %v", err)
+	}
+	if err := fsys.TryAcquireSharedLockRange(ctx, key, 50, 150, "reader-b", 30*time.Second); err != nil {
+		t.Fatalf("reader-b shared acquire on an overlapping range = %v, want nil (shared locks from different holders must coexist)", err)
+	}
+	// A third shared reader on the exact same range as reader-a too.
+	if err := fsys.TryAcquireSharedLockRange(ctx, key, 0, 100, "reader-c", 30*time.Second); err != nil {
+		t.Fatalf("reader-c shared acquire on the same range as reader-a = %v, want nil", err)
+	}
+}
+
+// TestExclusiveLockConflictsWithSharedFromOtherHolder covers both
+// orderings of the shared/exclusive conflict rule: an exclusive
+// request while a shared lock is held elsewhere is rejected, and a
+// shared request while an exclusive lock is held elsewhere is also
+// rejected — only shared-vs-shared is ever compatible.
+func TestExclusiveLockConflictsWithSharedFromOtherHolder(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("exclusive request while shared held", func(t *testing.T) {
+		fsys, _ := newTestFilesystem(t)
+		fsys.EnableLocking(true)
+		key := createLockTestFile(t, fsys)
+		if err := fsys.TryAcquireSharedLockRange(ctx, key, 0, 100, "reader-a", 30*time.Second); err != nil {
+			t.Fatalf("shared acquire: %v", err)
+		}
+		if err := fsys.TryAcquireLockRange(ctx, key, 50, 150, "writer-b", 30*time.Second); err != ErrLocked {
+			t.Fatalf("exclusive acquire overlapping a shared holder = %v, want ErrLocked", err)
+		}
+	})
+
+	t.Run("shared request while exclusive held", func(t *testing.T) {
+		fsys, _ := newTestFilesystem(t)
+		fsys.EnableLocking(true)
+		key := createLockTestFile(t, fsys)
+		if err := fsys.TryAcquireLockRange(ctx, key, 0, 100, "writer-a", 30*time.Second); err != nil {
+			t.Fatalf("exclusive acquire: %v", err)
+		}
+		if err := fsys.TryAcquireSharedLockRange(ctx, key, 50, 150, "reader-b", 30*time.Second); err != ErrLocked {
+			t.Fatalf("shared acquire overlapping an exclusive holder = %v, want ErrLocked", err)
+		}
+	})
+
+	t.Run("exclusive request while exclusive held", func(t *testing.T) {
+		fsys, _ := newTestFilesystem(t)
+		fsys.EnableLocking(true)
+		key := createLockTestFile(t, fsys)
+		if err := fsys.TryAcquireLockRange(ctx, key, 0, 100, "writer-a", 30*time.Second); err != nil {
+			t.Fatalf("exclusive acquire: %v", err)
+		}
+		if err := fsys.TryAcquireLockRange(ctx, key, 50, 150, "writer-b", 30*time.Second); err != ErrLocked {
+			t.Fatalf("exclusive acquire overlapping another exclusive holder = %v, want ErrLocked", err)
+		}
+	})
+}
+
+// TestRenewLockRangePreservesSharedType confirms a renewed shared
+// lock stays shared (a second, different holder can still coexist
+// after the renewal) rather than silently becoming exclusive.
+func TestRenewLockRangePreservesSharedType(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
+	ctx := context.Background()
+	key := createLockTestFile(t, fsys)
+
+	// See TestLockRenewOnlySucceedsForCurrentHolder's comment on why
+	// this needs to clear a couple of seconds: expires_at is anchored
+	// to objstore.Store.ServerTime's whole-second-resolution Date
+	// header now, not purely this TTL.
+	if err := fsys.TryAcquireSharedLockRange(ctx, key, 0, 100, "reader-a", 3*time.Second); err != nil {
+		t.Fatalf("shared acquire: %v", err)
+	}
+	if err := fsys.RenewLockRange(ctx, key, 0, 100, "reader-a", 30*time.Second); err != nil {
+		t.Fatalf("renew: %v", err)
+	}
+	if err := fsys.TryAcquireSharedLockRange(ctx, key, 0, 100, "reader-b", 30*time.Second); err != nil {
+		t.Fatalf("second shared acquire after renewal = %v, want nil (renewal must preserve the shared type)", err)
+	}
+}
+
+// TestFindConflictingLockRangeIsTypeAware covers fcntl(F_GETLK)'s real
+// semantics via FindConflictingLockRange directly: querying as shared
+// does not report another holder's shared claim as a conflict, but
+// querying as exclusive does; either query type reports a real
+// exclusive claim as a conflict.
+func TestFindConflictingLockRangeIsTypeAware(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("shared query against a shared holder", func(t *testing.T) {
+		fsys, _ := newTestFilesystem(t)
+		fsys.EnableLocking(true)
+		key := createLockTestFile(t, fsys)
+		if err := fsys.TryAcquireSharedLockRange(ctx, key, 0, 100, "reader-a", 30*time.Second); err != nil {
+			t.Fatalf("shared acquire: %v", err)
+		}
+		_, conflict, err := fsys.FindConflictingLockRange(ctx, key, 0, 100, "reader-b", true)
+		if err != nil {
+			t.Fatalf("find conflicting: %v", err)
+		}
+		if conflict {
+			t.Fatal("shared query against a shared holder reported a conflict, want none")
+		}
+	})
+
+	t.Run("exclusive query against a shared holder", func(t *testing.T) {
+		fsys, _ := newTestFilesystem(t)
+		fsys.EnableLocking(true)
+		key := createLockTestFile(t, fsys)
+		if err := fsys.TryAcquireSharedLockRange(ctx, key, 0, 100, "reader-a", 30*time.Second); err != nil {
+			t.Fatalf("shared acquire: %v", err)
+		}
+		info, conflict, err := fsys.FindConflictingLockRange(ctx, key, 0, 100, "writer-b", false)
+		if err != nil {
+			t.Fatalf("find conflicting: %v", err)
+		}
+		if !conflict {
+			t.Fatal("exclusive query against a shared holder reported no conflict, want one")
+		}
+		if !info.Shared {
+			t.Fatalf("reported conflict's Shared = %v, want true (it should reflect the real holder's type)", info.Shared)
+		}
+	})
+
+	t.Run("either query against an exclusive holder", func(t *testing.T) {
+		fsys, _ := newTestFilesystem(t)
+		fsys.EnableLocking(true)
+		key := createLockTestFile(t, fsys)
+		if err := fsys.TryAcquireLockRange(ctx, key, 0, 100, "writer-a", 30*time.Second); err != nil {
+			t.Fatalf("exclusive acquire: %v", err)
+		}
+		for _, sharedQuery := range []bool{true, false} {
+			info, conflict, err := fsys.FindConflictingLockRange(ctx, key, 0, 100, "other", sharedQuery)
+			if err != nil {
+				t.Fatalf("find conflicting (sharedQuery=%v): %v", sharedQuery, err)
+			}
+			if !conflict {
+				t.Fatalf("query (shared=%v) against an exclusive holder reported no conflict, want one", sharedQuery)
+			}
+			if info.Shared {
+				t.Fatalf("reported conflict's Shared = %v, want false", info.Shared)
+			}
+		}
+	})
+}
