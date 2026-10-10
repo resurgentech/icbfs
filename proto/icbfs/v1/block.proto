@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package icbfs.v1;
+
+option go_package = "github.com/resurgentech/icbfs/internal/pb";
+
+// EntryType mirrors internal/block.EntryType.
+enum EntryType {
+  ENTRY_TYPE_FILE = 0;
+  ENTRY_TYPE_DIR = 1;
+  ENTRY_TYPE_SYMLINK = 2;
+}
+
+// Entry is one row of a leaf block: a name -> UUID mapping.
+message Entry {
+  string name = 1;
+  string uuid = 2;
+  EntryType type = 3;
+}
+
+// BlockKind mirrors internal/block.Kind.
+enum BlockKind {
+  BLOCK_KIND_LEAF = 0;
+  BLOCK_KIND_INTERNAL = 1;
+}
+
+// Child is one range pointer in an internal node.
+message Child {
+  string min_key = 1;
+  string uuid = 2;
+}
+
+// Block is the wire representation of internal/block.Block: either a
+// Leaf (entries populated) or an Internal node (children populated).
+message Block {
+  BlockKind kind = 1;
+  repeated Entry entries = 2;
+  repeated Child children = 3;
+}

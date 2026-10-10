@@ -3,6 +3,11 @@ package block
 import (
 	"fmt"
 	"testing"
+
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
+
+	"github.com/resurgentech/icbfs/internal/pb"
 )
 
 func TestInsertFindRemoveSortedOrder(t *testing.T) {
@@ -133,5 +138,37 @@ func TestDecodeEmptyIsLeaf(t *testing.T) {
 	}
 	if b.Kind != Leaf || len(b.Entries) != 0 {
 		t.Fatalf("got %+v, want an empty leaf", b)
+	}
+}
+
+// TestDecodeIgnoresUnknownField is the schema-evolution test ROADMAP.md's
+// Protobuf migration task called for: Protobuf's wire format has its own
+// correctness surface JSON didn't (unknown-field handling), so this
+// confirms a message carrying a field this version of the schema doesn't
+// know about still decodes correctly instead of erroring — the forward-
+// compatibility property the whole migration is partly justified by.
+func TestDecodeIgnoresUnknownField(t *testing.T) {
+	known, err := proto.Marshal(&pb.Block{
+		Kind: pb.BlockKind_BLOCK_KIND_LEAF,
+		Entries: []*pb.Entry{
+			{Name: "a.txt", Uuid: "uuid-a", Type: pb.EntryType_ENTRY_TYPE_FILE},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	// Append a field number no current message in this schema defines
+	// (99), simulating a future writer that understands a newer schema
+	// than this reader does.
+	withUnknown := protowire.AppendTag(append([]byte{}, known...), 99, protowire.BytesType)
+	withUnknown = protowire.AppendBytes(withUnknown, []byte("future-field-payload"))
+
+	decoded, err := Decode(withUnknown)
+	if err != nil {
+		t.Fatalf("decode with unknown field: %v", err)
+	}
+	if decoded.Kind != Leaf || len(decoded.Entries) != 1 || decoded.Entries[0].Name != "a.txt" {
+		t.Fatalf("got %+v, want the known fields intact despite the unknown one", decoded)
 	}
 }
