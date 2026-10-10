@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awscreds "github.com/aws/aws-sdk-go-v2/credentials"
@@ -17,8 +18,13 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
+	"github.com/minio/minio-go/v7"
+	miniocreds "github.com/minio/minio-go/v7/pkg/credentials"
+
 	"github.com/resurgentech/icbfs/internal/fuseserver"
 	"github.com/resurgentech/icbfs/internal/icbfs"
+	"github.com/resurgentech/icbfs/internal/notify"
+	"github.com/resurgentech/icbfs/internal/notify/miniosrc"
 	"github.com/resurgentech/icbfs/internal/objstore"
 )
 
@@ -37,7 +43,7 @@ func main() {
 	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
 	size := fset.Uint64("size", 100<<30, "declared filesystem size in bytes, for df (only used the first time a filesystem name is created)")
 	locking := fset.Bool("locking", false, "enable the Locking feature (flock/fcntl); off by default, per ARCHITECTURE.md's Locking section")
-	notify := fset.Bool("notify", false, "enable the Change notifications feature (ROADMAP.md Part E); off by default, same opt-in reasoning as --locking. No backend is wired up to this flag yet (task E4 adds the MinIO one) — mounting with it set has no effect for now.")
+	enableNotify := fset.Bool("notify", false, "enable the Change notifications feature (ROADMAP.md Part E) via MinIO's ListenBucketNotification; off by default, same opt-in reasoning as --locking. Only the MinIO backend (task E4) is wired up here — Azure/AWS S3 adapters (tasks E5/E6) aren't reachable from this flag.")
 	debug := fset.Bool("debug", false, "log every FUSE operation")
 	if err := fset.Parse(os.Args[2:]); err != nil {
 		os.Exit(2)
@@ -68,9 +74,19 @@ func main() {
 		log.Fatalf("bootstrap filesystem %q: %v", *fsName, err)
 	}
 	fsys.EnableLocking(*locking)
-	_ = *notify // no backend wired up yet — see the flag's own usage string
 
-	root := fuseserver.Root(fsys, nil)
+	var source notify.Source
+	if *enableNotify {
+		minioClient, err := newMinIOClient(*endpoint, *accessKey, *secretKey)
+		if err != nil {
+			log.Fatalf("set up notify backend: %v", err)
+		}
+		src := miniosrc.New(ctx, minioClient, *bucket, fsys.Prefix())
+		defer src.Close()
+		source = src
+	}
+
+	root := fuseserver.Root(fsys, source)
 	server, err := fs.Mount(mountpoint, root, &fs.Options{
 		MountOptions: fuseMountOptions(*debug),
 		// Without this, go-fuse silently rewrites a real, stored "0000"
@@ -84,6 +100,22 @@ func main() {
 
 	log.Printf("icbfs %q mounted at %s (bucket %s via %s)", *fsName, mountpoint, *bucket, *endpoint)
 	server.Wait()
+}
+
+// newMinIOClient builds the separate minio-go client task E4's
+// notification adapter needs — see internal/notify/miniosrc's package
+// doc comment on why this can't just reuse the aws-sdk-go-v2 client
+// already in use for every other S3-API call. endpoint carries a
+// "http://"/"https://" scheme the way --endpoint is otherwise used
+// (as aws-sdk-go-v2's BaseEndpoint); minio.New wants the bare host
+// plus a separate Secure bool instead, so that's split out here.
+func newMinIOClient(endpoint, accessKey, secretKey string) (*minio.Client, error) {
+	secure := strings.HasPrefix(endpoint, "https://")
+	host := strings.TrimPrefix(strings.TrimPrefix(endpoint, "https://"), "http://")
+	return minio.New(host, &minio.Options{
+		Creds:  miniocreds.NewStaticV4(accessKey, secretKey, ""),
+		Secure: secure,
+	})
 }
 
 func fuseMountOptions(debug bool) fuse.MountOptions {
