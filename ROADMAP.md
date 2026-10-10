@@ -1,25 +1,179 @@
-# Roadmap: locking
+# Roadmap
 
-Concrete development tasks implementing the Locking section (and the
-Content writes: CAS, bounded retry, and escalation to locking section)
-of `ARCHITECTURE.md`. Unlike `MISSING_FEATURES.md`, everything here is
-already decided — this is sequencing and task breakdown, not open design.
+Concrete development tasks, broken out by workstream. Unlike
+`MISSING_FEATURES.md`, everything in this document is already decided —
+this is sequencing and task breakdown, not open design. "Done when" is
+the acceptance bar for each task — write the test first if that's
+practical, same as the rest of this codebase's testing style (real MinIO
+via testcontainers-go, not mocks).
+
+Two workstreams so far:
+
+- **Part A: Serialization — JSON to Protobuf.** All of this project's own
+  object bodies (directory/root blocks, the not-yet-built `.metadata`
+  object, the not-yet-built `.lock` object) move to Protobuf instead of
+  JSON. Do this one first, or at least its schema/toolchain setup —
+  Part B's `.lock` object should be defined in Protobuf from the start
+  rather than built in JSON and migrated a second time.
+- **Part B: Locking.** Implements the Locking section (and the Content
+  writes: CAS, bounded retry, and escalation to locking section) of
+  `ARCHITECTURE.md`.
+
+---
+
+## Part A: Serialization — JSON to Protobuf
+
+Everything in this part applies to objects this project defines itself —
+directory/root blocks, `.metadata`, `.lock`. It does not apply to, and
+cannot apply to, the native S3/Azure object-metadata header mechanism
+(`x-amz-meta-*`), which is a fixed, external, string-only API outside our
+control. Once `.metadata` exists with its own Protobuf body (task A4),
+it's likely those native headers won't be needed for much of anything —
+worth confirming once A4 lands, not assumed here.
+
+### A1. Decide where `.proto` files and generated code live, and how
+
+A real decision with consequences for every contributor, not a detail to
+default silently:
+
+- Where do `.proto` source files live in the repo (e.g. `/proto`, or
+  alongside each package)?
+- Are generated `.pb.go` files checked into git, or regenerated at build
+  time (`go:generate`, a Makefile target)? Checked-in means `go build`
+  keeps working for anyone without `protoc` installed; regenerated-only
+  means no risk of committed code drifting from its `.proto` source but
+  requires `protoc` + `protoc-gen-go` in every contributor's and CI's
+  environment.
+- **Done when:** the decision is written down (a short note in this
+  section or a comment at the top of the first `.proto` file is enough),
+  the toolchain is installed and confirmed working in this dev
+  environment, and a trivial "hello world" message round-trips through
+  `go generate`/`protoc` successfully.
+
+### A2. Define the directory/root block schema
+
+- A `.proto` message set covering what `internal/block.Block` currently
+  represents in JSON: `Kind` (leaf/internal), `Entries` (name, UUID,
+  type), `Children` (min key, UUID).
+- Decide whether the generated Protobuf types become the public Go API
+  for this package directly, or whether `block.Block`/`block.Entry`/
+  `block.Child` stay as hand-written Go types with Protobuf purely as
+  the wire format underneath (a translation layer in `Encode`/`Decode`).
+  Leaning toward the latter for decoupling — callers throughout
+  `internal/icbfs` shouldn't need to care that the wire format changed —
+  but this is a real choice to make explicitly, not assume.
+- **Done when:** the schema is defined and generates cleanly; this task
+  doesn't yet require wiring it into `internal/block` (that's A3).
+
+### A3. Migrate `internal/block` from JSON to Protobuf
+
+- Replace `Block.Encode`/`block.Decode`'s JSON implementation with the
+  A2 schema. If using the translation-layer approach, this means
+  converting between the hand-written types and the generated ones on
+  every encode/decode.
+- Update every caller in `internal/icbfs/filesystem.go` that currently
+  assumes JSON-compatible byte handling (there shouldn't be many, if the
+  `Encode`/`Decode` function signatures stay the same — `[]byte` in,
+  `[]byte` out — but confirm this rather than assume it).
+- **Rewrite `internal/block/block_test.go`'s format-specific tests.**
+  `TestEncodeDecodeRoundTrip` and `TestDecodeEmptyIsLeaf` are JSON-shaped
+  today (they construct/inspect JSON specifically) and need rewriting
+  against the new format. The pure-logic tests — `Insert`/`Find`/`Remove`/
+  `SplitLeaf`/`SplitInternal`/`ChildFor`/`InsertChild` — operate on the
+  in-memory `Block` type regardless of wire format and shouldn't need to
+  change at all; confirm that's actually true rather than assume it.
+- **Audit which tests get easier or redundant, which is a real property
+  of switching to a schema-backed format, not just a migration
+  side-effect worth ignoring.** A hand-rolled JSON struct with
+  `map[string]string`-style fields (see `internal/icbfs/attr.go`'s
+  `parseMetaUint`/`metadataFromAttr`) can silently hold a malformed or
+  wrong-typed value that only surfaces as a bug at parse time; a
+  generated Protobuf struct with a `uint32` field structurally cannot
+  hold a string, so a class of "did we parse this correctly" tests
+  becomes unnecessary — the type system already guarantees it. Document
+  which existing/hypothetical tests this removes the need for. This cuts
+  the other way too: Protobuf's wire format has its own correctness
+  surface that JSON didn't (unknown-field handling, schema evolution
+  across old-writer/new-reader or new-writer/old-reader combinations) —
+  if this schema is expected to keep evolving the way it already has
+  across this project's own design discussion, at least one test
+  exercising decoding a message with an unexpected/missing field is
+  worth adding, not just tests ported over from the JSON era.
+- **Confirm `internal/icbfs` and `internal/fuseserver`'s existing test
+  suites still pass unmodified** (`filesystem_test.go`,
+  `mount_test.go`) — they exercise the `Filesystem`/mount-level API, not
+  the wire format directly, so they shouldn't need code changes, only a
+  clean run after the migration. `internal/objstore`'s tests are
+  unaffected entirely (that package only ever deals in raw bytes) and
+  should need no changes or even a re-review.
+- **Done when:** `go test ./...` passes end to end, including the new
+  large-directory-sharding tests already in the suite
+  (`TestDirectorySplitsAndStaysConsistent`,
+  `TestMountLargeDirectorySharding`) — these specifically prove the
+  B-tree logic still functions correctly after changing the one thing
+  (encoding) underneath it.
+
+### A4. Build `.metadata` directly in Protobuf (not a migration — this object doesn't exist in code yet)
+
+This is where the `.metadata` consolidation from `ARCHITECTURE.md`
+(mode/uid/gid/nlink, replacing the current `<uuid>.nlink`-only design)
+and the extended-attributes/ACL union design actually get built — in one
+pass, directly in Protobuf, since there's no JSON version of this object
+shipped to migrate away from.
+
+- Schema: `mode`, `uid`, `gid`, `nlink` as native typed fields (replacing
+  `internal/icbfs/attr.go`'s current string-encoded
+  `map[string]string` metadata, which exists only because S3/Azure's
+  *native* object metadata headers are string-only — `.metadata`'s own
+  body has no such constraint), plus an `xattrs` field: `map<string,
+  bytes>`. POSIX ACLs are just an entry in that map under the key
+  `system.posix_acl_access` (mirroring Linux's own xattr-based ACL
+  representation exactly); Windows ACLs are just another entry under a
+  reserved key like `windows.acl`. No separate ACL-specific schema field,
+  no separate object.
+- Replace the current `<uuid>.nlink` side object and its tombstone
+  protocol with the same mechanism applied to `.metadata`'s `nlink`
+  field instead — the CAS/tombstone logic in
+  `internal/icbfs/filesystem.go`'s `adjustNlink` carries over
+  conceptually unchanged, just targeting `.metadata` instead of
+  `.nlink`.
+- Wire `Stat`/`SetAttr`/`Create`/`Symlink`/`Link`/`Unlink` to read/write
+  `.metadata` instead of native object metadata headers for
+  mode/uid/gid/nlink.
+- **Done when:** a new test suite (mirroring the existing
+  `TestConcurrentLinkRaceDoesNotLoseUpdates` style) proves the migrated
+  nlink CAS/tombstone protocol still closes the concurrent-link race
+  against real MinIO, plus new tests for the `xattrs` map round-tripping
+  arbitrary binary values (confirming no base64-style corruption or
+  truncation) and for a POSIX-ACL-shaped entry and a Windows-ACL-shaped
+  entry coexisting in the same map without interference.
+
+### A5. CI / build confirmation
+
+- Confirm `go build`/`go test` work the way A1's decision intended for a
+  contributor who hasn't touched this before — if generated code is
+  checked in, confirm building from a clean checkout with *no* `protoc`
+  installed still works; if not checked in, confirm a clean checkout
+  *fails* clearly (not confusingly) without `protoc`, and document the
+  install step.
+- **Done when:** both of the above are actually tried, not assumed.
+
+---
+
+## Part B: Locking
+
+Implements the Locking section (and the Content writes: CAS, bounded
+retry, and escalation to locking section) of `ARCHITECTURE.md`.
 
 Tasks are ordered; each one after the first two depends on the ones
-before it. "Done when" is the acceptance bar for each — write the test
-first if that's practical, same as the rest of this codebase's testing
-style (real MinIO via testcontainers-go, not mocks).
+before it.
 
-**Prerequisite context, not itself a task here:** `ARCHITECTURE.md`'s
-Metadata model section now describes mode/uid/gid/nlink consolidated
-into one `<uuid>.metadata` object, replacing the `<uuid>.nlink` object
-the code currently has. That migration isn't a locking feature and isn't
-broken out as a task in this document, but several tasks below assume
-`.metadata` exists (or at minimum, that `.lock` follows the same
-side-object pattern `.nlink` already established). Do that migration
-first, or adjust task 3 below to build `.lock` directly without waiting
-on it — either works, just don't let the two migrations silently
-conflict on the object-naming convention.
+**Prerequisite context:** Part A (task A4 specifically) builds
+`.metadata` for the first time — tasks below assume it exists, or at
+minimum that `.lock` follows the same side-object pattern. Task 2 below
+should define `.lock`'s body directly in Protobuf per Part A's schema
+conventions, not in JSON — there's no shipped JSON version of `.lock` to
+migrate from either, same situation as `.metadata`.
 
 ---
 
