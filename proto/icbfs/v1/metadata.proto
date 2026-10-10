@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package icbfs.v1;
+
+option go_package = "github.com/resurgentech/icbfs/internal/pb";
+
+// Metadata is the body of a file/symlink's dedicated <uuid>.metadata
+// object — see ARCHITECTURE.md's Metadata model section. mode/uid/gid/
+// nlink live here, as does xattrs, a generic name -> bytes map covering
+// POSIX ACLs (under the well-known key "system.posix_acl_access",
+// exactly mirroring Linux's own xattr-based ACL representation), future
+// Windows ACLs (under "windows.acl"), and ordinary user xattrs — all
+// just named entries, with no special-casing at the storage layer.
+//
+// Directories do not get one of these; they aren't hard-linkable, so
+// their mode/uid/gid stay in native object metadata on the directory
+// block object itself (see internal/icbfs/attr.go).
+message Metadata {
+  uint32 mode = 1;
+  uint32 uid = 2;
+  uint32 gid = 3;
+  uint32 nlink = 4;
+  map<string, bytes> xattrs = 5;
+}
