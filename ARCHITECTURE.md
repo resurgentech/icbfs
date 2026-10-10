@@ -492,6 +492,35 @@ service is the escalation path — deliberately not built up front.
   feature prioritizes correctness over performance, for an expected small
   number of users, with the real coordination-service escalation path
   above if that tradeoff ever stops being acceptable.
+
+  **Where Change Notifications (its own, separately optional feature —
+  see below) is also enabled, it can sharpen this polling loop's trigger,
+  on the one backend where that's actually a win.** A blocking acquire
+  can subscribe to notifications scoped to the specific `.lock` key it's
+  waiting on — simpler than the general inotify problem elsewhere in
+  this document, since there's no path-to-UUID ambiguity here at all,
+  the exact key being waited on is already known — and retry the
+  CAS-acquire as soon as a matching notification arrives, instead of
+  waiting out the next fixed poll interval. This is a trigger
+  optimization only, never a replacement for the CAS-acquire itself: a
+  notification means "this key changed," not "it's now free" (the
+  change could just as easily be the current holder renewing its
+  lease), so the acquire attempt still has to actually happen and can
+  still fail. **This only helps on MinIO.** MinIO's
+  `ListenBucketNotification` is genuinely near-real-time, so this is a
+  real latency win there. Azure's Change Feed is minutes-scale — using
+  it as a lock wake-up signal would make blocking acquisition *slower*
+  than plain polling, not faster, and should not be wired in for Azure
+  at all. AWS S3 via SQS sits in between (seconds-to-a-minute), a
+  plausible but modest win depending on the polling interval it's being
+  compared against. A fallback timeout is still required regardless of
+  backend — notifications are not delivery-guaranteed (MinIO's own async
+  mode can silently drop under overload, per Change Notifications'
+  mechanism table) — so this degrades to exactly the plain-polling
+  behavior above whenever a notification is missed, delayed, or simply
+  never arrives, and must do so correctly whether or not Change
+  Notifications happens to be enabled at all: Locking's correctness does
+  not depend on it.
 - **Byte-range locks are a list, not a single holder field:**
   `.lock`'s body holds `{range, holder, expires_at}` entries; acquiring a
   range means checking it against every existing entry for overlap before
