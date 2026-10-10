@@ -100,6 +100,20 @@ func rangesOverlap(aStart, aEnd, bStart, bEnd int64) bool {
 // claim ever wins) comes from the CAS write below, not from whose
 // clock set expires_at.
 func (f *Filesystem) TryAcquireLockRange(ctx context.Context, key string, start, end int64, holder string, ttl time.Duration) error {
+	return f.tryAcquireLockRange(ctx, key, start, end, holder, ttl, false)
+}
+
+// tryAcquireLockRange is TryAcquireLockRange's shared implementation.
+// escalationOnly tags the written claim as internal-escalation-only
+// (task B5), never a real application lock — see LockRange.EscalationOnly's
+// doc comment in lock.proto on why task B6's write-conflict check must
+// be able to tell the difference. Acquiring (here) always conflict-
+// checks against every entry regardless of that flag: an internal
+// escalation attempt must still respect a genuine application lock,
+// and a genuine application lock attempt must still respect another
+// session's in-flight escalation claim — only task B6's *separate*
+// check treats them differently.
+func (f *Filesystem) tryAcquireLockRange(ctx context.Context, key string, start, end int64, holder string, ttl time.Duration, escalationOnly bool) error {
 	lockKey := lockObjectKey(key)
 	for attempt := 0; attempt < maxLockCASRetries; attempt++ {
 		cur, obj, err := readLockRanges(ctx, f.store, lockKey)
@@ -128,7 +142,7 @@ func (f *Filesystem) TryAcquireLockRange(ctx context.Context, key string, start,
 			}
 		}
 
-		claim := &pb.LockRange{Start: start, End: end, Holder: holder, ExpiresAtUnixMs: now.Add(ttl).UnixMilli()}
+		claim := &pb.LockRange{Start: start, End: end, Holder: holder, ExpiresAtUnixMs: now.Add(ttl).UnixMilli(), EscalationOnly: escalationOnly}
 		data, err := proto.Marshal(&pb.Lock{Ranges: append(kept, claim)})
 		if err != nil {
 			return err
@@ -225,12 +239,14 @@ func (f *Filesystem) RenewLockRange(ctx context.Context, key string, start, end 
 		now := time.Now()
 		var kept []*pb.LockRange
 		found := false
+		escalationOnly := false
 		for _, e := range cur.Ranges {
 			if rangeExpired(e, now) {
 				continue
 			}
 			if e.Start == start && e.End == end && e.Holder == holder {
 				found = true
+				escalationOnly = e.EscalationOnly // preserved across renewal
 				continue // replaced below with the renewed expiry
 			}
 			kept = append(kept, e)
@@ -239,7 +255,7 @@ func (f *Filesystem) RenewLockRange(ctx context.Context, key string, start, end 
 			return ErrNotLockHolder
 		}
 
-		renewed := &pb.LockRange{Start: start, End: end, Holder: holder, ExpiresAtUnixMs: now.Add(ttl).UnixMilli()}
+		renewed := &pb.LockRange{Start: start, End: end, Holder: holder, ExpiresAtUnixMs: now.Add(ttl).UnixMilli(), EscalationOnly: escalationOnly}
 		data, err := proto.Marshal(&pb.Lock{Ranges: append(kept, renewed)})
 		if err != nil {
 			return err
@@ -279,9 +295,20 @@ const (
 // real win, without changing the fallback behavior here, which must
 // stay correct on its own regardless.
 func (f *Filesystem) AcquireLockRange(ctx context.Context, key string, start, end int64, holder string, ttl time.Duration) error {
+	return f.acquireLockRange(ctx, key, start, end, holder, ttl, false)
+}
+
+// acquireEscalationLockRange is AcquireLockRange's logic for
+// OpenFile.Flush's own internal escalation (task B5) — see
+// tryAcquireLockRange's escalationOnly parameter.
+func (f *Filesystem) acquireEscalationLockRange(ctx context.Context, key string, start, end int64, holder string, ttl time.Duration) error {
+	return f.acquireLockRange(ctx, key, start, end, holder, ttl, true)
+}
+
+func (f *Filesystem) acquireLockRange(ctx context.Context, key string, start, end int64, holder string, ttl time.Duration, escalationOnly bool) error {
 	backoff := lockPollMinInterval
 	for {
-		err := f.TryAcquireLockRange(ctx, key, start, end, holder, ttl)
+		err := f.tryAcquireLockRange(ctx, key, start, end, holder, ttl, escalationOnly)
 		if err == nil {
 			return nil
 		}
@@ -298,6 +325,43 @@ func (f *Filesystem) AcquireLockRange(ctx context.Context, key string, start, en
 			backoff = lockPollMaxInterval
 		}
 	}
+}
+
+// CheckRangeLockConflict implements task B6's stronger-than-advisory
+// enforcement: before issuing a content write, a caller checks its
+// touched range against current lock state and refuses the write if it
+// overlaps a currently-held, unexpired lock belonging to a different
+// holder. selfHolder is excluded the same way acquiring already
+// excludes a holder's own entries (so a session never blocks itself).
+//
+// Entries tagged EscalationOnly are also excluded unconditionally,
+// regardless of holder: those are OpenFile.Flush's own internal
+// bookkeeping (task B5), not a real application lock placed via
+// fcntl/LockFileEx — ARCHITECTURE.md's distinction between task B5
+// ("this driver's own write succeeding eventually under contention
+// with itself") and task B6 ("respecting a lock an external,
+// cooperating caller explicitly placed"). Treating another session's
+// in-flight escalation claim as an external lock here would spuriously
+// refuse writes that tasks B1/B5 already guarantee converge on their
+// own shortly after.
+func (f *Filesystem) CheckRangeLockConflict(ctx context.Context, key string, start, end int64, selfHolder string) error {
+	cur, _, err := readLockRanges(ctx, f.store, lockObjectKey(key))
+	if err != nil {
+		return err
+	}
+	if cur == nil {
+		return nil
+	}
+	now := time.Now()
+	for _, e := range cur.Ranges {
+		if e.Holder == selfHolder || e.EscalationOnly || rangeExpired(e, now) {
+			continue
+		}
+		if rangesOverlap(start, end, e.Start, e.End) {
+			return ErrLocked
+		}
+	}
+	return nil
 }
 
 // TryAcquireLock, ReleaseLock, RenewLock, and AcquireLock are the

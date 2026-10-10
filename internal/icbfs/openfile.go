@@ -238,6 +238,18 @@ func (o *OpenFile) Flush(ctx context.Context) (Attr, error) {
 		return o.fsys.statFile(ctx, o.key)
 	}
 
+	// Task B6: checked before every write, not just on retry
+	// exhaustion — refuse outright if the touched range overlaps a
+	// real, external application lock (fcntl/LockFileEx), rather than
+	// attempting the write and only finding out indirectly via a CAS
+	// conflict (which wouldn't distinguish "someone else's cooperating
+	// lock" from ordinary same-codebase contention B1/B5 already
+	// handle on their own).
+	start, end := o.touchedRangeLocked()
+	if err := o.fsys.CheckRangeLockConflict(ctx, o.key, start, end, o.holder); err != nil {
+		return Attr{}, err
+	}
+
 	deadline := time.Now().Add(contentWriteRetryBudget)
 	for {
 		attr, newETag, err := o.fsys.WriteFile(ctx, o.key, o.data, o.etag)
@@ -258,8 +270,7 @@ func (o *OpenFile) Flush(ctx context.Context) (Attr, error) {
 		}
 	}
 
-	start, end := o.touchedRangeLocked()
-	if err := o.fsys.AcquireLockRange(ctx, o.key, start, end, o.holder, lockEscalationLeaseTTL); err != nil {
+	if err := o.fsys.acquireEscalationLockRange(ctx, o.key, start, end, o.holder, lockEscalationLeaseTTL); err != nil {
 		return Attr{}, ErrWriteContention
 	}
 	defer func() { _ = o.fsys.ReleaseLockRange(context.WithoutCancel(ctx), o.key, start, end, o.holder) }()

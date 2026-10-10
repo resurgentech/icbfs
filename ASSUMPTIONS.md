@@ -309,3 +309,60 @@ against fast local infrastructure, these can pass vacuously on both
 sides of a real bug.
 
 ---
+
+## B6: distinguishing escalation locks from real application locks (new schema field)
+
+**Question I'd have asked:** B6's check needs to refuse a write that
+overlaps "a currently-held, unexpired lock belonging to someone else"
+— but task B5's own escalation mechanism *also* writes entries into
+that same `.lock` object under a different (per-session) holder. Once
+B6's check exists, would another session's in-flight escalation claim
+get mistaken for a real external application lock and spuriously
+refuse a write that B1/B5 would otherwise have converged on its own?
+
+**Assumed:** yes, this was a real, immediate interaction (not a
+hypothetical future one — B5 already existed and already wrote into
+the same object B6 now reads), so added `LockRange.EscalationOnly`
+(proto field 5) to tag entries `OpenFile.Flush`'s own escalation
+creates. `CheckRangeLockConflict` (B6) unconditionally excludes
+`EscalationOnly` entries from its conflict check, regardless of
+holder; `tryAcquireLockRange`'s own *acquire-time* conflict check is
+unchanged and still considers every entry regardless of the flag (an
+escalation attempt must still respect a real application lock, and a
+real application-lock attempt must still respect another session's
+in-flight escalation). Confirmed by
+`TestCheckRangeLockConflictIgnoresEscalationOnlyEntries`, which fails
+without the exclusion.
+
+**Check this if:** task B8 (real FUSE `flock`/`fcntl` wiring) lands and
+starts writing real application-lock entries under holder identities
+chosen by *that* code — those entries must NOT set `EscalationOnly`
+(the zero/default value already ensures this as long as B8 goes
+through the public `TryAcquireLockRange`/`AcquireLockRange`, not the
+unexported `acquireEscalationLockRange`/`tryAcquireLockRange(...,
+escalationOnly: true)` path, which only `OpenFile.Flush` should ever
+call).
+
+---
+
+## Known pre-existing flaky test (not caused by this session's changes)
+
+`internal/fuseserver.TestMountStatfsReflectsDeclaredSizeAndUsage`
+intermittently fails with `open .../statfs-usage.bin: input/output
+error` when run as part of the full package suite (not when run
+alone — 10/10 clean in isolation every time it's been tried). First
+observed during Part D (StatFS/df wiring) work, before any Part B
+locking code existed, and still happens at a similar rate after all of
+Part B's changes — confirmed the failure is in `Node.Create` (an EIO
+from an unmapped underlying error, almost certainly a MinIO-testcontainer
+"reports ready but isn't fully serving yet" startup race), not
+anywhere near Part B's lock/escalation code, which only runs inside
+`Flush`, never `Create`.
+
+**Check this if:** this flakiness rate gets worse or starts showing up
+in CI in a way that blocks merges — at that point it's worth adding a
+retry-on-connection-refused guard to the MinIO testcontainers setup
+helpers, or investigating the container module's readiness check
+directly, rather than continuing to treat it as background noise.
+
+---

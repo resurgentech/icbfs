@@ -14,6 +14,16 @@ message LockRange {
   int64 end = 2; // exclusive, like a Go slice bound
   string holder = 3;
   int64 expires_at_unix_ms = 4;
+  // escalation_only marks a claim made internally by OpenFile.Flush's
+  // own retry-escalation (ROADMAP.md task B5), not a real application
+  // lock placed via fcntl/LockFileEx. Task B6's stronger-than-advisory
+  // write check must skip these: a different OpenFile's own internal
+  // escalation claim is not "someone else's lock" a write needs to
+  // respect — it's this driver's own bookkeeping, already guaranteed
+  // to converge on its own via tasks B1/B5's retry mechanism, and
+  // treating it as an external lock would spuriously refuse writes
+  // that would otherwise just succeed shortly after.
+  bool escalation_only = 5;
 }
 
 // Lock is the whole <uuid>.lock object body: every currently-claimed

@@ -3,8 +3,10 @@ package icbfs
 import (
 	"bytes"
 	"context"
+	"errors"
 	"sync"
 	"testing"
+	"time"
 )
 
 // TestConcurrentNonOverlappingWritesBothSurvive covers ROADMAP.md's
@@ -141,5 +143,90 @@ func TestFlushEscalatesWhenPlainRetryBudgetIsExhausted(t *testing.T) {
 	want := append([]byte("hello"), concurrent[len("hello"):]...)
 	if !bytes.Equal(final, want) {
 		t.Fatalf("final content = %q, want %q", final, want)
+	}
+}
+
+// TestFlushRefusedWhenTouchedRangeOverlapsExternalLock covers
+// ROADMAP.md's task B6 "Done when": an explicit lock held by one
+// simulated client over a byte range causes a second simulated
+// client's overlapping write to be refused, while that second
+// client's write to a genuinely non-overlapping range still succeeds
+// normally while the first client's lock is still held.
+func TestFlushRefusedWhenTouchedRangeOverlapsExternalLock(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+	key, _, _, err := fsys.Create(ctx, root, "cooperative.bin", 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, _, err := fsys.WriteFile(ctx, key, make([]byte, 20), ""); err != nil {
+		t.Fatalf("seed content: %v", err)
+	}
+
+	// Simulated client 1 places a real, explicit application lock
+	// (e.g. via fcntl/LockFileEx, once task B8 wires that up) over
+	// [0, 10).
+	if err := fsys.TryAcquireLockRange(ctx, key, 0, 10, "client-1", 30*time.Second); err != nil {
+		t.Fatalf("client-1 acquire [0,10): %v", err)
+	}
+
+	// Simulated client 2's write overlapping that locked range must be
+	// refused outright, not retried/escalated — this is someone else's
+	// cooperating lock, not same-codebase contention.
+	overlapping, err := fsys.Open(ctx, key)
+	if err != nil {
+		t.Fatalf("client-2 open: %v", err)
+	}
+	overlapping.WriteAt([]byte("XXXXX"), 5) // [5,10) overlaps client-1's [0,10)
+	if _, err := overlapping.Flush(ctx); !errors.Is(err, ErrLocked) {
+		t.Fatalf("client-2 overlapping write = %v, want ErrLocked", err)
+	}
+
+	// Client 2's write to a genuinely non-overlapping range succeeds
+	// normally while client-1's lock is still held.
+	nonOverlapping, err := fsys.Open(ctx, key)
+	if err != nil {
+		t.Fatalf("client-2 open (second session): %v", err)
+	}
+	nonOverlapping.WriteAt([]byte("YYYYY"), 15) // [15,20), disjoint from [0,10)
+	if _, err := nonOverlapping.Flush(ctx); err != nil {
+		t.Fatalf("client-2 non-overlapping write = %v, want nil", err)
+	}
+
+	final, _, _, err := fsys.ReadFile(ctx, key)
+	if err != nil {
+		t.Fatalf("read final: %v", err)
+	}
+	if string(final[15:20]) != "YYYYY" {
+		t.Fatalf("non-overlapping write did not land: final[15:20] = %q, want %q", final[15:20], "YYYYY")
+	}
+	if string(final[5:10]) == "XXXXX" {
+		t.Fatalf("overlapping write landed despite being refused: final[5:10] = %q", final[5:10])
+	}
+}
+
+// TestCheckRangeLockConflictIgnoresEscalationOnlyEntries confirms the
+// specific reason LockRange.EscalationOnly exists: another session's
+// own in-flight B5 escalation claim must never be mistaken for a real
+// external application lock by B6's check — doing so would spuriously
+// refuse writes that tasks B1/B5 already guarantee converge on their
+// own shortly after.
+func TestCheckRangeLockConflictIgnoresEscalationOnlyEntries(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+	key, _, _, err := fsys.Create(ctx, root, "f.bin", 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	if err := fsys.acquireEscalationLockRange(ctx, key, 0, 5, "some-other-session", 30*time.Second); err != nil {
+		t.Fatalf("simulate an in-flight escalation claim: %v", err)
+	}
+	defer fsys.ReleaseLockRange(ctx, key, 0, 5, "some-other-session")
+
+	if err := fsys.CheckRangeLockConflict(ctx, key, 0, 5, "yet-another-holder"); err != nil {
+		t.Fatalf("check against an escalation-only claim = %v, want nil (not a real application lock)", err)
 	}
 }
