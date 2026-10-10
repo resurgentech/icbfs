@@ -43,7 +43,7 @@ Five workstreams so far:
   (the largest single item in this whole roadmap) and wires the
   already-decided primary-mode fields into it. Parts B and C each have
   a task that's "blocked on the WinFsp driver existing" (Part B's task
-  9, Part C's task C3) — those are this part, not separately scoped
+  B9, Part C's task C3) — those are this part, not separately scoped
   tasks of their own.
 
 ---
@@ -197,14 +197,14 @@ before it.
 
 **Prerequisite context:** Part A (task A4 specifically) builds
 `.metadata` for the first time — tasks below assume it exists, or at
-minimum that `.lock` follows the same side-object pattern. Task 2 below
+minimum that `.lock` follows the same side-object pattern. Task B2 below
 should define `.lock`'s body directly in Protobuf per Part A's schema
 conventions, not in JSON — there's no shipped JSON version of `.lock` to
 migrate from either, same situation as `.metadata`.
 
 ---
 
-### 1. Content writes become CAS-protected
+### B1. Content writes become CAS-protected
 
 Right now `Filesystem.WriteFile` does an unconditional `Put` (`ifMatch:
 ""`). This task makes it conditional, with retry-and-reapply on
@@ -238,10 +238,10 @@ file concurrently).
   edits survive in the final content — this test should fail against
   today's code and pass after this task.
 
-### 2. `.lock` object: non-blocking acquire/release/renew, whole-file only
+### B2. `.lock` object: non-blocking acquire/release/renew, whole-file only
 
 The core primitive, scoped to whole-file first — byte ranges come later
-(task 5) once the simple case is solid.
+(task B4) once the simple case is solid.
 
 - Object body: `{holder: string, expires_at: int64}` (holder is an
   opaque client-generated id, not necessarily a uid/pid — it just needs
@@ -268,9 +268,9 @@ The core primitive, scoped to whole-file first — byte ranges come later
   acquire attempts against the same free lock result in exactly one
   winner.
 
-### 3. Blocking acquisition via polling
+### B3. Blocking acquisition via polling
 
-Layered on top of task 2's non-blocking primitive.
+Layered on top of task B2's non-blocking primitive.
 
 - A blocking acquire loops: attempt the non-blocking acquire, and if
   held, sleep (with backoff — don't hammer the object store at a fixed
@@ -285,14 +285,14 @@ Layered on top of task 2's non-blocking primitive.
   expired on its own — proving it's reacting to the release, not just
   waiting out the lease.
 
-### 4. Byte-range locks
+### B4. Byte-range locks
 
-Generalizes task 2's single-holder body to a list, with overlap
+Generalizes task B2's single-holder body to a list, with overlap
 checking.
 
 - Object body becomes `{ranges: [{start, end, holder, expires_at}, ...]}`.
 - Acquire checks the requested `[start, end)` against every existing
-  entry for overlap; rejects (or blocks, via task 3's loop) only if a
+  entry for overlap; rejects (or blocks, via task B3's loop) only if a
   conflicting range is actually held and unexpired.
 - Release/renew operate on the caller's specific range entry, not the
   whole object.
@@ -301,12 +301,12 @@ checking.
   is rejected while the conflicting range is held; the same request
   succeeds once that range's lease expires or is released.
 
-### 5. Escalation wiring: content-write retry exhaustion → lock → retry
+### B5. Escalation wiring: content-write retry exhaustion → lock → retry
 
-Connects task 1 to tasks 2-4.
+Connects task B1 to tasks B2-B4.
 
-- When task 1's bounded retry budget is exhausted, acquire a lock (via
-  task 3's blocking acquire) covering the byte range the write actually
+- When task B1's bounded retry budget is exhausted, acquire a lock (via
+  task B3's blocking acquire) covering the byte range the write actually
   touches (or the whole file, if that's simpler to ship first — see
   ARCHITECTURE.md's note that even a whole-file fallback here is
   defensible as a first cut), then make one final CAS-protected write
@@ -323,7 +323,7 @@ Connects task 1 to tasks 2-4.
   escalation the same test would be expected to show one writer
   thrashing against the other's retries.
 
-### 6. Client-side stronger-than-advisory enforcement
+### B6. Client-side stronger-than-advisory enforcement
 
 The diff-against-what-I-read-then-check-locks mechanism from
 ARCHITECTURE.md, built on everything above.
@@ -336,7 +336,7 @@ ARCHITECTURE.md, built on everything above.
 - Re-fetch current lock state and check the touched range against it;
   refuse the write (return the appropriate error to the caller) if it
   overlaps a currently-held, unexpired lock belonging to someone else.
-- This is distinct from task 5: task 5 is about *this driver's own*
+- This is distinct from task B5: task B5 is about *this driver's own*
   write succeeding eventually under contention with itself; this task
   is about respecting a lock an *external, cooperating* caller
   explicitly placed via `fcntl`/`LockFileEx`.
@@ -346,7 +346,7 @@ ARCHITECTURE.md, built on everything above.
   write to a genuinely non-overlapping range from the second client
   succeeds normally while the lock is still held.
 
-### 7. Mount-time opt-in flag
+### B7. Mount-time opt-in flag
 
 - A CLI flag (`cmd/icbfs`, e.g. `--locking`) and the equivalent for
   whatever WinFsp's mount invocation ends up being, defaulting to off.
@@ -358,22 +358,22 @@ ARCHITECTURE.md, built on everything above.
 - **Done when:** a test confirms lock acquisition fails cleanly when
   the mount wasn't started with the flag, and succeeds when it was.
 
-### 8. FUSE wiring
+### B8. FUSE wiring
 
 - Investigate go-fuse's actual API surface for `flock`/`fcntl` before
   assuming a specific interface shape — not yet checked against the
   installed go-fuse version the way every other API assumption in this
   project has been checked first.
-- Wire whatever that interface is onto tasks 2-6's primitives.
+- Wire whatever that interface is onto tasks B2-B6's primitives.
 - **Done when:** a real mount test (same style as the existing
   `internal/fuseserver/mount_test.go` suite) exercises `flock`/`fcntl`
   through the actual kernel syscalls against a real mount, not just the
   `Filesystem`-level API directly.
 
-### 9. WinFsp wiring
+### B9. WinFsp wiring
 
 Blocked on the WinFsp driver existing at all — see Part F. Once it
-does, wire its lock-related callbacks onto the same tasks 2-6 primitives
+does, wire its lock-related callbacks onto the same tasks B2-B6 primitives
 used by FUSE. Not further broken down here since Part F owns scoping
 the driver itself.
 
@@ -645,7 +645,7 @@ prefix — build D's prefixing first).
 
 Implements `ARCHITECTURE.md`'s "Windows compatibility: primary mode"
 section. The largest single workstream in this roadmap — everything
-else Windows-related (Part B's task 9, Part C's task C3) is blocked on
+else Windows-related (Part B's task B9, Part C's task C3) is blocked on
 F1 specifically, not separately scoped.
 
 ### F1. WinFsp driver skeleton
