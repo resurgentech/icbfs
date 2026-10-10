@@ -41,7 +41,15 @@ var (
 	_ fs.NodeSymlinker  = (*Node)(nil)
 	_ fs.NodeReadlinker = (*Node)(nil)
 	_ fs.NodeLinker     = (*Node)(nil)
+	_ fs.NodeStatfser   = (*Node)(nil)
 )
+
+// statfsBlockSize is the block size StatfsOut reports, matching this
+// filesystem's reality exactly as closely as "virtual blocks on top of
+// an object store" allows: it's an arbitrary but conventional unit for
+// df to report sizes in, not a real on-disk block size (there is no
+// disk) — see ARCHITECTURE.md's du/df design.
+const statfsBlockSize = 4096
 
 // Root builds the node representing fsys's root directory, for use with
 // fs.Mount.
@@ -112,6 +120,8 @@ func errnoFromErr(err error) syscall.Errno {
 		return syscall.ENOTDIR
 	case errors.Is(err, icbfs.ErrIsDir):
 		return syscall.EISDIR
+	case errors.Is(err, icbfs.ErrArchived):
+		return syscall.EROFS
 	default:
 		return syscall.EIO
 	}
@@ -141,6 +151,29 @@ func (n *Node) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) 
 		return errnoFromErr(err)
 	}
 	fillAttr(&out.Attr, n.key, n.typ, attr)
+	return 0
+}
+
+// Statfs reports this filesystem's declared capacity and current usage
+// (ARCHITECTURE.md's du/df design) via icbfs.Filesystem.StatFS, scaled
+// into statfsBlockSize units since that's the unit StatfsOut's
+// Blocks/Bfree/Bavail fields are defined in terms of. Bavail is reported
+// equal to Bfree (no distinct "reserved for root" reservation exists
+// here, unlike a real block device).
+func (n *Node) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
+	total, used, err := n.fsys.StatFS(ctx)
+	if err != nil {
+		return errnoFromErr(err)
+	}
+	out.Bsize = statfsBlockSize
+	out.Frsize = statfsBlockSize
+	out.Blocks = total / statfsBlockSize
+	var free uint64
+	if used < total {
+		free = (total - used) / statfsBlockSize
+	}
+	out.Bfree = free
+	out.Bavail = free
 	return 0
 }
 

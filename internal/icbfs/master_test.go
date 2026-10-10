@@ -1,6 +1,7 @@
 package icbfs
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
@@ -317,6 +318,75 @@ func TestPruneRemovesEveryObjectUnderPrefix(t *testing.T) {
 	}
 	if mb.Filesystems[idx].Name != "" {
 		t.Fatalf("pruned entry's name = %q, want empty (tombstoned)", mb.Filesystems[idx].Name)
+	}
+}
+
+// TestStatFSIsScopedPerFilesystem covers D4's "Done when": two
+// filesystems in the same bucket, with differently-sized content, each
+// get a "Used" figure reflecting only their own content, not the
+// other's — the test that actually proves the multi-tenant scoping
+// problem is solved, not just that a number comes back.
+func TestStatFSIsScopedPerFilesystem(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	const declaredSize = 1 << 30
+	fsA := New(store, "tenant-a")
+	if err := fsA.Bootstrap(ctx, declaredSize, 0755, 0, 0); err != nil {
+		t.Fatalf("bootstrap tenant-a: %v", err)
+	}
+	fsB := New(store, "tenant-b")
+	if err := fsB.Bootstrap(ctx, declaredSize, 0755, 0, 0); err != nil {
+		t.Fatalf("bootstrap tenant-b: %v", err)
+	}
+
+	smallContent := bytes.Repeat([]byte("a"), 100)
+	bigContent := bytes.Repeat([]byte("b"), 10000)
+
+	fileA, _, err := fsA.Create(ctx, fsA.RootKey(), "small", 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("create in tenant-a: %v", err)
+	}
+	if _, err := fsA.WriteFile(ctx, fileA, smallContent); err != nil {
+		t.Fatalf("write in tenant-a: %v", err)
+	}
+
+	fileB, _, err := fsB.Create(ctx, fsB.RootKey(), "big", 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("create in tenant-b: %v", err)
+	}
+	if _, err := fsB.WriteFile(ctx, fileB, bigContent); err != nil {
+		t.Fatalf("write in tenant-b: %v", err)
+	}
+
+	totalA, usedA, err := fsA.StatFS(ctx)
+	if err != nil {
+		t.Fatalf("statfs tenant-a: %v", err)
+	}
+	totalB, usedB, err := fsB.StatFS(ctx)
+	if err != nil {
+		t.Fatalf("statfs tenant-b: %v", err)
+	}
+
+	if totalA != declaredSize || totalB != declaredSize {
+		t.Fatalf("declared totals = (%d, %d), want both %d", totalA, totalB, uint64(declaredSize))
+	}
+	if usedA >= usedB {
+		t.Fatalf("tenant-a (small file) Used=%d should be less than tenant-b (big file) Used=%d — each should only see its own content", usedA, usedB)
+	}
+	if usedA < uint64(len(smallContent)) {
+		t.Fatalf("tenant-a Used=%d is smaller than its own file content (%d bytes)", usedA, len(smallContent))
+	}
+	if usedB < uint64(len(bigContent)) {
+		t.Fatalf("tenant-b Used=%d is smaller than its own file content (%d bytes)", usedB, len(bigContent))
+	}
+
+	duA, err := fsA.DiskUsage(ctx)
+	if err != nil {
+		t.Fatalf("disk usage tenant-a: %v", err)
+	}
+	if uint64(duA) != usedA {
+		t.Fatalf("DiskUsage()=%d should match StatFS's Used=%d", duA, usedA)
 	}
 }
 

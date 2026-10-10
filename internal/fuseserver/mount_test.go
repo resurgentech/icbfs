@@ -361,3 +361,42 @@ func TestMountBirthtimeFromUUID(t *testing.T) {
 		t.Fatalf("mtime %v not within [%v, %v]", info.ModTime(), before, after)
 	}
 }
+
+// TestMountStatfsReflectsDeclaredSizeAndUsage covers D4's FUSE wiring
+// end to end through a real kernel mount (mountTestFS bootstraps with
+// a 1<<30 declared size — see newTestFilesystem's Bootstrap call): df
+// ("Total") should reflect the declared size, and writing a file should
+// move "Used" (via statfsBlockSize-rounded free space shrinking)
+// without the mount reporting bogus/zeroed values, which is what a
+// mis-wired NodeStatfser would actually look like (per that interface's
+// own doc comment: "If not defined, the `out` argument will [be]
+// zeroed with an OK result").
+func TestMountStatfsReflectsDeclaredSizeAndUsage(t *testing.T) {
+	mnt := mountTestFS(t)
+
+	var before syscall.Statfs_t
+	if err := syscall.Statfs(mnt, &before); err != nil {
+		t.Fatalf("statfs: %v", err)
+	}
+	const declaredSize = uint64(1) << 30
+	gotTotal := uint64(before.Blocks) * uint64(before.Bsize)
+	if gotTotal != declaredSize {
+		t.Fatalf("statfs Total = %d bytes, want the declared size %d", gotTotal, declaredSize)
+	}
+	if before.Bfree == 0 || before.Bfree != before.Bavail {
+		t.Fatalf("statfs Bfree=%d Bavail=%d on a fresh filesystem look wrong (zeroed NodeStatfser result?)", before.Bfree, before.Bavail)
+	}
+
+	path := filepath.Join(mnt, "statfs-usage.bin")
+	if err := os.WriteFile(path, make([]byte, 5*1024*1024), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	var after syscall.Statfs_t
+	if err := syscall.Statfs(mnt, &after); err != nil {
+		t.Fatalf("statfs after write: %v", err)
+	}
+	if after.Bfree >= before.Bfree {
+		t.Fatalf("statfs Bfree after a 5MB write = %d, want less than before (%d) — Used isn't moving", after.Bfree, before.Bfree)
+	}
+}
