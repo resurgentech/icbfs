@@ -75,7 +75,8 @@ func mountTestFS(t *testing.T) string {
 
 	mountDir := t.TempDir()
 	server, err := fs.Mount(mountDir, Root(fsys), &fs.Options{
-		MountOptions: fuse.MountOptions{FsName: "icbfs-test", Name: "icbfs-test"},
+		MountOptions:    fuse.MountOptions{FsName: "icbfs-test", Name: "icbfs-test"},
+		NullPermissions: true,
 	})
 	if err != nil {
 		t.Fatalf("mount: %v", err)
@@ -132,6 +133,29 @@ func TestMountBasicFileLifecycle(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("expected file to be gone, got err: %v", err)
+	}
+}
+
+// TestMountChmodToZeroIsReportedAccurately is a regression test for a real
+// bug found by testing, not foreseen: go-fuse silently rewrites a
+// genuinely-stored "0000" mode back to 0644/0755 on every Getattr unless
+// fs.Options.NullPermissions is set. See MISSING_FEATURES.md ("Permission
+// enforcement").
+func TestMountChmodToZeroIsReportedAccurately(t *testing.T) {
+	mnt := mountTestFS(t)
+	path := filepath.Join(mnt, "locked.txt")
+	if err := os.WriteFile(path, []byte("secret"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatalf("chmod 0: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0 {
+		t.Fatalf("got mode %o after chmod 0, want 0 (go-fuse's NullPermissions default would silently report 644/755 here)", info.Mode().Perm())
 	}
 }
 

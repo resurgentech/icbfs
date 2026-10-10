@@ -63,6 +63,10 @@ func main() {
 	root := fuseserver.Root(fsys)
 	server, err := fs.Mount(mountpoint, root, &fs.Options{
 		MountOptions: fuseMountOptions(*debug),
+		// Without this, go-fuse silently rewrites a real, stored "0000"
+		// mode to 0644/0755 on every Getattr — found by testing chmod 000
+		// and seeing stat report 644 back. See MISSING_FEATURES.md.
+		NullPermissions: true,
 	})
 	if err != nil {
 		log.Fatalf("mount %s: %v", mountpoint, err)
