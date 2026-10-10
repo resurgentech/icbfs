@@ -85,14 +85,18 @@ func mountFSWithLocking(t *testing.T, store objstore.Store, fsName string, locki
 	ctx := context.Background()
 
 	fsys := icbfs.New(store, fsName)
-	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0); err != nil {
+	if err := fsys.Bootstrap(ctx, 1<<30, 0755, uint32(os.Getuid()), uint32(os.Getgid())); err != nil {
 		t.Fatalf("bootstrap filesystem: %v", err)
 	}
 	fsys.EnableLocking(locking)
 
 	mountDir := t.TempDir()
 	server, err := fs.Mount(mountDir, Root(fsys), &fs.Options{
-		MountOptions:    fuse.MountOptions{FsName: "icbfs-test", Name: "icbfs-test"},
+		MountOptions: fuse.MountOptions{
+			FsName:  "icbfs-test",
+			Name:    "icbfs-test",
+			Options: []string{"default_permissions"}, // task C1
+		},
 		NullPermissions: true,
 	})
 	if err != nil {
@@ -122,6 +126,43 @@ func mountTestFS(t *testing.T) string {
 func mountTestFSWithLocking(t *testing.T) string {
 	t.Helper()
 	return mountFSWithLocking(t, newMountTestStore(t), "test", true)
+}
+
+// mountTestFSWithFsys is mountTestFS but also returns the underlying
+// *icbfs.Filesystem — for tests (task C2) that need to create an
+// object directly through the Filesystem API with an owner uid/gid
+// that doesn't match the test process's own, something no real
+// application could do through the mounted path itself but is exactly
+// what's needed to exercise "other"/group-bit enforcement without
+// real privilege escalation (setuid/running as a second real user).
+func mountTestFSWithFsys(t *testing.T) (string, *icbfs.Filesystem) {
+	t.Helper()
+	ctx := context.Background()
+	store := newMountTestStore(t)
+	fsys := icbfs.New(store, "test")
+	if err := fsys.Bootstrap(ctx, 1<<30, 0755, uint32(os.Getuid()), uint32(os.Getgid())); err != nil {
+		t.Fatalf("bootstrap filesystem: %v", err)
+	}
+
+	mountDir := t.TempDir()
+	server, err := fs.Mount(mountDir, Root(fsys), &fs.Options{
+		MountOptions: fuse.MountOptions{
+			FsName:  "icbfs-test",
+			Name:    "icbfs-test",
+			Options: []string{"default_permissions"}, // task C1
+		},
+		NullPermissions: true,
+	})
+	if err != nil {
+		t.Fatalf("mount: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := server.Unmount(); err != nil {
+			t.Logf("unmount: %v", err)
+		}
+	})
+
+	return mountDir, fsys
 }
 
 func TestMountBasicFileLifecycle(t *testing.T) {
@@ -173,8 +214,7 @@ func TestMountBasicFileLifecycle(t *testing.T) {
 // TestMountChmodToZeroIsReportedAccurately is a regression test for a real
 // bug found by testing, not foreseen: go-fuse silently rewrites a
 // genuinely-stored "0000" mode back to 0644/0755 on every Getattr unless
-// fs.Options.NullPermissions is set. See MISSING_FEATURES.md ("Permission
-// enforcement").
+// fs.Options.NullPermissions is set.
 func TestMountChmodToZeroIsReportedAccurately(t *testing.T) {
 	mnt := mountTestFS(t)
 	path := filepath.Join(mnt, "locked.txt")
@@ -190,6 +230,89 @@ func TestMountChmodToZeroIsReportedAccurately(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0 {
 		t.Fatalf("got mode %o after chmod 0, want 0 (go-fuse's NullPermissions default would silently report 644/755 here)", info.Mode().Perm())
+	}
+}
+
+// TestMountDefaultPermissionsEnforcesOwnerModeBits covers ROADMAP.md's
+// task C1 "Done when": a chmod 000 file cannot be read or written even
+// by its own owner, and a chmod 444 file can be read but a write
+// attempt fails with a permission error — real kernel-level
+// enforcement via default_permissions, not just mode bits being
+// correctly stored/reported (TestMountChmodToZeroIsReportedAccurately
+// already covers the reporting side; this covers actual enforcement).
+func TestMountDefaultPermissionsEnforcesOwnerModeBits(t *testing.T) {
+	mnt := mountTestFS(t)
+	path := filepath.Join(mnt, "perm-test.txt")
+	if err := os.WriteFile(path, []byte("secret"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatalf("chmod 000: %v", err)
+	}
+	if _, err := os.ReadFile(path); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("read a chmod 000 file as its own owner = %v, want a permission error", err)
+	}
+	if err := os.WriteFile(path, []byte("x"), 0644); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("write a chmod 000 file as its own owner = %v, want a permission error", err)
+	}
+
+	if err := os.Chmod(path, 0444); err != nil {
+		t.Fatalf("chmod 444: %v", err)
+	}
+	if _, err := os.ReadFile(path); err != nil {
+		t.Fatalf("read a chmod 444 file as its own owner = %v, want nil", err)
+	}
+	if err := os.WriteFile(path, []byte("x"), 0644); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("write a chmod 444 file as its own owner = %v, want a permission error", err)
+	}
+}
+
+// TestMountDefaultPermissionsEnforcesOtherBits is ROADMAP.md's task
+// C2's decision, made and exercised rather than silently skipped: a
+// genuine differing-real-uid test would need actual privilege
+// escalation (running part of the test as a second real user, which
+// needs root or an equivalent privilege to setuid) — not available to
+// this automated suite, and not worth adding just for this. Instead,
+// this test creates a file directly through the Filesystem API
+// (fsys.Create) with an owner uid/gid that is deliberately *not* this
+// test process's own — something no real application could do through
+// the mounted path itself (a real create(2) always records the real
+// calling uid), but the kernel's default_permissions enforcement
+// doesn't care how an inode's reported uid/gid/mode got that way, only
+// what Getattr reports at access time. So accessing that file through
+// the real, kernel-enforced mount still genuinely exercises the
+// "other" bits code path (this test process is neither the owner nor
+// a member of the fabricated group), not just the owner-bits path
+// task C1's test already covers.
+//
+// What this does NOT cover: the "group" bits specifically (vs.
+// "other"), and the ROADMAP-called-out nuance of the kernel checking a
+// caller's *full* supplementary group list, not just a primary gid —
+// confirming those still needs a genuine second real identity. Covered
+// here only to the extent that "other" bits are real kernel
+// enforcement, not something this codebase has to implement itself.
+func TestMountDefaultPermissionsEnforcesOtherBits(t *testing.T) {
+	mnt, fsys := mountTestFSWithFsys(t)
+	ctx := context.Background()
+
+	otherUID := uint32(os.Getuid()) + 12345
+	otherGID := uint32(os.Getgid()) + 12345
+	// mode 0604: owner rw-, group ---, other r--.
+	key, _, _, err := fsys.Create(ctx, fsys.RootKey(), "other-bits.txt", 0604, otherUID, otherGID)
+	if err != nil {
+		t.Fatalf("create via Filesystem API: %v", err)
+	}
+	if _, _, err := fsys.WriteFile(ctx, key, []byte("secret"), ""); err != nil {
+		t.Fatalf("seed content: %v", err)
+	}
+
+	path := filepath.Join(mnt, "other-bits.txt")
+	if _, err := os.ReadFile(path); err != nil {
+		t.Fatalf("read as 'other' (mode 0604, other bits r--) = %v, want nil", err)
+	}
+	if err := os.WriteFile(path, []byte("x"), 0644); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("write as 'other' (mode 0604, other bits r--, no write) = %v, want a permission error", err)
 	}
 }
 
@@ -447,7 +570,7 @@ func TestMountArchivedFilesystemRejectsWritesButAllowsReads(t *testing.T) {
 	ctx := context.Background()
 
 	fsys := icbfs.New(store, "archived-mount-test")
-	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0); err != nil {
+	if err := fsys.Bootstrap(ctx, 1<<30, 0755, uint32(os.Getuid()), uint32(os.Getgid())); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 	if _, _, _, err := fsys.Create(ctx, fsys.RootKey(), "before-archive.txt", 0644, 0, 0); err != nil {
