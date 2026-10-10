@@ -7,7 +7,7 @@ the acceptance bar for each task — write the test first if that's
 practical, same as the rest of this codebase's testing style (real MinIO
 via testcontainers-go, not mocks).
 
-Two workstreams so far:
+Three workstreams so far:
 
 - **Part A: Serialization — JSON to Protobuf.** All of this project's own
   object bodies (directory/root blocks, the not-yet-built `.metadata`
@@ -18,6 +18,9 @@ Two workstreams so far:
 - **Part B: Locking.** Implements the Locking section (and the Content
   writes: CAS, bounded retry, and escalation to locking section) of
   `ARCHITECTURE.md`.
+- **Part C: Permission enforcement.** Mode bits are stored and reported
+  correctly but not actually enforced on read/write — this closes that
+  gap. Independent of A and B; can be done in any order relative to them.
 
 ---
 
@@ -349,3 +352,62 @@ Blocked on the WinFsp driver existing at all (see `MISSING_FEATURES.md`
 — it doesn't yet). Once it does, wire its lock-related callbacks onto
 the same tasks 2-6 primitives used by FUSE. Not further broken down
 here since the driver itself isn't scoped yet.
+
+---
+
+## Part C: Permission enforcement
+
+Implements `MISSING_FEATURES.md`'s "Permission enforcement" finding 2.
+Finding 1 (go-fuse's `NullPermissions` default silently rewriting a
+genuinely-stored `0` mode back to 644/755) is already fixed. Finding 2
+is not: mode bits are correctly stored and correctly reported via
+`stat()`, but nothing currently gates actual access against them — a
+`chmod 400` (read-only) file can still be written by its own owner,
+verified directly against a real mount, not assumed.
+
+### C1. Enable kernel-level enforcement via `default_permissions`
+
+- Set the `default_permissions` FUSE mount option in `cmd/icbfs` and in
+  the test mount setup in `internal/fuseserver/mount_test.go` — the same
+  two places `NullPermissions` was added for the earlier bug fix.
+- This defers enforcement to the kernel: for every open/read/write (not
+  just the explicit `access(2)`-triggered checks go-fuse's own default
+  `Access()` fallback already handles today), the kernel compares the
+  calling process's uid/gid — and its *full* set of supplementary group
+  memberships, not just a primary gid — against whatever `Getattr`
+  reports for mode/uid/gid. Preferred over implementing `NodeAccesser`
+  or manual checks in `Open`/`Create` ourselves: this reuses the
+  kernel's own permission logic, which already correctly handles root
+  bypass and group membership, instead of re-implementing a
+  correctness-sensitive check by hand.
+- **Done when:** tests cover both directions on the owner's own
+  access, not just the write case already verified manually: a `chmod
+  000` file cannot be read *or* written even by its own owner; a
+  `chmod 444` file can be read but a write attempt fails with a
+  permission error rather than silently succeeding.
+
+### C2. Decide how to test group/other-bit enforcement, not just owner
+
+- The straightforward test in C1 only exercises the *owner* bits, since
+  the test process's uid is the same as the file's recorded owner uid.
+  Actually exercising group/other-bit enforcement needs a second
+  identity — either running part of the test as a different uid (real
+  environment complexity: needs root or an equivalent privilege to
+  `setuid`, not just a few more lines of Go) or explicitly accepting
+  owner-bit coverage as the automated bar and documenting group/other
+  enforcement as verified manually rather than continuously. A real
+  decision, not a default to skip silently.
+- **Done when:** the decision is made and whichever path was chosen is
+  actually exercised — either a genuine differing-uid test, or an
+  explicit note in the test file stating what's covered, what isn't,
+  and why.
+
+### C3. WinFsp equivalent (blocked on the driver existing)
+
+Windows doesn't use POSIX mode bits as its native enforcement
+mechanism — it's ACL/security-descriptor-based. Once the WinFsp driver
+exists (see `MISSING_FEATURES.md`), it needs its own enforcement path:
+real ACL checking if `ARCHITECTURE.md`'s primary-mode ACL design has
+been built by then, or at minimum an approximated mode-bit check
+equivalent to C1's for a POSIX-primary filesystem mounted on Windows.
+Not further broken down here since the driver itself isn't scoped yet.
