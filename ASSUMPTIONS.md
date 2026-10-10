@@ -182,3 +182,42 @@ that would have resolved on their own with one more retry) — this was
 never load-tested, just chosen as a reasonable round number.
 
 ---
+
+## B2: `expires_at` anchored to the client's clock, not a two-write server anchor
+
+**Question I'd have asked:** ARCHITECTURE.md says a lock's `expires_at`
+should be "computed from the lock write's own resulting Last-Modified
+... not the acquiring client's local clock." Literally, that's only
+achievable by writing once, learning the real result, then writing
+*again* with the corrected value (you can't know your own Put's result
+before you've sent its body) — is that two-write dance actually
+intended, or is a single-write, client-clock approximation acceptable?
+
+**Assumed:** implemented the simpler single-write version:
+`expires_at = time.Now() (client clock) + ttl`, documented directly in
+`TryAcquireLock`/`RenewLock`'s doc comments as a deliberate deviation
+from the literal server-anchor description. Rationale:
+- A true server-anchor would need either (a) a second CAS-conditioned
+  corrective write after learning the first write's `Last-Modified`
+  (real extra round-trip, and its own brief "looks provisionally
+  claimed with a slightly-off expiry" window), or (b) capturing the raw
+  HTTP `Date` response header, which ARCHITECTURE.md itself already
+  flags as unavailable through the typed SDK calls in use and "not
+  worth building until the soft edge actually matters."
+- ARCHITECTURE.md's own text says the actual safety property — "two
+  clients [never] both successfully steal" a lock — comes from the CAS
+  write itself, not from whose clock set `expires_at`: "clock skew here
+  can only shift *when* a lease looks expired by a few seconds, never
+  cause two clients to both successfully steal it." The implementation
+  preserves exactly that property (verified by
+  `TestLockConcurrentAcquireOnFreeLockHasExactlyOneWinner`); only the
+  precision of *when* a lease is treated as expired is client-clock-
+  relative instead of server-relative.
+
+**Check this if:** real deployments show meaningfully-skewed client
+clocks causing disputed/surprising lease-expiry behavior in practice —
+at that point the two-write server-anchor (or raw Date-header capture)
+would be the thing to actually build, per ARCHITECTURE.md's own
+escalation note.
+
+---

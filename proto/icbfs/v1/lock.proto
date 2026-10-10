@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package icbfs.v1;
+
+option go_package = "github.com/resurgentech/icbfs/internal/pb";
+
+// Lock is the whole-file lock object body — see ARCHITECTURE.md's
+// Locking section and ROADMAP.md's task B2. Generalized to a list of
+// byte-range entries in task B4; this message covers whole-file only.
+message Lock {
+  string holder = 1;
+  int64 expires_at_unix_ms = 2;
+}
