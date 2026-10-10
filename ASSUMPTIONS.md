@@ -638,3 +638,42 @@ describes, configured on the MinIO server itself, outside anything
 this Go code controls.
 
 ---
+
+## E5: no real Azure SDK code at all, by deliberate choice
+
+**Question I'd have asked:** should this task still attempt real
+Azure SDK for Go integration code (even if untestable here), or
+should it stop at the backend-agnostic checkpoint/filter logic plus a
+documented gap?
+
+**Assumed:** stopped at the backend-agnostic logic
+(`internal/notify/azurecf`: `Source`, the pull-and-resume cursor
+handling, client-side prefix filtering) plus a `Reader` interface a
+real implementation would satisfy — no Azure SDK dependency was
+added, and no concrete Azure-backed `Reader` was written at all.
+Rationale: every other backend API used in this project (go-fuse's
+`Notify*` methods, MinIO's `ListenBucketNotification`) was verified by
+reading the actual installed package source before being used — this
+project's own stated practice, reinforced by ARCHITECTURE.md's own
+MinIO-docs-corruption anecdote ("even documentation fetches get
+verified here, not trusted blind"). There is no way to do that for
+Azure here (no SDK installed, no account to exercise it against), so
+writing a "real" adapter would mean guessing at field names,
+pagination semantics, and error types from training knowledge alone —
+exactly the kind of unverified assumption this project has avoided
+everywhere else, for a cloud SDK where a wrong guess would be
+silently broken until someone with a real Storage Account found out
+the hard way. Task E5's own text explicitly scopes the testable
+deliverable to the checkpoint/filter logic and calls for the gap to be
+"documented plainly in the code, not silently absent" — which is what
+`azurecf`'s package doc comment does.
+
+**Check this if:** someone with real Azure Storage Account access
+picks this up — they'd add the real SDK dependency, implement `Reader`
+against the actual Change Feed client, and verify the actual
+continuation-token/`Cursor` representation against reality (this
+package treats `Cursor` as opaque `[]byte` specifically so that
+real shape, whatever it turns out to be, can slot in without changing
+`Source`'s own logic).
+
+---
