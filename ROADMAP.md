@@ -401,6 +401,45 @@ does, wire its lock-related callbacks onto the same tasks B2-B6 primitives
 used by FUSE. Not further broken down here since Part F owns scoping
 the driver itself.
 
+**Done — as "confirmed impossible on this binding," not as "built."**
+Part F finished, unblocking this task, but there is nothing to wire:
+`FSP_FILE_SYSTEM_INTERFACE` (WinFsp's real, native C interface — fetched
+and read directly, not inferred from the Go binding alone) has exactly
+33 callback members, `GetVolumeInfo` through `DispatcherStopped`, and
+**none of them concern byte-range locking** — no `LockControl`, no
+oplock callback, nothing. Cross-checked three independent ways before
+accepting this: `go-winfsp` (the chosen binding) exposes zero
+lock-related `Behaviour*` interfaces; WinFsp's own user-mode dispatch
+library (`fsop.c`, already read directly for other tasks — see F1/F9)
+has zero lock-dispatch code anywhere in it; and the real
+`inc/winfsp/winfsp.h` header, fetched fresh for this task specifically,
+confirms no such member exists in the struct at all, nor any comment
+mentioning locks or oplocks anywhere in the file.
+
+**The real, load-bearing consequence, not just a missing callback:**
+`LockFileEx`/byte-range locks on a WinFsp mount are handled entirely
+*inside WinFsp's kernel driver*, using its own local, same-host lock
+table — the same generic mechanism Windows provides for any local
+filesystem. Unlike FUSE's `EnableLocks` (task B8's own hard-won
+finding: an opt-out switch that exists but has to be explicitly
+flipped, see `ASSUMPTIONS.md`'s "Real lease renewal" entry), there is
+no switch here, because there is no callback to opt into in the first
+place. **icbfs's cross-host `.lock`-object Locking feature (tasks
+B2-B6) cannot be extended to a WinFsp mount on this binding, at all** —
+a Windows client's `LockFileEx` calls stay purely local to that one
+Windows machine and can never see or conflict with a lock a Linux/FUSE
+client holds on the same file through this project's own locking. This
+is a genuine Windows/FUSE feature-parity gap, not an implementation
+detail papered over — raised directly to Jared before closing this
+task out as done-via-documentation rather than quietly marking it
+complete or silently skipping it.
+
+No code changes result from this task: nothing exists to build, and
+adding a client-side-only approximation (e.g. this driver tracking its
+own locks in memory, ignorant of WinFsp's real kernel-level
+enforcement) was explicitly not attempted — it would be actively
+misleading, implying cross-host protection that doesn't exist.
+
 ### B10. Optional: use Change Notifications to accelerate blocking acquisition
 
 Cross-cutting with Part E — depends on both B3 (blocking acquisition)

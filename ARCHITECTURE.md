@@ -556,6 +556,22 @@ service is the escalation path — deliberately not built up front.
   the Content writes section above, where the driver grabs a lock purely
   to guarantee forward progress under CAS contention, with no application
   having asked for a lock at all.
+- **FUSE-only in practice, on the Windows access layer this project
+  actually built (ROADMAP.md's Part F, task B9).** This whole mechanism
+  assumes the access layer forwards an application's `fcntl`/`LockFileEx`
+  call to this driver at all. Confirmed directly against WinFsp's real
+  `FSP_FILE_SYSTEM_INTERFACE` (its 33 callback members, fetched and
+  read, not inferred from the Go binding alone): there is no
+  byte-range-lock callback of any kind. Byte-range locks on a WinFsp
+  mount are handled entirely inside WinFsp's own kernel driver, using
+  its own local, same-host lock table — the same generic mechanism
+  Windows provides any local filesystem — with no extension point at
+  all, unlike FUSE's own `EnableLocks` (an opt-out switch that at least
+  exists to be flipped). A Windows client's `LockFileEx` calls on an
+  icbfs WinFsp mount therefore stay purely local to that one Windows
+  machine; they never reach this mechanism and can never see or
+  conflict with a lock a Linux/FUSE client holds on the same file. A
+  genuine Windows/FUSE feature-parity gap, not papered over.
 
 See `ROADMAP.md` for this broken into concrete implementation tasks.
 
