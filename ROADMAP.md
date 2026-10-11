@@ -876,6 +876,29 @@ synced over as a tarball, `go build` run over SSH).
   this layer sits entirely on the `icbfs.Filesystem` side of the binding
   boundary.
 
+**Done.** `internal/winfspserver/resolve.go`'s `resolvePath` walks a
+WinFsp path string from `fsys.RootKey()` down via repeated
+`icbfs.Filesystem.Lookup` calls — a fresh walk per call, no
+driver-owned cache in this first cut, same "every call re-walks from
+the root" model described above. Deliberately not Windows-only (no
+`go-winfsp`/`golang.org/x/sys/windows` import at all): it's pure
+`icbfs.Filesystem` logic, so it builds and tests on any platform,
+proven by `go test ./internal/winfspserver/...` running clean on this
+Linux dev machine with no VM involved — exactly the point of this
+task's own "independent of a real WinFsp mount" bar.
+
+Covered by real tests, not just the happy path: nested directories,
+two hardlinked names resolving to the identical UUID (confirmed by
+reverting the intermediate-directory-type check and watching the
+through-a-file test fail, not just trusting it compiles), a genuinely
+missing path surfacing `icbfs.ErrNotFound`, and a path that tries to
+descend through a plain file surfacing `icbfs.ErrNotDir` rather than a
+confusing not-found or a silent wrong answer. Symlink-following through
+intermediate components is deliberately out of scope here — not asked
+for by this task's own "Done when," and a real design question for F3
+(WinFsp represents symlinks as reparse points, a different mechanism
+from POSIX's always-transparent-except-at-the-leaf convention).
+
 ### F3. Core operation wiring
 
 - Wire the chosen binding's callbacks to `icbfs.Filesystem` via F2's
