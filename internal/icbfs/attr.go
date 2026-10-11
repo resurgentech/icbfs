@@ -28,6 +28,47 @@ var (
 	ErrInvalidName = errors.New("name reserved on a primary-Windows filesystem")
 )
 
+// Windows FILE_ATTRIBUTE_* bits this project stores with native
+// fidelity for a file/symlink's Hidden/System/ReadOnly/Archive state
+// (ROADMAP.md's Part F, task F7; ARCHITECTURE.md's "File attribute
+// bits" rule). These duplicate golang.org/x/sys/windows's own
+// documented Win32 values (not imported from there) so this package
+// stays portable with no Windows dependency — same reasoning
+// winnames.go's own reserved-character constants give. Numerically
+// identical to FILE_ATTRIBUTE_READONLY/HIDDEN/SYSTEM/ARCHIVE, so
+// winfspserver can widen one of these straight into a
+// FSP_FSCTL_FILE_INFO.FileAttributes value with no translation table.
+const (
+	WindowsAttrReadOnly uint32 = 0x01
+	WindowsAttrHidden   uint32 = 0x02
+	WindowsAttrSystem   uint32 = 0x04
+	WindowsAttrArchive  uint32 = 0x20
+
+	windowsAttrMask = WindowsAttrReadOnly | WindowsAttrHidden | WindowsAttrSystem | WindowsAttrArchive
+)
+
+// WindowsAttributesXattrKey is the well-known xattrs map key a file/
+// symlink's native Windows attribute byte is stored under — "another
+// entry in .metadata's xattrs map," the same place task F8 plans to
+// land Windows ACLs (under "windows.acl") and POSIX already keeps its
+// own ACL entry (under "system.posix_acl_access"): no special-casing
+// at the storage layer, just another named entry in the union map.
+const WindowsAttributesXattrKey = "windows.attributes"
+
+// WindowsAttributesFromXattrs reads a file/symlink's natively-stored
+// Windows attribute bits, if any were ever written via
+// SetWindowsAttributes. ok is false if nothing has been stored yet —
+// callers decide what to derive instead (e.g. winfspserver falls back
+// to approximating ReadOnly from the POSIX mode bit, the same
+// approximation used before this field existed at all).
+func WindowsAttributesFromXattrs(xattrs map[string][]byte) (bits uint32, ok bool) {
+	v, present := xattrs[WindowsAttributesXattrKey]
+	if !present || len(v) == 0 {
+		return 0, false
+	}
+	return uint32(v[0]) & windowsAttrMask, true
+}
+
 // Attr is the POSIX-ish attribute set for one inode. Where it comes from
 // differs by type — see ARCHITECTURE.md's Metadata model and Multiple
 // filesystems per bucket sections:

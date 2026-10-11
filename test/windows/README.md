@@ -333,3 +333,32 @@ same: a real mount, not just a compiled binary.
   separate SSH connection won't see it at all (confirmed directly: a
   fresh `ssh_vm` call reported "Cannot find drive" for a drive a prior
   call had just successfully mounted and was still running).
+- **Bool flags need `-flag=value`, not `-flag value`**: found exercising
+  task F7 — Go's `flag` package treats a bare `-primary-windows` as
+  already satisfied (defaulting to `true`) and starts parsing the next
+  `ArgumentList` entry as a positional argument, which silently broke
+  `NArg() != 1`'s mountpoint check. `-primary-windows=true`/`=false`
+  works correctly.
+- **task F7's Hidden/System/ReadOnly/Archive round-trip, confirmed for
+  real**, against both primary modes on `icbfs-winfsp-manual`:
+  - **Primary-Windows** (`-primary-windows=true`): `[System.IO.File]::
+    SetAttributes("K:\f.txt", "Hidden,Archive,ReadOnly")` followed by
+    `GetAttributes` on the same path reported back all three bits
+    exactly; `Get-ChildItem -Force -Hidden` (a fresh `ReadDirectory`
+    call, not just `GetFileInfo`) agreed; clearing back down to just
+    `Archive` round-tripped correctly too (full replace, not
+    additive-only). cmd.exe's own `attrib.exe` utility has a *separate*,
+    unrelated quirk worth knowing about if it comes up again: it prints
+    "Not resetting hidden file" and silently skips `+R` on a file that
+    already has `+H` set — confirmed this is `attrib.exe`'s own
+    historical safety behavior, not a driver bug, by reproducing the
+    identical sequence through `[System.IO.File]::SetAttributes`
+    instead, which has no such restriction.
+  - **Primary-POSIX** (`-primary-windows=false`): the identical
+    `SetAttributes("Hidden,Archive,ReadOnly")` call against a
+    same-shaped file reported back only `ReadOnly` afterward — Hidden/
+    Archive have no POSIX analog and are correctly never persisted with
+    native fidelity outside primary-Windows mode, confirming the
+    primary-mode read-time branching in
+    `winfspserver.attr.go`'s `attributesFromAttr` actually takes effect
+    against a real mount, not just in a unit test.

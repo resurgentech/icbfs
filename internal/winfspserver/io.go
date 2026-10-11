@@ -55,7 +55,7 @@ func (d *driver) Write(fs *winfsp.FileSystemRef, file uintptr, buf []byte, offse
 			if err != nil {
 				return 0, toWinError(err)
 			}
-			fillFileInfo(info, h.typ, attr)
+			d.fillFileInfo(info, h.typ, attr)
 			return 0, nil
 		}
 		if off+int64(len(buf)) > size {
@@ -75,7 +75,7 @@ func (d *driver) Write(fs *winfsp.FileSystemRef, file uintptr, buf []byte, offse
 		return 0, toWinError(err)
 	}
 	attr.Size = open.Size()
-	fillFileInfo(info, h.typ, attr)
+	d.fillFileInfo(info, h.typ, attr)
 	return len(buf), nil
 }
 
@@ -95,13 +95,13 @@ func (d *driver) Flush(fs *winfsp.FileSystemRef, file uintptr, info *winfsp.FSP_
 		if err != nil {
 			return toWinError(err)
 		}
-		fillFileInfo(info, h.typ, attr)
+		d.fillFileInfo(info, h.typ, attr)
 		return nil
 	}
 	attr, err := open.Flush(ctx())
 	if err != nil {
 		return toWinError(err)
 	}
-	fillFileInfo(info, h.typ, attr)
+	d.fillFileInfo(info, h.typ, attr)
 	return nil
 }

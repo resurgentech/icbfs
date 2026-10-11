@@ -193,7 +193,7 @@ func (d *driver) Open(fs *winfsp.FileSystemRef, name string, createOptions, gran
 	if err != nil {
 		return 0, toWinError(err)
 	}
-	fillFileInfo(info, r.Type, r.Attr)
+	d.fillFileInfo(info, r.Type, r.Attr)
 	h := &fileHandle{key: r.Key, typ: r.Type}
 	return d.newHandle(h), nil
 }
@@ -240,7 +240,7 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 		if err != nil {
 			return 0, toWinError(err)
 		}
-		fillFileInfo(info, icbfs.TypeDir, attr)
+		d.fillFileInfo(info, icbfs.TypeDir, attr)
 		return d.newHandle(&fileHandle{key: newUUID, typ: icbfs.TypeDir}), nil
 	}
 
@@ -249,7 +249,15 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 	if err != nil {
 		return 0, toWinError(err)
 	}
-	fillFileInfo(info, icbfs.TypeFile, attr)
+	// Persist the real Hidden/System/ReadOnly/Archive byte from
+	// creation time too, not just from a later SetBasicInfo (task F7)
+	// — a file created with e.g. FILE_ATTRIBUTE_HIDDEN set should
+	// report it back immediately, not only after an explicit
+	// SetFileAttributes call.
+	if attr, err = d.fsys.SetWindowsAttributes(ctx(), newUUID, fileAttributes); err != nil {
+		return 0, toWinError(err)
+	}
+	d.fillFileInfo(info, icbfs.TypeFile, attr)
 	// seeded empty, not nil: a just-created file's content really is
 	// zero bytes, distinct from "not seeded yet" — ensureOpen below
 	// tells the two apart via hasSeed, not a nil check on this slice.
@@ -274,7 +282,7 @@ func (d *driver) Overwrite(fs *winfsp.FileSystemRef, file uintptr, attributes ui
 	h.mu.Lock()
 	h.open = nil // drop any stale buffered OpenFile; next I/O reopens against the now-truncated content
 	h.mu.Unlock()
-	fillFileInfo(info, h.typ, attr)
+	d.fillFileInfo(info, h.typ, attr)
 	return nil
 }
 

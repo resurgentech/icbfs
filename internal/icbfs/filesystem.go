@@ -839,6 +839,30 @@ func (f *Filesystem) updateFileMetadata(ctx context.Context, uuid string, mutate
 	return Attr{}, fmt.Errorf("update metadata %s: exceeded %d retries", uuid, maxTreeRetries)
 }
 
+// SetWindowsAttributes persists a file/symlink's Hidden/System/
+// ReadOnly/Archive bits with full native fidelity, regardless of
+// primary mode — ARCHITECTURE.md's "the schema always carries the
+// field" rule (task F7). Which representation (these stored bits, vs.
+// deriving ReadOnly from the POSIX mode bit) is authoritative at
+// *read* time is a decision for the caller, based on primary mode —
+// not this method's concern, same division SetAttr already has
+// between storing and interpreting mode/uid/gid.
+//
+// Directories have no .metadata object at all (see Attr's doc
+// comment), so are not supported here — matching ROADMAP.md's F7 scope
+// ("another entry in .metadata's xattrs map").
+func (f *Filesystem) SetWindowsAttributes(ctx context.Context, uuid string, bits uint32) (Attr, error) {
+	if err := f.checkWritable(); err != nil {
+		return Attr{}, err
+	}
+	return f.updateFileMetadata(ctx, uuid, func(a *Attr) {
+		if a.Xattrs == nil {
+			a.Xattrs = make(map[string][]byte)
+		}
+		a.Xattrs[WindowsAttributesXattrKey] = []byte{byte(bits & windowsAttrMask)}
+	})
+}
+
 // Link creates a hard link named name inside dirKey, pointing at the
 // existing node targetUUID/targetType, incrementing its nlink via the
 // CAS-protected metadataObjectKey object.

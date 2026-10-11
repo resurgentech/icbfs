@@ -48,7 +48,7 @@ func (d *driver) ReadDirectory(fs *winfsp.FileSystemRef, file uintptr, pattern s
 			continue // best-effort: an entry that vanished between ReadDir and Stat is simply omitted, same as a concurrent unlink racing a real directory read on any filesystem
 		}
 		var info winfsp.FSP_FSCTL_FILE_INFO
-		fillFileInfo(&info, e.Type, attr)
+		d.fillFileInfo(&info, e.Type, attr)
 		if ok, err := fill(e.Name, &info); err != nil || !ok {
 			return err
 		}

@@ -1111,6 +1111,54 @@ NTSTATUS mapping with direct precedent elsewhere in `driver.go`
   named callbacks on the actual installed interface, not inferred.
 - **Done when:** round-trips correctly through a real WinFsp mount.
 
+**Done.** Hidden/System/ReadOnly/Archive are stored with full native
+fidelity in a new well-known `.metadata` xattrs entry
+(`icbfs.WindowsAttributesXattrKey = "windows.attributes"`, a single
+byte, masked to just those four real `FILE_ATTRIBUTE_*` bit values —
+duplicated as portable constants in `internal/icbfs/attr.go` so the
+core package keeps no Windows dependency, same reasoning task F6's
+`winnames.go` already established), written via a new
+`Filesystem.SetWindowsAttributes` and read via
+`WindowsAttributesFromXattrs`. Per ARCHITECTURE.md's "File attribute
+bits" rule ("the schema always carries the field, populated/used per
+primary mode"): `SetBasicInfo`/`Create` in `winfspserver` always persist
+the real byte regardless of primary mode, but which representation
+`attributesFromAttr` treats as authoritative at *read* time is decided
+by `PrimaryWindows()` — a primary-Windows filesystem reports the stored
+native bits (including Hidden/System/Archive, which have no POSIX
+analog at all); a primary-POSIX filesystem ignores them and keeps the
+original approximation (ReadOnly derived from the POSIX owner-write
+bit, Hidden/System/Archive always clear). `fillFileInfo`/
+`attributesFromAttr` became `*driver` methods (not free functions) so
+every call site — `GetFileInfo`, `SetBasicInfo`, `SetFileSize`,
+`GetSecurityByName`, `Create`, `Overwrite`, `ReadDirectory`, `Read`/
+`Write`/`Flush` — can consult `d.fsys.PrimaryWindows()` without
+threading it through each signature individually.
+
+Verified with portable `icbfs`-level tests
+(`TestSetWindowsAttributesRoundTripsAndMasksUnrelatedBits`, confirmed
+discriminating both on the round trip itself and on write-time masking
+by temporarily breaking each and observing the expected failures), plus
+a real round trip through a real WinFsp mount on the Windows VM against
+the standalone MinIO container: `[System.IO.File]::SetAttributes`
+setting Hidden+Archive+ReadOnly on a primary-Windows mount round-tripped
+exactly through both `GetFileInfo` (a fresh `GetAttributes` call) and
+`ReadDirectory` (`Get-ChildItem -Force -Hidden`), including clearing
+bits back down correctly (full replace, not additive-only); the
+identical sequence against a primary-POSIX mount correctly reported
+back only `ReadOnly`, confirming the primary-mode read-time branching
+for real, not just in a unit test. One real but unrelated gotcha found
+and documented in `test/windows/README.md`: cmd.exe's `attrib.exe`
+utility itself refuses to set `+R` on a file that already has `+H` set
+("Not resetting hidden file") — a long-standing `attrib.exe` quirk, not
+a driver bug, confirmed by reproducing the same sequence through
+`[System.IO.File]::SetAttributes` instead, which has no such
+restriction. Also found and documented: Go's `flag` package needs
+`-primary-windows=true`/`=false`, not a space-separated `-primary-windows
+true` — the latter is silently misparsed as a positional argument.
+Full `gofmt`/`go build`/`go vet`/`go test ./...` clean on Linux, plus a
+Windows cross-compile and Windows-target vet of both WinFsp binaries.
+
 ### F8. ACL wiring
 
 - The `xattrs` map itself is built in Part A's task A4 (`.metadata`'s

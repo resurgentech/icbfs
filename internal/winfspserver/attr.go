@@ -21,8 +21,12 @@ import (
 // ctime/atime tracked at all): CreationTime/LastAccessTime/
 // LastWriteTime/ChangeTime all report Mtime (falling back to Btime,
 // then now, if Mtime is zero).
-func fillFileInfo(info *winfsp.FSP_FSCTL_FILE_INFO, typ icbfs.EntryType, a icbfs.Attr) {
-	info.FileAttributes = attributesFromAttr(typ, a)
+//
+// A method on *driver (not a free function) so it can consult
+// d.fsys.PrimaryWindows() when deciding which attribute representation
+// is authoritative — see attributesFromAttr.
+func (d *driver) fillFileInfo(info *winfsp.FSP_FSCTL_FILE_INFO, typ icbfs.EntryType, a icbfs.Attr) {
+	info.FileAttributes = d.attributesFromAttr(typ, a)
 	if typ == icbfs.TypeSymlink {
 		info.ReparseTag = windows.IO_REPARSE_TAG_SYMLINK
 	} else {
@@ -58,12 +62,19 @@ func filetimeFromTime(t time.Time) uint64 {
 }
 
 // attributesFromAttr computes the Windows FILE_ATTRIBUTE_* bits to
-// report for an entry. Hidden/System/Archive bits (task F7) aren't
-// wired yet — this task (F3) only distinguishes directory vs. file
-// and a basic read-only approximation from the POSIX owner-write bit,
-// matching the same approximation ARCHITECTURE.md already accepts for
-// the reverse direction.
-func attributesFromAttr(typ icbfs.EntryType, a icbfs.Attr) uint32 {
+// report for an entry.
+//
+// Task F7's primary-mode rule (ARCHITECTURE.md's "File attribute
+// bits": "the schema always carries the field, populated/used per
+// primary mode"): on a primary-Windows filesystem, natively-stored
+// Hidden/System/ReadOnly/Archive bits (icbfs.WindowsAttributesFromXattrs)
+// are authoritative and reported with full fidelity, including
+// Hidden/System/Archive, which have no POSIX analog at all. On a
+// primary-POSIX filesystem (or a primary-Windows file nothing has ever
+// called SetWindowsAttributes on), fall back to the original
+// approximation: ReadOnly derived from the POSIX owner-write bit,
+// Hidden/System/Archive always clear.
+func (d *driver) attributesFromAttr(typ icbfs.EntryType, a icbfs.Attr) uint32 {
 	switch typ {
 	case icbfs.TypeDir:
 		return windows.FILE_ATTRIBUTE_DIRECTORY
@@ -75,6 +86,14 @@ func attributesFromAttr(typ icbfs.EntryType, a icbfs.Attr) uint32 {
 		// regular file content.
 		return windows.FILE_ATTRIBUTE_REPARSE_POINT
 	default:
+		if d.fsys.PrimaryWindows() {
+			if bits, ok := icbfs.WindowsAttributesFromXattrs(a.Xattrs); ok {
+				if bits == 0 {
+					return windows.FILE_ATTRIBUTE_NORMAL
+				}
+				return bits
+			}
+		}
 		if a.Mode&0o200 == 0 {
 			return windows.FILE_ATTRIBUTE_READONLY
 		}
@@ -102,15 +121,22 @@ func (d *driver) GetFileInfo(fs *winfsp.FileSystemRef, file uintptr, info *winfs
 	if err != nil {
 		return toWinError(err)
 	}
-	fillFileInfo(info, h.typ, attr)
+	d.fillFileInfo(info, h.typ, attr)
 	return nil
 }
 
 // SetBasicInfo updates mode/attribute-adjacent fields WinFsp's
-// SetFileTime/SetFileAttributes callers end up driving. This task maps
-// only the read-only attribute bit through to the POSIX owner-write
-// bit — real Hidden/System/Archive persistence is F7's job (storing
-// them in .metadata's xattrs map, per ROADMAP.md).
+// SetFileTime/SetFileAttributes callers end up driving.
+//
+// Always persists the real Hidden/System/ReadOnly/Archive byte via
+// SetWindowsAttributes (task F7's native-fidelity storage — "the
+// schema always carries the field," regardless of primary mode) *and*
+// always derives/stores the approximated POSIX read-only mode bit the
+// same way this driver always has, so a primary-POSIX filesystem's
+// FUSE side keeps seeing a sensible (if partial) reflection of a
+// Windows client's ReadOnly toggle. Which of the two representations
+// GetFileInfo/attributesFromAttr later treats as authoritative is a
+// read-time decision based on primary mode, not this method's.
 func (d *driver) SetBasicInfo(fs *winfsp.FileSystemRef, file uintptr, flags winfsp.SetBasicInfoFlags, fileAttributes uint32, creationTime, lastAccessTime, lastWriteTime, changeTime uint64, info *winfsp.FSP_FSCTL_FILE_INFO) error {
 	h, ok := d.handle(file)
 	if !ok {
@@ -125,7 +151,13 @@ func (d *driver) SetBasicInfo(fs *winfsp.FileSystemRef, file uintptr, flags winf
 	if err != nil {
 		return toWinError(err)
 	}
-	fillFileInfo(info, h.typ, attr)
+	if flags&winfsp.SetBasicInfoAttributes != 0 && h.typ != icbfs.TypeDir {
+		attr, err = d.fsys.SetWindowsAttributes(ctx(), h.key, fileAttributes)
+		if err != nil {
+			return toWinError(err)
+		}
+	}
+	d.fillFileInfo(info, h.typ, attr)
 	return nil
 }
 
@@ -144,7 +176,7 @@ func (d *driver) SetFileSize(fs *winfsp.FileSystemRef, file uintptr, newSize uin
 		if err != nil {
 			return toWinError(err)
 		}
-		fillFileInfo(info, h.typ, attr)
+		d.fillFileInfo(info, h.typ, attr)
 		return nil
 	}
 	size := int64(newSize)
@@ -155,7 +187,7 @@ func (d *driver) SetFileSize(fs *winfsp.FileSystemRef, file uintptr, newSize uin
 	h.mu.Lock()
 	h.open = nil // drop any stale buffered OpenFile; next I/O reopens against the now-resized content
 	h.mu.Unlock()
-	fillFileInfo(info, h.typ, attr)
+	d.fillFileInfo(info, h.typ, attr)
 	return nil
 }
 
@@ -181,7 +213,7 @@ func (d *driver) GetSecurityByName(fs *winfsp.FileSystemRef, name string, flags 
 	if err != nil {
 		return 0, nil, err
 	}
-	return attributesFromAttr(r.Type, r.Attr), sd, nil
+	return d.attributesFromAttr(r.Type, r.Attr), sd, nil
 }
 
 func (d *driver) GetSecurity(fs *winfsp.FileSystemRef, file uintptr) (*windows.SECURITY_DESCRIPTOR, error) {

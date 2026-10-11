@@ -393,3 +393,84 @@ func TestXattrsPosixAndWindowsACLsCoexist(t *testing.T) {
 		t.Fatalf("got %d xattrs entries, want exactly 3 (no cross-contamination): %v", len(got.Xattrs), got.Xattrs)
 	}
 }
+
+// TestSetWindowsAttributesRoundTripsAndMasksUnrelatedBits covers task
+// F7's storage half: SetWindowsAttributes/WindowsAttributesFromXattrs,
+// the real public API (unlike the two tests above, which predate it
+// and poke .metadata directly). Confirms a round trip through real
+// storage, that unrelated Win32 bits (e.g. FILE_ATTRIBUTE_NORMAL,
+// FILE_ATTRIBUTE_DIRECTORY) passed in by a careless caller are masked
+// out rather than stored verbatim, and that mode/uid/gid/nlink are
+// left untouched by the call — same invariant
+// TestXattrsRoundTripArbitraryBinaryValues already established for
+// plain xattrs.
+func TestSetWindowsAttributesRoundTripsAndMasksUnrelatedBits(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+
+	uuid, _, _, err := fsys.Create(ctx, root, "has-win-attrs.txt", 0644, 1000, 1000)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// Hidden|Archive, plus FILE_ATTRIBUTE_NORMAL (0x80) and
+	// FILE_ATTRIBUTE_DIRECTORY (0x10) thrown in to confirm masking —
+	// neither belongs in the stored byte at all.
+	const (
+		fileAttributeDirectory = 0x10
+		fileAttributeNormal    = 0x80
+	)
+	in := WindowsAttrHidden | WindowsAttrArchive | fileAttributeDirectory | fileAttributeNormal
+
+	attr, err := fsys.SetWindowsAttributes(ctx, uuid, in)
+	if err != nil {
+		t.Fatalf("SetWindowsAttributes: %v", err)
+	}
+	want := WindowsAttrHidden | WindowsAttrArchive
+	bits, ok := WindowsAttributesFromXattrs(attr.Xattrs)
+	if !ok {
+		t.Fatal("WindowsAttributesFromXattrs: ok = false immediately after SetWindowsAttributes")
+	}
+	if bits != want {
+		t.Fatalf("stored bits = %#x, want %#x (Directory/Normal should be masked out)", bits, want)
+	}
+	// Check the raw stored byte directly, bypassing
+	// WindowsAttributesFromXattrs's own read-side mask — proves
+	// SetWindowsAttributes itself masks at write time, not just that
+	// the reader happens to hide an unmasked value.
+	if raw := attr.Xattrs[WindowsAttributesXattrKey]; len(raw) != 1 || raw[0] != byte(want) {
+		t.Fatalf("raw stored byte = %v, want [%#x] (Directory/Normal must not reach storage at all)", raw, byte(want))
+	}
+
+	// Re-read via Stat, not just the return value, to prove this is
+	// really persisted, not just echoed back.
+	got, err := fsys.Stat(ctx, uuid, TypeFile)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	bits, ok = WindowsAttributesFromXattrs(got.Xattrs)
+	if !ok {
+		t.Fatal("WindowsAttributesFromXattrs: ok = false after Stat")
+	}
+	if want := WindowsAttrHidden | WindowsAttrArchive; bits != want {
+		t.Fatalf("stat-read bits = %#x, want %#x", bits, want)
+	}
+	if got.Mode != 0644 || got.Uid != 1000 || got.Gid != 1000 || got.Nlink != 1 {
+		t.Fatalf("other fields disturbed by SetWindowsAttributes: %+v", got)
+	}
+
+	// An entry nothing has ever called SetWindowsAttributes on reports
+	// ok = false, not a zero-value false positive.
+	other, _, _, err := fsys.Create(ctx, root, "no-win-attrs.txt", 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	otherAttr, err := fsys.Stat(ctx, other, TypeFile)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if _, ok := WindowsAttributesFromXattrs(otherAttr.Xattrs); ok {
+		t.Fatalf("WindowsAttributesFromXattrs: ok = true for an entry never touched, xattrs = %v", otherAttr.Xattrs)
+	}
+}
