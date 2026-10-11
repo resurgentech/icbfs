@@ -937,6 +937,60 @@ from POSIX's always-transparent-except-at-the-leaf convention).
   either works for real or fails with a clear, intentional error —
   not an untested unknown either way.
 
+**Done.** `internal/winfspserver` (driver.go, attr.go, dir.go, io.go,
+reparse.go) wires `go-winfsp`'s native interfaces to `icbfs.Filesystem`
+via `resolve.go`'s `resolvePath`/`resolvePathFollow`, with a per-open
+`fileHandle` table standing in for what go-fuse's node tree gives the
+FUSE driver for free. `cmd/icbfs-winfsp` is the real mount entry
+point. Verified end to end on the real VM, built natively there, not
+just compiled: file/directory create, write, read, nested paths,
+unlink, rmdir, both relative- and absolute-target symlink creation
+*and* transparent read-through, and deleting a symlink itself (not its
+target) all confirmed byte-exact or behavior-exact against a live
+mount — not just "it compiled." Hardlinks return a clear, intentional
+`os.ErrPermission`-equivalent from `Create` (no native callback
+exists, per F1's finding); rename is out of scope here, same as the
+FUSE driver, which doesn't have it either (a real, pre-existing gap,
+flagged separately in `TESTING.md`, not re-solved ad hoc for Windows
+only).
+
+**Three more real, load-bearing bugs found and fixed via actual VM
+testing, each confirmed by tracing the exact failure before fixing it
+— not fixed speculatively:**
+1. **`winfsp.CaseSensitive(true)` is required.** Without it, WinFsp
+   case-folds names internally and can hand this driver an uppercased,
+   no-longer-matching name on a later call — caught when `Remove-Item`
+   on `subdir\nested.txt` arrived at `Cleanup` as `\SUBDIR\NESTED.TXT`,
+   which then failed to resolve at all. `icbfs.Filesystem`'s own
+   directory lookup is already exact-match, so this just makes the two
+   layers agree; it is not F4's real case-*insensitive* mount option.
+2. **A symlink's reparse buffer must set `SYMLINK_FLAG_RELATIVE`
+   correctly, not unconditionally.** Always setting it (matching an
+   absolute target with a "this is relative" flag) made the kernel try
+   to resolve `\??\K:\target.txt` as if it were relative to the link's
+   own directory, landing on the literal string `\??` as a bogus first
+   path component — traced directly via a `GetReparsePointByName(name=
+   "\??")` call this driver's own instrumentation caught. Fixed by
+   detecting the `\??\` NT-namespace prefix Windows itself prepends to
+   absolute targets.
+3. **`GetReparsePointByName` must return the exact NTSTATUS
+   `STATUS_NOT_A_REPARSE_POINT` for "this isn't a symlink," not a
+   generic error.** Returning anything else — confirmed by reading
+   WinFsp's own `fsop.c` resolver after a real relative-symlink
+   read-through failed with "Could not find a part of the path" —
+   makes WinFsp's resolution loop abort the whole path resolution
+   instead of continuing past it, even though the resolver had already
+   correctly found the real target. This, not a missing follow step,
+   was why a *relative*-target symlink's content read failed while an
+   *absolute*-target one (which the kernel re-resolves independently,
+   without going through this loop at all) worked.
+
+`Open` also explicitly follows a trailing symlink itself
+(`resolvePathFollow`, resolve.go) unless the caller set
+`FILE_OPEN_REPARSE_POINT` — kept as a deliberate backstop alongside
+fix 3 above, verified not to interfere with deleting a symlink itself
+(callers that want the link, not its target, do set that flag).
+
 ### F4. Case-sensitivity mount flag
 
 - Confirmed as a single whole-volume setting

@@ -77,6 +77,99 @@ func resolvePath(ctx context.Context, fsys *icbfs.Filesystem, path string) (reso
 	return resolved{Key: key, Type: typ, Attr: attr}, nil
 }
 
+// maxSymlinkHops bounds resolvePathFollow against a symlink cycle —
+// nothing currently prevents a symlink from pointing at itself or at
+// an ancestor that points back, so this is a real, not theoretical,
+// termination guarantee.
+const maxSymlinkHops = 20
+
+// ntPathPrefix is what Windows' own CreateSymbolicLinkW prepends to an
+// absolute symlink target before this driver ever sees it, confirmed
+// empirically against a real WinFsp mount, not assumed (see
+// ROADMAP.md's F3 entry) — the NT namespace's "DOS device path"
+// prefix. Recognizing it is how resolvePathFollow tells an absolute
+// stored target apart from a relative one, since icbfs.Filesystem.
+// Symlink's own target string carries no separate flag for this.
+const ntPathPrefix = `\??\`
+
+// resolvePathFollow is resolvePath, but transparently follows a
+// symlink at the very end of path too (resolvePath's own "intermediate
+// component must be a directory" rule already means a symlink midway
+// through a path is never transparently followed by either function —
+// a genuinely separate, harder question not attempted here, same as
+// resolvePath's own doc comment already flags).
+//
+// Needed because, confirmed empirically against a real mount: the
+// kernel transparently follows an *absolute* symlink target itself
+// (it can just reissue an independent, fresh open against it, with no
+// involvement from this filesystem) but not a *relative* one —
+// resolving "reltarget.txt relative to this link's own directory"
+// needs this filesystem's own cooperation, which nothing else
+// provides. Tried shipping without this and confirmed the gap for
+// real first, not assumed: an absolute-target symlink's content read
+// correctly through a real mount; the identical read through a
+// relative-target symlink failed with "Could not find a part of the
+// path," traced directly to the kernel never issuing a follow-up open
+// against the resolved target at all.
+func resolvePathFollow(ctx context.Context, fsys *icbfs.Filesystem, path string) (resolved, error) {
+	r, err := resolvePath(ctx, fsys, path)
+	if err != nil {
+		return resolved{}, err
+	}
+	dir, _ := splitParent(path)
+	for i := 0; r.Type == icbfs.TypeSymlink; i++ {
+		if i >= maxSymlinkHops {
+			return resolved{}, fmt.Errorf("resolve %q: too many levels of symbolic links", path)
+		}
+		target, err := fsys.Readlink(ctx, r.Key)
+		if err != nil {
+			return resolved{}, err
+		}
+		next := resolveSymlinkTarget(dir, target)
+		r, err = resolvePath(ctx, fsys, next)
+		if err != nil {
+			return resolved{}, err
+		}
+		dir, _ = splitParent(next)
+	}
+	return r, nil
+}
+
+// resolveSymlinkTarget turns a stored symlink target into a path
+// resolvePath can walk, given dir (the symlink's own parent
+// directory, for a relative target):
+//   - an NT-prefixed absolute target (`\??\K:\sub\file`) has the
+//     prefix and drive letter stripped, leaving an in-volume path —
+//     this driver only ever serves one drive letter per mount, so
+//     whatever follows the colon is that path;
+//   - a target already starting with `\` is already volume-absolute;
+//   - anything else is relative to dir.
+func resolveSymlinkTarget(dir, target string) string {
+	target = strings.TrimPrefix(target, ntPathPrefix)
+	if idx := strings.Index(target, ":"); idx >= 0 {
+		return target[idx+1:]
+	}
+	if strings.HasPrefix(target, `\`) {
+		return target
+	}
+	return dir + `\` + target
+}
+
+// splitParent splits path into its parent directory path and its own
+// base name — e.g. `\dir1\dir2\file.txt` splits to (`\dir1\dir2`,
+// `file.txt`); a root-level name like `\file.txt` splits to an empty
+// parent and `file.txt`, and resolvePath on an empty string already
+// resolves to the root, so callers never need to special-case that
+// themselves.
+func splitParent(path string) (dir, base string) {
+	path = strings.TrimSuffix(path, `\`)
+	idx := strings.LastIndex(path, `\`)
+	if idx < 0 {
+		return "", path
+	}
+	return path[:idx], path[idx+1:]
+}
+
 // splitPath breaks a WinFsp path into its non-empty segments: both a
 // bare backslash and an empty string (the root) split to zero
 // segments, and a leading/trailing/doubled backslash never produces a
