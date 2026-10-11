@@ -863,6 +863,26 @@ func (f *Filesystem) SetWindowsAttributes(ctx context.Context, uuid string, bits
 	})
 }
 
+// SetWindowsACL persists a file/symlink's native Windows security
+// descriptor, given as its SDDL string representation (task F8;
+// WindowsACLXattrKey's own doc comment explains the SDDL choice).
+// Directories have no .metadata object at all (see Attr's doc
+// comment), so are not supported here — same scope restriction task
+// F7's SetWindowsAttributes already applies to its own xattrs-map
+// storage; winfspserver.SetSecurity treats a directory handle as a
+// no-op rather than calling this at all.
+func (f *Filesystem) SetWindowsACL(ctx context.Context, uuid string, sddl []byte) (Attr, error) {
+	if err := f.checkWritable(); err != nil {
+		return Attr{}, err
+	}
+	return f.updateFileMetadata(ctx, uuid, func(a *Attr) {
+		if a.Xattrs == nil {
+			a.Xattrs = make(map[string][]byte)
+		}
+		a.Xattrs[WindowsACLXattrKey] = sddl
+	})
+}
+
 // Link creates a hard link named name inside dirKey, pointing at the
 // existing node targetUUID/targetType, incrementing its nlink via the
 // CAS-protected metadataObjectKey object.

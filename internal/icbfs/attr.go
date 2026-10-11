@@ -69,6 +69,31 @@ func WindowsAttributesFromXattrs(xattrs map[string][]byte) (bits uint32, ok bool
 	return uint32(v[0]) & windowsAttrMask, true
 }
 
+// WindowsACLXattrKey is the well-known xattrs map key a file/symlink's
+// native Windows security descriptor is stored under (ROADMAP.md's
+// Part F, task F8) — metadata.proto's own doc comment already reserved
+// this name. The value is a security descriptor's SDDL string
+// representation (ASCII, e.g. "O:...G:...D:..."), not the raw
+// self-relative binary layout: SDDL round-trips through
+// golang.org/x/sys/windows's own SecurityDescriptorFromString/
+// (*SECURITY_DESCRIPTOR).String() with no manual struct-layout work on
+// either side, and stores as ordinary bytes in this already-binary-safe
+// map with no further encoding needed, same as every other xattr here.
+const WindowsACLXattrKey = "windows.acl"
+
+// WindowsACLFromXattrs reads a file/symlink's natively-stored security
+// descriptor's SDDL string, if SetWindowsACL has ever been called for
+// it. ok is false if nothing has been stored yet — callers (winfspserver)
+// decide what to fall back to (the mounting process's own identity, per
+// ROADMAP.md's F8 entry).
+func WindowsACLFromXattrs(xattrs map[string][]byte) (sddl []byte, ok bool) {
+	v, present := xattrs[WindowsACLXattrKey]
+	if !present || len(v) == 0 {
+		return nil, false
+	}
+	return v, true
+}
+
 // Attr is the POSIX-ish attribute set for one inode. Where it comes from
 // differs by type — see ARCHITECTURE.md's Metadata model and Multiple
 // filesystems per bucket sections:

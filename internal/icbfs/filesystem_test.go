@@ -474,3 +474,63 @@ func TestSetWindowsAttributesRoundTripsAndMasksUnrelatedBits(t *testing.T) {
 		t.Fatalf("WindowsAttributesFromXattrs: ok = true for an entry never touched, xattrs = %v", otherAttr.Xattrs)
 	}
 }
+
+// TestSetWindowsACLRoundTrips covers task F8's storage half:
+// SetWindowsACL/WindowsACLFromXattrs. The value itself is treated as
+// an opaque SDDL string here — parsing/merging it into a real
+// *windows.SECURITY_DESCRIPTOR is winfspserver's job (Windows-only,
+// verified separately against a real mount, per ROADMAP.md's F8
+// entry) — this test only has to prove the storage round trip is
+// correct and that an untouched entry reports ok = false.
+func TestSetWindowsACLRoundTrips(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+
+	uuid, _, _, err := fsys.Create(ctx, root, "has-win-acl.txt", 0644, 1000, 1000)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	sddl := []byte("O:S-1-5-21-1-2-3-1000G:S-1-5-21-1-2-3-1001D:(A;;FA;;;S-1-5-21-1-2-3-1000)")
+	attr, err := fsys.SetWindowsACL(ctx, uuid, sddl)
+	if err != nil {
+		t.Fatalf("SetWindowsACL: %v", err)
+	}
+	got, ok := WindowsACLFromXattrs(attr.Xattrs)
+	if !ok {
+		t.Fatal("WindowsACLFromXattrs: ok = false immediately after SetWindowsACL")
+	}
+	if !bytes.Equal(got, sddl) {
+		t.Fatalf("stored SDDL = %q, want %q", got, sddl)
+	}
+
+	// Re-read via Stat, not just the return value, to prove this is
+	// really persisted, not just echoed back.
+	statAttr, err := fsys.Stat(ctx, uuid, TypeFile)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	got, ok = WindowsACLFromXattrs(statAttr.Xattrs)
+	if !ok {
+		t.Fatal("WindowsACLFromXattrs: ok = false after Stat")
+	}
+	if !bytes.Equal(got, sddl) {
+		t.Fatalf("stat-read SDDL = %q, want %q", got, sddl)
+	}
+	if statAttr.Mode != 0644 || statAttr.Uid != 1000 || statAttr.Gid != 1000 || statAttr.Nlink != 1 {
+		t.Fatalf("other fields disturbed by SetWindowsACL: %+v", statAttr)
+	}
+
+	other, _, _, err := fsys.Create(ctx, root, "no-win-acl.txt", 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	otherAttr, err := fsys.Stat(ctx, other, TypeFile)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if _, ok := WindowsACLFromXattrs(otherAttr.Xattrs); ok {
+		t.Fatalf("WindowsACLFromXattrs: ok = true for an entry never touched, xattrs = %v", otherAttr.Xattrs)
+	}
+}

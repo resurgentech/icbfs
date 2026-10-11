@@ -362,3 +362,23 @@ same: a real mount, not just a compiled binary.
     primary-mode read-time branching in
     `winfspserver.attr.go`'s `attributesFromAttr` actually takes effect
     against a real mount, not just in a unit test.
+- **task F8's security descriptor round-trip, confirmed for real,
+  including surviving a full remount** (a stronger bar than F7's own
+  verification needed): on a fresh file, `Get-Acl` initially reported
+  the fallback identity (`winfspserver`'s new `fallbackSD`, sourced from
+  `go-winfsp/procsd.Load()` — the mounting process's own token, here
+  `sshd`'s SYSTEM service context: `NT AUTHORITY\SYSTEM`,
+  `BUILTIN\Administrators`, plus the logon-session SID, Owner
+  `BUILTIN\Administrators`). `$acl.SetAccessRule(...)` + `Set-Acl`
+  adding an `Everyone: ReadAndExecute` rule round-tripped immediately
+  through a same-session `Get-Acl` (proving `SetSecurity`'s
+  `mergeSecurityDescriptor` correctly folded the new DACL entry in
+  without disturbing Owner/Group — `Set-Acl` only sends
+  `DACL_SECURITY_INFORMATION`). Then — the real test of persistence,
+  not just in-memory state — `Stop-Process` fully tore down the mount,
+  a **second, independent** `Start-Process` remounted the same
+  filesystem name fresh, and `Get-Acl` against the same path through
+  that brand new handle/driver instance reported back the exact same
+  ACL, confirming it's genuinely stored in the backing object (the
+  `windows.acl` `.metadata` xattr), not cached state that happened to
+  survive because the same process was still running.

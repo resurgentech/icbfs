@@ -3,10 +3,12 @@
 package winfspserver
 
 import (
+	"errors"
 	"os"
 	"time"
 
 	winfsp "github.com/winfsp/go-winfsp"
+	"github.com/winfsp/go-winfsp/procsd"
 	"golang.org/x/sys/windows"
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
@@ -191,17 +193,44 @@ func (d *driver) SetFileSize(fs *winfsp.FileSystemRef, file uintptr, newSize uin
 	return nil
 }
 
-// permissiveSD grants Everyone full control, owned by Builtin
-// Administrators — not a real ACL design, F8's job (mapping POSIX
-// uid/gid or a stored windows.acl xattr onto a real security
-// descriptor). This is deliberately the same placeholder
-// cmd/icbfs-winfsp-hello's smoke test uses: the kernel's access check
-// on a file open rejects a DACL-only SD outright (confirmed in task
-// F1 — see ASSUMPTIONS.md/ROADMAP.md), so Owner/Group have to be
-// present for anything to open at all, even before F8 decides what
-// they should really be.
-func permissiveSD() (*windows.SECURITY_DESCRIPTOR, error) {
-	return windows.SecurityDescriptorFromString("O:BAG:BAD:P(A;;FA;;;WD)")
+// fallbackSD is what GetSecurity/GetSecurityByName report for an entry
+// with no natively-stored windows.acl xattr (every directory, always —
+// see securityDescriptorFor — and any file/symlink SetSecurity has
+// never touched): the mounting process's own identity, via go-winfsp's
+// own procsd package — the same default gofs itself falls back to, one
+// of the two concrete options ROADMAP.md's F8 entry named (the other,
+// mapping POSIX uid/gid to a SID, has no real mapping to lean on in
+// this environment; picking a fixed well-known SID instead, this
+// driver's pre-F8 placeholder, was deliberately not kept as the
+// long-term default once a real option existed).
+//
+// Every SD returned from here must carry an Owner and Group, not just
+// a DACL (task F1's STATUS_INVALID_SECURITY_DESCR finding) —
+// procsd.Load() always does, since it's sourced from a live process
+// token via GetSecurityInfo.
+func fallbackSD() (*windows.SECURITY_DESCRIPTOR, error) {
+	return procsd.Load()
+}
+
+// securityDescriptorFor resolves the SD to report for typ/attr: a
+// file/symlink's own stored windows.acl xattr if SetSecurity has ever
+// set one (full native fidelity, same "schema always carries the
+// field" principle task F7 already established for attribute bits),
+// falling back to fallbackSD otherwise. Directories never get a stored
+// SD at all — they have no .metadata object to store one in (see
+// Attr's doc comment) — so always report fallbackSD; a corrupt or
+// unparseable stored SDDL string (which SetSecurity itself should
+// never produce, but a direct store-level edit could) is treated the
+// same as "nothing stored" rather than failing the whole call.
+func (d *driver) securityDescriptorFor(typ icbfs.EntryType, attr icbfs.Attr) (*windows.SECURITY_DESCRIPTOR, error) {
+	if typ != icbfs.TypeDir {
+		if raw, ok := icbfs.WindowsACLFromXattrs(attr.Xattrs); ok {
+			if sd, err := windows.SecurityDescriptorFromString(string(raw)); err == nil {
+				return sd, nil
+			}
+		}
+	}
+	return fallbackSD()
 }
 
 func (d *driver) GetSecurityByName(fs *winfsp.FileSystemRef, name string, flags winfsp.GetSecurityByNameFlags) (uint32, *windows.SECURITY_DESCRIPTOR, error) {
@@ -209,7 +238,7 @@ func (d *driver) GetSecurityByName(fs *winfsp.FileSystemRef, name string, flags 
 	if err != nil {
 		return 0, nil, toWinError(err)
 	}
-	sd, err := permissiveSD()
+	sd, err := d.securityDescriptorFor(r.Type, r.Attr)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -217,10 +246,105 @@ func (d *driver) GetSecurityByName(fs *winfsp.FileSystemRef, name string, flags 
 }
 
 func (d *driver) GetSecurity(fs *winfsp.FileSystemRef, file uintptr) (*windows.SECURITY_DESCRIPTOR, error) {
-	if _, ok := d.handle(file); !ok {
+	h, ok := d.handle(file)
+	if !ok {
 		return nil, os.ErrNotExist
 	}
-	return permissiveSD()
+	attr, err := d.fsys.Stat(ctx(), h.key, h.typ)
+	if err != nil {
+		return nil, toWinError(err)
+	}
+	return d.securityDescriptorFor(h.typ, attr)
+}
+
+// mergeSecurityDescriptor applies only the components SetSecurity's
+// info bitmask actually asks to change onto base, leaving the rest
+// untouched — matching the real NtSetSecurityObject contract: a
+// Windows caller that just changed DACL permissions via the Security
+// tab passes a desc carrying only a DACL, and info with only
+// DACL_SECURITY_INFORMATION set; blindly overwriting Owner/Group with
+// desc's (likely zero-value/absent) fields would silently corrupt them.
+func mergeSecurityDescriptor(base *windows.SECURITY_DESCRIPTOR, info windows.SECURITY_INFORMATION, desc *windows.SECURITY_DESCRIPTOR) (*windows.SECURITY_DESCRIPTOR, error) {
+	abs, err := base.ToAbsolute()
+	if err != nil {
+		return nil, err
+	}
+	if info&windows.OWNER_SECURITY_INFORMATION != 0 {
+		owner, defaulted, err := desc.Owner()
+		if err != nil {
+			return nil, err
+		}
+		if err := abs.SetOwner(owner, defaulted); err != nil {
+			return nil, err
+		}
+	}
+	if info&windows.GROUP_SECURITY_INFORMATION != 0 {
+		group, defaulted, err := desc.Group()
+		if err != nil {
+			return nil, err
+		}
+		if err := abs.SetGroup(group, defaulted); err != nil {
+			return nil, err
+		}
+	}
+	if info&windows.DACL_SECURITY_INFORMATION != 0 {
+		dacl, defaulted, err := desc.DACL()
+		present := true
+		if errors.Is(err, windows.ERROR_OBJECT_NOT_FOUND) {
+			present, err = false, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err := abs.SetDACL(dacl, present, defaulted); err != nil {
+			return nil, err
+		}
+	}
+	if info&windows.SACL_SECURITY_INFORMATION != 0 {
+		sacl, defaulted, err := desc.SACL()
+		present := true
+		if errors.Is(err, windows.ERROR_OBJECT_NOT_FOUND) {
+			present, err = false, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err := abs.SetSACL(sacl, present, defaulted); err != nil {
+			return nil, err
+		}
+	}
+	return abs.ToSelfRelative()
+}
+
+// SetSecurity persists a merged security descriptor as the real
+// windows.acl xattr (task F8). Directories are a documented no-op
+// (success, nothing written) — see securityDescriptorFor and
+// SetWindowsACL's own doc comment for why: there's no .metadata object
+// for a directory to store one in at all.
+func (d *driver) SetSecurity(fs *winfsp.FileSystemRef, file uintptr, info windows.SECURITY_INFORMATION, desc *windows.SECURITY_DESCRIPTOR) error {
+	h, ok := d.handle(file)
+	if !ok {
+		return os.ErrNotExist
+	}
+	if h.typ == icbfs.TypeDir {
+		return nil
+	}
+	attr, err := d.fsys.Stat(ctx(), h.key, h.typ)
+	if err != nil {
+		return toWinError(err)
+	}
+	base, err := d.securityDescriptorFor(h.typ, attr)
+	if err != nil {
+		return err
+	}
+	merged, err := mergeSecurityDescriptor(base, info, desc)
+	if err != nil {
+		return err
+	}
+	if _, err := d.fsys.SetWindowsACL(ctx(), h.key, []byte(merged.String())); err != nil {
+		return toWinError(err)
+	}
+	return nil
 }
 
 // GetVolumeInfo reports StatFS's declared size/usage — the same

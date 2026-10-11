@@ -92,6 +92,7 @@ var (
 	_ winfsp.BehaviourReadDirectory         = (*driver)(nil)
 	_ winfsp.BehaviourGetSecurityByName     = (*driver)(nil)
 	_ winfsp.BehaviourGetSecurity           = (*driver)(nil)
+	_ winfsp.BehaviourSetSecurity           = (*driver)(nil)
 	_ winfsp.BehaviourGetVolumeInfo         = (*driver)(nil)
 	_ winfsp.BehaviourGetReparsePoint       = (*driver)(nil)
 	_ winfsp.BehaviourGetReparsePointByName = (*driver)(nil)

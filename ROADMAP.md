@@ -1180,6 +1180,50 @@ Windows cross-compile and Windows-target vet of both WinFsp binaries.
 - **Done when:** a real security descriptor round-trips through a real
   WinFsp mount.
 
+**Done.** Owner/Group/DACL/SACL decided (resolving the "before anything
+else here" question above): a file/symlink's native security
+descriptor, once set, is stored with full fidelity under the
+already-reserved `.metadata` xattrs entry `windows.acl`
+(`icbfs.WindowsACLXattrKey`, new `Filesystem.SetWindowsACL`/
+`WindowsACLFromXattrs`) as its SDDL string — reusing
+`golang.org/x/sys/windows`'s own `SecurityDescriptorFromString`/
+`(*SECURITY_DESCRIPTOR).String()` for the round trip instead of
+hand-rolling the self-relative binary layout. When nothing has been
+stored yet — every directory, always (no `.metadata` object to store
+one in at all, same scope restriction task F7 already applies to its
+own xattrs-map storage; `SetSecurity` on a directory handle is
+accordingly a documented no-op), or a file/symlink `SetSecurity` has
+never touched — the fallback is the mounting process's own identity
+via `go-winfsp`'s own `procsd.Load()`, the option `gofs` itself already
+uses; this always carries a real Owner/Group (sourced from a live
+process token), settling F1's `STATUS_INVALID_SECURITY_DESCR` concern
+for the fallback path the same way the old placeholder SD did, without
+the placeholder's fakeness. (The POSIX-uid/gid-to-SID option was ruled
+out: no real mapping to lean on in this environment.)
+
+`SetSecurity`'s `info` bitmask only names which of
+Owner/Group/DACL/SACL a given call actually wants changed — new
+`mergeSecurityDescriptor` applies only those parts onto the current
+(stored-or-fallback) descriptor before persisting, matching real
+`NtSetSecurityObject` semantics; blindly overwriting with whatever
+`desc` happens to carry in the untouched fields would have silently
+corrupted them on every ordinary "just change the DACL" call (what
+`Set-Acl` actually sends).
+
+Verified with a portable `icbfs`-level storage round-trip test
+(`TestSetWindowsACLRoundTrips`, confirmed discriminating), plus a real
+round trip through a real WinFsp mount — a stronger bar than strictly
+required, since it confirms real persistence, not just in-memory
+state: `Get-Acl` initially reported the fallback identity; `Set-Acl`
+adding an `Everyone` rule round-tripped immediately; then the mount was
+fully torn down (`Stop-Process`) and a **second, independent** mount of
+the same filesystem name still reported the identical ACL through a
+brand new handle/driver instance, proving it's genuinely in the backing
+object, not process-lifetime cached state. Full details, including the
+exact commands, in `test/windows/README.md`. Full `gofmt`/`go build`/
+`go vet`/`go test ./...` clean on Linux, plus a Windows cross-compile
+and Windows-target vet of both WinFsp binaries.
+
 ### F9. Delete/rename-on-open-file emulation
 
 - Windows's pending-delete and share-mode semantics around a file open
