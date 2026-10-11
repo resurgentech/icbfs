@@ -308,3 +308,28 @@ needs an Owner/Group, not just a DACL).
 To build something new here: re-sync the source tarball (step 3) into
 `C:\icbfs`, then `cd C:\icbfs; go build -o <name>.exe .\cmd\<pkg>\`
 over SSH, exactly as demonstrated above.
+
+## Manually exercising the real driver against a real object store
+
+Used for task F3's functional verification (`cmd/icbfs-winfsp`,
+`ROADMAP.md`) and the right setup for any future task that needs the
+same: a real mount, not just a compiled binary.
+
+- **MinIO reachable from the VM**: a standalone `docker run minio/minio`
+  container on the Linux host (not the per-Go-test `testcontainers`
+  kind — this one needs to outlive a single test run and be reachable
+  from a different machine), published on `0.0.0.0:9000`, reachable
+  from the VM at the host's libvirt bridge address
+  (`192.168.122.1:9000` on this host — confirmed with a plain
+  `Invoke-WebRequest` against `/minio/health/live` from the VM before
+  trusting anything past that). A bucket on it needs versioning
+  enabled, same requirement every other icbfs backend has.
+- **Mount, exercise, unmount, in one SSH session**: `Start-Process
+  C:\icbfs\<built-exe>.exe -ArgumentList "-endpoint",...,"K:"
+  -RedirectStandardOutput ... -PassThru`, run real PowerShell/`cmd`
+  file operations against `K:\`, then `Stop-Process` the same `$p`
+  before the session ends. A mounted drive letter from a `Start-Process`
+  call is only visible within *that same logon session* — a later,
+  separate SSH connection won't see it at all (confirmed directly: a
+  fresh `ssh_vm` call reported "Cannot find drive" for a drive a prior
+  call had just successfully mounted and was still running).
