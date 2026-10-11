@@ -223,14 +223,69 @@ func fallbackSD() (*windows.SECURITY_DESCRIPTOR, error) {
 // never produce, but a direct store-level edit could) is treated the
 // same as "nothing stored" rather than failing the whole call.
 func (d *driver) securityDescriptorFor(typ icbfs.EntryType, attr icbfs.Attr) (*windows.SECURITY_DESCRIPTOR, error) {
-	if typ != icbfs.TypeDir {
+	// Stored ACL is only authoritative on a primary-Windows filesystem
+	// — "primary mode determines which [format] is authoritative at
+	// write time; the other is derived on access" (ARCHITECTURE.md's
+	// "Windows compatibility: primary mode" section), the same gating
+	// task F7 already applies to native attribute bits vs. the mode-
+	// derived approximation. A primary-POSIX filesystem always derives
+	// from mode instead (below), even if SetSecurity was once called
+	// on it: that write is preserved (never discarded — ACLs are
+	// explicitly "not a lossy one-way approximation" per the same
+	// ARCHITECTURE.md section) but isn't read back as authoritative,
+	// matching the fix this task (C3) found while building the
+	// POSIX-primary enforcement path itself, not assumed correct from
+	// F8 alone.
+	if typ != icbfs.TypeDir && d.fsys.PrimaryWindows() {
 		if raw, ok := icbfs.WindowsACLFromXattrs(attr.Xattrs); ok {
 			if sd, err := windows.SecurityDescriptorFromString(string(raw)); err == nil {
 				return sd, nil
 			}
 		}
 	}
+	if !d.fsys.PrimaryWindows() {
+		return approximateDACLFromMode(attr.Mode)
+	}
 	return fallbackSD()
+}
+
+// approximateDACLFromMode is task C3's "at minimum an approximated
+// mode-bit check equivalent to [task C1]'s for a POSIX-primary
+// filesystem mounted on Windows" bar: a primary-POSIX filesystem has
+// no real per-file Windows ACL, and there is no POSIX uid/gid-to-SID
+// mapping in this project to build a real owner/group-differentiated
+// one from (no RFC2307/Services-for-NFS-style mapping exists or is
+// planned) — so this can only approximate "is this file
+// readable/writable at all," using "Everyone" (the WD well-known SID)
+// as the universal stand-in principal, the same ownership-agnostic
+// style task F7's ReadOnly-from-owner-write-bit approximation already
+// established for attribute bits.
+//
+// A mode of 0 (e.g. chmod 000) produces an empty (present, protected,
+// zero-ACE) DACL — not an absent one, which Windows treats as "no
+// protection at all" and would grant everyone full access, the exact
+// opposite of what's needed. WinFsp's own real access-check mechanism
+// (already confirmed automatic for Create/Open/Rename — see task F9's
+// share-mode finding for the same class of "the dispatcher does this,
+// not our driver" confirmation) then denies access to every caller
+// against that empty DACL, including whoever mounted the filesystem —
+// matching task C1's own FUSE-side bar translated to Windows: "a
+// chmod 000 file cannot be read or written even by its own owner."
+func approximateDACLFromMode(mode uint32) (*windows.SECURITY_DESCRIPTOR, error) {
+	const (
+		anyRead  = 0o444
+		anyWrite = 0o200 // matches attributesFromAttr's own owner-write-bit approximation
+	)
+	var sddl string
+	switch {
+	case mode&anyWrite != 0:
+		sddl = "O:BAG:BAD:P(A;;FA;;;WD)"
+	case mode&anyRead != 0:
+		sddl = "O:BAG:BAD:P(A;;FR;;;WD)"
+	default:
+		sddl = "O:BAG:BAD:P"
+	}
+	return windows.SecurityDescriptorFromString(sddl)
 }
 
 func (d *driver) GetSecurityByName(fs *winfsp.FileSystemRef, name string, flags winfsp.GetSecurityByNameFlags) (uint32, *windows.SECURITY_DESCRIPTOR, error) {

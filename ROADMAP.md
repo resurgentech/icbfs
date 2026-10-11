@@ -532,6 +532,60 @@ if `ARCHITECTURE.md`'s primary-mode ACL design has been built by then
 C1's for a POSIX-primary filesystem mounted on Windows. Not further
 broken down here since Part F owns scoping the driver itself.
 
+**Done, both halves — real ACL checking (already free) and the
+mode-bit approximation (newly built).** Real ACL checking on a
+primary-Windows filesystem needed no new enforcement code at all:
+confirmed by re-reading `fsop.c`'s `FspAccessCheckEx`/`FspAccessCheck`
+(already read for other tasks — F1/F9) that WinFsp's own user-mode
+dispatch library performs real access checks against whatever security
+descriptor this driver's `GetSecurity`/`GetSecurityByName` report (task
+F8), on every `Create`/`Overwrite`/`OpenTargetDirectory`/`Rename` — the
+exact "the dispatcher enforces this, not our driver" pattern task F9
+already found for share-mode/pending-delete. F8's own real `Set-Acl`
+verification already exercised this same mechanism, just not framed as
+an enforcement test at the time.
+
+The mode-bit approximation for a primary-POSIX filesystem was a real
+gap, not already covered: `securityDescriptorFor` (task F8) reported
+the mounting process's own fixed identity (`fallbackSD`/`procsd.Load()`)
+for *every* file regardless of its actual mode bits, which enforces
+nothing — a `chmod 000` file was just as accessible as a `chmod 644`
+one. Fixed with a new `approximateDACLFromMode`: since there's no real
+POSIX uid/gid-to-SID mapping in this project (no RFC2307/
+Services-for-NFS-style scheme exists or is planned), it builds an
+"Everyone"-principal DACL purely from the stored mode bits — the same
+ownership-agnostic approximation style task F7 already established for
+attribute bits (`ReadOnly` from the owner-write bit). A mode of `0`
+produces an empty, *present*, protected DACL (not an absent one, which
+Windows would read as "no protection, allow everyone" — the opposite of
+intended), so WinFsp's own real access-check mechanism denies every
+caller, including whoever mounted the filesystem.
+
+**One real consistency bug found and fixed while building this, not
+assumed correct from F8 alone:** F8's `securityDescriptorFor` treated a
+stored `windows.acl` as authoritative unconditionally, regardless of
+primary mode — inconsistent with the "primary mode determines which
+format is authoritative" rule `ARCHITECTURE.md` states and task F7
+already correctly applies to attribute bits. Fixed by gating the
+stored-ACL-is-authoritative branch on `PrimaryWindows()` too: a
+primary-POSIX filesystem now always derives from mode, even if
+`SetSecurity` was once called on it (that write is still preserved,
+never discarded — ACLs are explicitly "not a lossy one-way
+approximation" — just not promoted to authoritative on read).
+
+Verified against a real WinFsp mount, going further than a round trip:
+three files with mode `000`/`444`/`644` (set directly via
+`icbfs.Filesystem.SetAttr` — Windows has no native `chmod`), remounted,
+and a real read/write attempted against each as the *same identity that
+mounted the filesystem* — `000` refused both, `444` allowed read and
+refused write, `644` allowed both, matching task C1's own FUSE-side bar
+("cannot be read or written even by its own owner") translated to
+Windows exactly. Also confirmed no regression on a primary-Windows
+mount (fallback identity and `Set-Acl` round-trip unchanged). Full
+details in `test/windows/README.md`. Full `gofmt`/`go build`/`go vet`/
+`go test ./...` clean on Linux, plus a Windows cross-compile and
+Windows-target vet of both WinFsp binaries.
+
 ---
 
 ## Part D: Multiple filesystems per bucket — the master block

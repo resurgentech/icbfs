@@ -440,3 +440,29 @@ same: a real mount, not just a compiled binary.
     real backing object once that handle's `Close()` ran — proving the
     delete genuinely defers to `Cleanup`'s `FspCleanupDelete` path,
     not an eager delete at `CanDelete` time.
+- **task C3: POSIX mode-bit enforcement on a primary-POSIX WinFsp
+  mount, confirmed end to end against real access attempts** (not just
+  that an SD round-trips, which F8 already covered) — against
+  `icbfs-winfsp-manual`. Created three files, then set their mode bits
+  directly via a throwaway helper calling `icbfs.Filesystem.SetAttr`
+  (Windows has no native `chmod`): `000`, `444`, and `644`. Remounted
+  and attempted a real read and a real write against each, as the same
+  identity that mounted the filesystem (not a different, less-privileged
+  user — the real point of the test):
+  - `000`: both read and write refused — `"Access to the path ... is
+    denied"` — matching task C1's own FUSE-side bar ("cannot be read or
+    written even by its own owner") translated to Windows.
+  - `444`: read succeeded, write refused.
+  - `644`: both succeeded (sanity baseline).
+
+  This confirms the new `approximateDACLFromMode` (an
+  "Everyone"-principal DACL built from the stored POSIX mode, since
+  there's no POSIX uid/gid-to-SID mapping in this project to build a
+  real owner/group-differentiated one from) correctly drives WinFsp's
+  own real access-check mechanism — the exact same "the dispatcher
+  enforces this automatically once we report the right thing" pattern
+  task F9 already found for share-mode/pending-delete, now confirmed
+  for access control too. Also confirmed no regression on a
+  primary-Windows mount: the fallback identity and a real `Set-Acl`
+  round-trip (task F8's own scenario) still behave identically after
+  this change, since it only takes effect when `!PrimaryWindows()`.
