@@ -76,7 +76,7 @@ func newTestFilesystem(t *testing.T) (*Filesystem, objstore.Store) {
 	t.Helper()
 	store := newTestStore(t)
 	fsys := New(store, "test")
-	if err := fsys.Bootstrap(context.Background(), 1<<30, 0755, 0, 0); err != nil {
+	if err := fsys.Bootstrap(context.Background(), 1<<30, 0755, 0, 0, false); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 	return fsys, store

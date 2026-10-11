@@ -82,7 +82,12 @@ func main() {
 	if *gidOverride >= 0 {
 		rootGID = uint32(*gidOverride)
 	}
-	if err := fsys.Bootstrap(ctx, *size, 0755, rootUID, rootGID); err != nil {
+	// primaryWindows=false: this is the POSIX/FUSE mount command, not
+	// ROADMAP.md's Part F Windows tool (cmd/icbfs-winfsp, which exposes
+	// --primary-windows, default true) — no flag exposed here yet,
+	// since nothing on this access layer reads the stored value today
+	// either way (task F5's own consumers, F6/F8, are Windows-only).
+	if err := fsys.Bootstrap(ctx, *size, 0755, rootUID, rootGID, false); err != nil {
 		log.Fatalf("bootstrap filesystem %q: %v", *fsName, err)
 	}
 	fsys.EnableLocking(*locking)

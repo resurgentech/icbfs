@@ -1036,6 +1036,21 @@ been — reverted, watched the test fail, restored.
 - **Done when:** creating a filesystem lets the caller specify primary
   mode, and it's correctly retrievable afterward.
 
+**Done.** Added to the master block's `FilesystemEntry` (`spec/proto/
+icbfs/v1/master.proto`'s new `primary_windows` field), not the root
+block — the same category of property as `size`/`archived` already
+living there, and this keeps every master-block "set once at creation,
+immutable afterward" property in one place. `Filesystem.Bootstrap`
+gained a `primaryWindows bool` parameter (same "only used the first
+time this filesystem name is created" rule `size`/`mode`/`uid`/`gid`
+already follow — `registerFilesystem` returns the *stored* value on a
+re-bootstrap, not the second call's argument, confirmed by a real test
+that fails without that distinction); `Filesystem.PrimaryWindows()`
+retrieves it. `cmd/icbfs-winfsp` gained `--primary-windows` (default
+`true`); `cmd/icbfs` (the POSIX/FUSE tool) was left without the flag
+for now — nothing on that access layer reads the stored value either
+way, since F5's actual consumers (F6/F8) are Windows-only.
+
 ### F6. Reserved-name/character enforcement
 
 - For a primary-Windows filesystem: `Create`/`Mkdir`/`Symlink`/`Link`
