@@ -1329,6 +1329,36 @@ pricing changes independently of this project).
   in icbfs's own docs/UI wherever a user would encounter the WinFsp-
   backed mount, not just noted here and forgotten.
 
+**Done.** Re-verified this entry's own claims directly against WinFsp's
+real `License.txt` (fetched fresh, not re-stated from memory): GPLv3,
+FLOSS exception requiring all three conditions exactly as described
+above, and the exact required notice text — "WinFsp - Windows File
+System Proxy, Copyright (C) Bill Zissimopoulos" plus a repo link. All
+three conditions confirmed satisfied: (1) icbfs is MIT-licensed,
+meeting the Open Source Definition; (2) the notice now appears at every
+real touchpoint (below); (3) `go.mod`'s dependency list is entirely
+ordinary FLOSS Go-ecosystem libraries (AWS SDK, MinIO client,
+`go-fuse`, `go-winfsp` itself — a separate, MIT-licensed binding, not
+WinFsp's own GPLv3-exception-covered code — protobuf, testcontainers),
+nothing proprietary mixed in.
+
+The notice (a new `winfspAttribution` constant, identical text in both
+binaries) now appears everywhere a user actually encounters the
+WinFsp-backed mount: `cmd/icbfs-winfsp`'s `--help`/usage output (via a
+new `fset.Usage` that both `-h` and a bad invocation now share, instead
+of each printing a different, notice-free usage line) and its startup
+log line on every successful mount; `cmd/icbfs-winfsp-hello`'s (the F1
+smoke-test binary — also a real WinFsp-backed mount, so it gets the
+same notice) usage and startup output; and a new "Third-party notice"
+section in the top-level `README.md`, since that's the first thing
+anyone encounters before ever running either binary.
+
+Full `gofmt`/`go build`/`go vet`/`go test ./...` clean on Linux, plus a
+Windows cross-compile and Windows-target vet of both WinFsp binaries —
+no VM round-trip needed this time, since nothing here changes driver
+behavior, only static text placement already confirmed correct by
+direct code review and successful cross-compilation.
+
 ### F11. Deployment / installer story
 
 - WinFsp requires its own kernel-mode driver and user-mode DLL installed

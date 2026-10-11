@@ -25,8 +25,25 @@ import (
 	"github.com/resurgentech/icbfs/internal/winfspserver"
 )
 
+// winfspAttribution is the exact notice WinFsp's own FLOSS exception
+// requires any FLOSS project linking against it to display in its UI
+// and user-facing docs, plus a link to WinFsp's repo — verified
+// against WinFsp's real License.txt, not paraphrased (ROADMAP.md's
+// Part F, task F10): "include the attribution... in user interface
+// and documentation." This is the one binary an end user actually
+// runs to get a WinFsp-backed mount, so it's shown both in --help/
+// usage output and at every successful mount, not just documented in
+// a file a user might never open.
+const winfspAttribution = "WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos\nhttps://github.com/winfsp/winfsp"
+
 func main() {
 	fset := flag.NewFlagSet("icbfs-winfsp", flag.ExitOnError)
+	fset.Usage = func() {
+		fmt.Fprintln(os.Stderr, "usage: icbfs-winfsp [flags] <mountpoint, e.g. J:>")
+		fset.PrintDefaults()
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, winfspAttribution)
+	}
 	endpoint := fset.String("endpoint", "http://127.0.0.1:9000", "S3-API endpoint (MinIO)")
 	bucket := fset.String("bucket", "icbfs", "bucket name (must have versioning enabled)")
 	fsName := fset.String("fs", "default", "filesystem name")
@@ -40,7 +57,7 @@ func main() {
 		os.Exit(2)
 	}
 	if fset.NArg() != 1 {
-		fmt.Fprintln(os.Stderr, "usage: icbfs-winfsp [flags] <mountpoint, e.g. J:>")
+		fset.Usage()
 		os.Exit(2)
 	}
 	mountpoint := fset.Arg(0)
@@ -82,6 +99,7 @@ func main() {
 	defer server.Unmount()
 
 	log.Printf("icbfs %q mounted at %s (bucket %s via %s)", *fsName, mountpoint, *bucket, *endpoint)
+	log.Println(winfspAttribution)
 	// winfsp.Mount's dispatcher runs its own background goroutines;
 	// block here until killed, same role cmd/icbfs's server.Wait()
 	// plays for the FUSE side.

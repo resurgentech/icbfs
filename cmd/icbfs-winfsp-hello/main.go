@@ -207,9 +207,17 @@ func (helloFS) Read(fs *winfsp.FileSystemRef, file uintptr, buf []byte, offset u
 	return copy(buf, helloContent[offset:]), nil
 }
 
+// winfspAttribution is the exact notice WinFsp's own FLOSS exception
+// requires (verified against WinFsp's real License.txt, not
+// paraphrased — ROADMAP.md's Part F, task F10): this is a real
+// WinFsp-backed mount too, even though it's a smoke-test tool rather
+// than the shipped cmd/icbfs-winfsp, so it carries the same notice.
+const winfspAttribution = "WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos\nhttps://github.com/winfsp/winfsp"
+
 func main() {
 	if len(os.Args) != 2 {
 		fmt.Fprintln(os.Stderr, "usage: icbfs-winfsp-hello.exe <mountpoint, e.g. J:>")
+		fmt.Fprintln(os.Stderr, winfspAttribution)
 		os.Exit(2)
 	}
 	mountpoint := os.Args[1]
@@ -222,5 +230,6 @@ func main() {
 	defer fsys.Unmount()
 
 	fmt.Printf("mounted at %s, staying up for %v\n", mountpoint, mountDuration)
+	fmt.Println(winfspAttribution)
 	time.Sleep(mountDuration)
 }

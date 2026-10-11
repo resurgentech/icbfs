@@ -49,3 +49,17 @@ fully in step yet. See:
 
 All three require object versioning enabled on the bucket/container —
 that's the mechanism snapshotting is built on.
+
+## Third-party notice
+
+The Windows mount (`cmd/icbfs-winfsp`) is built on
+[WinFsp](https://github.com/winfsp/winfsp), licensed GPLv3 with a FLOSS
+exception. icbfs qualifies under that exception (MIT-licensed, meeting
+the Open Source Definition; never bundled or distributed alongside
+proprietary software) and carries the exception's required notice:
+
+> WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos
+> https://github.com/winfsp/winfsp
+
+The same notice is printed by `cmd/icbfs-winfsp` itself, at every mount
+and in its `--help` output — not just noted here.
