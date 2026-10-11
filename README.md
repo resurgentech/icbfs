@@ -50,6 +50,31 @@ fully in step yet. See:
 All three require object versioning enabled on the bucket/container —
 that's the mechanism snapshotting is built on.
 
+## Windows mount: install WinFsp first
+
+`cmd/icbfs-winfsp` does **not** carry or install
+[WinFsp](https://github.com/winfsp/winfsp) itself — it's a real,
+separate prerequisite (a kernel-mode driver plus a user-mode DLL) that
+has to be installed on the target Windows machine *before* a mount is
+attempted, not something icbfs's own binary bundles. Skip this and a
+mount attempt fails outright with a DLL-not-found-style error, not a
+helpful message pointing back here.
+
+Install it one of two ways, either requiring administrator rights (it
+installs a Windows service and files under `Program Files`):
+
+- Download and run the installer from
+  [WinFsp's latest release](https://github.com/winfsp/winfsp/releases/latest)
+  (`winfsp-<version>.msi`), or
+- `choco install winfsp`, if [Chocolatey](https://chocolatey.org/) is
+  already set up.
+
+Supported on Windows 7 through 11, x86/x64/ARM64 (per WinFsp's own
+documentation). Verified end to end on a real Windows Server VM — see
+`test/windows/README.md`'s "Installing WinFsp itself" section for the
+exact commands and a real gotcha found along the way (the installer
+doesn't add its own `bin` directory to `Path`).
+
 ## Third-party notice
 
 The Windows mount (`cmd/icbfs-winfsp`) is built on

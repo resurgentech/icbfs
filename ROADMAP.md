@@ -1369,3 +1369,27 @@ direct code review and successful cross-compilation.
 - **Done when:** icbfs's own install documentation says this plainly and
   points to WinFsp's installer, rather than a user discovering the
   missing dependency only when a mount attempt fails.
+
+**Done.** New "Windows mount: install WinFsp first" section in
+`README.md`, placed before the Third-party notice section (task F10)
+so a reader hits it before ever running `cmd/icbfs-winfsp`: states
+plainly that WinFsp is a separate, required prerequisite (kernel driver
++ user-mode DLL, not bundled by icbfs), gives both real install paths
+confirmed to actually work (the GitHub releases MSI and
+`choco install winfsp`, both verified against WinFsp's own real
+release/documentation, not guessed), notes administrator rights are
+needed (it installs a Windows service and files under `Program
+Files`), states the supported Windows version range (7 through 11,
+x86/x64/ARM64, per WinFsp's own docs), and points to
+`test/windows/README.md`'s own "Installing WinFsp itself" section —
+already-existing, already-verified-end-to-end documentation (a real
+MSI install, a real gotcha found and fixed: the installer doesn't add
+its own `bin` directory to `Path`, confirmed by reading the machine
+`Path` registry value directly, not inferred) — for the exact commands
+rather than duplicating them.
+
+This closes out Part F (WinFsp/Windows support) in full: F1 through
+F11 all done, each verified against a real WinFsp mount or real
+portable tests where a mount added no further signal, with every real
+bug found along the way (not just the ones anticipated going in) fixed
+and documented in place.
