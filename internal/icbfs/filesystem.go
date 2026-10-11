@@ -603,6 +603,9 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 	if err := f.checkWritable(); err != nil {
 		return "", Attr{}, err
 	}
+	if err := f.checkName(name); err != nil {
+		return "", Attr{}, err
+	}
 	newUUID, err := f.newKey()
 	if err != nil {
 		return "", Attr{}, err
@@ -633,6 +636,9 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 // written).
 func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid, gid uint32) (string, Attr, string, error) {
 	if err := f.checkWritable(); err != nil {
+		return "", Attr{}, "", err
+	}
+	if err := f.checkName(name); err != nil {
 		return "", Attr{}, "", err
 	}
 	newUUID, err := f.newKey()
@@ -672,6 +678,9 @@ func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid,
 // uid/gid/nlink live in metadataObjectKey, same as for a regular file.
 func (f *Filesystem) Symlink(ctx context.Context, dirKey, name, target string, uid, gid uint32) (string, Attr, error) {
 	if err := f.checkWritable(); err != nil {
+		return "", Attr{}, err
+	}
+	if err := f.checkName(name); err != nil {
 		return "", Attr{}, err
 	}
 	newUUID, err := f.newKey()
@@ -835,6 +844,9 @@ func (f *Filesystem) updateFileMetadata(ctx context.Context, uuid string, mutate
 // CAS-protected metadataObjectKey object.
 func (f *Filesystem) Link(ctx context.Context, dirKey, name, targetUUID string, targetType EntryType) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
+		return Attr{}, err
+	}
+	if err := f.checkName(name); err != nil {
 		return Attr{}, err
 	}
 	if err := f.adjustNlink(ctx, targetUUID, +1); err != nil {

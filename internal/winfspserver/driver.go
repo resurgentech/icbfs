@@ -132,6 +132,11 @@ func toWinError(err error) error {
 		// internal/fuseserver's errnoFromErr maps it to EROFS on the
 		// POSIX side — a different errno, same underlying intent.
 		return os.ErrPermission
+	case errors.Is(err, icbfs.ErrInvalidName):
+		// convertNTStatus has no sentinel for this; return the real
+		// NTSTATUS directly rather than stretching an os.Err*/
+		// syscall.Errno value to fit (task F6).
+		return windows.STATUS_OBJECT_NAME_INVALID
 	default:
 		return err
 	}
