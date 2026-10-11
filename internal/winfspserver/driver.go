@@ -80,6 +80,7 @@ func Root(fsys *icbfs.Filesystem, caseInsensitive bool) winfsp.BehaviourBase {
 var (
 	_ winfsp.BehaviourBase                  = (*driver)(nil)
 	_ winfsp.BehaviourCreate                = (*driver)(nil)
+	_ winfsp.BehaviourRename                = (*driver)(nil)
 	_ winfsp.BehaviourOverwrite             = (*driver)(nil)
 	_ winfsp.BehaviourCleanup               = (*driver)(nil)
 	_ winfsp.BehaviourGetFileInfo           = (*driver)(nil)
@@ -138,6 +139,11 @@ func toWinError(err error) error {
 		// NTSTATUS directly rather than stretching an os.Err*/
 		// syscall.Errno value to fit (task F6).
 		return windows.STATUS_OBJECT_NAME_INVALID
+	case errors.Is(err, icbfs.ErrInvalidRename):
+		// Moving a directory into one of its own descendants (task
+		// F9) — no more specific NTSTATUS confirmed for this exact
+		// condition; STATUS_INVALID_PARAMETER is the closest real fit.
+		return windows.STATUS_INVALID_PARAMETER
 	default:
 		return err
 	}
@@ -305,6 +311,12 @@ func (d *driver) Cleanup(fs *winfsp.FileSystemRef, file uintptr, name string, cl
 	if err != nil {
 		return
 	}
+	// Same case-folding gotcha Rename hit (task F9, see
+	// realStoredName's own doc comment): the kernel can hand this
+	// callback a differently-cased name than what's actually stored
+	// when CaseSensitive(false) is in effect, which Rmdir/Unlink's
+	// exact-match lookup would otherwise silently fail to find.
+	base = realStoredName(ctx(), d.fsys, parent.Key, base, d.caseInsensitive)
 	if h.typ == icbfs.TypeDir {
 		_ = d.fsys.Rmdir(ctx(), parent.Key, base)
 	} else {
@@ -332,6 +344,55 @@ func (d *driver) CanDelete(fs *winfsp.FileSystemRef, file uintptr, name string) 
 		return syscall.ERROR_DIR_NOT_EMPTY
 	}
 	return nil
+}
+
+// Rename resolves both source and target (full WinFsp paths) to their
+// own parent directory + base name, same splitParent/resolvePath
+// pattern Create/Cleanup already use, then delegates to
+// icbfs.Filesystem.Rename (task F9 — see its own doc comment for why
+// this didn't already exist at the core layer). file (the open handle
+// on source) isn't needed here: Rename resolves the entry by
+// (oldParent, oldBase) itself.
+// realStoredName resolves name to its actual stored (real-case)
+// spelling within dirKey, if an entry matching it (case-aware per
+// caseInsensitive) exists; otherwise returns name unchanged — the
+// caller (e.g. Rename, below, for a target that doesn't exist yet)
+// decides what that means.
+//
+// Needed because icbfs.Filesystem's own operations always do an
+// *exact* (case-sensitive) lookup internally, but the kernel can hand
+// this driver a differently-cased name than what's actually stored
+// when CaseSensitive(false) is in effect — the exact F3-era gotcha
+// (see resolve.go's lookupCaseAware doc comment), confirmed recurring
+// here for Rename specifically: WinFsp/the kernel passed this driver
+// "OLD.TXT" for a file actually stored as "old.txt", which
+// icbfs.Filesystem.Rename's exact-match findInTree could never locate
+// on its own (unlike resolvePath's own directory-traversal, which
+// already runs every segment through lookupCaseAware).
+func realStoredName(ctx context.Context, fsys *icbfs.Filesystem, dirKey, name string, caseInsensitive bool) string {
+	entry, _, err := lookupCaseAware(ctx, fsys, dirKey, name, caseInsensitive)
+	if err != nil {
+		return name
+	}
+	return entry.Name
+}
+
+func (d *driver) Rename(fs *winfsp.FileSystemRef, file uintptr, source, target string, replaceIfExist bool) error {
+	oldDir, oldBase := splitParent(source)
+	oldParent, err := resolvePath(ctx(), d.fsys, oldDir, d.caseInsensitive)
+	if err != nil {
+		return toWinError(err)
+	}
+	oldBase = realStoredName(ctx(), d.fsys, oldParent.Key, oldBase, d.caseInsensitive)
+
+	newDir, newBase := splitParent(target)
+	newParent, err := resolvePath(ctx(), d.fsys, newDir, d.caseInsensitive)
+	if err != nil {
+		return toWinError(err)
+	}
+	newBase = realStoredName(ctx(), d.fsys, newParent.Key, newBase, d.caseInsensitive)
+
+	return toWinError(d.fsys.Rename(ctx(), oldParent.Key, oldBase, newParent.Key, newBase, replaceIfExist))
 }
 
 // ensureOpen lazily creates h's icbfs.OpenFile on first real I/O —

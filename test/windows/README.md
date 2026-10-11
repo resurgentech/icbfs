@@ -382,3 +382,61 @@ same: a real mount, not just a compiled binary.
   ACL, confirming it's genuinely stored in the backing object (the
   `windows.acl` `.metadata` xattr), not cached state that happened to
   survive because the same process was still running.
+- **task F9: a real driver bug found and fixed, plus confirmation that
+  WinFsp's kernel driver already provides share-mode/pending-delete
+  semantics for free.** `Rename` didn't exist anywhere in this
+  codebase before this task (core `icbfs.Filesystem`, FUSE, or WinFsp
+  alike) — confirmed by grepping, not assumed — so it had to be built
+  from scratch as a real prerequisite, not something F9 could emulate
+  open-file semantics around.
+  - **The bug**: `Rename-Item`/`[System.IO.File]::Move` against a real
+    mount failed with "Unable to find the specified file" even though
+    the source file genuinely existed. Traced with a temporary debug
+    `log.Printf` in the driver (confirmed real, not a guess) to: the
+    kernel handed this driver's `Rename` callback the *uppercased*
+    source name (`"OLD.TXT"` for a file actually stored as
+    `"old.txt"`) — the same class of case-folding gotcha task F3 first
+    found for `Cleanup`, now recurring because task F4's
+    `-case-insensitive=true` default (which sets WinFsp's own
+    `CaseSensitive(false)`) tells the kernel to fold case internally,
+    and `icbfs.Filesystem.Rename`'s own lookup is exact-match only —
+    unlike `resolvePath`'s directory traversal, which already runs
+    every segment through `lookupCaseAware`'s case-insensitive
+    fallback. **Fixed** with a new `realStoredName` helper that runs a
+    bare file/directory name (not a full path) through the same
+    `lookupCaseAware` resolution before handing it to
+    `icbfs.Filesystem`, applied to both `Rename`'s source/target names
+    and `Cleanup`'s delete path (the exact same bug class, found by
+    inspection once the pattern was recognized, not separately
+    hit-and-fixed).
+  - **Verified for real** against `icbfs-winfsp-manual`, primary-Windows
+    mode: plain same-directory rename, cross-directory move,
+    replace-into-place (the rsync/git "write a temp file, rename it
+    into place" pattern `TESTING.md` flagged), and a directory-move-
+    into-its-own-subdirectory correctly refused — the last one via raw
+    `[System.IO.Directory]::Move` specifically, not `Move-Item`/
+    PowerShell's own client-side path-prefix check, to make sure it was
+    this driver's own `ErrInvalidRename`/`STATUS_INVALID_PARAMETER`
+    check firing, not just the shell being helpful.
+  - **Share-mode enforcement, confirmed free from WinFsp's kernel
+    driver, zero driver code needed**: opening a file with
+    `FileShare.Read` (no `FILE_SHARE_DELETE`) and then attempting
+    `[System.IO.File]::Delete` on it from the same process failed with
+    "The process cannot access the file ... because it is being used
+    by another process" — a real sharing violation enforced by the
+    kernel before the request ever reaches this driver. Independently
+    confirmed by reading WinFsp's own open-source `fsop.c` directly:
+    zero `FILE_SHARE_*`/`STATUS_SHARING_VIOLATION` handling exists
+    anywhere in the user-mode dispatch library, meaning this is
+    entirely a kernel-driver (`winfsp.sys`) concern, never surfaced to
+    this project's code at all.
+  - **Pending-delete semantics, confirmed already correct from task
+    F3's existing `CanDelete`/`Cleanup` wiring, no new code needed**:
+    opening a file with `FileShare.Delete` + `FileOptions.DeleteOnClose`
+    (the old-style `FileStream` constructor overload — the newer
+    `FileStreamOptions` type doesn't exist in this VM's bundled
+    PowerShell 5.1/.NET Framework) kept the file visible via `Test-Path`
+    for the whole time the handle stayed open, and only removed the
+    real backing object once that handle's `Close()` ran — proving the
+    delete genuinely defers to `Cleanup`'s `FspCleanupDelete` path,
+    not an eager delete at `CanDelete` time.

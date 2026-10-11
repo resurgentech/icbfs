@@ -51,6 +51,7 @@ var (
 	_ fs.NodeSymlinker  = (*Node)(nil)
 	_ fs.NodeReadlinker = (*Node)(nil)
 	_ fs.NodeLinker     = (*Node)(nil)
+	_ fs.NodeRenamer    = (*Node)(nil)
 	_ fs.NodeStatfser   = (*Node)(nil)
 )
 
@@ -164,6 +165,10 @@ func errnoFromErr(err error) syscall.Errno {
 		// enforcement lives in icbfs.Filesystem itself, not just the
 		// WinFsp driver, since primary mode is a property of the
 		// filesystem, not of whichever access layer is mounting it.
+		return syscall.EINVAL
+	case errors.Is(err, icbfs.ErrInvalidRename):
+		// POSIX rename(2)'s EINVAL: "newpath contains a path prefix
+		// of oldpath" (task F9).
 		return syscall.EINVAL
 	default:
 		return syscall.EIO
@@ -336,6 +341,37 @@ func (n *Node) Link(ctx context.Context, target fs.InodeEmbedder, name string, o
 	}
 	fillAttr(&out.Attr, tn.key, tn.typ, attr)
 	return n.newChild(ctx, tn.key, tn.typ), 0
+}
+
+// renameExchange is RENAME_EXCHANGE (renameat2(2)/Linux's
+// NodeRenamer.flags): an atomic swap of two existing paths, not a
+// plain move/overwrite. Not implemented here — task F9's own scope
+// decision (see ROADMAP.md): a real atomic exchange would need its own
+// dedicated core-icbfs operation (swapping two directory entries'
+// UUIDs under one CAS, not a remove-then-insert pair), and nothing in
+// this project's actual target workloads (rsync/git/sqlite
+// temp-file-rename-into-place, per TESTING.md) needs it — it's
+// primarily a container-overlayfs/union-filesystem pattern.
+const renameExchange = 0x2
+
+// Rename implements fs.NodeRenamer: n is the *old* parent directory,
+// name is the entry's current name within it. flags carries Linux's
+// renameat2(2) bits (RENAME_NOREPLACE in bit 0, RENAME_EXCHANGE in bit
+// 1) through from the kernel; go-fuse's own exported constant only
+// names RENAME_EXCHANGE, so RENAME_NOREPLACE's bit is inlined here
+// (its real, documented value, confirmed against golang.org/x/sys/
+// unix.RENAME_NOREPLACE = 0x1, not guessed).
+func (n *Node) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+	if flags&renameExchange != 0 {
+		return syscall.ENOSYS
+	}
+	np, ok := newParent.(*Node)
+	if !ok {
+		return syscall.EINVAL
+	}
+	const renameNoReplace = 0x1
+	replace := flags&renameNoReplace == 0
+	return errnoFromErr(n.fsys.Rename(ctx, n.key, name, np.key, newName, replace))
 }
 
 // FileHandle adapts icbfs.OpenFile (the shared buffering/CAS-retry

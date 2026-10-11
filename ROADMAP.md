@@ -1239,6 +1239,78 @@ and Windows-target vet of both WinFsp binaries.
 - **Done when:** tests cover deleting/renaming a file that's open
   elsewhere behaving per Windows semantics, against a real mount.
 
+**Done — with a real, unplanned prerequisite discovered and built
+first.** `Rename` didn't exist anywhere in this codebase before this
+task — not in core `icbfs.Filesystem`, not in `internal/fuseserver`,
+not in `internal/winfspserver` — confirmed by grepping, not assumed;
+task F3's own "Done" notes had explicitly deferred it as "a real,
+pre-existing gap... not re-solved ad hoc for Windows only," and
+`TESTING.md` flagged the identical gap independently. Raised to Jared
+directly rather than either quietly building a Windows-only rename
+(contradicting F3's own stated principle) or quietly skipping F9;
+directed to build the real, cross-cutting fix first.
+
+**New: `icbfs.Filesystem.Rename(ctx, oldDirKey, oldName, newDirKey,
+newName, replace)`.** Matches POSIX `rename(2)` semantics throughout:
+a file can't replace a non-empty directory or vice versa
+(`ErrIsDir`/`ErrNotDir`); replacing an empty directory target works;
+`oldpath`/`newpath` already being hardlinks to the same object is
+always a no-op regardless of `replace` (POSIX's own documented special
+case); moving a directory into one of its own descendants is refused
+(`ErrInvalidRename`, via a new `dirContains` helper — this tree has no
+parent pointers to walk upward from the destination, so it walks
+downward from the source instead, an accepted cost matching
+`DiskUsage`/`Prune`'s own existing full-tree walks); reserved-name
+enforcement (task F6) applies to the new name on a primary-Windows
+filesystem. Known, documented simplification: the remove-then-insert
+pair isn't one atomic cross-directory transaction, matching the
+"last writer wins" tradeoff already accepted elsewhere (e.g. `SetAttr`'s
+ftruncate) rather than building real cross-directory distributed
+transactions, which is out of scope for this project's design. Wired
+into `internal/fuseserver` via `fs.NodeRenamer` (`RENAME_EXCHANGE` —
+atomic swap — explicitly declined: no real target workload needs it,
+and it would need its own dedicated core operation, not a
+remove-then-insert pair) and into `internal/winfspserver` via
+`winfsp.BehaviourRename`.
+
+**One real driver bug found and fixed via actual VM testing** (not
+fixed speculatively): `Rename` against a real mount initially failed
+with "Unable to find the specified file" even though the source file
+existed. Traced with a temporary debug `log.Printf` to the exact cause:
+the kernel handed the driver an *uppercased* source name
+(`"OLD.TXT"` for a file stored as `"old.txt"`) — the same case-folding
+class task F3 first found for `Cleanup`, recurring here because task
+F4's `-case-insensitive=true` default tells the kernel to fold case
+internally, while `icbfs.Filesystem`'s own lookups are exact-match
+only. Fixed with a new `realStoredName` helper (resolves a bare name to
+its real stored spelling via the existing `lookupCaseAware`, the same
+fallback `resolvePath` already uses for full paths) applied to both
+`Rename`'s source/target and — found by inspection once the pattern was
+recognized, the same bug, not separately hit — `Cleanup`'s delete path.
+
+**Share-mode enforcement and pending-delete, confirmed rather than
+assumed:** reading WinFsp's own open-source `fsop.c` directly found
+zero `FILE_SHARE_*`/`STATUS_SHARING_VIOLATION` handling anywhere in the
+user-mode dispatch library — confirming this is entirely a kernel-driver
+(`winfsp.sys`) concern, never surfaced to this project's code at all.
+Verified against a real mount: deleting a file open elsewhere without
+`FILE_SHARE_DELETE` fails with a real sharing violation with zero driver
+code involved; a file opened with `FileShare.Delete` +
+`FileOptions.DeleteOnClose` stays visible for as long as the handle is
+open and is only actually removed once `Close()` runs — proving task
+F3's existing `CanDelete`/`Cleanup` wiring already correctly implements
+pending-delete semantics (defers the real delete to `Cleanup`'s
+`FspCleanupDelete`, never deletes eagerly at `CanDelete` time); no new
+code was needed for this half of the task, only confirmation.
+
+Full `gofmt`/`go build`/`go vet`/`go test ./...` clean on Linux
+(including new portable `icbfs`-level `Rename` tests covering every
+branch above, each confirmed discriminating, and new real FUSE-mount
+tests covering basic rename and an open file descriptor surviving a
+rename of its own path), plus a Windows cross-compile and
+Windows-target vet of both WinFsp binaries. Full details, including the
+exact commands and debugging trace, in `test/windows/README.md`.
+
 ### F10. Licensing compliance
 
 WinFsp is GPLv3 with a FLOSS exception, verified against its own

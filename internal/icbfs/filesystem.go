@@ -962,6 +962,149 @@ func (f *Filesystem) Rmdir(ctx context.Context, dirKey, name string) error {
 	return f.store.Delete(ctx, entry.UUID, "")
 }
 
+// dirContains reports whether ancestorUUID's own subtree includes
+// targetUUID anywhere, ancestorUUID itself included — used by Rename
+// to refuse moving a directory into one of its own descendants
+// (POSIX rename(2)'s EINVAL: "newpath contains a path prefix of
+// oldpath"). This tree has no parent pointers to walk upward from
+// targetUUID instead, so the check walks downward from ancestorUUID —
+// an accepted cost here, same as DiskUsage/Prune's own full recursive
+// walks elsewhere in this file.
+func (f *Filesystem) dirContains(ctx context.Context, ancestorUUID, targetUUID string) (bool, error) {
+	if ancestorUUID == targetUUID {
+		return true, nil
+	}
+	entries, err := f.collectEntries(ctx, ancestorUUID)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range entries {
+		if e.Type != TypeDir {
+			continue
+		}
+		found, err := f.dirContains(ctx, e.UUID, targetUUID)
+		if err != nil {
+			return false, err
+		}
+		if found {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// Rename moves/renames the entry named oldName inside oldDirKey to
+// newName inside newDirKey (same directory if oldDirKey == newDirKey),
+// matching POSIX rename(2) semantics — the access-layer-independent
+// core task F9 found missing everywhere (core, FUSE, and WinFsp alike;
+// see ROADMAP.md's F9 entry and TESTING.md's "A real gap found while
+// drafting this doc"), not something to solve ad hoc for one access
+// layer.
+//
+// replace mirrors POSIX's implicit-overwrite default (true) vs.
+// RENAME_NOREPLACE (false, FUSE's NodeRenamer flags; WinFsp's Rename
+// callback's own replaceIfExist parameter maps the same way) — see the
+// existing-target handling below for the exact rules (matching
+// rename(2): a file can't replace a non-empty directory or vice versa;
+// an already-hardlinked-to-the-same-object source/target is always a
+// no-op regardless of replace).
+//
+// Known simplification, same "last writer wins" tradeoff already
+// accepted elsewhere in this file (e.g. SetAttr's ftruncate): the
+// remove-then-insert pair below is not one atomic cross-directory
+// transaction (each half is independently CAS-retried, not both
+// together) — a concurrent reader could briefly observe the entry at
+// neither location. A real, documented limitation, not silently
+// assumed away; a distributed cross-directory transaction is out of
+// scope for this project's design (see ARCHITECTURE.md's Locking
+// section for the general class of simplification this follows).
+func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, newName string, replace bool) error {
+	if err := f.checkWritable(); err != nil {
+		return err
+	}
+	if err := f.checkName(newName); err != nil {
+		return err
+	}
+	if oldDirKey == newDirKey && oldName == newName {
+		return nil
+	}
+
+	entry, ok, err := f.findInTree(ctx, oldDirKey, oldName)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrNotFound
+	}
+
+	if entry.Type == TypeDir {
+		contains, err := f.dirContains(ctx, entry.UUID, newDirKey)
+		if err != nil {
+			return err
+		}
+		if contains {
+			return ErrInvalidRename
+		}
+	}
+
+	existing, existingOK, err := f.findInTree(ctx, newDirKey, newName)
+	if err != nil {
+		return err
+	}
+	if existingOK {
+		if existing.UUID == entry.UUID {
+			// oldName and newName are two existing hardlinks to the
+			// same object (or, within one directory, literally the
+			// same entry) — rename(2) does nothing and succeeds,
+			// regardless of replace.
+			return nil
+		}
+		if !replace {
+			return ErrExists
+		}
+		if existing.Type == TypeDir {
+			if entry.Type != TypeDir {
+				return ErrIsDir
+			}
+			children, err := f.collectEntries(ctx, existing.UUID)
+			if err != nil {
+				return err
+			}
+			if len(children) > 0 {
+				return ErrNotEmpty
+			}
+			if _, err := f.removeEntry(ctx, newDirKey, newName); err != nil {
+				return err
+			}
+			if err := f.store.Delete(ctx, existing.UUID, ""); err != nil {
+				return err
+			}
+		} else {
+			if entry.Type == TypeDir {
+				return ErrNotDir
+			}
+			if _, err := f.removeEntry(ctx, newDirKey, newName); err != nil {
+				return err
+			}
+			if err := f.adjustNlink(ctx, existing.UUID, -1); err != nil && !errors.Is(err, ErrNotFound) {
+				return err
+			}
+		}
+	}
+
+	if _, err := f.removeEntry(ctx, oldDirKey, oldName); err != nil {
+		return err
+	}
+	if err := f.insertEntry(ctx, newDirKey, newName, entry.UUID, entry.Type); err != nil {
+		// Best-effort rollback: put the old entry back so a failed
+		// rename doesn't silently lose the source name on top of
+		// whatever already failed.
+		_ = f.insertEntry(ctx, oldDirKey, oldName, entry.UUID, entry.Type)
+		return err
+	}
+	return nil
+}
+
 // ReadFile returns a regular file's whole content and its attributes,
 // fetching the content and metadataObjectKey objects concurrently.
 // ReadFile also returns the content object's current ETag, so a caller

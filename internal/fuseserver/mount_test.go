@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -444,6 +445,134 @@ func TestMountHardlink(t *testing.T) {
 	}
 	if string(data) != "shared content" {
 		t.Fatalf("got %q after removing original, want %q", data, "shared content")
+	}
+}
+
+// TestMountRenameBasic exercises task F9's core deliverable (Rename
+// didn't exist anywhere in this codebase before — see ROADMAP.md's F9
+// entry) against a real FUSE mount: plain rename within one
+// directory, rename into a different directory, and rename replacing
+// an existing destination file (the "write a temp file, rename it
+// into place" pattern TESTING.md flagged rsync/git as depending on).
+func TestMountRenameBasic(t *testing.T) {
+	mnt := mountTestFS(t)
+
+	oldPath := filepath.Join(mnt, "old.txt")
+	if err := os.WriteFile(oldPath, []byte("hello"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	newPath := filepath.Join(mnt, "new.txt")
+	if err := os.Rename(oldPath, newPath); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old path still exists after rename, err: %v", err)
+	}
+	data, err := os.ReadFile(newPath)
+	if err != nil {
+		t.Fatalf("read new path: %v", err)
+	}
+	if string(data) != "hello" {
+		t.Fatalf("got %q, want %q", data, "hello")
+	}
+
+	subdir := filepath.Join(mnt, "subdir")
+	if err := os.Mkdir(subdir, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	movedPath := filepath.Join(subdir, "new.txt")
+	if err := os.Rename(newPath, movedPath); err != nil {
+		t.Fatalf("rename across directories: %v", err)
+	}
+	data, err = os.ReadFile(movedPath)
+	if err != nil {
+		t.Fatalf("read moved path: %v", err)
+	}
+	if string(data) != "hello" {
+		t.Fatalf("got %q after cross-directory rename, want %q", data, "hello")
+	}
+
+	// Replace-into-place: write a fresh temp file, rename it onto an
+	// existing destination — the real rsync/git pattern.
+	tempPath := filepath.Join(mnt, ".tmp-write")
+	if err := os.WriteFile(tempPath, []byte("replaced"), 0644); err != nil {
+		t.Fatalf("write temp: %v", err)
+	}
+	if err := os.Rename(tempPath, movedPath); err != nil {
+		t.Fatalf("rename-into-place over existing destination: %v", err)
+	}
+	data, err = os.ReadFile(movedPath)
+	if err != nil {
+		t.Fatalf("read after rename-into-place: %v", err)
+	}
+	if string(data) != "replaced" {
+		t.Fatalf("got %q after rename-into-place, want %q", data, "replaced")
+	}
+}
+
+// TestMountRenameOfOpenFileKeepsHandleUsable covers task F9's
+// open-file-semantics half directly: POSIX rename(2) only changes a
+// directory entry, never the underlying inode, so a file descriptor
+// opened under the old name must keep working — reading/writing
+// through it, and the data it writes must land on the content now
+// reachable only via the new name — exactly as a real local
+// filesystem behaves (and distinct from Windows's own, more
+// restrictive semantics, which FUSE on Linux does not need to
+// emulate).
+func TestMountRenameOfOpenFileKeepsHandleUsable(t *testing.T) {
+	mnt := mountTestFS(t)
+
+	oldPath := filepath.Join(mnt, "open-then-renamed.txt")
+	if err := os.WriteFile(oldPath, []byte("before"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	f, err := os.OpenFile(oldPath, os.O_RDWR, 0644)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	newPath := filepath.Join(mnt, "renamed-target.txt")
+	if err := os.Rename(oldPath, newPath); err != nil {
+		f.Close()
+		t.Fatalf("rename while open: %v", err)
+	}
+
+	// The already-open handle must still work after its path's only
+	// name changed out from under it.
+	if _, err := f.Seek(0, 0); err != nil {
+		f.Close()
+		t.Fatalf("seek on handle open across rename: %v", err)
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		f.Close()
+		t.Fatalf("read via handle open across rename: %v", err)
+	}
+	if string(data) != "before" {
+		f.Close()
+		t.Fatalf("got %q via still-open handle, want %q", data, "before")
+	}
+	if _, err := f.WriteAt([]byte("AFTER"), 0); err != nil {
+		f.Close()
+		t.Fatalf("write via handle open across rename: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close (flushes the write): %v", err)
+	}
+
+	// The write through the old handle must be visible at the new
+	// name — same underlying object, unaffected by which directory
+	// entry currently points at it.
+	gotAfter, err := os.ReadFile(newPath)
+	if err != nil {
+		t.Fatalf("read new path after write-through-old-handle: %v", err)
+	}
+	if string(gotAfter) != "AFTERe" { // "before" with its first 5 bytes overwritten
+		t.Fatalf("got %q at new path, want %q", gotAfter, "AFTERe")
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old path still exists after rename, err: %v", err)
 	}
 }
 
