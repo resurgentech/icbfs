@@ -162,7 +162,7 @@ func (d *driver) GetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 // internal error) as "abort the whole resolution," surfacing as
 // Windows' own "Could not find a part of the path" to the caller.
 func (d *driver) GetReparsePointByName(fs *winfsp.FileSystemRef, name string, isDirectory bool, buffer []byte) (int, error) {
-	r, err := resolvePath(ctx(), d.fsys, name)
+	r, err := resolvePath(ctx(), d.fsys, name, d.caseInsensitive)
 	if err != nil {
 		return 0, toWinError(err)
 	}
@@ -203,7 +203,7 @@ func (d *driver) SetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 		return err
 	}
 	dir, base := splitParent(name)
-	parent, err := resolvePath(ctx(), d.fsys, dir)
+	parent, err := resolvePath(ctx(), d.fsys, dir, d.caseInsensitive)
 	if err != nil {
 		return toWinError(err)
 	}

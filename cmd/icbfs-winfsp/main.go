@@ -3,8 +3,8 @@
 // Command icbfs-winfsp mounts an icbfs filesystem on Windows via
 // WinFsp, backed by an S3-API-compatible store — the Windows
 // counterpart to cmd/icbfs's FUSE mount, per ROADMAP.md's Part F.
-// Functional/manual-testing entry point for task F3; not yet wired to
-// any of F4-F11's mount flags (case-sensitivity, primary-mode, etc.).
+// Functional/manual-testing entry point for tasks F3-F4; not yet wired
+// to F5-F11's mount flags (primary-mode, etc.).
 package main
 
 import (
@@ -34,6 +34,7 @@ func main() {
 	secretKey := fset.String("secret-key", "minioadmin", "secret key")
 	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
 	size := fset.Uint64("size", 100<<30, "declared filesystem size in bytes (only used the first time a filesystem name is created)")
+	caseInsensitive := fset.Bool("case-insensitive", true, "case-insensitive name lookup, following the standard NTFS/Samba/WSL2 pattern (ARCHITECTURE.md's Windows compatibility section) — storage itself always stays case-sensitive/case-preserving regardless of this flag")
 	if err := fset.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
@@ -57,18 +58,23 @@ func main() {
 		log.Fatalf("bootstrap filesystem %q: %v", *fsName, err)
 	}
 
-	// CaseSensitive(true): icbfs.Filesystem's own directory lookup is
-	// already exact-match/case-sensitive (confirmed by reading it, not
-	// assumed) — without telling WinFsp the same thing, the kernel
-	// case-folds names internally and can hand this driver an
-	// uppercased, no-longer-matching name back on later calls (found
-	// via real on-VM testing: Remove-Item's underlying delete request
-	// arrived as `\SUBDIR\NESTED.TXT` for an entry actually named
-	// `subdir/nested.txt`, which then failed to resolve at all). A
-	// real case-insensitive *mount option* is ROADMAP.md's F4, a
-	// separate task; this is just making the two layers agree for
-	// now, not implementing that option.
-	server, err := winfsp.Mount(winfspserver.Root(fsys), mountpoint, winfsp.FileSystemName("icbfs"), winfsp.CaseSensitive(true))
+	// winfsp.CaseSensitive and winfspserver.Root's own caseInsensitive
+	// parameter must agree (task F4) — see Root's doc comment for why
+	// these are two separate, both load-bearing settings, not one flag
+	// under two names: WinFsp's CaseSensitive controls whether the
+	// *kernel* folds case before ever calling this driver at all
+	// (confirmed in task F3: with it left off/default, the kernel can
+	// hand this driver a canonicalized, differently-cased name than
+	// what's actually stored, breaking a plain Remove-Item outright),
+	// while Root's parameter controls whether this driver's own
+	// resolver additionally tolerates a case mismatch against
+	// icbfs.Filesystem's always-case-sensitive storage.
+	server, err := winfsp.Mount(
+		winfspserver.Root(fsys, *caseInsensitive),
+		mountpoint,
+		winfsp.FileSystemName("icbfs"),
+		winfsp.CaseSensitive(!*caseInsensitive),
+	)
 	if err != nil {
 		log.Fatalf("mount %s: %v", mountpoint, err)
 	}

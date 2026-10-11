@@ -13,9 +13,11 @@ package winfspserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/resurgentech/icbfs/internal/block"
 	"github.com/resurgentech/icbfs/internal/icbfs"
 )
 
@@ -50,7 +52,16 @@ type resolved struct {
 // "Done when" (nested directories and hardlinked names resolving to
 // the same UUID), and genuinely a separate design question for
 // whoever wires in real symlink/reparse-point handling (F3).
-func resolvePath(ctx context.Context, fsys *icbfs.Filesystem, path string) (resolved, error) {
+//
+// caseInsensitive controls whether a path segment is matched against
+// stored names exactly (false) or case-foldedly (true, via
+// lookupCaseAware) — ARCHITECTURE.md's Windows compatibility section
+// calls for exactly the standard NTFS/Samba/WSL2 pattern here: storage
+// itself always stays case-sensitive/case-preserving (icbfs.Filesystem's
+// own Lookup is never touched by this), and case-insensitive matching
+// is purely an access-layer behavior, driven by task F4's mount flag
+// (see cmd/icbfs-winfsp's --case-insensitive).
+func resolvePath(ctx context.Context, fsys *icbfs.Filesystem, path string, caseInsensitive bool) (resolved, error) {
 	key := fsys.RootKey()
 	segments := splitPath(path)
 
@@ -68,13 +79,51 @@ func resolvePath(ctx context.Context, fsys *icbfs.Filesystem, path string) (reso
 		if typ != icbfs.TypeDir {
 			return resolved{}, fmt.Errorf("resolve %q: %w", path, icbfs.ErrNotDir)
 		}
-		entry, a, err := fsys.Lookup(ctx, key, name)
+		entry, a, err := lookupCaseAware(ctx, fsys, key, name, caseInsensitive)
 		if err != nil {
 			return resolved{}, fmt.Errorf("resolve %q: %w", path, err)
 		}
 		key, typ, attr = entry.UUID, entry.Type, a
 	}
 	return resolved{Key: key, Type: typ, Attr: attr}, nil
+}
+
+// lookupCaseAware is fsys.Lookup, with an optional case-insensitive
+// fallback: an exact match is always tried first (and is always what
+// gets returned when one exists, even in case-insensitive mode — this
+// matters when two differently-cased names coexist, a state this
+// driver's own Create never produces but that pre-existing data or a
+// POSIX mount of the same filesystem could), and only on a genuine
+// not-found does case-insensitive mode fall back to a full directory
+// scan for a case-folded match.
+//
+// icbfs.Filesystem itself gains no case-insensitive mode at all —
+// deliberately: storage stays case-sensitive ground truth regardless
+// of how any one mount chooses to look things up (ARCHITECTURE.md).
+// The fallback scan's O(directory size) cost on every case-mismatched
+// lookup is accepted for the same reason ListByPrefix's own listing
+// cost is accepted elsewhere in this project: correct first, and nothing
+// faster exists without new storage-layer indexing this task doesn't
+// call for.
+func lookupCaseAware(ctx context.Context, fsys *icbfs.Filesystem, dirKey, name string, caseInsensitive bool) (block.Entry, icbfs.Attr, error) {
+	entry, attr, err := fsys.Lookup(ctx, dirKey, name)
+	if err == nil || !caseInsensitive || !errors.Is(err, icbfs.ErrNotFound) {
+		return entry, attr, err
+	}
+	entries, rdErr := fsys.ReadDir(ctx, dirKey)
+	if rdErr != nil {
+		return block.Entry{}, icbfs.Attr{}, err // the original not-found is still the right error to report
+	}
+	for _, e := range entries {
+		if strings.EqualFold(e.Name, name) {
+			a, statErr := fsys.Stat(ctx, e.UUID, e.Type)
+			if statErr != nil {
+				return block.Entry{}, icbfs.Attr{}, statErr
+			}
+			return e, a, nil
+		}
+	}
+	return block.Entry{}, icbfs.Attr{}, err
 }
 
 // maxSymlinkHops bounds resolvePathFollow against a symlink cycle —
@@ -111,8 +160,8 @@ const ntPathPrefix = `\??\`
 // relative-target symlink failed with "Could not find a part of the
 // path," traced directly to the kernel never issuing a follow-up open
 // against the resolved target at all.
-func resolvePathFollow(ctx context.Context, fsys *icbfs.Filesystem, path string) (resolved, error) {
-	r, err := resolvePath(ctx, fsys, path)
+func resolvePathFollow(ctx context.Context, fsys *icbfs.Filesystem, path string, caseInsensitive bool) (resolved, error) {
+	r, err := resolvePath(ctx, fsys, path, caseInsensitive)
 	if err != nil {
 		return resolved{}, err
 	}
@@ -126,7 +175,7 @@ func resolvePathFollow(ctx context.Context, fsys *icbfs.Filesystem, path string)
 			return resolved{}, err
 		}
 		next := resolveSymlinkTarget(dir, target)
-		r, err = resolvePath(ctx, fsys, next)
+		r, err = resolvePath(ctx, fsys, next, caseInsensitive)
 		if err != nil {
 			return resolved{}, err
 		}

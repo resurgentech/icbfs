@@ -1004,6 +1004,29 @@ fix 3 above, verified not to interfere with deleting a symlink itself
 - **Done when:** case-insensitive lookup behaves correctly against a
   real mount while the underlying stored names remain unchanged.
 
+**Done.** `cmd/icbfs-winfsp`'s `--case-insensitive` (default `true`,
+matching the NTFS/Samba/WSL2 convention `ARCHITECTURE.md` calls for)
+drives two separate, both load-bearing settings — confirmed two, not
+one, by testing F3's already-fixed case-sensitive behavior and
+confirming it would have broken if these were conflated:
+`winfsp.CaseSensitive` (whether the *kernel* folds case before ever
+calling this driver) and `winfspserver.Root`'s own `caseInsensitive`
+parameter (whether `resolve.go`'s new `lookupCaseAware` tolerates a
+case mismatch against `icbfs.Filesystem`'s always-case-sensitive
+storage, falling back to a directory scan only on a genuine not-found,
+and only in this mode). Storage itself never changes — confirmed
+directly: a file created as `MixedCase.txt` is still reported as
+`MixedCase.txt` by a case-insensitive mount, it simply also answers to
+`mixedcase.TXT`.
+
+Verified both ways against the real VM, not just unit-tested: the
+default mode resolves a request in different case than what was
+stored; an explicit `-case-insensitive=false` mount correctly refuses
+the same mismatched-case request while still serving the exact-case
+one. `resolvePath`'s case-insensitive fallback confirmed as a real,
+discriminating test the same way every other fix in this part has
+been — reverted, watched the test fail, restored.
+
 ### F5. Primary-mode flag
 
 - Store whether a filesystem is primary-Windows or primary-POSIX, set
