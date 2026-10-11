@@ -305,6 +305,66 @@ func TestPrimaryWindowsSetAtCreationAndImmutableAfterward(t *testing.T) {
 	}
 }
 
+// TestReservedNameRejectedOnlyOnPrimaryWindows covers task F6's exact
+// "Done when" bar: a reserved name like "CON" must be rejected by
+// Create/Mkdir/Symlink/Link on a primary-Windows filesystem, but
+// accepted by an otherwise-identical primary-POSIX filesystem — not
+// just the Windows-primary rejection case on its own.
+func TestReservedNameRejectedOnlyOnPrimaryWindows(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	winFS := New(store, "win-reserved")
+	if err := winFS.Bootstrap(ctx, 1<<30, 0755, 0, 0, true); err != nil {
+		t.Fatalf("bootstrap primary-Windows: %v", err)
+	}
+	winRoot := winFS.RootKey()
+
+	if _, _, _, err := winFS.Create(ctx, winRoot, "CON", 0644, 0, 0); !errors.Is(err, ErrInvalidName) {
+		t.Errorf("primary-Windows Create(CON) = %v, want ErrInvalidName", err)
+	}
+	if _, _, err := winFS.Mkdir(ctx, winRoot, "con.d", 0755, 0, 0); !errors.Is(err, ErrInvalidName) {
+		t.Errorf("primary-Windows Mkdir(con.d) = %v, want ErrInvalidName", err)
+	}
+	if _, _, err := winFS.Symlink(ctx, winRoot, "LPT1", "target", 0, 0); !errors.Is(err, ErrInvalidName) {
+		t.Errorf("primary-Windows Symlink(LPT1) = %v, want ErrInvalidName", err)
+	}
+	okUUID, _, _, err := winFS.Create(ctx, winRoot, "ok-target.txt", 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("primary-Windows Create(ok-target.txt): %v", err)
+	}
+	if _, err := winFS.Link(ctx, winRoot, "AUX", okUUID, TypeFile); !errors.Is(err, ErrInvalidName) {
+		t.Errorf("primary-Windows Link(AUX) = %v, want ErrInvalidName", err)
+	}
+	// A non-reserved name must still work on the same filesystem.
+	if _, _, _, err := winFS.Create(ctx, winRoot, "readme.txt", 0644, 0, 0); err != nil {
+		t.Errorf("primary-Windows Create(readme.txt) = %v, want nil", err)
+	}
+
+	posixFS := New(store, "posix-reserved")
+	if err := posixFS.Bootstrap(ctx, 1<<30, 0755, 0, 0, false); err != nil {
+		t.Fatalf("bootstrap primary-POSIX: %v", err)
+	}
+	posixRoot := posixFS.RootKey()
+
+	if _, _, _, err := posixFS.Create(ctx, posixRoot, "CON", 0644, 0, 0); err != nil {
+		t.Errorf("primary-POSIX Create(CON) = %v, want nil", err)
+	}
+	if _, _, err := posixFS.Mkdir(ctx, posixRoot, "con.d", 0755, 0, 0); err != nil {
+		t.Errorf("primary-POSIX Mkdir(con.d) = %v, want nil", err)
+	}
+	if _, _, err := posixFS.Symlink(ctx, posixRoot, "LPT1", "target", 0, 0); err != nil {
+		t.Errorf("primary-POSIX Symlink(LPT1) = %v, want nil", err)
+	}
+	posixOKUUID, _, _, err := posixFS.Create(ctx, posixRoot, "another-target.txt", 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("primary-POSIX Create(another-target.txt): %v", err)
+	}
+	if _, err := posixFS.Link(ctx, posixRoot, "AUX", posixOKUUID, TypeFile); err != nil {
+		t.Errorf("primary-POSIX Link(AUX) = %v, want nil", err)
+	}
+}
+
 // TestResizeChangesDeclaredSizeForEveryMount covers the Resize
 // operation added at Jared's direction (see ASSUMPTIONS.md's
 // D-cleanup entry, which originally flagged there being no way to

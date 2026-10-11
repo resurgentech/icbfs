@@ -1070,6 +1070,37 @@ way, since F5's actual consumers (F6/F8) are Windows-only.
   reserved name — Windows-primary rejects it; POSIX-primary accepts it
   — not just the Windows-primary rejection case.
 
+**Done.** Enforcement lives at the core `icbfs.Filesystem` layer, not
+just the WinFsp driver: a new portable file `internal/icbfs/winnames.go`
+holds `isWindowsReservedName` (reserved characters, control characters,
+trailing space/period, and the `CON`/`PRN`/`AUX`/`NUL`/`COM1-9`/`LPT1-9`
+base names matched case-insensitively with or without an extension) and
+`Filesystem.checkName`, which only rejects when `primaryWindows` is
+true — so the same enforcement applies regardless of which access layer
+(FUSE or WinFsp) is writing, since primary mode is a property of the
+filesystem itself. Wired into `Create`/`Mkdir`/`Symlink`/`Link` via a new
+`ErrInvalidName` sentinel, mapped to `syscall.EINVAL` in
+`fuseserver.errnoFromErr` and to the real `STATUS_OBJECT_NAME_INVALID`
+NTSTATUS (not a stretched `os.Err*`/`syscall.Errno` substitute) in
+`winfspserver.toWinError`. Verified with portable unit tests for
+`isWindowsReservedName` covering every character/base-name/edge case,
+plus a real `icbfs.Filesystem`-level test
+(`TestReservedNameRejectedOnlyOnPrimaryWindows`) proving the task's exact
+"Done when" bar: `CON`/`con.d`/`LPT1`/`AUX` are each rejected via
+`Create`/`Mkdir`/`Symlink`/`Link` on a primary-Windows filesystem and
+each accepted on an otherwise-identical primary-POSIX filesystem, with a
+non-reserved name still succeeding on the Windows-primary side too. Both
+new tests confirmed discriminating by temporarily disabling the checks
+and observing the expected failures. Full `gofmt`/`go build`/`go vet`/
+`go test ./...` clean on Linux, plus a Windows cross-compile
+(`GOOS=windows GOARCH=amd64 CGO_ENABLED=0`) of both `cmd/icbfs-winfsp`
+and `cmd/icbfs-winfsp-hello` and a Windows-target `go vet` of the
+WinFsp-only packages — no real VM mount needed this time, since the
+enforcement is pure portable logic already fully covered at the
+`icbfs.Filesystem` test level, and the WinFsp-side change is a one-line
+NTSTATUS mapping with direct precedent elsewhere in `driver.go`
+(`GetReparsePoint`/`GetReparsePointByName`'s own `STATUS_NOT_A_REPARSE_POINT`).
+
 ### F7. Windows file attribute bits
 
 - Hidden/System/ReadOnly/Archive — storage (likely another entry in

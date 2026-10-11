@@ -20,11 +20,12 @@ import (
 // Sentinel errors filesystem operations return, so access layers can map
 // them to their own error conventions (e.g. syscall.Errno for FUSE).
 var (
-	ErrNotFound = errors.New("not found")
-	ErrExists   = errors.New("already exists")
-	ErrNotEmpty = errors.New("directory not empty")
-	ErrNotDir   = errors.New("not a directory")
-	ErrIsDir    = errors.New("is a directory")
+	ErrNotFound    = errors.New("not found")
+	ErrExists      = errors.New("already exists")
+	ErrNotEmpty    = errors.New("directory not empty")
+	ErrNotDir      = errors.New("not a directory")
+	ErrIsDir       = errors.New("is a directory")
+	ErrInvalidName = errors.New("name reserved on a primary-Windows filesystem")
 )
 
 // Attr is the POSIX-ish attribute set for one inode. Where it comes from

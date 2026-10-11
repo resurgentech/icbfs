@@ -157,6 +157,14 @@ func errnoFromErr(err error) syscall.Errno {
 		return syscall.EAGAIN
 	case errors.Is(err, icbfs.ErrLockingDisabled):
 		return syscall.ENOSYS
+	case errors.Is(err, icbfs.ErrInvalidName):
+		// Only reachable at all if a primary-Windows filesystem
+		// (task F5) is mounted via this POSIX access layer and a
+		// caller names something Windows-reserved (task F6) — the
+		// enforcement lives in icbfs.Filesystem itself, not just the
+		// WinFsp driver, since primary mode is a property of the
+		// filesystem, not of whichever access layer is mounting it.
+		return syscall.EINVAL
 	default:
 		return syscall.EIO
 	}
