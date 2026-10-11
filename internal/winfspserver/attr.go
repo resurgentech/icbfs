@@ -173,7 +173,7 @@ func permissiveSD() (*windows.SECURITY_DESCRIPTOR, error) {
 }
 
 func (d *driver) GetSecurityByName(fs *winfsp.FileSystemRef, name string, flags winfsp.GetSecurityByNameFlags) (uint32, *windows.SECURITY_DESCRIPTOR, error) {
-	r, err := resolvePath(ctx(), d.fsys, name)
+	r, err := resolvePath(ctx(), d.fsys, name, d.caseInsensitive)
 	if err != nil {
 		return 0, nil, toWinError(err)
 	}

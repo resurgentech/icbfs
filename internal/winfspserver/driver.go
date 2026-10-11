@@ -24,7 +24,8 @@ import (
 // interface this task wires. One driver backs one mounted
 // icbfs.Filesystem; Root builds it.
 type driver struct {
-	fsys *icbfs.Filesystem
+	fsys            *icbfs.Filesystem
+	caseInsensitive bool
 
 	mu      sync.Mutex
 	handles map[uintptr]*fileHandle
@@ -58,8 +59,22 @@ type fileHandle struct {
 // winfsp.Mount. fsys must already be bootstrapped (see icbfs.Filesystem.
 // Bootstrap) — this driver does no bootstrapping of its own, same
 // division of responsibility as internal/fuseserver.Root.
-func Root(fsys *icbfs.Filesystem) winfsp.BehaviourBase {
-	return &driver{fsys: fsys, handles: make(map[uintptr]*fileHandle)}
+//
+// caseInsensitive (task F4) must match whatever the caller also passes
+// to winfsp.Mount's own winfsp.CaseSensitive option — the two are
+// separate, both load-bearing settings, not one flag with two names:
+// WinFsp's own CaseSensitive controls whether the *kernel* folds case
+// before ever calling this driver (confirmed in task F3: with it off,
+// the kernel can hand this driver a canonicalized, differently-cased
+// name than what's actually stored), while this field controls whether
+// resolvePath's own lookupCaseAware fallback additionally tolerates a
+// case mismatch against icbfs.Filesystem's always-case-sensitive
+// storage. Mismatching the two (e.g. kernel case-sensitive, driver
+// case-insensitive) leaves this fallback dead code; the other way
+// around leaves names the kernel already case-folded unable to match
+// at all.
+func Root(fsys *icbfs.Filesystem, caseInsensitive bool) winfsp.BehaviourBase {
+	return &driver{fsys: fsys, caseInsensitive: caseInsensitive, handles: make(map[uintptr]*fileHandle)}
 }
 
 var (
@@ -169,7 +184,7 @@ func (d *driver) Open(fs *winfsp.FileSystemRef, name string, createOptions, gran
 	if createOptions&fileOpenReparsePoint != 0 {
 		resolve = resolvePath
 	}
-	r, err := resolve(ctx(), d.fsys, name)
+	r, err := resolve(ctx(), d.fsys, name, d.caseInsensitive)
 	if err != nil {
 		return 0, toWinError(err)
 	}
@@ -208,7 +223,7 @@ func (d *driver) Close(fs *winfsp.FileSystemRef, file uintptr) {
 // FILE bit.
 func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, grantedAccess, fileAttributes uint32, securityDescriptor *windows.SECURITY_DESCRIPTOR, allocationSize uint64, info *winfsp.FSP_FSCTL_FILE_INFO) (uintptr, error) {
 	dir, base := splitParent(name)
-	parent, err := resolvePath(ctx(), d.fsys, dir)
+	parent, err := resolvePath(ctx(), d.fsys, dir, d.caseInsensitive)
 	if err != nil {
 		return 0, toWinError(err)
 	}
@@ -272,7 +287,7 @@ func (d *driver) Cleanup(fs *winfsp.FileSystemRef, file uintptr, name string, cl
 		return
 	}
 	dir, base := splitParent(name)
-	parent, err := resolvePath(ctx(), d.fsys, dir)
+	parent, err := resolvePath(ctx(), d.fsys, dir, d.caseInsensitive)
 	if err != nil {
 		return
 	}

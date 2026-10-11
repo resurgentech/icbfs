@@ -79,7 +79,7 @@ func TestResolvePathRoot(t *testing.T) {
 	ctx := context.Background()
 
 	for _, path := range []string{`\`, ``} {
-		got, err := resolvePath(ctx, fsys, path)
+		got, err := resolvePath(ctx, fsys, path, false)
 		if err != nil {
 			t.Fatalf("resolvePath(%q): %v", path, err)
 		}
@@ -123,7 +123,7 @@ func TestResolvePathNestedDirectories(t *testing.T) {
 		{`\dir1\dir2\file.txt`, fileUUID, icbfs.TypeFile},
 	}
 	for _, c := range cases {
-		got, err := resolvePath(ctx, fsys, c.path)
+		got, err := resolvePath(ctx, fsys, c.path, false)
 		if err != nil {
 			t.Fatalf("resolvePath(%q): %v", c.path, err)
 		}
@@ -158,11 +158,11 @@ func TestResolvePathHardlinkedNamesShareUUID(t *testing.T) {
 		t.Fatalf("link dir/linked.txt -> original.txt: %v", err)
 	}
 
-	original, err := resolvePath(ctx, fsys, `\original.txt`)
+	original, err := resolvePath(ctx, fsys, `\original.txt`, false)
 	if err != nil {
 		t.Fatalf("resolvePath(original.txt): %v", err)
 	}
-	linked, err := resolvePath(ctx, fsys, `\dir\linked.txt`)
+	linked, err := resolvePath(ctx, fsys, `\dir\linked.txt`, false)
 	if err != nil {
 		t.Fatalf("resolvePath(dir/linked.txt): %v", err)
 	}
@@ -174,6 +174,44 @@ func TestResolvePathHardlinkedNamesShareUUID(t *testing.T) {
 	}
 }
 
+// TestResolvePathCaseInsensitiveMatchesDifferentCase covers task F4:
+// with caseInsensitive=true, a path using different case than what
+// was actually stored still resolves to the same entry — the
+// WinFsp-mount-flag-driven behavior ARCHITECTURE.md's Windows
+// compatibility section calls for (storage itself stays case-
+// sensitive/preserving; only lookup folds case, and only when this
+// flag is set).
+func TestResolvePathCaseInsensitiveMatchesDifferentCase(t *testing.T) {
+	fsys := newTestFilesystem(t)
+	ctx := context.Background()
+
+	dirUUID, _, err := fsys.Mkdir(ctx, fsys.RootKey(), "MixedCase", 0755, 0, 0)
+	if err != nil {
+		t.Fatalf("mkdir MixedCase: %v", err)
+	}
+	fileUUID, _, _, err := fsys.Create(ctx, dirUUID, "File.TXT", 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("create File.TXT: %v", err)
+	}
+
+	// caseInsensitive=false: a differently-cased request must still
+	// fail, exactly as it did before this task existed — case folding
+	// is opt-in, never the default.
+	if _, err := resolvePath(ctx, fsys, `\mixedcase\file.txt`, false); !errors.Is(err, icbfs.ErrNotFound) {
+		t.Fatalf("case-sensitive resolvePath(wrong case) = %v, want ErrNotFound", err)
+	}
+
+	for _, path := range []string{`\MixedCase\File.TXT`, `\mixedcase\file.txt`, `\MIXEDCASE\FILE.TXT`} {
+		got, err := resolvePath(ctx, fsys, path, true)
+		if err != nil {
+			t.Fatalf("case-insensitive resolvePath(%q): %v", path, err)
+		}
+		if got.Key != fileUUID {
+			t.Fatalf("case-insensitive resolvePath(%q).Key = %q, want %q", path, got.Key, fileUUID)
+		}
+	}
+}
+
 // TestResolvePathNotFound confirms a genuinely missing path surfaces
 // icbfs.ErrNotFound, not some other generic error — callers (F3's real
 // WinFsp callback wiring) need to distinguish this to report the right
@@ -182,10 +220,10 @@ func TestResolvePathNotFound(t *testing.T) {
 	fsys := newTestFilesystem(t)
 	ctx := context.Background()
 
-	if _, err := resolvePath(ctx, fsys, `\does-not-exist.txt`); !errors.Is(err, icbfs.ErrNotFound) {
+	if _, err := resolvePath(ctx, fsys, `\does-not-exist.txt`, false); !errors.Is(err, icbfs.ErrNotFound) {
 		t.Fatalf("resolvePath(missing) = %v, want ErrNotFound", err)
 	}
-	if _, err := resolvePath(ctx, fsys, `\does\not\exist\either`); !errors.Is(err, icbfs.ErrNotFound) {
+	if _, err := resolvePath(ctx, fsys, `\does\not\exist\either`, false); !errors.Is(err, icbfs.ErrNotFound) {
 		t.Fatalf("resolvePath(missing, nested) = %v, want ErrNotFound", err)
 	}
 }
@@ -203,7 +241,7 @@ func TestResolvePathThroughNonDirectoryFails(t *testing.T) {
 		t.Fatalf("create file.txt: %v", err)
 	}
 
-	if _, err := resolvePath(ctx, fsys, `\file.txt\sub`); !errors.Is(err, icbfs.ErrNotDir) {
+	if _, err := resolvePath(ctx, fsys, `\file.txt\sub`, false); !errors.Is(err, icbfs.ErrNotDir) {
 		t.Fatalf("resolvePath(through a file) = %v, want ErrNotDir", err)
 	}
 }
