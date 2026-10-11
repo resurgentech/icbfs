@@ -1,4 +1,5 @@
 /bin/
 *.test
 *.out
+*.exe
 /test/windows/work/

@@ -208,3 +208,103 @@ Not yet possible, and not the point of this step: pointing WinSCP at
 *icbfs* itself. That's still blocked on the WinFsp driver existing in the
 main codebase — this section only proves the VM/tooling side of that
 future test is ready.
+
+## Installing WinFsp itself, and `winfsp-tests` — verified end to end
+
+Done at Jared's direction once Part F (the WinFsp driver, `ROADMAP.md`)
+was greenlit — this is the other real prerequisite that section's own
+intro calls out as not yet done: WinFsp's own kernel driver/user-mode DLL
+isn't optional infrastructure icbfs can carry itself (task F11), and
+`winfsp-tests` is the real conformance bar `TESTING.md` identifies, not
+something to leave for whoever eventually builds the driver to discover
+is also missing.
+
+1. **Found the current release via GitHub's API from inside the VM**,
+   not a guessed/hardcoded URL — `api.github.com/repos/winfsp/winfsp/
+   releases/latest` returned `winfsp-2.1.25156.msi` and
+   `winfsp-tests-2.1.25156.zip`, confirming this VM has real outbound
+   internet access (unlike the Windows ISO itself, nothing here needed
+   downloading on the host and `scp`'d over).
+2. **Silent MSI install**: `msiexec /i winfsp.msi /qn /norestart`,
+   exit code 0 — but *not* trusted on its own, same reasoning as every
+   other install step in this doc. Confirmed for real: WinFsp's DLLs/
+   driver files present under `C:\Program Files (x86)\WinFsp\bin`, and
+   `Get-Service WinFsp.Launcher` reporting `Running`/`Automatic`.
+3. **One real gotcha found, not assumed away**: `winfsp-tests-x64.exe`
+   failed immediately with exit code `-1073741515`
+   (`STATUS_DLL_NOT_FOUND`) — the WinFsp installer does **not** add its
+   own `bin` directory to the system `Path` at all (confirmed by reading
+   `[Environment]::GetEnvironmentVariable("Path","Machine")` directly,
+   not inferred). Fixed by appending `C:\Program Files (x86)\WinFsp\bin`
+   to the machine-level `Path` and restarting the `sshd` service (a
+   plain reboot isn't actually required — `sshd`, like any other
+   already-running service, only re-reads the registry-based `Path` on
+   its own next start, the same class of "environment captured at
+   service-start time" gotcha as this doc's `FirstLogonCommands` note
+   above, just for a different service). Confirmed fixed: `sshd`
+   restarted, same command then ran clean.
+4. **Real proof it actually works, not just that files exist**: ran
+   `winfsp-tests-x64.exe --resilient` (the *default*, internal mode —
+   against WinFsp's own embedded MEMFS reference filesystem, no
+   external filesystem needed) end to end. **107/107 tests passed,
+   zero `FAIL`/`Error`/`Exception` lines, exit code 0** — a genuine,
+   working WinFsp kernel driver + user-mode DLL on this VM, confirmed
+   the same way `TESTING.md` says to confirm everything else: by
+   actually running it, not trusting an installer's exit code.
+5. **`clean-base` snapshot replaced** to include WinFsp, the `winfsp-
+   tests` binaries (left unzipped at `C:\Windows\Temp\winfsp-tests\` for
+   reuse), and the `Path` fix — same pattern as the WinSCP install
+   above. VM shut down afterward, per the normal workflow.
+
+Still blocked, and the only remaining piece: `winfsp-tests --external`
+against *icbfs's own* WinFsp driver, which doesn't exist in this
+codebase yet (`ROADMAP.md`'s Part F, now in progress). Everything this
+section proves is that the moment that driver can mount something, this
+VM is immediately ready to point `winfsp-tests` at it — no further
+environment setup needed.
+
+## Building natively on the VM, not just cross-compiling — confirmed necessary, not just more thorough
+
+Part F's driver work was originally planned as cross-compile-from-Linux
+(`GOOS=windows CGO_ENABLED=0`), copy the `.exe` over, run it — simpler,
+and `ROADMAP.md`'s F1 confirmed it works mechanically (a trivial mount
+proved that way). At Jared's direction, stopped assuming that's
+sufficient and set up native builds on this VM instead, specifically to
+rule cross-compilation in or out as a factor in F1's then-unresolved
+`ERROR_INVALID_FUNCTION` bug — **it wasn't the cause**: the identical
+native-interface code, built natively on this VM with zero
+cross-compilation involved, failed with the exact same error. Real,
+useful negative result — it ruled out the entire toolchain/ABI class of
+hypothesis and pointed at the Go-level wiring, which is where the real
+causes turned out to be (two of them, both since fixed and verified
+with a working mount built right here — see `ROADMAP.md`'s F1 entry for
+the specifics: WinFsp's dispatcher demands `Create`+`Open`+`Overwrite`
+all be wired or it rejects every open, and the security descriptor
+needs an Owner/Group, not just a DACL).
+
+**Now the standing workflow**, not a one-off experiment:
+1. **Go 1.27.2 installed** via the official `go.dev/dl/?mode=json` API
+   (found the current stable release's Windows installer URL for real,
+   not a guessed/hardcoded version) and a silent `msiexec` install, same
+   pattern as WinFsp's own install above.
+2. **Same `Path`-not-updated-for-already-running-services gotcha as
+   WinFsp's own install** — confirmed again, not assumed to be a
+   one-off: `go.exe` wasn't found until `C:\Program Files\Go\bin` was
+   added to the machine `Path` and `sshd` was restarted.
+3. **Source gets onto the VM via a plain tarball**, not git: this
+   environment has no reason to run a git client on the VM, so the
+   working tree (`.git` and `test/windows/work/`'s large ISOs excluded)
+   is `tar`'d up on the Linux host, `scp`'d over, and extracted with
+   Windows' own built-in `tar.exe` (shipped since Windows 10/Server
+   2019) at `C:\icbfs`. Re-sync this the same way before any future
+   native build session — it's a snapshot of the source at sync time,
+   not kept continuously up to date.
+4. **`clean-base` snapshot replaced again** to include the Go
+   toolchain, the `Path` fix, and a primed `C:\icbfs` checkout (its
+   `go.mod`/`go.sum` already resolved once, so `golang.org/x/sys` and
+   `github.com/winfsp/go-winfsp` are already in the module cache —
+   future builds here don't re-download them from scratch).
+
+To build something new here: re-sync the source tarball (step 3) into
+`C:\icbfs`, then `cd C:\icbfs; go build -o <name>.exe .\cmd\<pkg>\`
+over SSH, exactly as demonstrated above.

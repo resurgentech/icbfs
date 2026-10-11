@@ -13,6 +13,7 @@ require (
 	github.com/hanwen/go-fuse/v2 v2.12.0
 	github.com/minio/minio-go/v7 v7.3.0
 	github.com/testcontainers/testcontainers-go/modules/minio v0.44.0
+	github.com/winfsp/go-winfsp v1.0.6
 	google.golang.org/protobuf v1.36.12
 )
 
@@ -63,6 +64,7 @@ require (
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
+	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
 	github.com/rs/xid v1.6.0 // indirect
