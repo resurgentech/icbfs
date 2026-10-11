@@ -100,6 +100,64 @@ func locksConflict(aShared, bShared bool) bool {
 	return !(aShared && bShared)
 }
 
+// mergeOwnRanges implements real fcntl(2) same-owner lock merge/split
+// semantics (task B4's originally-deferred nuance, fixed at Jared's
+// direction — see ASSUMPTIONS.md's B4 entry): acquiring [start, end)
+// doesn't just replace an *identical* existing entry this holder
+// already has, it adjusts every existing entry of theirs that
+// overlaps [start, end) at all, exactly the way a real kernel's
+// posix_lock_file merges/splits a process's own byte-range locks on a
+// repeated F_SETLK:
+//   - an overlapping entry of the SAME type (shared/exclusive) is
+//     absorbed into the new claim — the returned bounds widen to
+//     cover it, and it is not kept as a separate entry;
+//   - an overlapping entry of a DIFFERENT type is trimmed to its
+//     non-overlapping remainder(s) (0, 1, or 2 of them, depending on
+//     whether the new range covers one edge, both edges, or the whole
+//     thing), preserving that remainder's own original type/flags.
+//
+// Runs to a fixed point: absorbing a same-type entry can widen the
+// claim enough to newly overlap an entry that didn't overlap the
+// original [start, end), so this keeps sweeping owned until a full
+// pass changes nothing. owned must already be filtered to this one
+// holder's own, unexpired entries; entries belonging to other holders
+// are handled separately by the caller's ordinary conflict check and
+// never passed in here.
+func mergeOwnRanges(owned []*pb.LockRange, start, end int64, shared bool) (remainder []*pb.LockRange, newStart, newEnd int64) {
+	newStart, newEnd = start, end
+	remaining := owned
+	for {
+		changed := false
+		var next []*pb.LockRange
+		for _, e := range remaining {
+			if !rangesOverlap(newStart, newEnd, e.Start, e.End) {
+				next = append(next, e)
+				continue
+			}
+			changed = true
+			if e.Shared == shared {
+				if e.Start < newStart {
+					newStart = e.Start
+				}
+				if e.End > newEnd {
+					newEnd = e.End
+				}
+				continue // absorbed into the new claim, not kept
+			}
+			if e.Start < newStart {
+				next = append(next, &pb.LockRange{Start: e.Start, End: newStart, Holder: e.Holder, ExpiresAtUnixMs: e.ExpiresAtUnixMs, EscalationOnly: e.EscalationOnly, Shared: e.Shared})
+			}
+			if e.End > newEnd {
+				next = append(next, &pb.LockRange{Start: newEnd, End: e.End, Holder: e.Holder, ExpiresAtUnixMs: e.ExpiresAtUnixMs, EscalationOnly: e.EscalationOnly, Shared: e.Shared})
+			}
+		}
+		remaining = next
+		if !changed {
+			return remaining, newStart, newEnd
+		}
+	}
+}
+
 // TryAcquireLockRange attempts to claim [start, end) of key for
 // holder, non-blocking: checked against every other holder's current,
 // unexpired range entries for overlap (task B4's generalization of
@@ -110,9 +168,9 @@ func locksConflict(aShared, bShared bool) bool {
 // already held by the same holder (idempotent re-acquire/replace) are
 // all treated as non-conflicting. A holder may hold several disjoint
 // ranges simultaneously — acquiring a new range never conflicts with
-// that same holder's own existing entries, and leaves them untouched;
-// only the exact (holder, start, end) entry being reacquired here is
-// replaced.
+// that same holder's own existing entries. An existing entry of theirs
+// that overlaps the new range (not just an identical one) is merged or
+// split per real fcntl(2) same-owner semantics — see mergeOwnRanges.
 //
 // expires_at is anchored to the object store's clock (objstore.Store.
 // ServerTime, a real HTTP Date header, not a typed field — see its
@@ -187,16 +245,14 @@ func (f *Filesystem) tryAcquireLockRange(ctx context.Context, key string, start,
 		checkNow := time.Now()
 
 		var kept []*pb.LockRange
+		var owned []*pb.LockRange
 		if cur != nil {
 			for _, e := range cur.Ranges {
 				if rangeExpired(e, checkNow) {
 					continue // pruned: an expired lease is simply gone
 				}
 				if e.Holder == holder {
-					if e.Start == start && e.End == end {
-						continue // the exact entry being replaced below
-					}
-					kept = append(kept, e) // this holder's other ranges, untouched
+					owned = append(owned, e) // merged/split below, not just left untouched
 					continue
 				}
 				if rangesOverlap(start, end, e.Start, e.End) && locksConflict(shared, e.Shared) {
@@ -206,7 +262,12 @@ func (f *Filesystem) tryAcquireLockRange(ctx context.Context, key string, start,
 			}
 		}
 
-		claim := &pb.LockRange{Start: start, End: end, Holder: holder, ExpiresAtUnixMs: serverNow.Add(ttl).UnixMilli(), EscalationOnly: escalationOnly, Shared: shared}
+		// Real fcntl(2) same-owner merge/split, not just an exact-tuple
+		// replace — see mergeOwnRanges's doc comment.
+		remainder, claimStart, claimEnd := mergeOwnRanges(owned, start, end, shared)
+		kept = append(kept, remainder...)
+
+		claim := &pb.LockRange{Start: claimStart, End: claimEnd, Holder: holder, ExpiresAtUnixMs: serverNow.Add(ttl).UnixMilli(), EscalationOnly: escalationOnly, Shared: shared}
 		data, err := proto.Marshal(&pb.Lock{Ranges: append(kept, claim)})
 		if err != nil {
 			return err
@@ -328,7 +389,7 @@ func (f *Filesystem) RenewLockRange(ctx context.Context, key string, start, end 
 				found = true
 				escalationOnly = e.EscalationOnly // preserved across renewal
 				shared = e.Shared                 // preserved across renewal
-				continue // replaced below with the renewed expiry
+				continue                          // replaced below with the renewed expiry
 			}
 			kept = append(kept, e)
 		}
@@ -564,6 +625,41 @@ func (f *Filesystem) FindConflictingLockRange(ctx context.Context, key string, s
 		}
 	}
 	return LockRangeInfo{}, false, nil
+}
+
+// LockRangesHeldBy returns holder's current, unexpired, non-
+// escalation entries on key, in their *current* form — which, thanks
+// to mergeOwnRanges, may have different bounds than whatever any one
+// earlier acquire call originally requested (an overlapping re-lock
+// can widen or split a holder's own entries — see that function's doc
+// comment).
+//
+// This exists for background lease renewal (task B8's lease-renewal
+// fix, at Jared's direction — see ASSUMPTIONS.md's B8 entry): a
+// caller that wants to keep a holder's locks alive for as long as it
+// stays alive doesn't need to separately track what it originally
+// asked for across possible merges/splits — it just asks "what do I
+// currently hold" each time and renews whatever comes back.
+func (f *Filesystem) LockRangesHeldBy(ctx context.Context, key, holder string) ([]LockRangeInfo, error) {
+	if !f.lockingEnabled {
+		return nil, nil
+	}
+	cur, _, err := readLockRanges(ctx, f.store, lockObjectKey(key))
+	if err != nil {
+		return nil, err
+	}
+	if cur == nil {
+		return nil, nil
+	}
+	now := time.Now()
+	var out []LockRangeInfo
+	for _, e := range cur.Ranges {
+		if e.Holder != holder || e.EscalationOnly || rangeExpired(e, now) {
+			continue
+		}
+		out = append(out, LockRangeInfo{Start: e.Start, End: e.End, Holder: e.Holder, Shared: e.Shared})
+	}
+	return out, nil
 }
 
 // TryAcquireLock, ReleaseLock, RenewLock, and AcquireLock are the

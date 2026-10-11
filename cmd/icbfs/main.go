@@ -154,5 +154,14 @@ func fuseMountOptions(debug bool) fuse.MountOptions {
 		// membership — preferred over implementing NodeAccesser or
 		// manual checks ourselves.
 		Options: []string{"default_permissions"},
+		// EnableLocks (task B8): without this, the kernel never
+		// forwards FUSE_GETLK/SETLK/SETLKW to this driver at all — it
+		// silently falls back to its own local, single-host advisory
+		// lock table, which defeats the entire point of this
+		// filesystem's remote, object-store-backed locking (and was
+		// found, at Jared's direction, to have been masking a real
+		// bug in this exact way throughout testing — see
+		// ASSUMPTIONS.md's B8 entry).
+		EnableLocks: true,
 	}
 }

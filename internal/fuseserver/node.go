@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 	"syscall"
 	"time"
 
@@ -278,7 +279,7 @@ func (n *Node) Create(ctx context.Context, name string, flags uint32, mode uint3
 		return nil, nil, 0, errnoFromErr(err)
 	}
 	fillAttr(&out.Attr, newUUID, icbfs.TypeFile, attr)
-	fh := &FileHandle{open: n.fsys.NewOpenFile(newUUID, etag, nil)}
+	fh := newFileHandle(n.fsys.NewOpenFile(newUUID, etag, nil))
 	return n.newChild(ctx, newUUID, icbfs.TypeFile), fh, 0, 0
 }
 
@@ -287,7 +288,7 @@ func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 	if err != nil {
 		return nil, 0, errnoFromErr(err)
 	}
-	return &FileHandle{open: open}, 0, 0
+	return newFileHandle(open), 0, 0
 }
 
 func (n *Node) Unlink(ctx context.Context, name string) syscall.Errno {
@@ -331,8 +332,23 @@ func (n *Node) Link(ctx context.Context, target fs.InodeEmbedder, name string, o
 
 // FileHandle adapts icbfs.OpenFile (the shared buffering/CAS-retry
 // logic — see its doc comment) to go-fuse's FileHandle interfaces.
+//
+// renewers tracks one background lease-renewal goroutine per FUSE
+// lock-owner token that currently holds at least one lock through
+// this handle (task B8's lease-renewal fix, at Jared's direction —
+// see ensureRenewal/runRenewal and ASSUMPTIONS.md's B8 entry). nil
+// until the first successful lock acquire; newFileHandle is not
+// required to construct a usable FileHandle, only to pre-size it.
 type FileHandle struct {
 	open *icbfs.OpenFile
+
+	mu       sync.Mutex
+	renewers map[uint64]context.CancelFunc
+	wg       sync.WaitGroup // one Add per spawned runRenewal goroutine; Release waits on this
+}
+
+func newFileHandle(open *icbfs.OpenFile) *FileHandle {
+	return &FileHandle{open: open}
 }
 
 var (
@@ -340,6 +356,7 @@ var (
 	_ fs.FileReader   = (*FileHandle)(nil)
 	_ fs.FileWriter   = (*FileHandle)(nil)
 	_ fs.FileFlusher  = (*FileHandle)(nil)
+	_ fs.FileReleaser = (*FileHandle)(nil)
 	_ fs.FileGetlker  = (*FileHandle)(nil)
 	_ fs.FileSetlker  = (*FileHandle)(nil)
 	_ fs.FileSetlkwer = (*FileHandle)(nil)
@@ -367,18 +384,36 @@ func (h *FileHandle) Flush(ctx context.Context) syscall.Errno {
 const fcntlLockEOF = math.MaxInt64
 
 // lockLeaseTTL is the lease every FUSE-sourced flock/fcntl claim gets
-// (task B8). Real POSIX locks have no TTL at all — held until
-// explicitly unlocked or the owning fd/process goes away — but every
-// claim in this codebase's Locking model requires one (see
-// ARCHITECTURE.md's Locking section). This project doesn't implement
-// background lease renewal for the duration an application holds a
-// real fcntl/flock lock, so a lock held longer than this TTL without
-// being renewed can be silently stolen by another claimant — a known,
-// accepted gap (see ASSUMPTIONS.md), not a guarantee this TTL is
-// trying to approximate. 24 hours is chosen to make that gap
-// practically unreachable for ordinary use rather than to model any
-// real semantics.
-const lockLeaseTTL = 24 * time.Hour
+// (task B8), kept alive for as long as the acquiring lock-owner stays
+// alive by ensureRenewal/runRenewal's background renewal, below —
+// fixed at Jared's direction after this project's original version
+// shipped with no renewal at all (see ASSUMPTIONS.md's B8 entry): a
+// lease TTL with nothing ever renewing it can't actually distinguish
+// "holder crashed" from "holder has just been holding this a long
+// time," which a real NFS/SMB-style lease (short TTL, renewed
+// periodically while alive, reclaimed only after a holder goes dark
+// for one full lease period) can. 30 seconds is in that same
+// real-world lease-length range, not the old "practically
+// unreachable" 24h placeholder — short enough that a holder that
+// really did crash or get network-partitioned away loses its lock
+// within a bounded, human-noticeable time, not after a full day.
+//
+// A var, not a const, for the same reason contentWriteRetryBudget
+// (openfile.go) is one: this package's own tests shrink this (and
+// lockRenewInterval) to get fast, deterministic proof that renewal
+// and expiry actually work, rather than a real test having to wait
+// out 30 real seconds either way to find out.
+var lockLeaseTTL = 30 * time.Second
+
+// lockRenewInterval is how often runRenewal re-renews a still-live
+// holder's locks — a fraction of lockLeaseTTL so a renewal has two
+// more chances to land before the lease it's extending would actually
+// expire, tolerating one or two missed/slow ticks (a slow store
+// round trip, a brief backend hiccup) without losing the lock.
+//
+// Also a var: computed fresh from lockLeaseTTL at the top of a test
+// that shrinks the latter, not baked in once at package init time.
+var lockRenewInterval = lockLeaseTTL / 3
 
 // lockHolderFromOwner turns a FUSE lock owner token (kernel-assigned,
 // stable for the lifetime of one open-file-description's/process's
@@ -474,23 +509,185 @@ func (h *FileHandle) setlk(ctx context.Context, owner uint64, lk *fuse.FileLock,
 		return errnoFromErr(h.open.ReleaseLockRange(ctx, start, end, holder))
 	case syscall.F_RDLCK:
 		if blocking {
-			return errnoFromErr(h.open.AcquireSharedLockRange(ctx, start, end, holder, lockLeaseTTL))
+			if err := h.open.AcquireSharedLockRange(ctx, start, end, holder, lockLeaseTTL); err != nil {
+				return errnoFromErr(err)
+			}
+			h.ensureRenewal(owner)
+			return 0
 		}
 		err := h.open.TryAcquireSharedLockRange(ctx, start, end, holder, lockLeaseTTL)
 		if errors.Is(err, icbfs.ErrLocked) {
 			return syscall.EAGAIN
 		}
-		return errnoFromErr(err)
+		if err != nil {
+			return errnoFromErr(err)
+		}
+		h.ensureRenewal(owner)
+		return 0
 	case syscall.F_WRLCK:
 		if blocking {
-			return errnoFromErr(h.open.AcquireLockRange(ctx, start, end, holder, lockLeaseTTL))
+			if err := h.open.AcquireLockRange(ctx, start, end, holder, lockLeaseTTL); err != nil {
+				return errnoFromErr(err)
+			}
+			h.ensureRenewal(owner)
+			return 0
 		}
 		err := h.open.TryAcquireLockRange(ctx, start, end, holder, lockLeaseTTL)
 		if errors.Is(err, icbfs.ErrLocked) {
 			return syscall.EAGAIN
 		}
-		return errnoFromErr(err)
+		if err != nil {
+			return errnoFromErr(err)
+		}
+		h.ensureRenewal(owner)
+		return 0
 	default:
 		return syscall.EINVAL
+	}
+}
+
+// ensureRenewal starts runRenewal for owner if it isn't already
+// running on this handle — called after every successful lock
+// acquire, idempotent so a second (or Nth) lock taken by the same
+// owner doesn't start a second redundant renewal loop.
+func (h *FileHandle) ensureRenewal(owner uint64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.renewers == nil {
+		h.renewers = make(map[uint64]context.CancelFunc)
+	}
+	if _, running := h.renewers[owner]; running {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	h.renewers[owner] = cancel
+	h.wg.Add(1)
+	go h.runRenewal(ctx, owner)
+}
+
+// runRenewal periodically renews every lock owner currently holds on
+// this file, for as long as this FileHandle stays open (Release
+// cancels ctx) and owner still actually holds something (an empty
+// LockRangesHeldBy result means there's nothing left to renew, so
+// this just exits rather than polling forever).
+//
+// Deliberately re-queries LockRangesHeldBy on every tick instead of
+// renewing whatever bounds the triggering setlk call originally
+// requested: mergeOwnRanges (lock.go) can widen or split a holder's
+// own entries on a later overlapping acquire, so "what I originally
+// asked for" can stop matching any real current entry — asking "what
+// do I currently hold" each time and renewing *that* is correct
+// regardless of any merging/splitting that happened in between.
+//
+// This is the actual fix for task B8's original gap (see
+// ASSUMPTIONS.md): a holder that's still alive and still has this
+// file open now keeps its lock indefinitely via renewal; one that
+// crashes, gets network-partitioned away, or closes this handle
+// without releasing stops being renewed and loses it within one
+// lockLeaseTTL, same as if it had explicitly unlocked — "leaks die
+// eventually," not "everything dies on a fixed clock regardless of
+// whether anyone's still using it."
+func (h *FileHandle) runRenewal(ctx context.Context, owner uint64) {
+	defer h.wg.Done()
+	holder := lockHolderFromOwner(owner)
+	defer h.stopRenewal(owner)
+	ticker := time.NewTicker(lockRenewInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			ranges, err := h.open.LockRangesHeldBy(ctx, holder)
+			if err != nil {
+				continue // transient (e.g. a slow/failed store round trip) — try again next tick
+			}
+			if len(ranges) == 0 {
+				return // nothing left of this owner's to renew
+			}
+			for _, r := range ranges {
+				// Best-effort: a failure here (e.g. ErrNotLockHolder,
+				// if somehow already lost) just means this specific
+				// range won't be renewed this tick; the next tick's
+				// fresh LockRangesHeldBy call is the source of truth,
+				// not this return value.
+				_ = h.open.RenewLockRange(ctx, r.Start, r.End, holder, lockLeaseTTL)
+			}
+		}
+	}
+}
+
+func (h *FileHandle) stopRenewal(owner uint64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.renewers, owner)
+}
+
+// Release implements fs.FileReleaser: fires when the kernel closes
+// this FUSE file handle. Stops every background renewal goroutine
+// this handle started (the "tied to the FUSE file handle's lifetime"
+// backstop task B8's renewal fix needed — see runRenewal's doc
+// comment), *and* actively releases whatever locks each of those
+// owners still held at that point — a second, real gap this renewal
+// work exposed, not just the first: with real kernel lock forwarding
+// never previously enabled (see EnableLocks's doc comment in
+// mount_test.go/cmd/icbfs's fuseMountOptions, fixed alongside this),
+// the kernel's own local advisory-lock table was silently doing
+// "release on close" for every B8 test, for free, making it look like
+// this driver already handled it — once real dispatch was turned on,
+// a plain close(2)/process-exit without an explicit F_UNLCK left the
+// lock sitting in the remote .lock object, held until its lease
+// naturally expired, not released immediately the way real fcntl/
+// flock close semantics require. Confirmed as a real, previously
+// latent bug, not a hypothetical: TestMountFcntlByteRangeLocksAcrossProcesses
+// started failing the moment EnableLocks was turned on, specifically
+// at the "succeeds once the holder process exits" assertion, until
+// this fix was added.
+//
+// Scoped to exactly what *this* FileHandle's own acquire calls
+// registered in h.renewers, not every lock its owner holds anywhere —
+// real fcntl(2) semantics are that closing *any* fd releases *all* of
+// that process's locks on the inode (locks are owned per-process, not
+// per-fd), which would need a process/owner-scoped registry shared
+// across every FileHandle on this Filesystem, not attempted here.
+// This covers the dominant real case (one fd per lock user, which is
+// how flock(2) always behaves, and how most real fcntl(2) usage does
+// too) but not a process that locks via one fd and closes a different
+// one first — see ASSUMPTIONS.md's B8 entry.
+func (h *FileHandle) Release(ctx context.Context) syscall.Errno {
+	h.mu.Lock()
+	renewers := h.renewers
+	h.renewers = nil
+	h.mu.Unlock()
+	for _, cancel := range renewers {
+		cancel()
+	}
+	// Waits for every runRenewal goroutine to actually observe
+	// ctx.Done() and return, not just signals it and moves on: without
+	// this, a goroutine's own in-flight renewal tick could race with
+	// releaseAllHeldBy below (renewing a range the very moment this is
+	// trying to release it) — and, found by the race detector, could
+	// also race against a test that mutates the package-level
+	// lockLeaseTTL var right after this handle closes, since cancel()
+	// alone doesn't guarantee the goroutine has stopped reading it yet.
+	h.wg.Wait()
+	for owner := range renewers {
+		h.releaseAllHeldBy(ctx, owner)
+	}
+	return 0
+}
+
+// releaseAllHeldBy releases every range owner currently holds on this
+// file — called from Release so a plain close(2)/process-exit without
+// an explicit F_UNLCK still frees the lock immediately, rather than
+// leaving it to expire at its next lease boundary.
+func (h *FileHandle) releaseAllHeldBy(ctx context.Context, owner uint64) {
+	holder := lockHolderFromOwner(owner)
+	ranges, err := h.open.LockRangesHeldBy(ctx, holder)
+	if err != nil {
+		return // best-effort: the lease's own TTL is still the backstop
+	}
+	for _, r := range ranges {
+		_ = h.open.ReleaseLockRange(ctx, r.Start, r.End, holder)
 	}
 }
