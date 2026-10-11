@@ -27,12 +27,17 @@ const (
 // filesystem's ID is its position (index) in MasterBlock.filesystems,
 // not a field stored here at all.
 type FilesystemEntry struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Size          uint64                 `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
-	Archived      bool                   `protobuf:"varint,3,opt,name=archived,proto3" json:"archived,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Name     string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Size     uint64                 `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
+	Archived bool                   `protobuf:"varint,3,opt,name=archived,proto3" json:"archived,omitempty"`
+	// primary_windows: set once at creation, immutable afterward — see
+	// ARCHITECTURE.md's "Windows compatibility: primary mode" section
+	// and ROADMAP.md's Part F, task F5. false (the default) means
+	// primary-POSIX.
+	PrimaryWindows bool `protobuf:"varint,4,opt,name=primary_windows,json=primaryWindows,proto3" json:"primary_windows,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *FilesystemEntry) Reset() {
@@ -82,6 +87,13 @@ func (x *FilesystemEntry) GetSize() uint64 {
 func (x *FilesystemEntry) GetArchived() bool {
 	if x != nil {
 		return x.Archived
+	}
+	return false
+}
+
+func (x *FilesystemEntry) GetPrimaryWindows() bool {
+	if x != nil {
+		return x.PrimaryWindows
 	}
 	return false
 }
@@ -140,11 +152,12 @@ var File_spec_proto_icbfs_v1_master_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_master_proto_rawDesc = "" +
 	"\n" +
-	" spec/proto/icbfs/v1/master.proto\x12\bicbfs.v1\"U\n" +
+	" spec/proto/icbfs/v1/master.proto\x12\bicbfs.v1\"~\n" +
 	"\x0fFilesystemEntry\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x1a\n" +
-	"\barchived\x18\x03 \x01(\bR\barchived\"J\n" +
+	"\barchived\x18\x03 \x01(\bR\barchived\x12'\n" +
+	"\x0fprimary_windows\x18\x04 \x01(\bR\x0eprimaryWindows\"J\n" +
 	"\vMasterBlock\x12;\n" +
 	"\vfilesystems\x18\x01 \x03(\v2\x19.icbfs.v1.FilesystemEntryR\vfilesystemsB+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
 

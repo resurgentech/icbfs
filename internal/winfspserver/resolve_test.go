@@ -65,7 +65,7 @@ func newTestFilesystem(t *testing.T) *icbfs.Filesystem {
 
 	store := objstore.NewS3Store(client, bucket)
 	fsys := icbfs.New(store, "test")
-	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0); err != nil {
+	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0, false); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 	return fsys

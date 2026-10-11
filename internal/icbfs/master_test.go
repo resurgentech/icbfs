@@ -49,7 +49,7 @@ func TestRegisterFilesystemAllocatesSequentialIDs(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	id0, archived, err := registerFilesystem(ctx, store, "fs-a", 1<<30)
+	id0, archived, _, err := registerFilesystem(ctx, store, "fs-a", 1<<30, false)
 	if err != nil {
 		t.Fatalf("register fs-a: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestRegisterFilesystemAllocatesSequentialIDs(t *testing.T) {
 		t.Fatalf("fs-a = (%q, archived=%v), want (0000, false)", id0, archived)
 	}
 
-	id1, archived, err := registerFilesystem(ctx, store, "fs-b", 1<<30)
+	id1, archived, _, err := registerFilesystem(ctx, store, "fs-b", 1<<30, false)
 	if err != nil {
 		t.Fatalf("register fs-b: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestRegisterFilesystemAllocatesSequentialIDs(t *testing.T) {
 
 	// Re-registering an existing name is idempotent: same ID back, no
 	// new slot consumed.
-	again, _, err := registerFilesystem(ctx, store, "fs-a", 999)
+	again, _, _, err := registerFilesystem(ctx, store, "fs-a", 999, false)
 	if err != nil {
 		t.Fatalf("re-register fs-a: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestRegisterFilesystemConcurrentCreatesGetDistinctIDs(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			id, _, err := registerFilesystem(ctx, store, fmt.Sprintf("concurrent-%02d", i), 1<<30)
+			id, _, _, err := registerFilesystem(ctx, store, fmt.Sprintf("concurrent-%02d", i), 1<<30, false)
 			ids[i] = id
 			errs[i] = err
 		}(i)
@@ -122,12 +122,12 @@ func TestPruneFreesSlotForReuse(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	idA, _, err := registerFilesystem(ctx, store, "to-prune", 1<<30)
+	idA, _, _, err := registerFilesystem(ctx, store, "to-prune", 1<<30, false)
 	if err != nil {
 		t.Fatalf("register to-prune: %v", err)
 	}
 	fsys := New(store, "to-prune")
-	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0); err != nil {
+	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0, false); err != nil {
 		t.Fatalf("bootstrap to-prune: %v", err)
 	}
 	if _, _, _, err := fsys.Create(ctx, fsys.RootKey(), "somefile", 0644, 0, 0); err != nil {
@@ -146,7 +146,7 @@ func TestPruneFreesSlotForReuse(t *testing.T) {
 		t.Fatalf("prune left %d objects behind under prefix %q, want 0", len(objs), idA+"-")
 	}
 
-	idB, _, err := registerFilesystem(ctx, store, "reuses-slot", 1<<30)
+	idB, _, _, err := registerFilesystem(ctx, store, "reuses-slot", 1<<30, false)
 	if err != nil {
 		t.Fatalf("register reuses-slot: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestIDPrefixingIsPresentOnDisk(t *testing.T) {
 	ctx := context.Background()
 
 	fsys := New(store, "prefixed")
-	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0); err != nil {
+	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0, false); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 	id := fsys.id
@@ -222,7 +222,7 @@ func TestArchivedFilesystemRejectsWritesButAllowsReads(t *testing.T) {
 	ctx := context.Background()
 
 	fsys := New(store, "to-archive")
-	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0); err != nil {
+	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0, false); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 	fileUUID, _, _, err := fsys.Create(ctx, fsys.RootKey(), "before-archive", 0644, 0, 0)
@@ -245,7 +245,7 @@ func TestArchivedFilesystemRejectsWritesButAllowsReads(t *testing.T) {
 	}
 
 	reopened := New(store, "to-archive")
-	if err := reopened.Bootstrap(ctx, 1<<30, 0755, 0, 0); err != nil {
+	if err := reopened.Bootstrap(ctx, 1<<30, 0755, 0, 0, false); err != nil {
 		t.Fatalf("re-bootstrap archived filesystem: %v", err)
 	}
 
@@ -266,6 +266,45 @@ func TestArchivedFilesystemRejectsWritesButAllowsReads(t *testing.T) {
 	}
 }
 
+// TestPrimaryWindowsSetAtCreationAndImmutableAfterward covers
+// ROADMAP.md's Part F, task F5: a filesystem's primary-mode is
+// specified at creation and correctly retrievable afterward — and,
+// matching size/mode/uid/gid's existing precedent for "only used the
+// first time a filesystem name is created," a later Bootstrap call
+// passing a *different* value for an already-registered name does not
+// change the stored one.
+func TestPrimaryWindowsSetAtCreationAndImmutableAfterward(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	winFS := New(store, "win-primary")
+	if err := winFS.Bootstrap(ctx, 1<<30, 0755, 0, 0, true); err != nil {
+		t.Fatalf("bootstrap primary-Windows: %v", err)
+	}
+	if !winFS.PrimaryWindows() {
+		t.Fatalf("PrimaryWindows() = false, want true")
+	}
+
+	posixFS := New(store, "posix-primary")
+	if err := posixFS.Bootstrap(ctx, 1<<30, 0755, 0, 0, false); err != nil {
+		t.Fatalf("bootstrap primary-POSIX: %v", err)
+	}
+	if posixFS.PrimaryWindows() {
+		t.Fatalf("PrimaryWindows() = true, want false")
+	}
+
+	// Re-bootstrapping the same (already-registered) name with the
+	// opposite value must not change what's stored — same idempotency
+	// rule size already follows.
+	reopened := New(store, "win-primary")
+	if err := reopened.Bootstrap(ctx, 1<<30, 0755, 0, 0, false); err != nil {
+		t.Fatalf("re-bootstrap primary-Windows filesystem: %v", err)
+	}
+	if !reopened.PrimaryWindows() {
+		t.Fatalf("re-bootstrapped PrimaryWindows() = false, want true (the originally-stored value, not the second call's argument)")
+	}
+}
+
 // TestResizeChangesDeclaredSizeForEveryMount covers the Resize
 // operation added at Jared's direction (see ASSUMPTIONS.md's
 // D-cleanup entry, which originally flagged there being no way to
@@ -281,11 +320,11 @@ func TestResizeChangesDeclaredSizeForEveryMount(t *testing.T) {
 
 	const initialSize = 1 << 30
 	fsys := New(store, "to-resize")
-	if err := fsys.Bootstrap(ctx, initialSize, 0755, 0, 0); err != nil {
+	if err := fsys.Bootstrap(ctx, initialSize, 0755, 0, 0, false); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 	otherMount := New(store, "to-resize")
-	if err := otherMount.Bootstrap(ctx, initialSize, 0755, 0, 0); err != nil {
+	if err := otherMount.Bootstrap(ctx, initialSize, 0755, 0, 0, false); err != nil {
 		t.Fatalf("bootstrap other mount: %v", err)
 	}
 
@@ -336,7 +375,7 @@ func TestPruneRemovesEveryObjectUnderPrefix(t *testing.T) {
 	ctx := context.Background()
 
 	fsys := New(store, "prune-me")
-	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0); err != nil {
+	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0, false); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 	id := fsys.id
@@ -394,11 +433,11 @@ func TestStatFSIsScopedPerFilesystem(t *testing.T) {
 
 	const declaredSize = 1 << 30
 	fsA := New(store, "tenant-a")
-	if err := fsA.Bootstrap(ctx, declaredSize, 0755, 0, 0); err != nil {
+	if err := fsA.Bootstrap(ctx, declaredSize, 0755, 0, 0, false); err != nil {
 		t.Fatalf("bootstrap tenant-a: %v", err)
 	}
 	fsB := New(store, "tenant-b")
-	if err := fsB.Bootstrap(ctx, declaredSize, 0755, 0, 0); err != nil {
+	if err := fsB.Bootstrap(ctx, declaredSize, 0755, 0, 0, false); err != nil {
 		t.Fatalf("bootstrap tenant-b: %v", err)
 	}
 

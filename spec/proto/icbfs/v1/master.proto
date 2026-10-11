@@ -13,6 +13,11 @@ message FilesystemEntry {
   string name = 1;
   uint64 size = 2;
   bool archived = 3;
+  // primary_windows: set once at creation, immutable afterward — see
+  // ARCHITECTURE.md's "Windows compatibility: primary mode" section
+  // and ROADMAP.md's Part F, task F5. false (the default) means
+  // primary-POSIX.
+  bool primary_windows = 4;
 }
 
 // MasterBlock is the body of the one, fixed, well-known master-block

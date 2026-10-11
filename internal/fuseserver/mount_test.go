@@ -88,7 +88,7 @@ func mountFSWithLocking(t *testing.T, store objstore.Store, fsName string, locki
 	ctx := context.Background()
 
 	fsys := icbfs.New(store, fsName)
-	if err := fsys.Bootstrap(ctx, 1<<30, 0755, uint32(os.Getuid()), uint32(os.Getgid())); err != nil {
+	if err := fsys.Bootstrap(ctx, 1<<30, 0755, uint32(os.Getuid()), uint32(os.Getgid()), false); err != nil {
 		t.Fatalf("bootstrap filesystem: %v", err)
 	}
 	fsys.EnableLocking(locking)
@@ -158,7 +158,7 @@ func mountTestFSWithFsys(t *testing.T) (string, *icbfs.Filesystem) {
 	ctx := context.Background()
 	store := newMountTestStore(t)
 	fsys := icbfs.New(store, "test")
-	if err := fsys.Bootstrap(ctx, 1<<30, 0755, uint32(os.Getuid()), uint32(os.Getgid())); err != nil {
+	if err := fsys.Bootstrap(ctx, 1<<30, 0755, uint32(os.Getuid()), uint32(os.Getgid()), false); err != nil {
 		t.Fatalf("bootstrap filesystem: %v", err)
 	}
 
@@ -588,7 +588,7 @@ func TestMountArchivedFilesystemRejectsWritesButAllowsReads(t *testing.T) {
 	ctx := context.Background()
 
 	fsys := icbfs.New(store, "archived-mount-test")
-	if err := fsys.Bootstrap(ctx, 1<<30, 0755, uint32(os.Getuid()), uint32(os.Getgid())); err != nil {
+	if err := fsys.Bootstrap(ctx, 1<<30, 0755, uint32(os.Getuid()), uint32(os.Getgid()), false); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 	if _, _, _, err := fsys.Create(ctx, fsys.RootKey(), "before-archive.txt", 0644, 0, 0); err != nil {
@@ -1023,7 +1023,7 @@ func TestMountNotifyDispatchesSignalToCorrectInode(t *testing.T) {
 	ctx := context.Background()
 	store := newMountTestStore(t)
 	fsys := icbfs.New(store, "test")
-	if err := fsys.Bootstrap(ctx, 1<<30, 0755, uint32(os.Getuid()), uint32(os.Getgid())); err != nil {
+	if err := fsys.Bootstrap(ctx, 1<<30, 0755, uint32(os.Getuid()), uint32(os.Getgid()), false); err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
 

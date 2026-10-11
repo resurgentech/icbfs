@@ -45,6 +45,7 @@ type Filesystem struct {
 	fsName         string
 	id             string // 4-hex-digit prefix, set by Bootstrap
 	archived       bool   // set by Bootstrap; see ErrArchived
+	primaryWindows bool   // set by Bootstrap from the stored master-block value; see PrimaryWindows, task F5
 	lockingEnabled bool   // off by default; see EnableLocking, task B7
 
 	// lockNotify is nil unless EnableChangeNotifications (task B10) was
@@ -97,6 +98,13 @@ func (f *Filesystem) EnableChangeNotifications(signals <-chan notify.Signal) {
 	f.lockNotify = signals
 }
 
+// PrimaryWindows reports whether this filesystem was created as
+// primary-Windows (true) or primary-POSIX (false, the default) — see
+// ARCHITECTURE.md's "Windows compatibility: primary mode" section and
+// ROADMAP.md's Part F, task F5. Set once at creation, immutable
+// afterward; only meaningful after Bootstrap.
+func (f *Filesystem) PrimaryWindows() bool { return f.primaryWindows }
+
 // RootKey returns the block key identifying this filesystem's root:
 // "<id>-root-<name>", a derived key, not stored anywhere separately —
 // see ARCHITECTURE.md. Only meaningful after Bootstrap.
@@ -146,13 +154,18 @@ func (f *Filesystem) checkWritable() error {
 // ignored if the filesystem already exists, same as mode/uid/gid are
 // ignored for an already-existing root, below), then ensures the root
 // block exists, creating an empty one if this is a brand new filesystem.
-func (f *Filesystem) Bootstrap(ctx context.Context, size uint64, mode, uid, gid uint32) error {
-	id, archived, err := registerFilesystem(ctx, f.store, f.fsName, size)
+// primaryWindows is only consulted the first time f.fsName is created
+// — same idempotency rule size/mode/uid/gid already follow — and is
+// immutable afterward; see PrimaryWindows and ROADMAP.md's Part F,
+// task F5.
+func (f *Filesystem) Bootstrap(ctx context.Context, size uint64, mode, uid, gid uint32, primaryWindows bool) error {
+	id, archived, storedPrimaryWindows, err := registerFilesystem(ctx, f.store, f.fsName, size, primaryWindows)
 	if err != nil {
 		return err
 	}
 	f.id = id
 	f.archived = archived
+	f.primaryWindows = storedPrimaryWindows
 
 	rootKey := f.RootKey()
 	if _, err := f.store.Head(ctx, rootKey); err == nil {

@@ -3,8 +3,8 @@
 // Command icbfs-winfsp mounts an icbfs filesystem on Windows via
 // WinFsp, backed by an S3-API-compatible store — the Windows
 // counterpart to cmd/icbfs's FUSE mount, per ROADMAP.md's Part F.
-// Functional/manual-testing entry point for tasks F3-F4; not yet wired
-// to F5-F11's mount flags (primary-mode, etc.).
+// Functional/manual-testing entry point for tasks F3-F5; not yet wired
+// to F6-F11's mount flags.
 package main
 
 import (
@@ -35,6 +35,7 @@ func main() {
 	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
 	size := fset.Uint64("size", 100<<30, "declared filesystem size in bytes (only used the first time a filesystem name is created)")
 	caseInsensitive := fset.Bool("case-insensitive", true, "case-insensitive name lookup, following the standard NTFS/Samba/WSL2 pattern (ARCHITECTURE.md's Windows compatibility section) — storage itself always stays case-sensitive/case-preserving regardless of this flag")
+	primaryWindows := fset.Bool("primary-windows", true, "mark this filesystem primary-Windows rather than primary-POSIX (ARCHITECTURE.md's \"Windows compatibility: primary mode\" section) — only used the first time a filesystem name is created, immutable afterward, same as --size")
 	if err := fset.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
@@ -54,7 +55,7 @@ func main() {
 	store := objstore.NewS3Store(client, *bucket)
 
 	fsys := icbfs.New(store, *fsName)
-	if err := fsys.Bootstrap(ctx, *size, 0755, 0, 0); err != nil {
+	if err := fsys.Bootstrap(ctx, *size, 0755, 0, 0, *primaryWindows); err != nil {
 		log.Fatalf("bootstrap filesystem %q: %v", *fsName, err)
 	}
 
