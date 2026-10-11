@@ -3,6 +3,7 @@ package icbfs
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -262,6 +263,67 @@ func TestArchivedFilesystemRejectsWritesButAllowsReads(t *testing.T) {
 	}
 	if err := reopened.Unlink(ctx, reopened.RootKey(), "before-archive"); err != ErrArchived {
 		t.Fatalf("unlink against archived filesystem = %v, want ErrArchived", err)
+	}
+}
+
+// TestResizeChangesDeclaredSizeForEveryMount covers the Resize
+// operation added at Jared's direction (see ASSUMPTIONS.md's
+// D-cleanup entry, which originally flagged there being no way to
+// change a filesystem's declared size after creation): unlike
+// EnableLocking's per-mount, in-memory flag, Resize changes a real,
+// shared master-block property — a *different*, already-open handle
+// on the same filesystem name must see the new size on its very next
+// StatFS, with no re-Bootstrap required (StatFS always re-reads the
+// master block fresh, per its own implementation).
+func TestResizeChangesDeclaredSizeForEveryMount(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	const initialSize = 1 << 30
+	fsys := New(store, "to-resize")
+	if err := fsys.Bootstrap(ctx, initialSize, 0755, 0, 0); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	otherMount := New(store, "to-resize")
+	if err := otherMount.Bootstrap(ctx, initialSize, 0755, 0, 0); err != nil {
+		t.Fatalf("bootstrap other mount: %v", err)
+	}
+
+	total, _, err := fsys.StatFS(ctx)
+	if err != nil {
+		t.Fatalf("statfs before resize: %v", err)
+	}
+	if total != initialSize {
+		t.Fatalf("total before resize = %d, want %d", total, initialSize)
+	}
+
+	const newSize = 5 << 30
+	if err := Resize(ctx, store, "to-resize", newSize); err != nil {
+		t.Fatalf("resize: %v", err)
+	}
+
+	total, _, err = fsys.StatFS(ctx)
+	if err != nil {
+		t.Fatalf("statfs after resize (original handle): %v", err)
+	}
+	if total != newSize {
+		t.Fatalf("total after resize (original handle) = %d, want %d", total, newSize)
+	}
+
+	total, _, err = otherMount.StatFS(ctx)
+	if err != nil {
+		t.Fatalf("statfs after resize (other mount): %v", err)
+	}
+	if total != newSize {
+		t.Fatalf("total after resize (other mount) = %d, want %d", total, newSize)
+	}
+}
+
+func TestResizeOfUnknownFilesystemReturnsNotFound(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := Resize(ctx, store, "never-created", 1<<30); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("resize of unknown filesystem = %v, want ErrNotFound", err)
 	}
 }
 

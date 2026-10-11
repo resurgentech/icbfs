@@ -96,9 +96,24 @@ func mountFSWithLocking(t *testing.T, store objstore.Store, fsName string, locki
 	mountDir := t.TempDir()
 	server, err := fs.Mount(mountDir, Root(fsys, nil), &fs.Options{
 		MountOptions: fuse.MountOptions{
-			FsName:  "icbfs-test",
-			Name:    "icbfs-test",
-			Options: []string{"default_permissions"}, // task C1
+			FsName: "icbfs-test",
+			Name:   "icbfs-test",
+			// EnableLocks: without this, the kernel never forwards
+			// FUSE_GETLK/SETLK/SETLKW to our Node/FileHandle at all —
+			// it silently falls back to its own local, in-kernel
+			// advisory lock table (fs/locks.c), which happens to
+			// reproduce identical pass/fail behavior for a same-host
+			// test (both "processes" share one kernel), making every
+			// task B8 test pass without ever actually exercising this
+			// driver's remote .lock-object logic. Found the hard way
+			// (at Jared's direction, while verifying the lease-renewal
+			// fix below actually did anything): added debug prints to
+			// tryAcquireLockRange and confirmed they never fired, even
+			// under TestMountFcntlByteRangeLocksAcrossProcesses, which
+			// specifically exists to prove cross-process conflicts
+			// work. See ASSUMPTIONS.md's B8 entry.
+			EnableLocks: true,
+			Options:     []string{"default_permissions"}, // task C1
 		},
 		NullPermissions: true,
 	})
@@ -725,6 +740,37 @@ func waitForFileOrFail(t *testing.T, path string, timeout time.Duration) {
 	}
 }
 
+// retryFcntlSetlkUntilNotEagain retries a non-blocking F_SETLK that's
+// expected to succeed once another process's exit releases a lock it
+// held, tolerating a short window of EAGAIN rather than asserting
+// success the instant cmd.Wait() returns.
+//
+// Needed once real kernel lock forwarding is enabled (fuse.MountOptions.
+// EnableLocks, task B8 — see mountFSWithLocking's doc comment): a FUSE
+// RELEASE is dispatched to this driver's own FileHandle.Release
+// asynchronously relative to the closing/exiting process's close(2)/
+// exit returning — unlike the kernel's own local, in-process advisory
+// lock table (what every FUSE lock op silently fell back to before
+// EnableLocks was set, an earlier bug in this project's test
+// infrastructure — see ASSUMPTIONS.md's B8 entry), which releases
+// synchronously as part of the same close/exit. Found at Jared's
+// direction while verifying the lease-renewal fix actually exercised
+// real dispatch instead of that silent fallback.
+func retryFcntlSetlkUntilNotEagain(t *testing.T, fd uintptr, lk *syscall.Flock_t, timeout time.Duration) error {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		err := syscall.FcntlFlock(fd, syscall.F_SETLK, lk)
+		if !errors.Is(err, syscall.EAGAIN) {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // TestMountFcntlByteRangeLocksAcrossProcesses covers ROADMAP.md's task
 // B8 "Done when" for fcntl(2) byte-range locks through real kernel
 // syscalls against a real mount, using a genuine second OS process
@@ -795,8 +841,101 @@ func TestMountFcntlByteRangeLocksAcrossProcesses(t *testing.T) {
 		t.Fatalf("helper process exited with error: %v", err)
 	}
 
-	if err := syscall.FcntlFlock(f2.Fd(), syscall.F_SETLK, &overlapping); err != nil {
+	if err := retryFcntlSetlkUntilNotEagain(t, f2.Fd(), &overlapping, time.Second); err != nil {
 		t.Fatalf("F_SETLK f2 [5,15) after helper process exited (and released) = %v, want nil", err)
+	}
+}
+
+// TestMountFcntlLockSurvivesPastOriginalTTLViaRenewal covers task B8's
+// lease-renewal fix (added at Jared's direction — see ASSUMPTIONS.md's
+// B8 entry and node.go's ensureRenewal/runRenewal): a lock held by a
+// still-alive, still-open process must keep being refreshed well past
+// one lockLeaseTTL window, not just silently expire on a fixed clock
+// regardless of whether anyone's still using it.
+//
+// lockLeaseTTL/lockRenewInterval are shrunk for the test (same reason
+// contentWriteRetryBudget is a var, not a const — see its own doc
+// comment), but not down to sub-second: expires_at is anchored to the
+// object store's clock via a raw HTTP Date header (objstore.Store.
+// ServerTime), which only has whole-second resolution and can itself
+// lag true time by up to ~1s (see ASSUMPTIONS.md's B2 entry, and
+// lock_test.go's own TTL choices for the same reason) — a TTL much
+// below 1s can already read as expired relative to this test's local
+// clock before even one renewal tick runs. 2s/500ms keeps comfortably
+// clear of that while still being fast enough to sleep past several
+// full lease windows deterministically, not 90+ real seconds — and,
+// together with the sleep below, stays under runFcntlLockHolderHelper's
+// own hardcoded 10s give-up deadline (it exits on its own, as if it
+// had crashed, if nobody signals release by then — found the hard
+// way: an earlier 3s-TTL/12s-sleep version of this test tripped
+// exactly that timeout, which looked identical to a real renewal
+// failure until the timestamps were compared).
+func TestMountFcntlLockSurvivesPastOriginalTTLViaRenewal(t *testing.T) {
+	origTTL, origInterval := lockLeaseTTL, lockRenewInterval
+	// Registered via t.Cleanup, not a plain defer, and *before*
+	// mountTestFSWithLocking (so its own Unmount cleanup — registered
+	// next — runs first, LIFO): FileHandle.Release waits for its own
+	// runRenewal goroutines to stop before returning, but closing an
+	// fd never blocks on that Release actually running (FUSE dispatches
+	// it asynchronously relative to close(2)/process-exit returning —
+	// see retryFcntlSetlkUntilNotEagain's doc comment). A plain defer
+	// here raced the var restore below against a renewal goroutine
+	// that hadn't been dispatched yet when this function returned
+	// (caught by -race); Server.Unmount retries the real unmount
+	// syscall until the kernel reports no files still open and then
+	// drains its own dispatch loop, which is the first point it's
+	// actually safe to mutate these shared package vars again.
+	t.Cleanup(func() { lockLeaseTTL, lockRenewInterval = origTTL, origInterval })
+	lockLeaseTTL = 2 * time.Second
+	lockRenewInterval = 500 * time.Millisecond
+
+	mnt := mountTestFSWithLocking(t)
+	path := filepath.Join(mnt, "fcntl-renewal.bin")
+	if err := os.WriteFile(path, make([]byte, 100), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	signalDir := t.TempDir()
+	readyPath := filepath.Join(signalDir, "ready")
+	releasePath := filepath.Join(signalDir, "release")
+
+	cmd := exec.Command(os.Args[0], "-test.run=NoSuchTest")
+	cmd.Env = append(os.Environ(),
+		"ICBFS_FCNTL_HELPER=1",
+		"ICBFS_FCNTL_HELPER_PATH="+path,
+		"ICBFS_FCNTL_HELPER_READY="+readyPath,
+		"ICBFS_FCNTL_HELPER_RELEASE="+releasePath,
+	)
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper process: %v", err)
+	}
+	defer func() {
+		_ = os.WriteFile(releasePath, []byte("release"), 0644)
+		_ = cmd.Wait()
+	}()
+
+	waitForFileOrFail(t, readyPath, 5*time.Second)
+
+	// The helper process never renews anything itself — it just holds
+	// one fd open with its F_SETLK outstanding. Sleeping past several
+	// lockLeaseTTL windows while it stays alive only still conflicts
+	// below if *this* test process's own FileHandle (the one serving
+	// the helper's open, in-process, via go-fuse) has been renewing
+	// that lock on the helper's behalf the whole time. *3, not more —
+	// runFcntlLockHolderHelper's own 10s give-up deadline is the real
+	// ceiling here, not just "however many lease windows looks good."
+	time.Sleep(lockLeaseTTL * 3)
+
+	f2, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open f2: %v", err)
+	}
+	defer f2.Close()
+
+	overlapping := syscall.Flock_t{Type: syscall.F_WRLCK, Whence: 0, Start: 5, Len: 10}
+	if err := syscall.FcntlFlock(f2.Fd(), syscall.F_SETLK, &overlapping); !errors.Is(err, syscall.EAGAIN) {
+		t.Fatalf("F_SETLK f2 [5,15) after sleeping past 3 lease windows while helper stayed alive = %v, want EAGAIN (renewal should have kept the lock held)", err)
 	}
 }
 
@@ -1024,7 +1163,7 @@ func TestMountFcntlSharedLocksCoexistAcrossProcesses(t *testing.T) {
 
 	release()
 
-	if err := syscall.FcntlFlock(f2.Fd(), syscall.F_SETLK, &writeLock); err != nil {
+	if err := retryFcntlSetlkUntilNotEagain(t, f2.Fd(), &writeLock, time.Second); err != nil {
 		t.Fatalf("F_SETLK F_WRLCK [0,10) after helper process released its F_RDLCK = %v, want nil", err)
 	}
 }

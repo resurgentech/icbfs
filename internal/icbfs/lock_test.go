@@ -365,6 +365,69 @@ func TestByteRangeLocksSameHolderCanHoldMultipleDisjointRanges(t *testing.T) {
 	}
 }
 
+// TestByteRangeLocksSameHolderOverlappingReacquireMergesAndSplits covers
+// task B4's originally-deferred nuance (fixed at Jared's direction —
+// see ASSUMPTIONS.md's B4 entry and mergeOwnRanges's doc comment): a
+// holder re-locking an overlapping-but-not-identical range adjusts its
+// own existing claim(s) via real fcntl(2) merge/split, rather than
+// adding a second, independent entry that leaves the original intact.
+func TestByteRangeLocksSameHolderOverlappingReacquireMergesAndSplits(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
+	ctx := context.Background()
+	key := createLockTestFile(t, fsys)
+
+	// Same-type overlap: re-locking [5,15) exclusive while already
+	// holding [0,10) exclusive should absorb into one [0,15) claim —
+	// not leave [0,10) around as a second entry.
+	if err := fsys.TryAcquireLockRange(ctx, key, 0, 10, "holder-a", 30*time.Second); err != nil {
+		t.Fatalf("acquire [0,10): %v", err)
+	}
+	if err := fsys.TryAcquireLockRange(ctx, key, 5, 15, "holder-a", 30*time.Second); err != nil {
+		t.Fatalf("acquire overlapping [5,15) for the same holder: %v", err)
+	}
+	// Another holder must now see the whole merged [0,15) as held —
+	// including [10,15), which was never separately requested.
+	if err := fsys.TryAcquireLockRange(ctx, key, 10, 15, "holder-b", 30*time.Second); err != ErrLocked {
+		t.Fatalf("[10,15) should be covered by holder-a's merged [0,15): got %v", err)
+	}
+	// And [0,5), the other half of the original [0,10), must also
+	// still be held — proving it wasn't dropped, only absorbed.
+	if err := fsys.TryAcquireLockRange(ctx, key, 0, 5, "holder-b", 30*time.Second); err != ErrLocked {
+		t.Fatalf("[0,5) should still be covered by holder-a's merged [0,15): got %v", err)
+	}
+	if err := fsys.ReleaseLockRange(ctx, key, 0, 15, "holder-a"); err != nil {
+		t.Fatalf("release merged [0,15): %v", err)
+	}
+
+	// Different-type overlap: holding exclusive [0,20), then
+	// re-locking [5,10) shared from the same holder, must split the
+	// exclusive claim into [0,5) and [10,20) remainders and leave a
+	// new shared [5,10) — not simply replace or ignore the original.
+	if err := fsys.TryAcquireLockRange(ctx, key, 0, 20, "holder-a", 30*time.Second); err != nil {
+		t.Fatalf("acquire [0,20) exclusive: %v", err)
+	}
+	if err := fsys.TryAcquireSharedLockRange(ctx, key, 5, 10, "holder-a", 30*time.Second); err != nil {
+		t.Fatalf("acquire overlapping [5,10) shared for the same holder: %v", err)
+	}
+	// The remainders [0,5) and [10,20) are still exclusive: another
+	// holder's shared request there must still conflict.
+	if err := fsys.TryAcquireSharedLockRange(ctx, key, 0, 5, "holder-b", 30*time.Second); err != ErrLocked {
+		t.Fatalf("[0,5) remainder should still be holder-a's exclusive claim: got %v", err)
+	}
+	if err := fsys.TryAcquireSharedLockRange(ctx, key, 10, 20, "holder-b", 30*time.Second); err != ErrLocked {
+		t.Fatalf("[10,20) remainder should still be holder-a's exclusive claim: got %v", err)
+	}
+	// [5,10) is now shared: another holder's shared request there
+	// must succeed (coexists), but an exclusive one must not.
+	if err := fsys.TryAcquireSharedLockRange(ctx, key, 5, 10, "holder-b", 30*time.Second); err != nil {
+		t.Fatalf("[5,10) should now be holder-a's shared claim, coexisting with holder-b's: %v", err)
+	}
+	if err := fsys.TryAcquireLockRange(ctx, key, 5, 10, "holder-c", 30*time.Second); err != ErrLocked {
+		t.Fatalf("[5,10) exclusive request should conflict with the two shared holders: got %v", err)
+	}
+}
+
 // TestBlockingAcquireRespectsContextDeadline confirms AcquireLock
 // actually stops waiting (rather than blocking forever) once its ctx
 // is done, when the lock is never released.

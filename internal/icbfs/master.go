@@ -176,6 +176,21 @@ func updateFilesystemEntry(ctx context.Context, store objstore.Store, fsName str
 	return fmt.Errorf("update filesystem entry %q: exceeded %d retries", fsName, maxTreeRetries)
 }
 
+// Resize changes fsName's declared capacity (StatFS's "Total", the
+// `size` originally fixed at Bootstrap/creation time) to newSize.
+// Unlike Locking's EnableLocking flag, declared size is a real,
+// shared property of the filesystem itself — ARCHITECTURE.md's own
+// master-block `size` field, same category as archived — so this
+// takes effect for every mount of fsName immediately, not just the
+// caller's own. See ASSUMPTIONS.md's D-cleanup entry: this closes the
+// "no way to change it after the fact" gap that entry originally
+// flagged.
+func Resize(ctx context.Context, store objstore.Store, fsName string, newSize uint64) error {
+	return updateFilesystemEntry(ctx, store, fsName, func(e *pb.FilesystemEntry) {
+		e.Size = newSize
+	})
+}
+
 // Prune physically deletes every object fsName owns (everything under
 // its ID prefix, the same listing df/du use for "Used") and then blanks
 // its master block entry, freeing the slot for reuse by a later Create.

@@ -102,11 +102,21 @@ planning. Test helpers (`newTestFilesystem` in
 `internal/fuseserver/mount_test.go`) use a smaller 1 GiB placeholder
 since the value is irrelevant to what those tests exercise.
 
-**Check this if:** there's an intended real default (e.g. "unlimited"/no
-declared cap, or a value tied to the actual backing bucket's quota) —
-right now `StatFS`'s "Total" will just report whatever was passed at
-first creation, with no way to change it after the fact (no `Resize`
-operation exists yet).
+**Resolved later, at Jared's direction:** the "no way to change it
+after the fact" gap above is closed — `icbfs.Resize(ctx, store,
+fsName, newSize)` (master.go) updates the master-block entry's `Size`
+field via the same CAS pattern `Archive` already uses. Like `archived`
+(and unlike `EnableLocking`'s per-mount flag), declared size is a
+real, shared property of the filesystem itself, so a resize takes
+effect for every mount of that filesystem immediately — confirmed by
+`TestResizeChangesDeclaredSizeForEveryMount`, which calls `StatFS` on
+a second, already-bootstrapped handle after resizing and checks it
+sees the new total (it does, because `StatFS` always re-reads the
+master block fresh rather than caching the value from `Bootstrap`).
+100 GiB remains the arbitrary first-creation default; there is still
+no "unlimited" option, and no CLI subcommand wires `Resize` up yet
+(same as `Archive`/`Prune`, which also have no CLI wiring — all three
+are library-level admin operations, not `icbfs mount` flags).
 
 ---
 
@@ -185,42 +195,43 @@ never load-tested, just chosen as a reasonable round number.
 
 ---
 
-## B2: `expires_at` anchored to the client's clock, not a two-write server anchor
+## B2: `expires_at` anchoring — now a real server-clock anchor, not the client's
 
-**Question I'd have asked:** ARCHITECTURE.md says a lock's `expires_at`
-should be "computed from the lock write's own resulting Last-Modified
-... not the acquiring client's local clock." Literally, that's only
-achievable by writing once, learning the real result, then writing
-*again* with the corrected value (you can't know your own Put's result
-before you've sent its body) — is that two-write dance actually
-intended, or is a single-write, client-clock approximation acceptable?
+**Resolved later, at Jared's direction** (the drift below went
+unnoticed for a while — this entry still described the original,
+superseded decision after the real fix shipped; caught and corrected
+when explaining this file's E3 entry surfaced the inconsistency): this
+entry originally recorded a single-write, client-clock approximation
+(`expires_at = time.Now() (client clock) + ttl`) as "good enough," with
+raw-`Date`-header capture flagged as "not worth building until the
+soft edge actually matters." That edge mattered, and the real fix was
+built: `objstore.Store.ServerTime` captures the object store's actual
+clock via a real request's raw HTTP `Date` response header (S3Store's
+implementation uses `smithy-go`'s deserialize middleware against a
+`HeadBucket` call, confirmed against real MinIO, not assumed — see its
+own doc comment), and `tryAcquireLockRange`/`RenewLockRange` now anchor
+every claim's `expires_at` to that, fetched once per call rather than
+per retry attempt. The expiry *check* against already-held entries
+still deliberately uses the local clock (`checkNow`) inside the retry
+loop, not another store round trip — see ARCHITECTURE.md: clock skew
+there can only shift *when* a lease looks expired by a few seconds,
+never let two clients both successfully steal it, so this asymmetry is
+accepted rather than every single retry attempt also paying for a
+server round trip.
 
-**Assumed:** implemented the simpler single-write version:
-`expires_at = time.Now() (client clock) + ttl`, documented directly in
-`TryAcquireLock`/`RenewLock`'s doc comments as a deliberate deviation
-from the literal server-anchor description. Rationale:
-- A true server-anchor would need either (a) a second CAS-conditioned
-  corrective write after learning the first write's `Last-Modified`
-  (real extra round-trip, and its own brief "looks provisionally
-  claimed with a slightly-off expiry" window), or (b) capturing the raw
-  HTTP `Date` response header, which ARCHITECTURE.md itself already
-  flags as unavailable through the typed SDK calls in use and "not
-  worth building until the soft edge actually matters."
-- ARCHITECTURE.md's own text says the actual safety property — "two
-  clients [never] both successfully steal" a lock — comes from the CAS
-  write itself, not from whose clock set `expires_at`: "clock skew here
-  can only shift *when* a lease looks expired by a few seconds, never
-  cause two clients to both successfully steal it." The implementation
-  preserves exactly that property (verified by
-  `TestLockConcurrentAcquireOnFreeLockHasExactlyOneWinner`); only the
-  precision of *when* a lease is treated as expired is client-clock-
-  relative instead of server-relative.
+**Real constraint found while fixing this:** the HTTP `Date` header
+only has whole-second resolution and can itself lag true time by up to
+~1s — this broke a couple of existing tests that used sub-second TTLs
+(150-200ms), since `expires_at` could already read as "in the past" by
+the time a local check ran against it. Fixed by giving those tests
+multi-second TTLs instead of chasing sub-second precision this
+anchoring approach can't actually offer.
 
-**Check this if:** real deployments show meaningfully-skewed client
-clocks causing disputed/surprising lease-expiry behavior in practice —
-at that point the two-write server-anchor (or raw Date-header capture)
-would be the thing to actually build, per ARCHITECTURE.md's own
-escalation note.
+**Check this if:** a future backend adapter (Azure Blob, when that's
+built — see `objstore.Store.ServerTime`'s own doc comment for a sketch
+of the Azure-side equivalent) is added — it needs its own real,
+verified `ServerTime` implementation, not an assumption that whatever
+raw-header approach worked for S3/MinIO transfers unchanged.
 
 ---
 
@@ -248,12 +259,37 @@ naturally as "one of potentially several" than "the holder's only
 one." Covered by
 `TestByteRangeLocksSameHolderCanHoldMultipleDisjointRanges`.
 
-**Check this if:** a caller actually wants POSIX-style same-process
-lock *merging/splitting* (re-locking an overlapping-but-not-identical
-range from the same holder adjusts the existing claim rather than
-adding a second, independent one) — that's real `fcntl` semantics this
-implementation does not attempt; it was out of scope for B4's stated
-"Done when" and would be a real, separate feature if ever needed.
+**Resolved later, at Jared's direction:** the "check this if" below
+was the wrong call to leave open — real POSIX `fcntl`/`flock`
+same-owner merge/split isn't a separate, hypothetical feature, it's
+part of what "a holder can hold multiple ranges" already implies for
+a filesystem whose explicit ask is POSIX fidelity (same correction
+already made for shared/exclusive semantics, above). Added
+`mergeOwnRanges` (lock.go): acquiring a new range now adjusts every
+existing entry this same holder already holds that overlaps it — an
+overlapping entry of the *same* type (shared/exclusive) is absorbed
+(the new claim's bounds widen to cover it), one of a *different* type
+is trimmed to its non-overlapping remainder(s) — exactly matching real
+`posix_lock_file` merge/split behavior for repeated `F_SETLK` from the
+same owner, run to a fixed point since absorbing one entry can newly
+overlap another. Covered by
+`TestByteRangeLocksSameHolderOverlappingReacquireMergesAndSplits`,
+confirmed to fail without the fix (reverted lock.go, ran it, got a
+real failure) before trusting it as a regression test.
+
+~~**Check this if:** a caller actually wants POSIX-style same-process
+lock *merging/splitting* ... that's real `fcntl` semantics this
+implementation does not attempt.~~ (superseded by the fix above)
+
+**Still not attempted, deliberately out of scope for this fix:**
+partial-range *unlock* splitting — real `fcntl` also lets `F_UNLCK`
+release only part of a held range, splitting the remainder into
+however many separate locked extents are left outside the unlocked
+part. `ReleaseLockRange` still only matches an exact `(holder, start,
+end)` tuple. Not attempted because it wasn't what was asked for here
+(acquire-time merge/split specifically), but it's the same flavor of
+gap and would need the same fixed-point-split treatment if a caller
+ever needs it.
 
 ---
 
@@ -347,32 +383,6 @@ call).
 
 ---
 
-## Known pre-existing flaky test (not caused by this session's changes)
-
-Several `internal/fuseserver` mount tests (first
-`TestMountStatfsReflectsDeclaredSizeAndUsage`, during Part D; later
-also `TestMountFcntlByteRangeLocksAcrossProcesses`, during Part B's
-task B8) intermittently fail with `open .../<newfile>: input/output
-error` — always on a plain `os.WriteFile` creating a brand-new file,
-always clean (10/10+) when the same test is run alone, only showing up
-when run as part of the full package suite (and more often under
-`-race`, which slows the whole run down, giving more opportunities to
-hit it). The common factor across both occurrences is `Node.Create`
-returning an EIO from an unmapped underlying error — almost certainly a
-MinIO-testcontainer "reports ready but isn't fully serving yet"
-startup race — not anything specific to either test's own feature
-(StatFS/df wiring in one case, fcntl locking in the other), confirming
-this is generic container-startup flakiness in the shared test
-infrastructure, not a defect in either feature.
-
-**Check this if:** this flakiness rate gets worse or starts showing up
-in CI in a way that blocks merges — at that point it's worth adding a
-retry-on-connection-refused guard to the MinIO testcontainers setup
-helpers, or investigating the container module's readiness check
-directly, rather than continuing to treat it as background noise.
-
----
-
 ## B7: where the flag lives, and whether it also gates B5's escalation
 
 **Question I'd have asked:** should the Locking on/off flag be a
@@ -440,18 +450,23 @@ description) — but a lease-based model has no "held until explicitly
 released" concept real POSIX locks have. How should the FUSE wiring
 reconcile these?
 
-**Assumed:**
-- FUSE-sourced locks get a fixed `lockLeaseTTL = 24h`, with **no
-  background renewal** for as long an application holds the lock.
-  Rationale: this project's lease model has no "forever" concept at
-  all (every claim needs an `expires_at`); implementing real renewal
-  would mean a goroutine tied to the FUSE file handle's lifetime,
-  explicitly out of scope for what B8's "Done when" asks for. **Real
-  consequence:** an application that holds an fcntl/flock lock longer
-  than 24h without this codebase ever renewing it could have that
-  lock silently stolen by another claimant — picked long enough to
-  make this impractical to hit by accident, not to model real "no
-  TTL" semantics.
+**Assumed, later corrected at Jared's direction — see the standalone
+"Real lease renewal" entry near the end of this file:** FUSE-sourced
+locks originally got a fixed `lockLeaseTTL = 24h`, with **no
+background renewal** for as long an application holds the lock.
+Rationale at the time: this project's lease model has no "forever"
+concept at all (every claim needs an `expires_at`); implementing real
+renewal would mean a goroutine tied to the FUSE file handle's
+lifetime, explicitly out of scope for what B8's "Done when" asks for.
+**Real consequence, correctly identified but wrongly left
+unaddressed:** an application that holds an fcntl/flock lock longer
+than 24h without this codebase ever renewing it could have that lock
+silently stolen by another claimant — regardless of whether that
+application was still alive and actively using it. Fixed for real: see
+the later entry for the renewal goroutine, the much shorter resulting
+TTL, and — more significantly — the real, previously-latent bug this
+work exposed when actually verifying it (kernel lock forwarding had
+never been enabled in any test or in `cmd/icbfs` itself).
 - `owner` (the kernel-assigned FUSE lock-owner token) becomes this
   codebase's holder string directly (`fuse-owner-<owner>`) — no
   translation needed; it already has exactly the stability guarantee
@@ -477,11 +492,11 @@ contrast, is owned per-open-file-description, so the original
 single-process, two-fd version of that test was correct as written
 and needed no such fix.
 
-**Check this if:** a real application legitimately needs shared
+~~**Check this if:** a real application legitimately needs shared
 (read) lock semantics, or needs a lock held reliably longer than 24h
-— both would require real design work (a reader/writer-aware lock
-model; a renewal mechanism tied to the FUSE file handle's lifetime)
-this session deliberately didn't attempt.
+— both would require real design work...~~ (both resolved — shared/
+exclusive semantics in the standalone entry further below, lease
+renewal in the one after it).
 
 ---
 
@@ -681,6 +696,20 @@ package treats `Cursor` as opaque `[]byte` specifically so that
 real shape, whatever it turns out to be, can slot in without changing
 `Source`'s own logic).
 
+**Related note, added at Jared's direction:** this entry is about the
+Change-notifications backend specifically — the *object storage* side
+(the actual put/get/list CRUD `objstore.Store` exposes, what files and
+locks are actually stored through) is a separate, already-existing
+abstraction with the same "no real Azure to verify against" problem.
+Confirmed it's already structured so a real `AzureStore` is just a new
+file implementing `objstore.Store`, not a new layer: every call site
+in icbfs (`master.go`, `lock.go`, `filesystem.go`, ...) already only
+ever talks to the `Store` interface, never to `s3.Client`/AWS types
+directly. Added a per-method doc comment on `objstore.Store` itself
+sketching the Azure Blob Storage SDK for Go call each one would make —
+same explicit "unverified, not installed/testable here" caveat as
+`azurecf` above, not claimed as confirmed fact.
+
 ---
 
 ## E6: a real adapter this time (unlike E5), plus why
@@ -811,8 +840,13 @@ holders coexist, not just two fds in one process).
 ## Docker container readiness (the other direction B8/E4/etc.'s flakiness note should have gone)
 
 An earlier session logged `internal/fuseserver`'s intermittent
-container-related test failures as an accepted, documented flake
-rather than fixing it — the wrong call, raised directly. Root cause:
+container-related test failures (`TestMountStatfsReflectsDeclaredSizeAndUsage`,
+during Part D; later also `TestMountFcntlByteRangeLocksAcrossProcesses`,
+during Part B's task B8 — both failing with `open .../<newfile>:
+input/output error` on a plain `os.WriteFile` creating a brand-new
+file, only when run as part of the full suite, never alone) as an
+accepted, documented flake rather than fixing it — the wrong call,
+raised directly. Root cause:
 `testcontainers-go`'s MinIO module waits on MinIO's own
 `/minio/health/live` endpoint, a *liveness* probe ("the process
 started"), not a readiness one — a real S3 API call immediately after
@@ -822,5 +856,109 @@ real API call (bucket creation) in all four MinIO-container test
 helpers (`internal/objstore`, `internal/icbfs`, `internal/fuseserver`,
 `internal/notify/miniosrc`) in a short retry instead of trusting the
 container's own "ready" signal.
+
+---
+
+## Real lease renewal, and the much bigger bug it exposed (further correcting B8)
+
+Added for real, at Jared's direction, after B8's original "no
+renewal, 24h TTL" decision above was raised directly: a lease nothing
+ever renews can't distinguish "holder crashed" from "holder has just
+been holding this a while," which a real NFS/SMB-style lease (short
+TTL, renewed periodically while alive, reclaimed only after a holder
+goes dark for one full lease period) can. Added `FileHandle.
+ensureRenewal`/`runRenewal` (node.go): one background goroutine per
+FUSE lock-owner that currently holds a lock through that handle,
+renewing everything that owner currently holds (`icbfs.Filesystem.
+LockRangesHeldBy`, new) every `lockRenewInterval` for as long as the
+handle stays open. `lockLeaseTTL` dropped from the old 24h placeholder
+to 30s now that something actually renews it. Queries "what do I
+currently hold" fresh on every tick rather than renewing whatever
+bounds the triggering acquire call originally requested, specifically
+because `mergeOwnRanges` (the B4 fix above) can widen or split a
+holder's own entries after the fact — renewing a stale remembered
+range would silently stop working the moment a later overlapping
+acquire changed the real stored bounds.
+
+**The much bigger bug this surfaced, not a hypothetical:** verifying
+the renewal fix actually did anything meant adding temporary debug
+prints to `tryAcquireLockRange` and confirming they fired during a
+real cross-process test. They didn't — not for the new test, and not
+for `TestMountFcntlByteRangeLocksAcrossProcesses`, a pre-existing test
+specifically written to prove cross-process conflict detection works.
+Root cause, found by reading go-fuse directly rather than guessing:
+`fuse.MountOptions.EnableLocks` gates whether the kernel forwards
+`FUSE_GETLK`/`SETLK`/`SETLKW` to this driver *at all* — `go-fuse/fuse/
+opcode.go`'s `kernelFlags |= input.Flags64() & (CAP_FLOCK_LOCKS |
+CAP_POSIX_LOCKS)` only happens `if server.opts.EnableLocks`. Neither
+any test helper (`mountFSWithLocking`) nor `cmd/icbfs`'s own
+`fuseMountOptions` ever set it. Without it, the kernel silently falls
+back to its own local, single-host advisory lock table (the same one
+every local filesystem uses) and never calls this driver's `Setlk`/
+`Getlk`/`Setlkw`/`Getlk` at all — which, for a same-host test (both
+"processes" share one kernel), reproduces *identical* pass/fail
+behavior to this driver's real remote-`.lock`-object logic, with zero
+indication anything was wrong. Every task B2-B8 FUSE-level lock test
+that has ever passed in this project, before this fix, may have been
+exercising the kernel's own local lock table, never this driver's
+actual code — the byte-range/shared/exclusive *logic* itself was
+separately verified at the `internal/icbfs` level (no FUSE/kernel
+involved there), but the FUSE *wiring* on top of it was never really
+proven end-to-end until now.
+
+**Fixed:** `EnableLocks: true` added to `mountFSWithLocking`
+(mount_test.go) and `cmd/icbfs`'s `fuseMountOptions`. Turning it on
+immediately failed three existing/new tests for two more real reasons
+(not flakes — each confirmed by tracing exact timestamps):
+- `FileHandle` never actually released a lock on a plain fd close/
+  process-exit without an explicit `F_UNLCK` — it had never needed to
+  before, because the kernel's own local lock table was doing that for
+  free. Added `FileHandle.Release` (`fs.FileReleaser`): stops every
+  renewal goroutine for this handle's owners *and* actively releases
+  whatever they still held, so a crash/plain-close still frees the
+  lock immediately rather than waiting out a lease. Deliberately
+  scoped to what *this* `FileHandle`'s own acquires registered, not
+  every lock its owner holds anywhere — real `fcntl(2)` semantics are
+  that closing *any* fd releases *all* of that process's locks on the
+  inode (locks are owned per-process, not per-fd), which would need a
+  registry shared across every `FileHandle` on a `Filesystem`, not
+  attempted here.
+- FUSE's `RELEASE` is dispatched to this driver asynchronously
+  relative to the closing/exiting process's `close(2)`/exit actually
+  returning — confirmed by tracing timestamps: `cmd.Wait()` returning
+  (the helper process is fully gone) does not mean this driver's
+  `Release` has run yet. Two existing cross-process tests asserted
+  "succeeds immediately after `cmd.Wait()`" with no tolerance for
+  this; fixed with `retryFcntlSetlkUntilNotEagain` (a short bounded
+  retry, not a blind sleep) at both assertion points.
+- The new renewal test itself had two bugs, both caught by actually
+  running it rather than trusting it once it compiled: a TTL short
+  enough to collide with `ServerTime`'s whole-second Date-header
+  resolution (same class of issue as the B2 entry — fixed by using
+  2s/500ms instead of sub-second values), and a sleep duration longer
+  than `runFcntlLockHolderHelper`'s own hardcoded 10s give-up deadline
+  (the helper was self-exiting from *its own* timeout, which looked
+  identical to a real renewal failure until timestamps were compared
+  — fixed by keeping the sleep at 3 lease windows, comfortably under
+  10s).
+- `-race` caught one more real bug in the fix itself: `Release`
+  calling each renewal goroutine's `cancel()` and returning
+  immediately, without waiting for the goroutine to actually observe
+  it and stop, raced a test that mutates the shared `lockLeaseTTL`/
+  `lockRenewInterval` vars during cleanup. Added a `sync.WaitGroup`
+  so `Release` blocks until every goroutine it signaled has actually
+  exited before returning (and before releasing their locks, so a
+  goroutine's own in-flight renewal can't race the release either) —
+  a real goroutine-lifecycle bug, not just a test-only concern, even
+  though the race detector only caught it via the test.
+
+**Check this if:** a process locks the same file through *multiple*
+open fds and closes one without releasing — only the `FileHandle`
+that actually acquired a given range releases it on its own close;
+real `fcntl(2)` would release it on *any* of that process's fds
+closing. Also check if any other mount configuration or driver
+(a future WinFsp equivalent) needs the same `EnableLocks`-equivalent
+capability turned on explicitly — it is never implied by implementing
+the lock interfaces alone.
 
 ---

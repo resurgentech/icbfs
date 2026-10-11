@@ -323,6 +323,18 @@ func (o *OpenFile) ReleaseLockRange(ctx context.Context, start, end int64, holde
 	return o.fsys.ReleaseLockRange(ctx, o.key, start, end, holder)
 }
 
+func (o *OpenFile) RenewLockRange(ctx context.Context, start, end int64, holder string, ttl time.Duration) error {
+	return o.fsys.RenewLockRange(ctx, o.key, start, end, holder, ttl)
+}
+
 func (o *OpenFile) FindConflictingLockRange(ctx context.Context, start, end int64, selfHolder string, querySharedType bool) (LockRangeInfo, bool, error) {
 	return o.fsys.FindConflictingLockRange(ctx, o.key, start, end, selfHolder, querySharedType)
+}
+
+// LockRangesHeldBy is OpenFile's wrapper over the identically-named
+// Filesystem method — see its doc comment. Used to drive background
+// lease renewal (task B8's fix) without separately tracking what an
+// earlier acquire call originally requested.
+func (o *OpenFile) LockRangesHeldBy(ctx context.Context, holder string) ([]LockRangeInfo, error) {
+	return o.fsys.LockRangesHeldBy(ctx, o.key, holder)
 }
