@@ -1,9 +1,13 @@
 # Testing icbfs: the big-picture certification plan
 
-> **Note to other agents: ignore this file for now.** This is a plan, not
-> wired into any build target, CI job, or `go test` path yet. Nothing here
-> needs implementing unless Jared explicitly asks for it. Don't let this
-> doc redirect work you're already doing elsewhere in the repo.
+> **Note to other agents:** this is a plan, not wired into any build
+> target, CI job, or `go test` path yet — don't let it redirect work
+> you're already doing elsewhere in the repo unless it's actually
+> relevant. It's no longer purely speculative, though: Jared has asked
+> to move forward with `ROADMAP.md`'s Part F (the WinFsp driver) as of
+> 2026-10-10, and the Windows VM this doc describes is real, verified,
+> and ready — see Part F's own updated intro in `ROADMAP.md` for the
+> current plan and open questions before touching any of this.
 
 This is a plan for a layer of testing icbfs doesn't have yet: proof, using
 real, independently-written, widely-trusted test suites against a real
@@ -205,9 +209,13 @@ mitigated with an auto-restart loop rather than solved.
 See **[`test/windows/README.md`](test/windows/README.md)** for the full
 story and **`test/windows/*.sh`** for the actual runnable scripts
 (`create-vm.sh`, `wait-for-ssh.sh`, `check-eval-expiry.sh`,
-`destroy-vm.sh`). The only piece still blocked is running `winfsp-tests`
-itself, on the WinFsp driver existing in this codebase, which it doesn't
-yet.
+`destroy-vm.sh`). WinFsp itself and `winfsp-tests` are now installed and
+verified working on this VM too (107/107 of `winfsp-tests`' own default
+suite passing against its embedded reference filesystem) — see
+`test/windows/README.md`'s own section on this. The only piece still
+blocked is running `winfsp-tests --external` against *icbfs's own*
+WinFsp driver, which doesn't exist in this codebase yet
+(`ROADMAP.md`'s Part F, now in progress).
 
 ## Automation shape
 
