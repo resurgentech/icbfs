@@ -121,6 +121,15 @@ func (o *OpenFile) Size() int64 {
 	return int64(len(o.data))
 }
 
+// TouchAtime bumps this file's recorded last-access time to now
+// (ROADMAP.md's Part G, task G1) — a thin forward to Filesystem's own
+// TouchAtime, keeping o.fsys/o.key unexported from access-layer
+// callers (fuseserver, winfspserver) the same way every other
+// OpenFile method already does.
+func (o *OpenFile) TouchAtime(ctx context.Context) error {
+	return o.fsys.TouchAtime(ctx, o.key, TypeFile)
+}
+
 // ReadAt returns up to length bytes starting at off from the current
 // (post-edit, pre-flush) in-memory content — this is read-your-own-
 // writes within the same open session, before Flush has made any of it

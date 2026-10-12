@@ -105,11 +105,17 @@ func setTime(sec *uint64, nsec *uint32, t time.Time) {
 
 // fillAttr translates an icbfs.Attr into the fuse.Attr the kernel expects.
 //
-// Known simplification: ctime and atime are both reported as mtime.
-// ARCHITECTURE.md derives mtime from the current version's LastModified,
-// which also bumps on a metadata-only change — so a true ctime/mtime split
-// would need an explicit extra field, and atime isn't tracked at all (see
-// ARCHITECTURE.md's metadata model for why).
+// Known simplification: ctime is reported as mtime. ARCHITECTURE.md
+// derives mtime from the current version's LastModified, which also
+// bumps on a metadata-only change — so a true ctime/mtime split would
+// need an explicit extra field.
+//
+// atime (ROADMAP.md's Part G, task G1) is real, not a copy of mtime: a
+// file/directory that's never actually been read reports the zero
+// value's own fallback (mtime, same as before this task — a sensible
+// "as good as we've got" default), but once a real read happens
+// (TouchAtime, called by this package's own Read/Readdir, never from
+// here) it reports that real, explicitly tracked timestamp instead.
 func fillAttr(out *fuse.Attr, key string, typ icbfs.EntryType, a icbfs.Attr) {
 	out.Ino = icbfs.Ino(key)
 	out.Mode = typeToFuseMode(typ) | (a.Mode & 0o7777)
@@ -126,7 +132,12 @@ func fillAttr(out *fuse.Attr, key string, typ icbfs.EntryType, a icbfs.Attr) {
 	}
 	setTime(&out.Mtime, &out.Mtimensec, mtime)
 	setTime(&out.Ctime, &out.Ctimensec, mtime)
-	setTime(&out.Atime, &out.Atimensec, mtime)
+
+	atime := a.Atime
+	if atime.IsZero() {
+		atime = mtime
+	}
+	setTime(&out.Atime, &out.Atimensec, atime)
 }
 
 func callerOwner(ctx context.Context) (uid, gid uint32) {
@@ -241,6 +252,7 @@ func (n *Node) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
 func (n *Node) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
 	var modeP, uidP, gidP *uint32
 	var sizeP *int64
+	var atimeP *time.Time
 	if m, ok := in.GetMode(); ok {
 		mm := m & 0o7777
 		modeP = &mm
@@ -255,8 +267,15 @@ func (n *Node) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn,
 		ss := int64(s)
 		sizeP = &ss
 	}
+	// utimensat(2)'s explicit atime set (ROADMAP.md's Part G, task G1)
+	// — go-fuse's own GetATime already resolves UTIME_NOW to the
+	// kernel's current time for us, so there's no "now" special case
+	// to handle here.
+	if a, ok := in.GetATime(); ok {
+		atimeP = &a
+	}
 
-	attr, err := n.fsys.SetAttr(ctx, n.key, n.typ, modeP, uidP, gidP, sizeP)
+	attr, err := n.fsys.SetAttr(ctx, n.key, n.typ, modeP, uidP, gidP, sizeP, atimeP)
 	if err != nil {
 		return errnoFromErr(err)
 	}
@@ -269,6 +288,12 @@ func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	if err != nil {
 		return nil, errnoFromErr(err)
 	}
+	// Best-effort, deliberately not checked: a real readdir(2) bumps a
+	// directory's atime (ROADMAP.md's Part G, task G1's strict
+	// semantics), but a lost race on that bump must never fail the
+	// read itself — the directory listing the caller asked for already
+	// succeeded above.
+	_ = n.fsys.TouchAtime(ctx, n.key, icbfs.TypeDir)
 	list := make([]fuse.DirEntry, 0, len(entries))
 	for _, e := range entries {
 		list = append(list, fuse.DirEntry{
@@ -412,7 +437,12 @@ var (
 )
 
 func (h *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	return fuse.ReadResultData(h.open.ReadAt(off, int64(len(dest)))), 0
+	data := h.open.ReadAt(off, int64(len(dest)))
+	// Best-effort, deliberately not checked — same reasoning as
+	// Node.Readdir's own TouchAtime call: a lost race on this bump
+	// must never fail the read itself.
+	_ = h.open.TouchAtime(ctx)
+	return fuse.ReadResultData(data), 0
 }
 
 func (h *FileHandle) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {

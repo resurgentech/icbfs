@@ -33,12 +33,20 @@ const (
 // their mode/uid/gid stay in native object metadata on the directory
 // block object itself (see internal/icbfs/attr.go).
 type Metadata struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Mode          uint32                 `protobuf:"varint,1,opt,name=mode,proto3" json:"mode,omitempty"`
-	Uid           uint32                 `protobuf:"varint,2,opt,name=uid,proto3" json:"uid,omitempty"`
-	Gid           uint32                 `protobuf:"varint,3,opt,name=gid,proto3" json:"gid,omitempty"`
-	Nlink         uint32                 `protobuf:"varint,4,opt,name=nlink,proto3" json:"nlink,omitempty"`
-	Xattrs        map[string][]byte      `protobuf:"bytes,5,rep,name=xattrs,proto3" json:"xattrs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Mode   uint32                 `protobuf:"varint,1,opt,name=mode,proto3" json:"mode,omitempty"`
+	Uid    uint32                 `protobuf:"varint,2,opt,name=uid,proto3" json:"uid,omitempty"`
+	Gid    uint32                 `protobuf:"varint,3,opt,name=gid,proto3" json:"gid,omitempty"`
+	Nlink  uint32                 `protobuf:"varint,4,opt,name=nlink,proto3" json:"nlink,omitempty"`
+	Xattrs map[string][]byte      `protobuf:"bytes,5,rep,name=xattrs,proto3" json:"xattrs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Last-access time, nanoseconds since the Unix epoch (ROADMAP.md's
+	// Part G, task G1). Unlike mtime, this has no free ride from the
+	// object store (mtime is derived from the content object's own
+	// LastModified) — atime needs real, explicit storage, and real,
+	// explicit strict semantics: every read updates it, by direct
+	// decision, accepting the cost of a metadata write on every read
+	// rather than a relatime-style approximation.
+	AtimeUnixNano int64 `protobuf:"varint,6,opt,name=atime_unix_nano,json=atimeUnixNano,proto3" json:"atime_unix_nano,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -108,17 +116,25 @@ func (x *Metadata) GetXattrs() map[string][]byte {
 	return nil
 }
 
+func (x *Metadata) GetAtimeUnixNano() int64 {
+	if x != nil {
+		return x.AtimeUnixNano
+	}
+	return 0
+}
+
 var File_spec_proto_icbfs_v1_metadata_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\n" +
-	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\"\xcb\x01\n" +
+	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\"\xf3\x01\n" +
 	"\bMetadata\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\rR\x04mode\x12\x10\n" +
 	"\x03uid\x18\x02 \x01(\rR\x03uid\x12\x10\n" +
 	"\x03gid\x18\x03 \x01(\rR\x03gid\x12\x14\n" +
 	"\x05nlink\x18\x04 \x01(\rR\x05nlink\x126\n" +
-	"\x06xattrs\x18\x05 \x03(\v2\x1e.icbfs.v1.Metadata.XattrsEntryR\x06xattrs\x1a9\n" +
+	"\x06xattrs\x18\x05 \x03(\v2\x1e.icbfs.v1.Metadata.XattrsEntryR\x06xattrs\x12&\n" +
+	"\x0fatime_unix_nano\x18\x06 \x01(\x03R\ratimeUnixNano\x1a9\n" +
 	"\vXattrsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01B+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"

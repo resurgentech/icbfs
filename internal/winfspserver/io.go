@@ -19,6 +19,10 @@ func (d *driver) Read(fs *winfsp.FileSystemRef, file uintptr, buf []byte, offset
 		return 0, toWinError(err)
 	}
 	data := open.ReadAt(int64(offset), int64(len(buf)))
+	// Best-effort, deliberately not checked — a lost race on this
+	// bump must never fail the read itself (ROADMAP.md's Part G, task
+	// G1).
+	_ = open.TouchAtime(ctx())
 	if len(data) == 0 {
 		if int64(offset) >= open.Size() {
 			return 0, io.EOF

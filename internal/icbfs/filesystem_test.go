@@ -418,7 +418,7 @@ func TestSetAttrRejectsNegativeSizeInsteadOfCrashing(t *testing.T) {
 	}
 
 	negative := int64(-1)
-	if _, err := fsys.SetAttr(ctx, uuid, TypeFile, nil, nil, nil, &negative); !errors.Is(err, ErrInvalidArgument) {
+	if _, err := fsys.SetAttr(ctx, uuid, TypeFile, nil, nil, nil, &negative, nil); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("SetAttr with negative size = %v, want ErrInvalidArgument", err)
 	}
 
@@ -455,7 +455,7 @@ func TestSetAttrRejectsHugeSizeInsteadOfCrashing(t *testing.T) {
 	}
 
 	huge := int64(999999999999999)
-	if _, err := fsys.SetAttr(ctx, uuid, TypeFile, nil, nil, nil, &huge); !errors.Is(err, ErrInvalidArgument) {
+	if _, err := fsys.SetAttr(ctx, uuid, TypeFile, nil, nil, nil, &huge, nil); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("SetAttr with huge size = %v, want ErrInvalidArgument", err)
 	}
 
@@ -465,6 +465,131 @@ func TestSetAttrRejectsHugeSizeInsteadOfCrashing(t *testing.T) {
 	}
 	if string(data) != "hello" {
 		t.Fatalf("content disturbed by rejected SetAttr: got %q, want %q", data, "hello")
+	}
+}
+
+// TestTouchAtimeBumpsFileAtime covers ROADMAP.md's Part G, task G1:
+// a brand-new file reports zero Atime (never accessed), and a single
+// TouchAtime call (what a real read(2) triggers via FileHandle.Read/
+// winfspserver's Read) makes it report a real, current timestamp —
+// confirmed strictly later than the file's own creation, not just
+// "non-zero."
+func TestTouchAtimeBumpsFileAtime(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+
+	uuid, _, _, err := fsys.Create(ctx, root, "atime-target.txt", 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	before, err := fsys.Stat(ctx, uuid, TypeFile)
+	if err != nil {
+		t.Fatalf("stat before touch: %v", err)
+	}
+	if !before.Atime.IsZero() {
+		t.Fatalf("freshly created file's Atime = %v, want zero (never accessed)", before.Atime)
+	}
+
+	touchedAt := time.Now()
+	if err := fsys.TouchAtime(ctx, uuid, TypeFile); err != nil {
+		t.Fatalf("TouchAtime: %v", err)
+	}
+
+	after, err := fsys.Stat(ctx, uuid, TypeFile)
+	if err != nil {
+		t.Fatalf("stat after touch: %v", err)
+	}
+	if after.Atime.Before(touchedAt.Add(-time.Second)) {
+		t.Fatalf("Atime after TouchAtime = %v, want at/after %v", after.Atime, touchedAt)
+	}
+}
+
+// TestTouchAtimeBumpsDirAtime is TestTouchAtimeBumpsFileAtime's
+// sibling for directories, which store their attributes (including
+// atime) in native object metadata rather than a .metadata side
+// object — a real, separately-implemented path (Filesystem.TouchAtime
+// branches on type), so this needs its own discriminating test, not
+// just an inference from the file case passing.
+func TestTouchAtimeBumpsDirAtime(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+
+	dirUUID, _, err := fsys.Mkdir(ctx, root, "atime-dir", 0755, 0, 0)
+	if err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	before, err := fsys.Stat(ctx, dirUUID, TypeDir)
+	if err != nil {
+		t.Fatalf("stat before touch: %v", err)
+	}
+	if !before.Atime.IsZero() {
+		t.Fatalf("freshly created dir's Atime = %v, want zero (never accessed)", before.Atime)
+	}
+
+	touchedAt := time.Now()
+	if err := fsys.TouchAtime(ctx, dirUUID, TypeDir); err != nil {
+		t.Fatalf("TouchAtime: %v", err)
+	}
+
+	after, err := fsys.Stat(ctx, dirUUID, TypeDir)
+	if err != nil {
+		t.Fatalf("stat after touch: %v", err)
+	}
+	if after.Atime.Before(touchedAt.Add(-time.Second)) {
+		t.Fatalf("Atime after TouchAtime = %v, want at/after %v", after.Atime, touchedAt)
+	}
+	// TouchAtime must not disturb mode/uid/gid — it's a full
+	// native-metadata rewrite (MetadataDirectiveReplace), so a bug
+	// here would silently wipe them, not just fail loudly.
+	if after.Mode != 0755 {
+		t.Fatalf("mode disturbed by TouchAtime: got %o, want %o", after.Mode, 0755)
+	}
+}
+
+// TestSetAttrSetsExplicitAtime covers utimensat(2)'s explicit-set
+// path (ROADMAP.md's Part G, task G1) for both a file and a
+// directory, each going through a genuinely different storage branch
+// in Filesystem.SetAttr — a caller-chosen timestamp (not "now") must
+// round-trip exactly, proving this is real explicit storage, not an
+// accidental alias of TouchAtime's own "now" behavior.
+func TestSetAttrSetsExplicitAtime(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+	explicit := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+
+	fileUUID, _, _, err := fsys.Create(ctx, root, "explicit-atime.txt", 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := fsys.SetAttr(ctx, fileUUID, TypeFile, nil, nil, nil, nil, &explicit); err != nil {
+		t.Fatalf("SetAttr explicit atime (file): %v", err)
+	}
+	fileAttr, err := fsys.Stat(ctx, fileUUID, TypeFile)
+	if err != nil {
+		t.Fatalf("stat file: %v", err)
+	}
+	if !fileAttr.Atime.Equal(explicit) {
+		t.Fatalf("file Atime = %v, want %v", fileAttr.Atime, explicit)
+	}
+
+	dirUUID, _, err := fsys.Mkdir(ctx, root, "explicit-atime-dir", 0755, 0, 0)
+	if err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if _, err := fsys.SetAttr(ctx, dirUUID, TypeDir, nil, nil, nil, nil, &explicit); err != nil {
+		t.Fatalf("SetAttr explicit atime (dir): %v", err)
+	}
+	dirAttr, err := fsys.Stat(ctx, dirUUID, TypeDir)
+	if err != nil {
+		t.Fatalf("stat dir: %v", err)
+	}
+	if !dirAttr.Atime.Equal(explicit) {
+		t.Fatalf("dir Atime = %v, want %v", dirAttr.Atime, explicit)
 	}
 }
 

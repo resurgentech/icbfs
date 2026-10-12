@@ -118,6 +118,7 @@ type Attr struct {
 	Gid    uint32
 	Nlink  uint32
 	Size   int64
+	Atime  time.Time
 	Mtime  time.Time
 	Ctime  time.Time
 	Btime  time.Time         // derived from the UUIDv7 key; zero if the key isn't a UUIDv7
@@ -134,22 +135,33 @@ const (
 	dirMetaGid   = "gid"
 	dirMetaNlink = "nlink"
 	dirMetaMtime = "mtime"
+	dirMetaAtime = "atime"
 )
 
 // dirMetadataFromAttr builds the object-metadata map a directory block
-// object's mode/uid/gid/nlink/mtime are stored as.
+// object's mode/uid/gid/nlink/mtime/atime are stored as.
 func dirMetadataFromAttr(a Attr) map[string]string {
 	mtime := a.Mtime
 	if mtime.IsZero() {
 		mtime = time.Now()
 	}
-	return map[string]string{
+	m := map[string]string{
 		dirMetaMode:  strconv.FormatUint(uint64(a.Mode), 10),
 		dirMetaUid:   strconv.FormatUint(uint64(a.Uid), 10),
 		dirMetaGid:   strconv.FormatUint(uint64(a.Gid), 10),
 		dirMetaNlink: strconv.FormatUint(uint64(a.Nlink), 10),
 		dirMetaMtime: strconv.FormatInt(mtime.UnixNano(), 10),
 	}
+	// atime is only written when the caller actually has one to set
+	// (Stat's read-bumps-atime path, or an explicit utimensat) — unlike
+	// mtime, a brand-new directory has no meaningful "last accessed"
+	// yet, and omitting the key here lets parseMetaTime's zero-value
+	// default (never accessed) stay honest rather than defaulting to
+	// "now" the way mtime does above.
+	if !a.Atime.IsZero() {
+		m[dirMetaAtime] = strconv.FormatInt(a.Atime.UnixNano(), 10)
+	}
+	return m
 }
 
 func parseMetaUint(m map[string]string, key string) uint32 {
@@ -188,12 +200,21 @@ func metadataObjectKey(uuid string) string { return uuid + ".metadata" }
 // encodeFileMetadata serializes mode/uid/gid/nlink/xattrs to the wire
 // format stored at metadataObjectKey.
 func encodeFileMetadata(a Attr) ([]byte, error) {
+	var atimeNano int64
+	if !a.Atime.IsZero() {
+		// Go's zero time.Time isn't the Unix epoch — its own
+		// UnixNano() is a large negative number, not 0, so a never-
+		// yet-accessed file must stay at proto3's real 0 default
+		// rather than encoding that nonsense value.
+		atimeNano = a.Atime.UnixNano()
+	}
 	return proto.Marshal(&pb.Metadata{
-		Mode:   a.Mode,
-		Uid:    a.Uid,
-		Gid:    a.Gid,
-		Nlink:  a.Nlink,
-		Xattrs: a.Xattrs,
+		Mode:          a.Mode,
+		Uid:           a.Uid,
+		Gid:           a.Gid,
+		Nlink:         a.Nlink,
+		Xattrs:        a.Xattrs,
+		AtimeUnixNano: atimeNano,
 	})
 }
 
@@ -210,12 +231,17 @@ func decodeFileMetadata(data []byte) (Attr, error) {
 	if err := proto.Unmarshal(data, &m); err != nil {
 		return Attr{}, err
 	}
+	var atime time.Time
+	if m.AtimeUnixNano != 0 {
+		atime = time.Unix(0, m.AtimeUnixNano).UTC()
+	}
 	return Attr{
 		Mode:   m.Mode,
 		Uid:    m.Uid,
 		Gid:    m.Gid,
 		Nlink:  m.Nlink,
 		Xattrs: m.Xattrs,
+		Atime:  atime,
 	}, nil
 }
 

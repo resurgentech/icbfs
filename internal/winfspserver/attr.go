@@ -17,12 +17,16 @@ import (
 // fillFileInfo translates an icbfs.Attr into the FSP_FSCTL_FILE_INFO
 // WinFsp expects back from Open/Create/GetFileInfo/Overwrite.
 //
-// Known simplification, same one internal/fuseserver's fillAttr
-// accepts for the same underlying reason (ARCHITECTURE.md's metadata
-// model derives mtime from a version's LastModified, with no separate
-// ctime/atime tracked at all): CreationTime/LastAccessTime/
-// LastWriteTime/ChangeTime all report Mtime (falling back to Btime,
-// then now, if Mtime is zero).
+// Known simplification: ctime isn't tracked separately, so
+// CreationTime/LastWriteTime/ChangeTime all report Mtime (falling
+// back to Btime, then now, if Mtime is zero) — same reasoning
+// internal/fuseserver's fillAttr accepts.
+//
+// LastAccessTime (ROADMAP.md's Part G, task G1) is real, not a copy of
+// Mtime: reports a.Atime when it's been explicitly tracked (by a real
+// read — this package's own Read/ReadDirectory call TouchAtime, never
+// this function), falling back to the same Mtime/Btime/now chain
+// otherwise, same honest "as good as we've got" default as before.
 //
 // A method on *driver (not a free function) so it can consult
 // d.fsys.PrimaryWindows() when deciding which attribute representation
@@ -46,9 +50,14 @@ func (d *driver) fillFileInfo(info *winfsp.FSP_FSCTL_FILE_INFO, key string, typ 
 	}
 	ft := filetimeFromTime(mtime)
 	info.CreationTime = ft
-	info.LastAccessTime = ft
 	info.LastWriteTime = ft
 	info.ChangeTime = ft
+
+	atime := a.Atime
+	if atime.IsZero() {
+		atime = mtime
+	}
+	info.LastAccessTime = filetimeFromTime(atime)
 
 	// A real, stable, distinct-per-object file ID — task F3's own
 	// note had flagged this as unreported (hardcoded 0) "where
@@ -74,6 +83,15 @@ func (d *driver) fillFileInfo(info *winfsp.FSP_FSCTL_FILE_INFO, key string, typ 
 func filetimeFromTime(t time.Time) uint64 {
 	ft := windows.NsecToFiletime(t.UnixNano())
 	return uint64(ft.HighDateTime)<<32 | uint64(ft.LowDateTime)
+}
+
+// timeFromFiletime is filetimeFromTime's inverse — needed by
+// SetBasicInfo (ROADMAP.md's Part G, task G1) to turn a caller's
+// explicit SetFileTime-style request back into a Go time.Time before
+// handing it to icbfs.Filesystem.SetAttr.
+func timeFromFiletime(v uint64) time.Time {
+	ft := windows.Filetime{HighDateTime: uint32(v >> 32), LowDateTime: uint32(v)}
+	return time.Unix(0, ft.Nanoseconds()).UTC()
 }
 
 // attributesFromAttr computes the Windows FILE_ATTRIBUTE_* bits to
@@ -162,7 +180,17 @@ func (d *driver) SetBasicInfo(fs *winfsp.FileSystemRef, file uintptr, flags winf
 		mode := modeFromAttributes(fileAttributes)
 		modeP = &mode
 	}
-	attr, err := d.fsys.SetAttr(ctx(), h.key, h.typ, modeP, nil, nil, nil)
+	var atimeP *time.Time
+	// SetFileTime's explicit LastAccessTime set (ROADMAP.md's Part G,
+	// task G1) — a real, previously entirely-ignored call: this
+	// function used to accept creationTime/lastAccessTime/
+	// lastWriteTime/changeTime as parameters and silently do nothing
+	// with any of them.
+	if flags&winfsp.SetBasicInfoLastAccessTime != 0 {
+		a := timeFromFiletime(lastAccessTime)
+		atimeP = &a
+	}
+	attr, err := d.fsys.SetAttr(ctx(), h.key, h.typ, modeP, nil, nil, nil, atimeP)
 	if err != nil {
 		return toWinError(err)
 	}
@@ -195,7 +223,7 @@ func (d *driver) SetFileSize(fs *winfsp.FileSystemRef, file uintptr, newSize uin
 		return nil
 	}
 	size := int64(newSize)
-	attr, err := d.fsys.SetAttr(ctx(), h.key, h.typ, nil, nil, nil, &size)
+	attr, err := d.fsys.SetAttr(ctx(), h.key, h.typ, nil, nil, nil, &size, nil)
 	if err != nil {
 		return toWinError(err)
 	}

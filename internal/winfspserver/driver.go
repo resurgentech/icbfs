@@ -299,7 +299,7 @@ func (d *driver) Overwrite(fs *winfsp.FileSystemRef, file uintptr, attributes ui
 		return os.ErrNotExist
 	}
 	var zero int64
-	attr, err := d.fsys.SetAttr(ctx(), h.key, h.typ, nil, nil, nil, &zero)
+	attr, err := d.fsys.SetAttr(ctx(), h.key, h.typ, nil, nil, nil, &zero, nil)
 	if err != nil {
 		return toWinError(err)
 	}

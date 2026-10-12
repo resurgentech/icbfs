@@ -1,1488 +1,269 @@
 # Roadmap
 
-Concrete development tasks, broken out by workstream, implementing the
-design already settled in `ARCHITECTURE.md` — this is sequencing and
-task breakdown, not open design. "Done when" is the acceptance bar for
-each task — write the test first if that's practical, same as the rest
-of this codebase's testing style (real MinIO via testcontainers-go, not
-mocks).
+Concrete development tasks for icbfs's active work. "Done when" is the
+acceptance bar for each task — write the test first if that's
+practical, same as the rest of this codebase's testing style (real
+MinIO via testcontainers-go, not mocks).
 
-**Status: Parts A-E are done and shipped on `main`.** Part F (the
-WinFsp driver) is the only remaining workstream — see its section
-below for the current plan, now grounded in a real, verified Windows
-test VM (`TESTING.md`, `test/windows/`) that didn't exist when this
-part was first scoped.
-
-Five workstreams so far:
-
-- **Part A: Serialization — JSON to Protobuf.** All of this project's own
-  object bodies (directory/root blocks, the not-yet-built `.metadata`
-  object, the not-yet-built `.lock` object, the not-yet-built master
-  block) move to Protobuf instead of JSON. Do this one first, or at least
-  its schema/toolchain setup — every object defined in Parts B and D
-  should be born in Protobuf rather than built in JSON and migrated a
-  second time.
-- **Part B: Locking.** Implements the Locking section (and the Content
-  writes: CAS, bounded retry, and escalation to locking section) of
-  `ARCHITECTURE.md`.
-- **Part C: Permission enforcement.** Mode bits are stored and reported
-  correctly but not actually enforced on read/write — this closes that
-  gap. Independent of A and B; can be done in any order relative to them.
-- **Part D: Multiple filesystems per bucket — the master block.**
-  Implements the Multiple filesystems per bucket section of
-  `ARCHITECTURE.md`: the master block itself, uniform ID-prefixing of
-  every object (a real migration — the current code has no such prefix
-  at all), the archive/prune lifecycle, and `df`/`du`. Depends on Part A
-  for its schema (task D1), and its prefixing change affects every other
-  part's object-naming — sequence it early relative to B and C's own
-  object-creation code, not as an afterthought bolted on at the end.
-- **Part E: Change notifications.** Implements the Change notifications
-  section of `ARCHITECTURE.md` — three backend-specific event sources
-  behind one internal interface, wired to go-fuse's notification API.
-  Depends on Part D's ID-prefixing (notifications are scoped by it) and,
-  for MinIO, on Part A's Protobuf toolchain not being required at all —
-  this part's wire format is each backend's own event schema, not
-  something icbfs defines.
-- **Part F: WinFsp driver and Windows compatibility.** Everything in
-  `ARCHITECTURE.md`'s "Windows compatibility: primary mode" section has
-  zero code behind it today — this part builds the WinFsp driver itself
-  (the largest single item in this whole roadmap) and wires the
-  already-decided primary-mode fields into it. Parts B and C each have
-  a task that's "blocked on the WinFsp driver existing" (Part B's task
-  B9, Part C's task C3) — those are this part, not separately scoped
-  tasks of their own.
+Parts A through F (serialization, locking, permission enforcement,
+multiple filesystems per bucket, change notifications, and the WinFsp
+driver) shipped and are done — see git history for their full task
+breakdown and verification notes. This file tracks only the current,
+active workstream.
 
 ---
 
-## Part A: Serialization — JSON to Protobuf
-
-Everything in this part applies to objects this project defines itself —
-directory/root blocks, `.metadata`, `.lock`. It does not apply to, and
-cannot apply to, the native S3/Azure object-metadata header mechanism
-(`x-amz-meta-*`), which is a fixed, external, string-only API outside our
-control. Once `.metadata` exists with its own Protobuf body (task A4),
-it's likely those native headers won't be needed for much of anything —
-worth confirming once A4 lands, not assumed here.
-
-### A1. Decide where `.proto` files and generated code live, and how
-
-A real decision with consequences for every contributor, not a detail to
-default silently:
-
-- Where do `.proto` source files live in the repo (e.g. `/proto`, or
-  alongside each package)?
-- Are generated `.pb.go` files checked into git, or regenerated at build
-  time (`go:generate`, a Makefile target)? Checked-in means `go build`
-  keeps working for anyone without `protoc` installed; regenerated-only
-  means no risk of committed code drifting from its `.proto` source but
-  requires `protoc` + `protoc-gen-go` in every contributor's and CI's
-  environment.
-- **Done when:** the decision is written down (a short note in this
-  section or a comment at the top of the first `.proto` file is enough),
-  the toolchain is installed and confirmed working in this dev
-  environment, and a trivial "hello world" message round-trips through
-  `go generate`/`protoc` successfully.
-
-### A2. Define the directory/root block schema
-
-- A `.proto` message set covering what `internal/block.Block` currently
-  represents in JSON: `Kind` (leaf/internal), `Entries` (name, UUID,
-  type), `Children` (min key, UUID).
-- Decide whether the generated Protobuf types become the public Go API
-  for this package directly, or whether `block.Block`/`block.Entry`/
-  `block.Child` stay as hand-written Go types with Protobuf purely as
-  the wire format underneath (a translation layer in `Encode`/`Decode`).
-  Leaning toward the latter for decoupling — callers throughout
-  `internal/icbfs` shouldn't need to care that the wire format changed —
-  but this is a real choice to make explicitly, not assume.
-- **Done when:** the schema is defined and generates cleanly; this task
-  doesn't yet require wiring it into `internal/block` (that's A3).
-
-### A3. Migrate `internal/block` from JSON to Protobuf
-
-- Replace `Block.Encode`/`block.Decode`'s JSON implementation with the
-  A2 schema. If using the translation-layer approach, this means
-  converting between the hand-written types and the generated ones on
-  every encode/decode.
-- Update every caller in `internal/icbfs/filesystem.go` that currently
-  assumes JSON-compatible byte handling (there shouldn't be many, if the
-  `Encode`/`Decode` function signatures stay the same — `[]byte` in,
-  `[]byte` out — but confirm this rather than assume it).
-- **Rewrite `internal/block/block_test.go`'s format-specific tests.**
-  `TestEncodeDecodeRoundTrip` and `TestDecodeEmptyIsLeaf` are JSON-shaped
-  today (they construct/inspect JSON specifically) and need rewriting
-  against the new format. The pure-logic tests — `Insert`/`Find`/`Remove`/
-  `SplitLeaf`/`SplitInternal`/`ChildFor`/`InsertChild` — operate on the
-  in-memory `Block` type regardless of wire format and shouldn't need to
-  change at all; confirm that's actually true rather than assume it.
-- **Audit which tests get easier or redundant, which is a real property
-  of switching to a schema-backed format, not just a migration
-  side-effect worth ignoring.** A hand-rolled JSON struct with
-  `map[string]string`-style fields (see `internal/icbfs/attr.go`'s
-  `parseMetaUint`/`metadataFromAttr`) can silently hold a malformed or
-  wrong-typed value that only surfaces as a bug at parse time; a
-  generated Protobuf struct with a `uint32` field structurally cannot
-  hold a string, so a class of "did we parse this correctly" tests
-  becomes unnecessary — the type system already guarantees it. Document
-  which existing/hypothetical tests this removes the need for. This cuts
-  the other way too: Protobuf's wire format has its own correctness
-  surface that JSON didn't (unknown-field handling, schema evolution
-  across old-writer/new-reader or new-writer/old-reader combinations) —
-  if this schema is expected to keep evolving the way it already has
-  across this project's own design discussion, at least one test
-  exercising decoding a message with an unexpected/missing field is
-  worth adding, not just tests ported over from the JSON era.
-- **Confirm `internal/icbfs` and `internal/fuseserver`'s existing test
-  suites still pass unmodified** (`filesystem_test.go`,
-  `mount_test.go`) — they exercise the `Filesystem`/mount-level API, not
-  the wire format directly, so they shouldn't need code changes, only a
-  clean run after the migration. `internal/objstore`'s tests are
-  unaffected entirely (that package only ever deals in raw bytes) and
-  should need no changes or even a re-review.
-- **Done when:** `go test ./...` passes end to end, including the new
-  large-directory-sharding tests already in the suite
-  (`TestDirectorySplitsAndStaysConsistent`,
-  `TestMountLargeDirectorySharding`) — these specifically prove the
-  B-tree logic still functions correctly after changing the one thing
-  (encoding) underneath it.
-
-### A4. Build `.metadata` directly in Protobuf (not a migration — this object doesn't exist in code yet)
-
-This is where the `.metadata` consolidation from `ARCHITECTURE.md`
-(mode/uid/gid/nlink, replacing the current `<uuid>.nlink`-only design)
-and the extended-attributes/ACL union design actually get built — in one
-pass, directly in Protobuf, since there's no JSON version of this object
-shipped to migrate away from.
-
-- Schema: `mode`, `uid`, `gid`, `nlink` as native typed fields (replacing
-  `internal/icbfs/attr.go`'s current string-encoded
-  `map[string]string` metadata, which exists only because S3/Azure's
-  *native* object metadata headers are string-only — `.metadata`'s own
-  body has no such constraint), plus an `xattrs` field: `map<string,
-  bytes>`. POSIX ACLs are just an entry in that map under the key
-  `system.posix_acl_access` (mirroring Linux's own xattr-based ACL
-  representation exactly); Windows ACLs are just another entry under a
-  reserved key like `windows.acl`. No separate ACL-specific schema field,
-  no separate object.
-- Replace the current `<uuid>.nlink` side object and its tombstone
-  protocol with the same mechanism applied to `.metadata`'s `nlink`
-  field instead — the CAS/tombstone logic in
-  `internal/icbfs/filesystem.go`'s `adjustNlink` carries over
-  conceptually unchanged, just targeting `.metadata` instead of
-  `.nlink`.
-- Wire `Stat`/`SetAttr`/`Create`/`Symlink`/`Link`/`Unlink` to read/write
-  `.metadata` instead of native object metadata headers for
-  mode/uid/gid/nlink.
-- **Done when:** a new test suite (mirroring the existing
-  `TestConcurrentLinkRaceDoesNotLoseUpdates` style) proves the migrated
-  nlink CAS/tombstone protocol still closes the concurrent-link race
-  against real MinIO, plus new tests for the `xattrs` map round-tripping
-  arbitrary binary values (confirming no base64-style corruption or
-  truncation) and for a POSIX-ACL-shaped entry and a Windows-ACL-shaped
-  entry coexisting in the same map without interference.
-
-### A5. CI / build confirmation
-
-- Confirm `go build`/`go test` work the way A1's decision intended for a
-  contributor who hasn't touched this before — if generated code is
-  checked in, confirm building from a clean checkout with *no* `protoc`
-  installed still works; if not checked in, confirm a clean checkout
-  *fails* clearly (not confusingly) without `protoc`, and document the
-  install step.
-- **Done when:** both of the above are actually tried, not assumed.
-
----
-
-## Part B: Locking
-
-Implements the Locking section (and the Content writes: CAS, bounded
-retry, and escalation to locking section) of `ARCHITECTURE.md`.
-
-Tasks are ordered; each one after the first two depends on the ones
-before it.
-
-**Prerequisite context:** Part A (task A4 specifically) builds
-`.metadata` for the first time — tasks below assume it exists, or at
-minimum that `.lock` follows the same side-object pattern. Task B2 below
-should define `.lock`'s body directly in Protobuf per Part A's schema
-conventions, not in JSON — there's no shipped JSON version of `.lock` to
-migrate from either, same situation as `.metadata`.
-
----
-
-### B1. Content writes become CAS-protected
-
-Right now `Filesystem.WriteFile` does an unconditional `Put` (`ifMatch:
-""`). This task makes it conditional, with retry-and-reapply on
-rejection — independent of locking, and valuable on its own (it's the
-fix for the lost-update case described in ARCHITECTURE.md, which exists
-today for any two processes writing non-overlapping ranges of the same
-file concurrently).
-
-- `FileHandle` needs to track the version (ETag) it read at `Open`/
-  `Create` time.
-- `FileHandle.Write` currently mutates its in-memory buffer directly as
-  `pwrite`-style calls arrive. For retry-and-reapply to work, the
-  specific edits (offset, data) need to be replayable onto a freshly
-  fetched base, not just baked into a buffer that's already lost track
-  of what the original content was. Simplest approach: keep the
-  pristine buffer read at `Open` time *separate* from a list of
-  `{offset, data}` writes applied since, and only merge them into one
-  buffer at flush time — on a CAS rejection, re-fetch fresh content and
-  replay the same edit list onto that instead of the stale pristine copy.
-- `Filesystem.WriteFile` takes an expected ETag and uses it as `ifMatch`
-  on the `Put`; on `objstore.IsPreconditionFailed`, the caller (the
-  `FileHandle`/`Flush` path) re-fetches and retries.
-- Bound the retry count/time budget — a separate constant from
-  `maxTreeRetries`, since a content-write retry can mean resending a
-  large object, not a small block. A time budget (not just a count)
-  is worth considering so large and small files get comparable retry
-  windows rather than comparable attempt counts.
-- **Done when:** a test spawns two concurrent writers against the same
-  file editing non-overlapping byte ranges (mirroring
-  `TestConcurrentLinkRaceDoesNotLoseUpdates`'s style) and confirms both
-  edits survive in the final content — this test should fail against
-  today's code and pass after this task.
-
-### B2. `.lock` object: non-blocking acquire/release/renew, whole-file only
-
-The core primitive, scoped to whole-file first — byte ranges come later
-(task B4) once the simple case is solid.
-
-- Object body: `{holder: string, expires_at: int64}` (holder is an
-  opaque client-generated id, not necessarily a uid/pid — it just needs
-  to be unique enough to tell "is this still the same holder renewing,
-  or someone else").
-- `expires_at` is computed from the *write's own resulting*
-  `Last-Modified` (already available from every `Put` in this codebase)
-  plus the TTL — not the client's local clock. See ARCHITECTURE.md's
-  Locking section for why.
-- Acquire: read current state (or treat a missing object as free);
-  if free or `expires_at` has passed (checked against the reading
-  client's local clock — accepted, see ARCHITECTURE.md), CAS-write your
-  own claim; on a lost CAS race, re-read and retry a bounded number of
-  times before reporting "currently held."
-- Release: CAS-write back to an empty/absent state, conditioned on
-  still being the current holder (don't release a lock you no longer
-  hold because your lease already expired and someone else took it).
-- Renew: same as acquire, but only succeeds if you're still the current
-  holder — bumps `expires_at` forward.
-- **Done when:** tests cover: acquire-then-release round trip; a second
-  acquire attempt while the first holder's lease is still valid is
-  rejected; an acquire attempt *after* the TTL has passed succeeds even
-  without an explicit release (expired-lease steal); two concurrent
-  acquire attempts against the same free lock result in exactly one
-  winner.
-
-### B3. Blocking acquisition via polling
-
-Layered on top of task B2's non-blocking primitive.
-
-- A blocking acquire loops: attempt the non-blocking acquire, and if
-  held, sleep (with backoff — don't hammer the object store at a fixed
-  tight interval) and retry, until it succeeds or an optional timeout
-  elapses.
-- Expose both a non-blocking (`LOCK_NB`-equivalent) and blocking variant,
-  since callers need both.
-- **Done when:** a test holds a lock, starts a blocking acquire attempt
-  from a second "client" in a goroutine, releases the first lock, and
-  confirms the second acquire completes promptly after release (not
-  just eventually) and definitely before the lease TTL would have
-  expired on its own — proving it's reacting to the release, not just
-  waiting out the lease.
-
-### B4. Byte-range locks
-
-Generalizes task B2's single-holder body to a list, with overlap
-checking.
-
-- Object body becomes `{ranges: [{start, end, holder, expires_at}, ...]}`.
-- Acquire checks the requested `[start, end)` against every existing
-  entry for overlap; rejects (or blocks, via task B3's loop) only if a
-  conflicting range is actually held and unexpired.
-- Release/renew operate on the caller's specific range entry, not the
-  whole object.
-- **Done when:** tests cover: two non-overlapping ranges can be held
-  concurrently by different holders; a request for an overlapping range
-  is rejected while the conflicting range is held; the same request
-  succeeds once that range's lease expires or is released.
-
-Done — including a later fix (shared/exclusive semantics, and real
-`fcntl(2)` same-owner merge/split on re-locking an overlapping range)
-raised directly after initial shipping. See `ASSUMPTIONS.md`'s B4 and
-"Real POSIX shared/exclusive lock semantics" entries.
-
-### B5. Escalation wiring: content-write retry exhaustion → lock → retry
-
-Connects task B1 to tasks B2-B4.
-
-- When task B1's bounded retry budget is exhausted, acquire a lock (via
-  task B3's blocking acquire) covering the byte range the write actually
-  touches (or the whole file, if that's simpler to ship first — see
-  ARCHITECTURE.md's note that even a whole-file fallback here is
-  defensible as a first cut), then make one final CAS-protected write
-  attempt while holding it, then release.
-- This must be implemented identically by every client write path. For
-  now that's only the FUSE driver; this task includes making sure the
-  escalation logic lives somewhere shared (not copy-pasted per driver)
-  so the eventual WinFsp driver gets it automatically rather than by
-  re-implementation.
-- **Done when:** a test simulates sustained contention — e.g. two
-  goroutines each repeatedly writing to the same file as fast as
-  possible for a bounded duration — and confirms both make real forward
-  progress (neither is starved indefinitely), where without this task's
-  escalation the same test would be expected to show one writer
-  thrashing against the other's retries.
-
-### B6. Client-side stronger-than-advisory enforcement
-
-The diff-against-what-I-read-then-check-locks mechanism from
-ARCHITECTURE.md, built on everything above.
-
-- Before issuing a content write (not just on retry-exhaustion — every
-  write), diff the modified buffer against the version read at open
-  time to get the touched range (a single contiguous min/max span is
-  sufficient — see ARCHITECTURE.md for why over-approximating is safe
-  here).
-- Re-fetch current lock state and check the touched range against it;
-  refuse the write (return the appropriate error to the caller) if it
-  overlaps a currently-held, unexpired lock belonging to someone else.
-- This is distinct from task B5: task B5 is about *this driver's own*
-  write succeeding eventually under contention with itself; this task
-  is about respecting a lock an *external, cooperating* caller
-  explicitly placed via `fcntl`/`LockFileEx`.
-- **Done when:** a test holds an explicit lock on a range from one
-  simulated client, attempts a write overlapping that range from a
-  second simulated client, and confirms it's refused — then confirms a
-  write to a genuinely non-overlapping range from the second client
-  succeeds normally while the lock is still held.
-
-### B7. Mount-time opt-in flag
-
-- A CLI flag (`cmd/icbfs`, e.g. `--locking`) and the equivalent for
-  whatever WinFsp's mount invocation ends up being, defaulting to off.
-- When off, lock/unlock calls should return "not supported" (or
-  whatever the correct POSIX/Windows errno is for an unimplemented
-  lock operation) rather than silently no-op — a caller that thinks
-  it's holding a lock when it isn't is worse than a caller that gets a
-  clear error.
-- **Done when:** a test confirms lock acquisition fails cleanly when
-  the mount wasn't started with the flag, and succeeds when it was.
-
-### B8. FUSE wiring
-
-- Investigate go-fuse's actual API surface for `flock`/`fcntl` before
-  assuming a specific interface shape — not yet checked against the
-  installed go-fuse version the way every other API assumption in this
-  project has been checked first.
-- Wire whatever that interface is onto tasks B2-B6's primitives.
-- **Done when:** a real mount test (same style as the existing
-  `internal/fuseserver/mount_test.go` suite) exercises `flock`/`fcntl`
-  through the actual kernel syscalls against a real mount, not just the
-  `Filesystem`-level API directly.
-
-Done — but the "done when" bar above was passing for the wrong reason
-for a long time: `fuse.MountOptions.EnableLocks` was never set, so the
-kernel silently handled every lock locally and never actually
-dispatched to this driver at all. Also added real lease renewal
-(tied to the FUSE file handle's lifetime) once that was fixed and a
-much shorter TTL became safe. **Required reading before touching
-Part F's own lock-callback wiring (B9, below) or any other FUSE mount
-option:** `ASSUMPTIONS.md`'s "Real lease renewal, and the much bigger
-bug it exposed" entry — the same category of "an option exists that
-gates whether the kernel actually calls your driver at all" mistake is
-worth checking for explicitly on the WinFsp side too, not assumed away
-because the FUSE side eventually got it right.
-
-### B9. WinFsp wiring
-
-Blocked on the WinFsp driver existing at all — see Part F. Once it
-does, wire its lock-related callbacks onto the same tasks B2-B6 primitives
-used by FUSE. Not further broken down here since Part F owns scoping
-the driver itself.
-
-**Done — as "confirmed impossible on this binding," not as "built."**
-Part F finished, unblocking this task, but there is nothing to wire:
-`FSP_FILE_SYSTEM_INTERFACE` (WinFsp's real, native C interface — fetched
-and read directly, not inferred from the Go binding alone) has exactly
-33 callback members, `GetVolumeInfo` through `DispatcherStopped`, and
-**none of them concern byte-range locking** — no `LockControl`, no
-oplock callback, nothing. Cross-checked three independent ways before
-accepting this: `go-winfsp` (the chosen binding) exposes zero
-lock-related `Behaviour*` interfaces; WinFsp's own user-mode dispatch
-library (`fsop.c`, already read directly for other tasks — see F1/F9)
-has zero lock-dispatch code anywhere in it; and the real
-`inc/winfsp/winfsp.h` header, fetched fresh for this task specifically,
-confirms no such member exists in the struct at all, nor any comment
-mentioning locks or oplocks anywhere in the file.
-
-**The real, load-bearing consequence, not just a missing callback:**
-`LockFileEx`/byte-range locks on a WinFsp mount are handled entirely
-*inside WinFsp's kernel driver*, using its own local, same-host lock
-table — the same generic mechanism Windows provides for any local
-filesystem. Unlike FUSE's `EnableLocks` (task B8's own hard-won
-finding: an opt-out switch that exists but has to be explicitly
-flipped, see `ASSUMPTIONS.md`'s "Real lease renewal" entry), there is
-no switch here, because there is no callback to opt into in the first
-place. **icbfs's cross-host `.lock`-object Locking feature (tasks
-B2-B6) cannot be extended to a WinFsp mount on this binding, at all** —
-a Windows client's `LockFileEx` calls stay purely local to that one
-Windows machine and can never see or conflict with a lock a Linux/FUSE
-client holds on the same file through this project's own locking. This
-is a genuine Windows/FUSE feature-parity gap, not an implementation
-detail papered over — raised directly to Jared before closing this
-task out as done-via-documentation rather than quietly marking it
-complete or silently skipping it.
-
-No code changes result from this task: nothing exists to build, and
-adding a client-side-only approximation (e.g. this driver tracking its
-own locks in memory, ignorant of WinFsp's real kernel-level
-enforcement) was explicitly not attempted — it would be actively
-misleading, implying cross-host protection that doesn't exist.
-
-### B10. Optional: use Change Notifications to accelerate blocking acquisition
-
-Cross-cutting with Part E — depends on both B3 (blocking acquisition)
-and Part E existing, and is itself optional on top of two already-
-optional features (Locking and Change Notifications each have their own
-mount flag; this task only does anything when both happen to be on).
-
-- When Change Notifications is enabled, B3's polling loop can
-  additionally subscribe to notifications scoped to the exact `.lock`
-  key it's waiting on, and retry the CAS-acquire as soon as a matching
-  notification arrives rather than waiting out the next poll interval.
-  Scoping this is simpler than Part E's general per-watch UUID tracking
-  (task E3) — the key being waited on is already known exactly, no
-  path-to-UUID resolution needed.
-- **Gate this per backend — do not wire it in for Azure.** MinIO's
-  adapter (task E4) is genuinely near-real-time, a real win here. Azure
-  Change Feed (task E5) is minutes-scale; using it as a lock wake-up
-  signal would make blocking acquisition slower than plain polling, not
-  faster. AWS S3 (task E6) is a plausible, modest win depending on the
-  polling interval being compared against.
-- The plain-polling fallback from B3 must stay fully correct and be the
-  actual behavior whenever a notification is missed, delayed, never
-  arrives, or Change Notifications isn't enabled at all — this task
-  only ever sharpens the retry trigger, it never becomes a load-bearing
-  dependency for Locking's correctness.
-- **Done when:** a test with both features enabled against MinIO shows
-  lock handoff latency measurably better than B3's plain-polling
-  baseline; a second test with Change Notifications disabled (or
-  pointed at a fake Azure-shaped adapter with injected multi-minute
-  delay) confirms blocking acquisition still converges correctly via
-  the B3 fallback, just without the speedup — proving the dependency is
-  genuinely optional, not just untested.
-
----
-
-## Part C: Permission enforcement
-
-Mode bits are correctly stored and correctly reported via `stat()`, but
-nothing currently gates actual access against them — a `chmod 400`
-(read-only) file can still be written by its own owner, verified
-directly against a real mount, not assumed. (A related, already-fixed
-bug: go-fuse's `NullPermissions` default used to silently rewrite a
-genuinely-stored `0` mode back to 644/755 on every `stat()` — that one's
-done; this part is about the separate, still-open enforcement gap.)
-
-### C1. Enable kernel-level enforcement via `default_permissions`
-
-- Set the `default_permissions` FUSE mount option in `cmd/icbfs` and in
-  the test mount setup in `internal/fuseserver/mount_test.go` — the same
-  two places `NullPermissions` was added for the earlier bug fix.
-- This defers enforcement to the kernel: for every open/read/write (not
-  just the explicit `access(2)`-triggered checks go-fuse's own default
-  `Access()` fallback already handles today), the kernel compares the
-  calling process's uid/gid — and its *full* set of supplementary group
-  memberships, not just a primary gid — against whatever `Getattr`
-  reports for mode/uid/gid. Preferred over implementing `NodeAccesser`
-  or manual checks in `Open`/`Create` ourselves: this reuses the
-  kernel's own permission logic, which already correctly handles root
-  bypass and group membership, instead of re-implementing a
-  correctness-sensitive check by hand.
-- **Done when:** tests cover both directions on the owner's own
-  access, not just the write case already verified manually: a `chmod
-  000` file cannot be read *or* written even by its own owner; a
-  `chmod 444` file can be read but a write attempt fails with a
-  permission error rather than silently succeeding.
-
-### C2. Decide how to test group/other-bit enforcement, not just owner
-
-- The straightforward test in C1 only exercises the *owner* bits, since
-  the test process's uid is the same as the file's recorded owner uid.
-  Actually exercising group/other-bit enforcement needs a second
-  identity — either running part of the test as a different uid (real
-  environment complexity: needs root or an equivalent privilege to
-  `setuid`, not just a few more lines of Go) or explicitly accepting
-  owner-bit coverage as the automated bar and documenting group/other
-  enforcement as verified manually rather than continuously. A real
-  decision, not a default to skip silently.
-- **Done when:** the decision is made and whichever path was chosen is
-  actually exercised — either a genuine differing-uid test, or an
-  explicit note in the test file stating what's covered, what isn't,
-  and why.
-
-### C3. WinFsp equivalent (blocked on the driver existing)
-
-Windows doesn't use POSIX mode bits as its native enforcement
-mechanism — it's ACL/security-descriptor-based. Once the WinFsp driver
-exists (Part F), it needs its own enforcement path: real ACL checking
-if `ARCHITECTURE.md`'s primary-mode ACL design has been built by then
-(see Part F), or at minimum an approximated mode-bit check equivalent to
-C1's for a POSIX-primary filesystem mounted on Windows. Not further
-broken down here since Part F owns scoping the driver itself.
-
-**Done, both halves — real ACL checking (already free) and the
-mode-bit approximation (newly built).** Real ACL checking on a
-primary-Windows filesystem needed no new enforcement code at all:
-confirmed by re-reading `fsop.c`'s `FspAccessCheckEx`/`FspAccessCheck`
-(already read for other tasks — F1/F9) that WinFsp's own user-mode
-dispatch library performs real access checks against whatever security
-descriptor this driver's `GetSecurity`/`GetSecurityByName` report (task
-F8), on every `Create`/`Overwrite`/`OpenTargetDirectory`/`Rename` — the
-exact "the dispatcher enforces this, not our driver" pattern task F9
-already found for share-mode/pending-delete. F8's own real `Set-Acl`
-verification already exercised this same mechanism, just not framed as
-an enforcement test at the time.
-
-The mode-bit approximation for a primary-POSIX filesystem was a real
-gap, not already covered: `securityDescriptorFor` (task F8) reported
-the mounting process's own fixed identity (`fallbackSD`/`procsd.Load()`)
-for *every* file regardless of its actual mode bits, which enforces
-nothing — a `chmod 000` file was just as accessible as a `chmod 644`
-one. Fixed with a new `approximateDACLFromMode`: since there's no real
-POSIX uid/gid-to-SID mapping in this project (no RFC2307/
-Services-for-NFS-style scheme exists or is planned), it builds an
-"Everyone"-principal DACL purely from the stored mode bits — the same
-ownership-agnostic approximation style task F7 already established for
-attribute bits (`ReadOnly` from the owner-write bit). A mode of `0`
-produces an empty, *present*, protected DACL (not an absent one, which
-Windows would read as "no protection, allow everyone" — the opposite of
-intended), so WinFsp's own real access-check mechanism denies every
-caller, including whoever mounted the filesystem.
-
-**One real consistency bug found and fixed while building this, not
-assumed correct from F8 alone:** F8's `securityDescriptorFor` treated a
-stored `windows.acl` as authoritative unconditionally, regardless of
-primary mode — inconsistent with the "primary mode determines which
-format is authoritative" rule `ARCHITECTURE.md` states and task F7
-already correctly applies to attribute bits. Fixed by gating the
-stored-ACL-is-authoritative branch on `PrimaryWindows()` too: a
-primary-POSIX filesystem now always derives from mode, even if
-`SetSecurity` was once called on it (that write is still preserved,
-never discarded — ACLs are explicitly "not a lossy one-way
-approximation" — just not promoted to authoritative on read).
-
-Verified against a real WinFsp mount, going further than a round trip:
-three files with mode `000`/`444`/`644` (set directly via
-`icbfs.Filesystem.SetAttr` — Windows has no native `chmod`), remounted,
-and a real read/write attempted against each as the *same identity that
-mounted the filesystem* — `000` refused both, `444` allowed read and
-refused write, `644` allowed both, matching task C1's own FUSE-side bar
-("cannot be read or written even by its own owner") translated to
-Windows exactly. Also confirmed no regression on a primary-Windows
-mount (fallback identity and `Set-Acl` round-trip unchanged). Full
-details in `test/windows/README.md`. Full `gofmt`/`go build`/`go vet`/
-`go test ./...` clean on Linux, plus a Windows cross-compile and
-Windows-target vet of both WinFsp binaries.
-
----
-
-## Part D: Multiple filesystems per bucket — the master block
-
-Implements the Multiple filesystems per bucket section of
-`ARCHITECTURE.md`. Depends on Part A (task A1 at minimum) for the
-Protobuf toolchain — the master block schema should be defined in
-Protobuf from the start, same reasoning as `.metadata`/`.lock`.
-
-### D1. Define the master block schema and bootstrap logic
-
-- `FilesystemEntry{name, size, archived}` / `MasterBlock{repeated
-  filesystems}`, per `ARCHITECTURE.md`.
-- Create-if-missing bootstrap at a single fixed key, one per bucket —
-  mirrors `Filesystem.Bootstrap`'s existing logic for a root block
-  almost exactly; worth checking whether that function can be
-  generalized/reused rather than duplicated.
-- **Done when:** a fresh bucket's master block can be bootstrapped, and
-  bootstrapping an already-existing one is a no-op (same bar
-  `Bootstrap` already meets for roots).
-
-### D2. Filesystem creation through the master block
-
-- CAS-read the master block; scan the in-memory list for the
-  lowest-indexed free (`name == ""`) slot, reuse it if found, else
-  append; write back conditioned on the ETag read, retrying on a lost
-  race (the standard pattern, applied to a new object).
-- Derive the ID from the chosen index, zero-padded to 4 hex digits;
-  create the root at `<id>-root-<name>`.
-- **Done when:** tests cover: creating a filesystem allocates the
-  expected ID; two concurrent creation attempts both succeed with
-  distinct IDs (one retries after losing the CAS race, not both landing
-  on the same slot); after a filesystem is deleted (D5) and its slot
-  tombstoned, a new creation reuses that same freed slot rather than
-  only ever appending.
-
-### D3. Uniform ID-prefixing of every object — a real migration, not new-code-only
-
-**This is the task with the widest blast radius in this part.** Every
-key-generation call site in `internal/icbfs` currently produces a bare
-UUID (or `<uuid>.metadata`, `<uuid>.lock`, etc.) with no filesystem-ID
-prefix at all — `Create`, `Mkdir`, `Symlink`, the nlink side-object key
-helper, and anything added by Parts B/D's own new code. All of them need
-the owning filesystem's ID prepended, which means `Filesystem` needs to
-know its own ID (learned at open time, by finding its entry's position
-in the master block) and thread it into every key it generates.
-- **Done when:** a test creates a filesystem, writes a file, a
-  directory, and (once Part B exists) a lock, and confirms every one of
-  their keys in the backend actually carries the expected `<id>-`
-  prefix — not just that the filesystem still works end to end (the
-  existing test suite already proves that), but that the prefix
-  convention is actually present on disk, since that's the thing this
-  task is actually for.
-
-### D4. `df`/`du` via prefix-scoped listing
-
-- `du`: already free, a tree walk from the filesystem's own root — if
-  this isn't already exposed as a callable operation independent of
-  `ReadDir`'s existing recursive traversal, this task includes exposing
-  it as one.
-- `df`: "Total" is the master block entry's `size` field; "Used" is a
-  `ListObjectsV2`/`List Blobs` call scoped to the filesystem's `<id>-`
-  prefix, summing each returned entry's size across pagination.
-- Wire into FUSE's `StatFs` — investigate go-fuse's actual
-  `NodeStatfser` interface shape before assuming it, the same way every
-  other go-fuse API assumption in this project has been checked first.
-- **Done when:** a test creates two filesystems in the same bucket, adds
-  differently-sized content to each, and confirms each filesystem's `df`
-  "Used" reflects only its own content, not the other's — this is the
-  test that actually proves the multi-tenant scoping problem is solved,
-  not just that a number comes back.
-
-### D5. Archive and prune lifecycle
-
-- Archive: set `archived = true` on the filesystem's master block
-  entry (a CAS write, like any other). Enforcement is checked at
-  mount/session start, not per-operation — a mounted session doesn't
-  need to notice an archive that happens mid-session; the next mount
-  does. Document this explicitly wherever it's implemented, since it's
-  a deliberately chosen gap, not an accident.
-- Prune: list every object under the filesystem's `<id>-` prefix (the
-  same listing D4's "Used" calculation uses) and delete each one, then
-  blank the master block entry (`name = ""`), making its slot eligible
-  for D2's reuse.
-- **Done when:** tests cover: writes against an archived filesystem are
-  rejected (checked at the point this project chooses to enforce it —
-  mount/session start, per above — not necessarily mid-session); reads
-  against an archived filesystem still succeed; pruning actually removes
-  every object under the prefix (confirmed by listing after, not just
-  trusting the delete calls didn't error) and frees the slot for reuse.
-
-### D6. A tool to change a filesystem's declared size after creation — done
-
-`icbfs.Resize(ctx, store, fsName, newSize)` (`master.go`): a CAS write to
-the master block entry's `size` field, same pattern as `Archive`. Takes
-effect for every mount of that filesystem immediately (`StatFS` always
-re-reads the master block fresh, never caches the value from
-`Bootstrap`). No validation against current "Used" — shrinking below
-what's already stored is allowed and simply makes `df` report negative
-headroom, same as any real filesystem resized smaller than its contents
-without a tool checking first. No CLI wiring (same as `Archive`/`Prune` —
-all three are library-level admin operations today, not `icbfs mount`
-flags).
-
----
-
-## Part E: Change notifications
-
-Implements the Change notifications section of `ARCHITECTURE.md`.
-Depends on Part D (notifications are scoped by the filesystem's ID
-prefix — build D's prefixing first). Once this part exists, see Part
-B's task B10 — Locking's blocking acquisition can use it to wake up
-faster than polling, on MinIO specifically, as an optional enhancement
-in the other direction.
-
-### E1. Internal event-source interface
-
-- Define one internal interface all three backend adapters implement:
-  something like "a channel of wake-up signals, each naming the
-  key/prefix that changed," deliberately minimal — per
-  `ARCHITECTURE.md`'s governing principle, a signal is never expected to
-  carry authoritative payload data, so the interface shouldn't be
-  designed as if it needs to.
-- **Done when:** the interface is defined and at least one trivial fake
-  implementation exists for testing the consumer side independent of
-  any real backend.
-
-### E2. Mount-time opt-in flag, and the explicit "works with none of these" test
-
-- A CLI flag (`cmd/icbfs`), defaulting to off — same pattern as
-  Locking's flag.
-- **This needs its own explicit, permanent regression test, not an
-  assumption that "optional" naturally holds**: mount with no
-  notification backend configured at all, and confirm every existing
-  operation (create, read, write, mkdir, etc.) works identically to a
-  mount that predates this feature entirely — no hang, no error, no
-  behavioral difference. This was specifically called for, not left
-  implicit.
-- **Done when:** that test exists and passes, run as part of the normal
-  suite, not a one-off manual check.
-
-### E3. Per-watch UUID tracking and go-fuse wiring
-
-- A FUSE watch gets established via a path lookup, which already
-  resolves to a UUID at that moment (`Lookup`'s existing behavior) — the
-  driver records "this active watch corresponds to UUID X" at setup
-  time, rather than needing any general reverse index from UUID back to
-  path.
-- Filter incoming wake-up signals (from whichever backend adapter is
-  active) against the set of currently-active watched UUIDs; on a
-  match, push the notification via go-fuse's `Inode.NotifyContent`/
-  `NotifyEntry` — investigate the actual current API shape before
-  assuming it, same practice as every other go-fuse assumption in this
-  project.
-- Renames are the known remaining wrinkle: inotify's `MOVED_FROM`/
-  `MOVED_TO` semantics don't fall out of plain "a UUID changed" signals
-  — not solved here, flagged for whoever picks this up.
-- **Done when:** a real mount test establishes a watch, triggers a
-  change through a *second*, independent client against the same
-  backend, and confirms the watching mount receives a notification —
-  this is the test that actually proves cross-mount delivery works, not
-  just that the internal plumbing compiles.
-
-### E4. MinIO adapter
-
-- New dependency: `github.com/minio/minio-go/v7` (confirmed non-standard,
-  not reachable via the `aws-sdk-go-v2` client already used everywhere
-  else — this is an exception to the project's otherwise-single-SDK
-  approach, worth a comment at the import site saying why).
-- Use prefix-scoped `ListenBucketNotification`, scoped to the
-  filesystem's own ID prefix (MinIO supports this server-side).
-- Prefer **sync** delivery mode over async: async can silently drop
-  events under sustained queue overload (documented), and since this
-  feature is already latency-tolerant by design, sync's slower send rate
-  is a good trade, not a real cost.
-- **Done when:** a real MinIO container test (testcontainers-go, same
-  pattern as the rest of this project) proves an actual change produces
-  an actual received notification — this is the one backend that can be
-  tested the way everything else in this project is.
-
-### E5. Azure adapter
-
-- Change Feed is a pull-and-resume log — this task includes cursor/
-  checkpoint persistence (where does "I've read up to here" live
-  between polls?), not just a one-shot read.
-- No server-side filtering exists — read the whole account's feed and
-  filter client-side for this filesystem's own ID prefix.
-- Given latency is minutes-scale and this environment has no way to
-  provision a real Azure Storage Account (see `ARCHITECTURE.md`'s
-  Testing reality note), this task's test strategy needs its own
-  decision: a mocked/fake Change Feed reader exercising the
-  checkpoint-and-filter logic in isolation is realistic here; an actual
-  end-to-end Azure test is not, and shouldn't be assumed into this
-  project's automated suite the way MinIO's can.
-- **Done when:** the checkpoint/filter logic has a passing test against
-  a fake feed, and the gap (no automated real-Azure test exists) is
-  documented plainly in the code, not silently absent.
-
-### E6. AWS S3 adapter
-
-- Bucket notification configuration → SQS; consume via long-polling
-  `ReceiveMessage` (`WaitTimeSeconds` up to 20).
-- Stays within the existing SDK family (`aws-sdk-go-v2/service/sqs`) —
-  no new dependency, unlike MinIO's adapter.
-- Same testing-reality constraint as Azure: no real AWS account
-  available in this environment, so this task's automated coverage is
-  necessarily a fake/mocked SQS consumer, with real-account testing
-  documented as a manual, not automated, gap.
-- **Done when:** the consumption logic has a passing test against a
-  fake queue, same bar as E5.
-
----
-
-## Part F: WinFsp driver and Windows compatibility
-
-Implements `ARCHITECTURE.md`'s "Windows compatibility: primary mode"
-section. The largest single workstream in this roadmap — everything
-else Windows-related (Part B's task B9, Part C's task C3) is blocked on
-this part, not separately scoped.
-
-**The environment gap that blocked this part is closed.** A previous
-version of this section said flatly that no Windows machine or VM was
-available to test against, the same category of gap as Part E's "no
-real Azure/AWS account" but with no partial workaround. That's no
-longer true: a real, fully-unattended, verified Windows Server 2025
-eval VM now exists on this host (`TESTING.md`, `test/windows/` — real
-KVM/libvirt, confirmed SSH access, a reusable `clean-base` snapshot,
-eval license good until **2027-04-08** per `slmgr`'s own authoritative
-check). Every "done when" below that says "against a real mount" is
-now actually actionable, not aspirational. Two things it does **not**
-yet include, confirmed while writing this update:
-- **WinFsp itself** (the kernel-mode driver + user-mode DLL every
-  WinFsp-backed filesystem needs, task F11) is not installed on the VM
-  yet — only OpenSSH and WinSCP are, per `test/windows/README.md`. This
-  needs doing once, before F1-level code can be exercised at all, and
-  the resulting state re-snapshotted into `clean-base` the same way the
-  WinSCP install already was.
-- **`winfsp-tests`** (the prebuilt conformance suite `TESTING.md`
-  identifies as the real certification bar, `--external` mode) hasn't
-  been downloaded onto the VM yet either — straightforward once WinFsp
-  itself is installed, ships as a ready-to-run zip on WinFsp's GitHub
-  releases, no build step needed.
-
-Both are now unblocked, cheap, one-time setup — not attempted here
-without checking first whether that's wanted, since it means booting a
-real VM and changing its saved snapshot.
-
-### F1. Choose a Go binding — now fully enumerated, not just researched
-
-Two current, real options — both downloaded and actually read directly
-(not inferred from docs), both confirmed to cross-compile clean from
-this Linux host to a real Windows `.exe` with `CGO_ENABLED=0` (a trivial
-program against each built and verified), so neither costs anything in
-dev-loop friction:
-
-- **`github.com/winfsp/go-winfsp`** (root package, v1.0.6) — a direct
-  binding to WinFsp's *native* C API. Far more actively maintained (a
-  real release as recent as **2026-10-04**, six days before this
-  writing, vs. cgofuse's **2025-01-05**). Its full interface is now
-  enumerable — `winfsp_windows.go`'s `FSP_FILE_SYSTEM_INTERFACE` struct
-  is a direct, complete mirror of WinFsp's real C struct (36 callback
-  slots: `Create`, `Open`, `Overwrite`, `Cleanup`, `Read`, `Write`,
-  `Flush`, `GetFileInfo`, `SetBasicInfo`, `SetFileSize`, `CanDelete`,
-  `Rename`, `GetSecurity`, `SetSecurity`, `ReadDirectory`,
-  `Get`/`Set`/`DeleteReparsePoint`, `GetEa`/`SetEa`, ...), each backed by
-  a Go-idiomatic opt-in `Behaviour*` interface
-  (`BehaviourSetSecurity`, `BehaviourGetReparsePoint`, ...) our
-  filesystem type implements only the ones it needs. This maps
-  **directly** onto F7 (`BehaviourSetBasicInfo`'s `FILE_ATTRIBUTE_*`),
-  F8 (`BehaviourGetSecurity`/`SetSecurity`), and F9
-  (`BehaviourCanDelete`/`SetDelete`) below — no translation through a
-  FUSE-shaped approximation needed for any of them. It also ships a
-  higher-level `gofs` sub-package (an `io/fs`-shaped
-  `OpenFile`/`Mkdir`/`Stat`/`Rename`/`Remove` convenience wrapper, with
-  its own `memfs` reference implementation) — **not the right layer for
-  icbfs**: it has no `SetSecurity`/`SetReparsePoint`/attribute-bit
-  control at all, exactly what F7-F9 need, so this driver should bind
-  directly against the root package's `Behaviour*` interfaces, not
-  `gofs`.
-- **`github.com/winfsp/cgofuse`** (v1.6.0) — a FUSE-*compatible* shim:
-  the same callback shape across Windows/WinFsp, macOS/macFUSE, and
-  Linux/libfuse. Its `FileSystemInterface` **does** have a `Link`
-  (hardlink) method, which go-winfsp's native interface has no slot for
-  at all — the one real capability asymmetry found. But this is likely
-  illusory, not a real advantage: both bindings sit on the exact same
-  underlying WinFsp driver, whose native `FSP_FILE_SYSTEM_INTERFACE`
-  (confirmed above) has no hard-link callback either — cgofuse's
-  `Link()` almost certainly just surfaces as `ENOSYS` on the Windows
-  backend regardless, not a real, working hardlink. Worth a direct
-  five-minute check against the VM before relying on this read, not
-  assumed either way.
-
-**Decided, at Jared's direction: `go-winfsp`'s root package** — the
-semantic-fit and maintenance-currency reasons above, confirmed rather
-than defaulted to.
-
-**Neither gives you what go-fuse's high-level `fs` package gives
-`internal/fuseserver`** — a cached node tree where `Lookup` returns a
-reusable `*Inode`. Both are flatly path-string-based. This means
-whichever is chosen, `internal/fuseserver`'s `Node` structs are **not
-portable** to this driver; only `icbfs.Filesystem`'s core logic is
-(it's already key/UUID-based and access-layer-agnostic by design — see
-task F2).
-
-- **Done when:** one is chosen and the choice is recorded here with its
-  reasoning (done above), and a trivial "hello world" WinFsp mount
-  using it is actually proven against the real VM — the same "don't
-  just compile it, run it" bar every other external API in this
-  project has been held to.
-
-**Done, for real, against the native interfaces the real driver
-needs.** `cmd/icbfs-winfsp-hello`, built and run on the VM, proves an
-actual mount through `go-winfsp`'s native `Behaviour*` interfaces: a
-real `dir J:\` listing (volume label and all), `[System.IO.File]::
-ReadAllText` returning the exact expected bytes, a not-found path
-correctly surfacing `FileNotFoundException`, and `Get-Acl` round-
-tripping the security descriptor. Not `gofs` — the production driver
-can't use `gofs` (F7-F9 need `SetSecurity`/`SetReparsePoint`/attribute
-control it doesn't expose), so proving the smoke test through `gofs`
-would have proven the wrong layer.
-
-**It did not work the first time, and the reasons are load-bearing for
-F2-F9, not quirks of the smoke test.** The first native attempt failed
-with `ERROR_INVALID_FUNCTION` ("Incorrect function") on every single
-I/O, despite the mount reporting success. Two real root causes, each
-verified against the actual source rather than guessed:
-1. **WinFsp refuses every create/open unless `Create`, `Open`, and
-   `Overwrite` are all wired.** Confirmed in WinFsp's own `fsop.c`
-   (`FspFileSystemOpCreate`): `STATUS_INVALID_DEVICE_REQUEST` if
-   `Create`/`CreateEx` is NULL, or `Open` is NULL, or
-   `Overwrite`/`OverwriteEx` is NULL. That NTSTATUS is exactly what
-   Win32 renders as "Incorrect function." A filesystem that only wires
-   `Open` never has a single callback invoked — which is why
-   `Win32_Volume` never saw a volume either — while `Mount()` itself
-   succeeds, which is what made this so hard to see. A read-only
-   filesystem can simply refuse both; they still have to exist.
-2. **The security descriptor must carry an Owner and Group, not just
-   a DACL.** With `Create`/`Overwrite` wired, directory listing worked
-   immediately, but a *file* open failed with "The security descriptor
-   structure is invalid" (`STATUS_INVALID_SECURITY_DESCR`): the
-   kernel's access check on a file open rejects a DACL-only SD. `gofs`
-   never hits this because it hands WinFsp the current process's own
-   SD (`procsd.Load()`), which naturally has both. Directly relevant to
-   F8's ACL design — whatever `windows.acl` stores has to be a
-   complete SD, or the mount-side translation has to supply the
-   missing parts.
-
-A third, latent bug fixed on the way: `GetOrNewDirBuffer` must return
-the *same* `DirBuffer` for the same open directory across calls — the
-marker-based continuation reads back out of it — not a fresh zero
-buffer per call, which leaks the native allocation every time.
-
-**Cross-compilation was ruled out before any of this was found**: at
-Jared's direction, native builds were set up on the VM first (Go
-1.27.2 installed there — see `test/windows/README.md`), and the
-failing code rebuilt natively failed identically. That eliminated the
-whole toolchain/ABI class of hypothesis cleanly and pointed at the
-Go-level wiring, which is where both real causes turned out to be.
-`go-winfsp`'s own module ships no native-interface example or test
-anywhere (only a `gofs`-based one, `winfsp_test.go`), so there was
-nothing to diff against — the answer came from reading WinFsp's own
-C source for what its dispatcher demands, which is the right reference
-for F2/F3 too.
-
-**Standing workflow going forward: build on the VM, not cross-compiled
-from Linux** — this was Jared's direct instruction after the
-cross-compilation question came up, not just this investigation's own
-conclusion; see `test/windows/README.md` for the mechanics (source
-synced over as a tarball, `go build` run over SSH).
-
-### F2. Path-resolution layer
-
-- Since neither binding provides go-fuse's node-tree/`Lookup`-caches-an-
-  `Inode` convenience, this driver needs its own layer resolving a path
-  string to an `icbfs.Filesystem` UUID on every call — either a fresh
-  tree walk per call, or a driver-owned cache. This is genuinely new
-  architecture, not a port of anything already built.
-- **Done when:** path resolution is correct for nested directories and
-  for multiple hard-linked names resolving to the same UUID — provable
-  at the Go unit-test level, independent of a real WinFsp mount, since
-  this layer sits entirely on the `icbfs.Filesystem` side of the binding
-  boundary.
-
-**Done.** `internal/winfspserver/resolve.go`'s `resolvePath` walks a
-WinFsp path string from `fsys.RootKey()` down via repeated
-`icbfs.Filesystem.Lookup` calls — a fresh walk per call, no
-driver-owned cache in this first cut, same "every call re-walks from
-the root" model described above. Deliberately not Windows-only (no
-`go-winfsp`/`golang.org/x/sys/windows` import at all): it's pure
-`icbfs.Filesystem` logic, so it builds and tests on any platform,
-proven by `go test ./internal/winfspserver/...` running clean on this
-Linux dev machine with no VM involved — exactly the point of this
-task's own "independent of a real WinFsp mount" bar.
-
-Covered by real tests, not just the happy path: nested directories,
-two hardlinked names resolving to the identical UUID (confirmed by
-reverting the intermediate-directory-type check and watching the
-through-a-file test fail, not just trusting it compiles), a genuinely
-missing path surfacing `icbfs.ErrNotFound`, and a path that tries to
-descend through a plain file surfacing `icbfs.ErrNotDir` rather than a
-confusing not-found or a silent wrong answer. Symlink-following through
-intermediate components is deliberately out of scope here — not asked
-for by this task's own "Done when," and a real design question for F3
-(WinFsp represents symlinks as reparse points, a different mechanism
-from POSIX's always-transparent-except-at-the-leaf convention).
-
-### F3. Core operation wiring
-
-- Wire the chosen binding's callbacks to `icbfs.Filesystem` via F2's
-  path resolution, covering the same basic operation set already proven
-  on the FUSE side: create, read, write, mkdir, rmdir, unlink, readdir,
-  getattr/setattr, symlink, readlink, link. If `go-winfsp` is the chosen
-  binding (task F1): `Create`/`Open`/`Read`/`Write`/`GetFileInfo`
-  map directly; `readdir` goes through `BehaviourReadDirectory`;
-  symlink/readlink go through `BehaviourSetReparsePoint`/
-  `GetReparsePoint` (Windows represents symlinks as reparse points, not
-  a separate native concept) — confirm the exact reparse-tag/buffer
-  format WinFsp expects against its own header/docs before assuming
-  it, same practice as every other external API in this project.
-- **Likely real gap, confirm before building around it either way:**
-  hardlinks may simply not be supported on this access path at all —
-  WinFsp's native `FSP_FILE_SYSTEM_INTERFACE` (task F1) has no hardlink
-  callback regardless of which binding wraps it. If confirmed, `Link`
-  on a primary-Windows (or Windows-mounted) filesystem should return a
-  clear "not supported" error, not silently no-op or corrupt nlink
-  bookkeeping that assumes it happened.
-- **Reuse `icbfs.Ino()` for file identity — a genuine, confirmed point
-  of code reuse, not a Windows-specific reimplementation.** WinFsp's
-  `FSP_FSCTL_FILE_INFO.IndexNumber` is a direct analog to FUSE's
-  `st_ino`, and — same as FUSE — WinFsp does not generate one for you;
-  the existing hash-of-UUID function plugs directly into this different
-  struct field.
-- **Wire `Create`, `Open`, and `Overwrite` together, from the very
-  first commit — not incrementally.** WinFsp's dispatcher
-  (`fsop.c`, `FspFileSystemOpCreate`) refuses *every* open with
-  `STATUS_INVALID_DEVICE_REQUEST` until all three are non-NULL, while
-  the mount itself still reports success. Found the hard way in F1;
-  an "Open first, Create later" sequencing of this task would
-  reproduce it exactly and look like a mysterious total failure.
-- **Done when:** basic file lifecycle (create/read/write/mkdir/rmdir)
-  *and* symlink create/read work against a real WinFsp mount; hardlink
-  either works for real or fails with a clear, intentional error —
-  not an untested unknown either way.
-
-**Done.** `internal/winfspserver` (driver.go, attr.go, dir.go, io.go,
-reparse.go) wires `go-winfsp`'s native interfaces to `icbfs.Filesystem`
-via `resolve.go`'s `resolvePath`/`resolvePathFollow`, with a per-open
-`fileHandle` table standing in for what go-fuse's node tree gives the
-FUSE driver for free. `cmd/icbfs-winfsp` is the real mount entry
-point. Verified end to end on the real VM, built natively there, not
-just compiled: file/directory create, write, read, nested paths,
-unlink, rmdir, both relative- and absolute-target symlink creation
-*and* transparent read-through, and deleting a symlink itself (not its
-target) all confirmed byte-exact or behavior-exact against a live
-mount — not just "it compiled." Hardlinks return a clear, intentional
-`os.ErrPermission`-equivalent from `Create` (no native callback
-exists, per F1's finding); rename is out of scope here, same as the
-FUSE driver, which doesn't have it either (a real, pre-existing gap,
-flagged separately in `TESTING.md`, not re-solved ad hoc for Windows
-only).
-
-**Three more real, load-bearing bugs found and fixed via actual VM
-testing, each confirmed by tracing the exact failure before fixing it
-— not fixed speculatively:**
-1. **`winfsp.CaseSensitive(true)` is required.** Without it, WinFsp
-   case-folds names internally and can hand this driver an uppercased,
-   no-longer-matching name on a later call — caught when `Remove-Item`
-   on `subdir\nested.txt` arrived at `Cleanup` as `\SUBDIR\NESTED.TXT`,
-   which then failed to resolve at all. `icbfs.Filesystem`'s own
-   directory lookup is already exact-match, so this just makes the two
-   layers agree; it is not F4's real case-*insensitive* mount option.
-2. **A symlink's reparse buffer must set `SYMLINK_FLAG_RELATIVE`
-   correctly, not unconditionally.** Always setting it (matching an
-   absolute target with a "this is relative" flag) made the kernel try
-   to resolve `\??\K:\target.txt` as if it were relative to the link's
-   own directory, landing on the literal string `\??` as a bogus first
-   path component — traced directly via a `GetReparsePointByName(name=
-   "\??")` call this driver's own instrumentation caught. Fixed by
-   detecting the `\??\` NT-namespace prefix Windows itself prepends to
-   absolute targets.
-3. **`GetReparsePointByName` must return the exact NTSTATUS
-   `STATUS_NOT_A_REPARSE_POINT` for "this isn't a symlink," not a
-   generic error.** Returning anything else — confirmed by reading
-   WinFsp's own `fsop.c` resolver after a real relative-symlink
-   read-through failed with "Could not find a part of the path" —
-   makes WinFsp's resolution loop abort the whole path resolution
-   instead of continuing past it, even though the resolver had already
-   correctly found the real target. This, not a missing follow step,
-   was why a *relative*-target symlink's content read failed while an
-   *absolute*-target one (which the kernel re-resolves independently,
-   without going through this loop at all) worked.
-
-`Open` also explicitly follows a trailing symlink itself
-(`resolvePathFollow`, resolve.go) unless the caller set
-`FILE_OPEN_REPARSE_POINT` — kept as a deliberate backstop alongside
-fix 3 above, verified not to interfere with deleting a symlink itself
-(callers that want the link, not its target, do set that flag).
-
-### F4. Case-sensitivity mount flag
-
-- Confirmed as a single whole-volume setting
-  (`VolumeParams.CaseSensitiveSearch`) — WinFsp explicitly does not
-  support NTFS's newer per-directory mixed-sensitivity model, so there's
-  no finer-grained option to consider. This maps cleanly onto the
-  already-decided design (case-preserving storage, case-folded
-  comparison only at the access layer, from `ARCHITECTURE.md`'s Windows
-  compatibility section): set this flag, do the case-fold in this
-  driver's own lookup path.
-- **Done when:** case-insensitive lookup behaves correctly against a
-  real mount while the underlying stored names remain unchanged.
-
-**Done.** `cmd/icbfs-winfsp`'s `--case-insensitive` (default `true`,
-matching the NTFS/Samba/WSL2 convention `ARCHITECTURE.md` calls for)
-drives two separate, both load-bearing settings — confirmed two, not
-one, by testing F3's already-fixed case-sensitive behavior and
-confirming it would have broken if these were conflated:
-`winfsp.CaseSensitive` (whether the *kernel* folds case before ever
-calling this driver) and `winfspserver.Root`'s own `caseInsensitive`
-parameter (whether `resolve.go`'s new `lookupCaseAware` tolerates a
-case mismatch against `icbfs.Filesystem`'s always-case-sensitive
-storage, falling back to a directory scan only on a genuine not-found,
-and only in this mode). Storage itself never changes — confirmed
-directly: a file created as `MixedCase.txt` is still reported as
-`MixedCase.txt` by a case-insensitive mount, it simply also answers to
-`mixedcase.TXT`.
-
-Verified both ways against the real VM, not just unit-tested: the
-default mode resolves a request in different case than what was
-stored; an explicit `-case-insensitive=false` mount correctly refuses
-the same mismatched-case request while still serving the exact-case
-one. `resolvePath`'s case-insensitive fallback confirmed as a real,
-discriminating test the same way every other fix in this part has
-been — reverted, watched the test fail, restored.
-
-### F5. Primary-mode flag
-
-- Store whether a filesystem is primary-Windows or primary-POSIX, set
-  once at creation and immutable afterward — add this to the master
-  block's `FilesystemEntry` (Part D) or the root block; either works,
-  pick one and be consistent.
-- **Done when:** creating a filesystem lets the caller specify primary
-  mode, and it's correctly retrievable afterward.
-
-**Done.** Added to the master block's `FilesystemEntry` (`spec/proto/
-icbfs/v1/master.proto`'s new `primary_windows` field), not the root
-block — the same category of property as `size`/`archived` already
-living there, and this keeps every master-block "set once at creation,
-immutable afterward" property in one place. `Filesystem.Bootstrap`
-gained a `primaryWindows bool` parameter (same "only used the first
-time this filesystem name is created" rule `size`/`mode`/`uid`/`gid`
-already follow — `registerFilesystem` returns the *stored* value on a
-re-bootstrap, not the second call's argument, confirmed by a real test
-that fails without that distinction); `Filesystem.PrimaryWindows()`
-retrieves it. `cmd/icbfs-winfsp` gained `--primary-windows` (default
-`true`); `cmd/icbfs` (the POSIX/FUSE tool) was left without the flag
-for now — nothing on that access layer reads the stored value either
-way, since F5's actual consumers (F6/F8) are Windows-only.
-
-### F6. Reserved-name/character enforcement
-
-- For a primary-Windows filesystem: `Create`/`Mkdir`/`Symlink`/`Link`
-  reject Windows-reserved names and characters outright
-  (`< > : " / \ | ? *`, trailing space/period, `CON`/`AUX`/`COM1`...).
-- **Primary-POSIX behavior, confirmed at Jared's direction** (this was
-  only an inference in `ARCHITECTURE.md` before — "presumably allow the
-  write and handle presentation via escaping on the Windows access
-  path" — now a real decision, not just an unconfirmed guess carried
-  forward): a primary-POSIX filesystem **allows** any POSIX-legal name,
-  Windows-reserved or not. A Windows client that later accesses such a
-  filesystem needs its own escaping/presentation handling for whatever
-  it finds — not designed here, since it's a Windows-access-path
-  concern against an already-POSIX-primary filesystem, not something
-  this task's enforcement logic itself needs to solve.
-- **Done when:** tests cover both primary modes' actual behavior for a
-  reserved name — Windows-primary rejects it; POSIX-primary accepts it
-  — not just the Windows-primary rejection case.
-
-**Done.** Enforcement lives at the core `icbfs.Filesystem` layer, not
-just the WinFsp driver: a new portable file `internal/icbfs/winnames.go`
-holds `isWindowsReservedName` (reserved characters, control characters,
-trailing space/period, and the `CON`/`PRN`/`AUX`/`NUL`/`COM1-9`/`LPT1-9`
-base names matched case-insensitively with or without an extension) and
-`Filesystem.checkName`, which only rejects when `primaryWindows` is
-true — so the same enforcement applies regardless of which access layer
-(FUSE or WinFsp) is writing, since primary mode is a property of the
-filesystem itself. Wired into `Create`/`Mkdir`/`Symlink`/`Link` via a new
-`ErrInvalidName` sentinel, mapped to `syscall.EINVAL` in
-`fuseserver.errnoFromErr` and to the real `STATUS_OBJECT_NAME_INVALID`
-NTSTATUS (not a stretched `os.Err*`/`syscall.Errno` substitute) in
-`winfspserver.toWinError`. Verified with portable unit tests for
-`isWindowsReservedName` covering every character/base-name/edge case,
-plus a real `icbfs.Filesystem`-level test
-(`TestReservedNameRejectedOnlyOnPrimaryWindows`) proving the task's exact
-"Done when" bar: `CON`/`con.d`/`LPT1`/`AUX` are each rejected via
-`Create`/`Mkdir`/`Symlink`/`Link` on a primary-Windows filesystem and
-each accepted on an otherwise-identical primary-POSIX filesystem, with a
-non-reserved name still succeeding on the Windows-primary side too. Both
-new tests confirmed discriminating by temporarily disabling the checks
-and observing the expected failures. Full `gofmt`/`go build`/`go vet`/
-`go test ./...` clean on Linux, plus a Windows cross-compile
-(`GOOS=windows GOARCH=amd64 CGO_ENABLED=0`) of both `cmd/icbfs-winfsp`
-and `cmd/icbfs-winfsp-hello` and a Windows-target `go vet` of the
-WinFsp-only packages — no real VM mount needed this time, since the
-enforcement is pure portable logic already fully covered at the
-`icbfs.Filesystem` test level, and the WinFsp-side change is a one-line
-NTSTATUS mapping with direct precedent elsewhere in `driver.go`
-(`GetReparsePoint`/`GetReparsePointByName`'s own `STATUS_NOT_A_REPARSE_POINT`).
-
-### F7. Windows file attribute bits
-
-- Hidden/System/ReadOnly/Archive — storage (likely another entry in
-  `.metadata`'s `xattrs` map, consistent with how ACLs landed there) and
-  wiring to WinFsp's `FILE_ATTRIBUTE_*` reporting/setting. If
-  `go-winfsp` is the chosen binding (task F1): `BehaviourGetFileInfo`
-  reports them, `BehaviourSetBasicInfo` sets them — confirmed real,
-  named callbacks on the actual installed interface, not inferred.
-- **Done when:** round-trips correctly through a real WinFsp mount.
-
-**Done.** Hidden/System/ReadOnly/Archive are stored with full native
-fidelity in a new well-known `.metadata` xattrs entry
-(`icbfs.WindowsAttributesXattrKey = "windows.attributes"`, a single
-byte, masked to just those four real `FILE_ATTRIBUTE_*` bit values —
-duplicated as portable constants in `internal/icbfs/attr.go` so the
-core package keeps no Windows dependency, same reasoning task F6's
-`winnames.go` already established), written via a new
-`Filesystem.SetWindowsAttributes` and read via
-`WindowsAttributesFromXattrs`. Per ARCHITECTURE.md's "File attribute
-bits" rule ("the schema always carries the field, populated/used per
-primary mode"): `SetBasicInfo`/`Create` in `winfspserver` always persist
-the real byte regardless of primary mode, but which representation
-`attributesFromAttr` treats as authoritative at *read* time is decided
-by `PrimaryWindows()` — a primary-Windows filesystem reports the stored
-native bits (including Hidden/System/Archive, which have no POSIX
-analog at all); a primary-POSIX filesystem ignores them and keeps the
-original approximation (ReadOnly derived from the POSIX owner-write
-bit, Hidden/System/Archive always clear). `fillFileInfo`/
-`attributesFromAttr` became `*driver` methods (not free functions) so
-every call site — `GetFileInfo`, `SetBasicInfo`, `SetFileSize`,
-`GetSecurityByName`, `Create`, `Overwrite`, `ReadDirectory`, `Read`/
-`Write`/`Flush` — can consult `d.fsys.PrimaryWindows()` without
-threading it through each signature individually.
-
-Verified with portable `icbfs`-level tests
-(`TestSetWindowsAttributesRoundTripsAndMasksUnrelatedBits`, confirmed
-discriminating both on the round trip itself and on write-time masking
-by temporarily breaking each and observing the expected failures), plus
-a real round trip through a real WinFsp mount on the Windows VM against
-the standalone MinIO container: `[System.IO.File]::SetAttributes`
-setting Hidden+Archive+ReadOnly on a primary-Windows mount round-tripped
-exactly through both `GetFileInfo` (a fresh `GetAttributes` call) and
-`ReadDirectory` (`Get-ChildItem -Force -Hidden`), including clearing
-bits back down correctly (full replace, not additive-only); the
-identical sequence against a primary-POSIX mount correctly reported
-back only `ReadOnly`, confirming the primary-mode read-time branching
-for real, not just in a unit test. One real but unrelated gotcha found
-and documented in `test/windows/README.md`: cmd.exe's `attrib.exe`
-utility itself refuses to set `+R` on a file that already has `+H` set
-("Not resetting hidden file") — a long-standing `attrib.exe` quirk, not
-a driver bug, confirmed by reproducing the same sequence through
-`[System.IO.File]::SetAttributes` instead, which has no such
-restriction. Also found and documented: Go's `flag` package needs
-`-primary-windows=true`/`=false`, not a space-separated `-primary-windows
-true` — the latter is silently misparsed as a positional argument.
-Full `gofmt`/`go build`/`go vet`/`go test ./...` clean on Linux, plus a
-Windows cross-compile and Windows-target vet of both WinFsp binaries.
-
-### F8. ACL wiring
-
-- The `xattrs` map itself is built in Part A's task A4 (`.metadata`'s
-  Protobuf schema); this task is specifically about implementing
-  WinFsp's `GetSecurity`/`SetSecurity` callbacks (confirmed real,
-  FUSE-side-has-no-analog operations) to read/write the `windows.acl`
-  entry, and — if `getfacl`/`setfacl`-style POSIX ACL support is ever
-  built on the FUSE side — the `system.posix_acl_access` entry
-  correspondingly.
-- **Every SD handed back to WinFsp must carry an Owner and Group, not
-  just a DACL** — the kernel's access check on a file open fails with
-  `STATUS_INVALID_SECURITY_DESCR` otherwise (found in F1; directory
-  listing tolerates a DACL-only SD, a file open does not). So this
-  task has to decide what Owner/Group a `.metadata` entry with no
-  stored `windows.acl` reports — mapped from the POSIX uid/gid, a
-  fixed well-known SID, or the mounting process's own identity (what
-  `gofs` does via `procsd.Load()`) — before anything else here, since
-  nothing opens at all until that's settled.
-- **Done when:** a real security descriptor round-trips through a real
-  WinFsp mount.
-
-**Done.** Owner/Group/DACL/SACL decided (resolving the "before anything
-else here" question above): a file/symlink's native security
-descriptor, once set, is stored with full fidelity under the
-already-reserved `.metadata` xattrs entry `windows.acl`
-(`icbfs.WindowsACLXattrKey`, new `Filesystem.SetWindowsACL`/
-`WindowsACLFromXattrs`) as its SDDL string — reusing
-`golang.org/x/sys/windows`'s own `SecurityDescriptorFromString`/
-`(*SECURITY_DESCRIPTOR).String()` for the round trip instead of
-hand-rolling the self-relative binary layout. When nothing has been
-stored yet — every directory, always (no `.metadata` object to store
-one in at all, same scope restriction task F7 already applies to its
-own xattrs-map storage; `SetSecurity` on a directory handle is
-accordingly a documented no-op), or a file/symlink `SetSecurity` has
-never touched — the fallback is the mounting process's own identity
-via `go-winfsp`'s own `procsd.Load()`, the option `gofs` itself already
-uses; this always carries a real Owner/Group (sourced from a live
-process token), settling F1's `STATUS_INVALID_SECURITY_DESCR` concern
-for the fallback path the same way the old placeholder SD did, without
-the placeholder's fakeness. (The POSIX-uid/gid-to-SID option was ruled
-out: no real mapping to lean on in this environment.)
-
-`SetSecurity`'s `info` bitmask only names which of
-Owner/Group/DACL/SACL a given call actually wants changed — new
-`mergeSecurityDescriptor` applies only those parts onto the current
-(stored-or-fallback) descriptor before persisting, matching real
-`NtSetSecurityObject` semantics; blindly overwriting with whatever
-`desc` happens to carry in the untouched fields would have silently
-corrupted them on every ordinary "just change the DACL" call (what
-`Set-Acl` actually sends).
-
-Verified with a portable `icbfs`-level storage round-trip test
-(`TestSetWindowsACLRoundTrips`, confirmed discriminating), plus a real
-round trip through a real WinFsp mount — a stronger bar than strictly
-required, since it confirms real persistence, not just in-memory
-state: `Get-Acl` initially reported the fallback identity; `Set-Acl`
-adding an `Everyone` rule round-tripped immediately; then the mount was
-fully torn down (`Stop-Process`) and a **second, independent** mount of
-the same filesystem name still reported the identical ACL through a
-brand new handle/driver instance, proving it's genuinely in the backing
-object, not process-lifetime cached state. Full details, including the
-exact commands, in `test/windows/README.md`. Full `gofmt`/`go build`/
-`go vet`/`go test ./...` clean on Linux, plus a Windows cross-compile
-and Windows-target vet of both WinFsp binaries.
-
-### F9. Delete/rename-on-open-file emulation
-
-- Windows's pending-delete and share-mode semantics around a file open
-  elsewhere, emulated at this driver's layer per `ARCHITECTURE.md` —
-  not a core object-model change. If `go-winfsp` is the chosen binding
-  (task F1): `BehaviourCanDelete` is where a pending delete gets
-  refused if some other emulated condition says it should be (WinFsp
-  itself already handles the core "can't delete while another handle
-  has it open without `FILE_SHARE_DELETE`" share-mode enforcement
-  natively — confirm exactly how much of this is already free from
-  WinFsp itself vs. needs emulating here before assuming it's all this
-  task's responsibility).
-- **Done when:** tests cover deleting/renaming a file that's open
-  elsewhere behaving per Windows semantics, against a real mount.
-
-**Done — with a real, unplanned prerequisite discovered and built
-first.** `Rename` didn't exist anywhere in this codebase before this
-task — not in core `icbfs.Filesystem`, not in `internal/fuseserver`,
-not in `internal/winfspserver` — confirmed by grepping, not assumed;
-task F3's own "Done" notes had explicitly deferred it as "a real,
-pre-existing gap... not re-solved ad hoc for Windows only," and
-`TESTING.md` flagged the identical gap independently. Raised to Jared
-directly rather than either quietly building a Windows-only rename
-(contradicting F3's own stated principle) or quietly skipping F9;
-directed to build the real, cross-cutting fix first.
-
-**New: `icbfs.Filesystem.Rename(ctx, oldDirKey, oldName, newDirKey,
-newName, replace)`.** Matches POSIX `rename(2)` semantics throughout:
-a file can't replace a non-empty directory or vice versa
-(`ErrIsDir`/`ErrNotDir`); replacing an empty directory target works;
-`oldpath`/`newpath` already being hardlinks to the same object is
-always a no-op regardless of `replace` (POSIX's own documented special
-case); moving a directory into one of its own descendants is refused
-(`ErrInvalidRename`, via a new `dirContains` helper — this tree has no
-parent pointers to walk upward from the destination, so it walks
-downward from the source instead, an accepted cost matching
-`DiskUsage`/`Prune`'s own existing full-tree walks); reserved-name
-enforcement (task F6) applies to the new name on a primary-Windows
-filesystem. Known, documented simplification: the remove-then-insert
-pair isn't one atomic cross-directory transaction, matching the
-"last writer wins" tradeoff already accepted elsewhere (e.g. `SetAttr`'s
-ftruncate) rather than building real cross-directory distributed
-transactions, which is out of scope for this project's design. Wired
-into `internal/fuseserver` via `fs.NodeRenamer` (`RENAME_EXCHANGE` —
-atomic swap — explicitly declined: no real target workload needs it,
-and it would need its own dedicated core operation, not a
-remove-then-insert pair) and into `internal/winfspserver` via
-`winfsp.BehaviourRename`.
-
-**One real driver bug found and fixed via actual VM testing** (not
-fixed speculatively): `Rename` against a real mount initially failed
-with "Unable to find the specified file" even though the source file
-existed. Traced with a temporary debug `log.Printf` to the exact cause:
-the kernel handed the driver an *uppercased* source name
-(`"OLD.TXT"` for a file stored as `"old.txt"`) — the same case-folding
-class task F3 first found for `Cleanup`, recurring here because task
-F4's `-case-insensitive=true` default tells the kernel to fold case
-internally, while `icbfs.Filesystem`'s own lookups are exact-match
-only. Fixed with a new `realStoredName` helper (resolves a bare name to
-its real stored spelling via the existing `lookupCaseAware`, the same
-fallback `resolvePath` already uses for full paths) applied to both
-`Rename`'s source/target and — found by inspection once the pattern was
-recognized, the same bug, not separately hit — `Cleanup`'s delete path.
-
-**Share-mode enforcement and pending-delete, confirmed rather than
-assumed:** reading WinFsp's own open-source `fsop.c` directly found
-zero `FILE_SHARE_*`/`STATUS_SHARING_VIOLATION` handling anywhere in the
-user-mode dispatch library — confirming this is entirely a kernel-driver
-(`winfsp.sys`) concern, never surfaced to this project's code at all.
-Verified against a real mount: deleting a file open elsewhere without
-`FILE_SHARE_DELETE` fails with a real sharing violation with zero driver
-code involved; a file opened with `FileShare.Delete` +
-`FileOptions.DeleteOnClose` stays visible for as long as the handle is
-open and is only actually removed once `Close()` runs — proving task
-F3's existing `CanDelete`/`Cleanup` wiring already correctly implements
-pending-delete semantics (defers the real delete to `Cleanup`'s
-`FspCleanupDelete`, never deletes eagerly at `CanDelete` time); no new
-code was needed for this half of the task, only confirmation.
-
-Full `gofmt`/`go build`/`go vet`/`go test ./...` clean on Linux
-(including new portable `icbfs`-level `Rename` tests covering every
-branch above, each confirmed discriminating, and new real FUSE-mount
-tests covering basic rename and an open file descriptor surviving a
-rename of its own path), plus a Windows cross-compile and
-Windows-target vet of both WinFsp binaries. Full details, including the
-exact commands and debugging trace, in `test/windows/README.md`.
-
-### F10. Licensing compliance
-
-WinFsp is GPLv3 with a FLOSS exception, verified against its own
-`License.txt`, not assumed from general familiarity with GPL-family
-licenses — the exception requires **all three** of: (1) icbfs meeting
-the Free Software Definition or Open Source Definition; (2) including
-WinFsp's specific attribution notice and a link to its repo, in icbfs's
-own UI and user-facing docs; (3) **never** linking or distributing
-WinFsp together with any proprietary software while relying on this
-exception — mixing FLOSS and proprietary under it is not permitted. A
-commercial license exists as a fallback if that constraint ever doesn't
-fit (per-organization or per-developer terms, confirmed current
-pricing available on WinFsp's own site, not reproduced here since
-pricing changes independently of this project).
-- **Done when:** the attribution notice and repo link actually appear
-  in icbfs's own docs/UI wherever a user would encounter the WinFsp-
-  backed mount, not just noted here and forgotten.
-
-**Done.** Re-verified this entry's own claims directly against WinFsp's
-real `License.txt` (fetched fresh, not re-stated from memory): GPLv3,
-FLOSS exception requiring all three conditions exactly as described
-above, and the exact required notice text — "WinFsp - Windows File
-System Proxy, Copyright (C) Bill Zissimopoulos" plus a repo link. All
-three conditions confirmed satisfied: (1) icbfs is MIT-licensed,
-meeting the Open Source Definition; (2) the notice now appears at every
-real touchpoint (below); (3) `go.mod`'s dependency list is entirely
-ordinary FLOSS Go-ecosystem libraries (AWS SDK, MinIO client,
-`go-fuse`, `go-winfsp` itself — a separate, MIT-licensed binding, not
-WinFsp's own GPLv3-exception-covered code — protobuf, testcontainers),
-nothing proprietary mixed in.
-
-The notice (a new `winfspAttribution` constant, identical text in both
-binaries) now appears everywhere a user actually encounters the
-WinFsp-backed mount: `cmd/icbfs-winfsp`'s `--help`/usage output (via a
-new `fset.Usage` that both `-h` and a bad invocation now share, instead
-of each printing a different, notice-free usage line) and its startup
-log line on every successful mount; `cmd/icbfs-winfsp-hello`'s (the F1
-smoke-test binary — also a real WinFsp-backed mount, so it gets the
-same notice) usage and startup output; and a new "Third-party notice"
-section in the top-level `README.md`, since that's the first thing
-anyone encounters before ever running either binary.
-
-Full `gofmt`/`go build`/`go vet`/`go test ./...` clean on Linux, plus a
-Windows cross-compile and Windows-target vet of both WinFsp binaries —
-no VM round-trip needed this time, since nothing here changes driver
-behavior, only static text placement already confirmed correct by
-direct code review and successful cross-compilation.
-
-### F11. Deployment / installer story
-
-- WinFsp requires its own kernel-mode driver and user-mode DLL installed
-  on the target Windows machine, **separately from icbfs's own binary**,
-  requiring admin rights — confirmed, not assumed. icbfs cannot silently
-  carry or install this itself; it's a real, separate prerequisite a
-  user or an installer script has to satisfy via WinFsp's own installer.
-- **Done when:** icbfs's own install documentation says this plainly and
-  points to WinFsp's installer, rather than a user discovering the
-  missing dependency only when a mount attempt fails.
-
-**Done.** New "Windows mount: install WinFsp first" section in
-`README.md`, placed before the Third-party notice section (task F10)
-so a reader hits it before ever running `cmd/icbfs-winfsp`: states
-plainly that WinFsp is a separate, required prerequisite (kernel driver
-+ user-mode DLL, not bundled by icbfs), gives both real install paths
-confirmed to actually work (the GitHub releases MSI and
-`choco install winfsp`, both verified against WinFsp's own real
-release/documentation, not guessed), notes administrator rights are
-needed (it installs a Windows service and files under `Program
-Files`), states the supported Windows version range (7 through 11,
-x86/x64/ARM64, per WinFsp's own docs), and points to
-`test/windows/README.md`'s own "Installing WinFsp itself" section —
-already-existing, already-verified-end-to-end documentation (a real
-MSI install, a real gotcha found and fixed: the installer doesn't add
-its own `bin` directory to `Path`, confirmed by reading the machine
-`Path` registry value directly, not inferred) — for the exact commands
-rather than duplicating them.
-
-This closes out Part F (WinFsp/Windows support) in full: F1 through
-F11 all done, each verified against a real WinFsp mount or real
-portable tests where a mount added no further signal, with every real
-bug found along the way (not just the ones anticipated going in) fixed
-and documented in place.
+## Part G: Closing real findings from the actual certification runs
+
+Four items, each discussed directly with Jared before scoping (see that
+discussion's own record for the full reasoning) and each confirmed
+buildable with no hard blockers found during that discussion — not
+aspirational. The explicit goal for all four, stated directly: pass the
+real test, don't just document why it's excluded. Usefulness of the
+underlying feature to a real user is **explicitly not a factor** in
+scoping any of these — confirmed directly, more than once, for G2 and
+G4 specifically.
+
+**Not yet covered by this part, worth a decision before it's assumed
+in scope:** the rest of the open-findings backlog `test/windows/
+README.md` and `test/linux/README.md` already catalogue (16 WinFsp
+findings beyond the two reparse ones below — `create_readonlydir_test`,
+the three privilege-gated `create_*` tests, `getfileattr_test`,
+`getfileinfo_name_test`, `rename_test`/`rename_standby_test`,
+`setsecurity_test`, the three `rdwr_*` mmap/overlapped findings,
+`querydir_test`, `dirnotify_test`; plus Linux's `open/06.t` residual
+finding). Those aren't part of this round — raised here so the roadmap
+doesn't quietly imply they are, not because they're out of scope
+forever.
+
+### G1. Real atime tracking — strict semantics
+
+Today `fillAttr`'s own doc comment is explicit that atime is just
+reported as a copy of mtime; there's no separate atime storage at all.
+Mtime is free (derived from the object's own S3 `LastModified`); atime
+has no backend-native equivalent, so this needs its own explicit
+storage and an explicit write on every read.
+
+- New `Atime time.Time` field on `icbfs.Attr`; a new `.metadata` xattrs
+  entry (or equivalent explicit metadata field) to persist it, since
+  there's no free ride from the object store the way mtime gets one.
+- **Strict semantics, decided directly, cost understood and accepted**:
+  every read bumps atime via a real `Store.UpdateMetadata` call — not
+  `relatime`-style approximation. Jared's own words: "I understand the
+  cost... a user would be insane to actually use it nevertheless. We
+  will put it in there to be able to pass the tests cleanly." Document
+  this cost plainly wherever the write-on-every-read path lives, the
+  same way other deliberately-expensive-but-correct choices in this
+  project are documented, not left for a future reader to discover by
+  profiling.
+- Wire into `Stat`, the explicit `utimensat`/`SetAttr` path (setting
+  atime directly), and both access layers' read paths (`fuseserver`'s
+  `FileHandle.Read`, `winfspserver`'s `Read`) so a real read actually
+  triggers the update, not just `Getattr`/`GetFileInfo` reporting
+  whatever's already stored.
+- `fillAttr` (FUSE)/`fillFileInfo` (WinFsp) report the real stored
+  value instead of copying mtime.
+- **Done when:** a FUSE read measurably bumps atime (confirmed via
+  `stat` before/after, not just code review); a WinFsp read does the
+  same through `GetFileInfo`; `winfsp-tests`' `getfileinfo_test`/
+  `setfileinfo_test` (currently excluded, `test/windows/README.md`) and
+  whichever `pjdfstest` `utimensat`/`open`/`ftime`-style subtests
+  currently fail on atime grounds specifically (not the already-
+  explained device-type-loop failures) both pass.
+
+**Done.** New `Atime time.Time` field on `icbfs.Attr`; files/symlinks
+store it as a new `atime_unix_nano` field on `.metadata`'s own Protobuf
+schema (`spec/proto/icbfs/v1/metadata.proto` — a plain additive field,
+regenerated via a reconstructed `protoc`/`protoc-gen-go` invocation
+confirmed byte-identical against the existing generated files before
+trusting it); directories store it as a new `atime` native-metadata
+key, same pattern as the existing `mtime` one. `Filesystem.TouchAtime`
+(new) bumps it to now for either type, called by both access layers'
+real read paths — `fuseserver`'s `FileHandle.Read`/`Node.Readdir`,
+`winfspserver`'s `Read`/`ReadDirectory` — never from `Stat`/`Getattr`
+itself, matching real POSIX semantics (`stat(2)` must not update
+atime). `SetAttr` also gained a `atime *time.Time` parameter for
+`utimensat`'s explicit-set path, wired through go-fuse's real
+`SetAttrIn.GetATime()` and a new `timeFromFiletime` helper
+(`filetimeFromTime`'s inverse) for WinFsp's `SetBasicInfo` — which,
+found while wiring this, previously ignored its own
+`creationTime`/`lastAccessTime`/`lastWriteTime`/`changeTime`
+parameters entirely, silently no-opping any `SetFileTime` call.
+
+Verified for real, not just via portable tests (though those exist
+too — `TestTouchAtimeBumpsFileAtime`/`TestTouchAtimeBumpsDirAtime`/
+`TestSetAttrSetsExplicitAtime`, each confirmed discriminating by
+temporarily breaking the code path and watching the expected failure):
+rebuilt and redeployed to both certification VMs. `winfsp-tests`'
+`getfileinfo_test`/`setfileinfo_test` both now pass against a real
+mount, confirmed alongside all 41 previously-passing default tests
+with zero regressions. `pjdfstest`'s `utimensat` category improved
+measurably across every file in it (e.g. `00.t`: 24→22 failed,
+`02.t`: 3→1, `05.t`: 7→4, `06.t`: 2→0, `09.t`: a parse-error crash →
+a real, lesser failure) — not fully clean, because a good chunk of
+`utimensat`'s own remaining failures are explained by a related but
+genuinely separate gap this task deliberately did not fix: explicit
+**mtime**-setting (as opposed to atime) is still a no-op for files,
+since mtime is currently derived entirely from the content object's
+own S3 `LastModified` with no override field — a real, new finding,
+flagged here rather than silently folded into this task's scope or
+silently left undocumented.
+
+**One unrelated, pre-existing finding surfaced while verifying this,
+not caused by it:** `winfsp-tests`' `create_test` fails
+(`ASSERT(ERROR_INVALID_NAME == GetLastError())`, actually
+`STATUS_NOT_A_DIRECTORY`) on a trailing-backslash-past-a-file path
+check — confirmed via a direct side-by-side run against the
+*pre-G1* binary, which fails identically, so this isn't a regression
+from this task. Not yet root-caused; likely resolver-layer behavior
+(`resolvePath`'s existing `ErrNotDir` path) disagreeing with this
+specific Win32 path-validation convention. Logged here as a new, real,
+open finding rather than silently left for whoever next runs the full
+suite to rediscover from scratch.
+
+### G2. FIFO, device-node, and Unix-socket special files
+
+Confirmed, during discussion, to be much closer to "just metadata" than
+it sounds: for FIFOs, device nodes, and Unix domain sockets alike, the
+**kernel** services the actual runtime I/O once the special-file type is
+reported correctly — none of this needs the FUSE driver to implement
+pipe or device semantics itself. AF_UNIX `bind()` also creates its
+socket's filesystem entry via the kernel's own `vfs_mknod()` with
+`S_IFSOCK`, the identical path FIFOs and device nodes use — confirmed,
+not assumed, before scoping this as one task rather than three.
+
+- New `EntryType` values (`spec/proto/icbfs/v1/block.proto` — a plain,
+  additive proto enum change, not a migration) for FIFO, char device,
+  block device, and socket.
+- One new `Mknod` callback in `internal/fuseserver/node.go` (go-fuse's
+  real `NodeMknoder` interface: `Mknod(ctx, name, mode, dev, out)`),
+  dispatching on `mode & S_IFMT` to create the right entry type. Char/
+  block device nodes additionally need the `dev` (rdev: encoded major/
+  minor) stored and reported back correctly; FIFOs and sockets don't.
+- **POSIX/FUSE-only, confirmed** — NTFS has no equivalent concept, so
+  there's nothing to build on `internal/winfspserver`'s side. Flag this
+  plainly wherever the WinFsp side's own test/doc coverage might
+  otherwise imply parity that doesn't exist.
+- **Explicitly scoped to include device nodes, not just FIFOs/sockets,
+  at Jared's direct instruction** — the real security/policy question
+  this raises (should a shared, possibly-multi-mounted, object-store-
+  backed filesystem let a client create a node pointing at a real host
+  device?) was raised and explicitly set aside as out of scope for this
+  task's own goal: "any judgment about the usefulness of this feature
+  is not in scope... if we can support it, we will, simply for the
+  benefit of passing the tests."
+- **Done when:** `pjdfstest`'s `mkfifo`/`mknod` categories pass (today,
+  13 files fail outright — `test/linux/README.md`'s own "already
+  out-of-scope" table), and the device-type branches of every other
+  type-looping test file (`rename`, `open`, `link`, `chmod`, `chown`,
+  `mkdir`, `rmdir`, `unlink`, `symlink`, `utimensat` — currently ~55
+  files with partial failures explained by exactly this gap) pass too.
+
+### G3. Local disk cache for file content, replacing the in-RAM buffer
+
+Scoped deliberately narrow after discussion corrected an initial
+over-scoping on my part: this is the local-buffering layer only. The
+backend protocol (`objstore.Store`'s whole-object `Put`/`Get`) does not
+change in this task — no range-GET, no multipart upload. Jared's own
+correction: "I don't understand the need for [a backend protocol
+change]... did you think I asked for that?" — confirmed no, scope is
+local-cache-only.
+
+- `OpenFile` (`internal/icbfs/openfile.go`)'s `data []byte` field —
+  today, the *entire* file is always materialized as one in-memory
+  slice on `Open` (the root cause of this session's three crash-bug
+  fixes, see below) — becomes a local on-disk cache file; `ReadAt`/
+  `WriteAt` operate against it via streaming I/O instead of slice
+  indexing.
+- `Flush` keeps reading the local cache file whole and `Put`-ing it
+  whole to the backend — identical write protocol to today, just
+  sourced from disk instead of RAM.
+- New config: a maximum total local cache size (a `cmd/icbfs` flag,
+  needs a sensible default since this isn't optional functionality the
+  way `--locking`/`--notify` are) and an LRU eviction policy at
+  **per-file granularity** — evict the whole locally-cached copy of the
+  least-recently-accessed open file once the total budget is exceeded.
+  Not sub-file chunking: there's no backend partial-write path to make
+  finer-grained eviction pay off, since this task deliberately doesn't
+  touch the backend protocol.
+- **Verify, don't assume, that the existing CAS-retry-and-reapply
+  `writeOp` log (task B1) carries over unchanged** — it already tracks
+  `{offset, data}` edits independent of whatever backs `o.data`, so it
+  should be agnostic to this change, but this needs actual confirmation
+  against the existing Part B test suite, not just a reasonable-sounding
+  assumption.
+- **Not a "Done when" requirement, but a real follow-up worth tracking
+  once this lands:** this was raised as the reason mmap "should" get
+  more straightforward (a local file can be mmap'd directly via the
+  OS's own mechanism, rather than emulated over a Go slice) — revisit
+  the open `rdwr_mmap_test`/`rdwr_mixed_test` findings
+  (`test/windows/README.md`) once G3 ships, to see whether that hope
+  actually paid off, rather than assuming it did.
+- **Done when:** a large file's `ReadAt`/`WriteAt` traffic no longer
+  shows up as a large RSS spike in the mounting process (confirmed via
+  the same `runtime.MemStats`-logging technique already used to
+  diagnose this session's OOM bug, not just reasoned about); total
+  local cache usage never exceeds the configured budget under sustained
+  multi-file access; `go test ./...` — especially Part B's existing
+  CAS-retry/escalation suite — still passes unmodified.
+
+### G4. Generic (non-symlink) reparse-point support
+
+`internal/winfspserver/reparse.go` already handles symlinks correctly
+(confirmed by reading it directly, not re-guessed) — this task is
+specifically the *other* reparse-tag case `winfsp-tests`' own
+`reparse_guid_test`/`reparse_nfs_test` exercise: setting an arbitrary,
+non-symlink reparse tag (a custom GUID, or an NFS-style tag) with
+opaque data on any file, confirmed against the real test source
+(`tst/winfsp-tests/reparse-test.c`), not assumed from the test name
+alone.
+
+- A new, separate `SetReparsePoint`/`GetReparsePoint` path (distinct
+  from the existing symlink-specific one) for any tag other than
+  `IO_REPARSE_TAG_SYMLINK`: store the raw tag + GUID (when present) +
+  opaque data blob as a new `.metadata` xattrs entry — the same pattern
+  `windows.acl` (task F8) and `windows.attributes` (task F7) already
+  established, not a new storage mechanism.
+- A normal `Open` (no `FILE_FLAG_OPEN_REPARSE_POINT`) against a file
+  carrying a tag this driver doesn't know how to transparently follow
+  must fail distinctly — the real test expects `ERROR_CANT_ACCESS_FILE`
+  on the Win32 side; confirm the exact NTSTATUS WinFsp's own header
+  maps that to before assuming it, same practice as every other
+  external API in this project. Opening *with* that flag must still
+  succeed and return the raw reparse point, unresolved.
+- **Wire up `BehaviourDeleteReparsePoint`** — confirmed, while scoping
+  this task, that `go-winfsp` exposes this as its own separate hook and
+  `reparse.go` doesn't implement it at all today, for symlinks or
+  anything else. `FSCTL_DELETE_REPARSE_POINT` likely doesn't work for
+  *any* reparse point currently — a bonus finding from this task's own
+  research, not something `reparse_guid_test`/`_nfs_test` alone forced
+  into view, but squarely in scope since both tests exercise delete as
+  part of their own flow.
+- **Done when:** `winfsp-tests`' `reparse_guid_test` and
+  `reparse_nfs_test` both pass against a real mount.
+
+### G5. Fix: symlink creation fails under `SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE`
+
+A real, concrete driver bug — **not** a missing capability, correcting
+an earlier assumption surfaced during discussion that this would need
+access to the caller's privilege/security token, which `go-winfsp`
+genuinely does not expose. Reading the real test source
+(`tst/winfsp-tests/winfsp-tests.h`'s `BestEffortCreateSymbolicLinkW`)
+showed the actual mechanism: it calls `CreateSymbolicLinkW` with the
+modern `SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE` flag first (the
+ordinary, no-privilege-needed way Windows creates symlinks today), and
+only falls back to the privileged variant if that specific attempt
+fails with exactly `ERROR_INVALID_PARAMETER`. This driver currently
+returns some other error under that flag (observed: file-not-found),
+which breaks the test's fallback logic and its final
+`ERROR_PRIVILEGE_NOT_HELD` assertion — a bug in how `Create`/
+`SetReparsePoint`'s two-step sequence handles whatever this flag
+actually changes about the request, not an unbuilt feature.
+
+- Reproduce directly on the Windows VM with targeted logging — the same
+  method that found the `Rename` case-folding bug (task F9) and the
+  `applyLocked` OOM trigger (`internal/icbfs`, this session) — to find
+  exactly where the `Create`-then-`SetReparsePoint` sequence diverges
+  under this specific flag.
+- **Done when:** `winfsp-tests`' `reparse_symlink_test` and
+  `reparse_symlink_relative_test` both pass against a real mount.

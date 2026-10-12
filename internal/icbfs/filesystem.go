@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"sync"
 	"time"
 
@@ -286,6 +287,7 @@ func dirAttrFromObject(key string, obj *objstore.Object) Attr {
 		Gid:   parseMetaUint(obj.Metadata, dirMetaGid),
 		Nlink: parseMetaUint(obj.Metadata, dirMetaNlink),
 		Size:  obj.Size,
+		Atime: parseMetaTime(obj.Metadata, dirMetaAtime), // zero if never read (no fallback — unlike mtime, "never accessed" is a real, honest value here)
 		Mtime: mtime,
 		Ctime: obj.LastModified,
 		Btime: Btime(key),
@@ -1224,7 +1226,7 @@ func (f *Filesystem) WriteFile(ctx context.Context, key string, data []byte, ifM
 // mode/uid/gid change goes through updateFileMetadata, which — unlike
 // the directory case — *is* real-CAS-protected, a quiet benefit of the
 // .metadata consolidation.
-func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mode, uid, gid *uint32, size *int64) (Attr, error) {
+func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mode, uid, gid *uint32, size *int64, atime *time.Time) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
 	}
@@ -1267,6 +1269,9 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 		if gid != nil {
 			attr.Gid = *gid
 		}
+		if atime != nil {
+			attr.Atime = *atime
+		}
 		obj, err := f.store.UpdateMetadata(ctx, key, dirMetadataFromAttr(attr), "")
 		if err != nil {
 			return Attr{}, err
@@ -1294,7 +1299,7 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 		}
 	}
 
-	if mode != nil || uid != nil || gid != nil {
+	if mode != nil || uid != nil || gid != nil || atime != nil {
 		return f.updateFileMetadata(ctx, key, func(a *Attr) {
 			if mode != nil {
 				a.Mode = *mode
@@ -1305,10 +1310,55 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 			if gid != nil {
 				a.Gid = *gid
 			}
+			if atime != nil {
+				a.Atime = *atime
+			}
 		})
 	}
 
 	return f.Stat(ctx, key, typ)
+}
+
+// TouchAtime bumps key's recorded last-access time to now — called by
+// access layers after a real read(2)/readdir(2), never from Stat/
+// Getattr itself, matching POSIX semantics (stat(2) must not itself
+// update atime). Part of ROADMAP.md's Part G, task G1's deliberately
+// strict (not relatime-approximated) semantics: every real read
+// triggers this, accepting the real cost of a metadata write on every
+// read rather than batching or approximating it.
+//
+// A lost CAS race against a concurrent chmod/chown/write (the
+// underlying updateFileMetadata/UpdateMetadata calls both retry a
+// bounded number of times, same as any other metadata update) just
+// means this read's atime update is superseded by the other writer's
+// own version of the object — acceptable for a field whose own
+// documented cost/benefit tradeoff already accepts far worse
+// imprecision than that.
+func (f *Filesystem) TouchAtime(ctx context.Context, key string, typ EntryType) error {
+	now := time.Now()
+	if typ == TypeDir {
+		obj, err := f.store.Head(ctx, key)
+		if err != nil {
+			return mapNotFound(err)
+		}
+		meta := obj.Metadata
+		if meta == nil {
+			meta = map[string]string{}
+		} else {
+			cp := make(map[string]string, len(meta))
+			for k, v := range meta {
+				cp[k] = v
+			}
+			meta = cp
+		}
+		meta[dirMetaAtime] = strconv.FormatInt(now.UnixNano(), 10)
+		_, err = f.store.UpdateMetadata(ctx, key, meta, obj.ETag)
+		return err
+	}
+	_, err := f.updateFileMetadata(ctx, key, func(a *Attr) {
+		a.Atime = now
+	})
+	return err
 }
 
 func mapNotFound(err error) error {

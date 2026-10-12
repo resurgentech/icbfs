@@ -42,6 +42,9 @@ func (d *driver) ReadDirectory(fs *winfsp.FileSystemRef, file uintptr, pattern s
 	if err != nil {
 		return toWinError(err)
 	}
+	// Best-effort, deliberately not checked — same reasoning as
+	// Read's own TouchAtime call (ROADMAP.md's Part G, task G1).
+	_ = d.fsys.TouchAtime(ctx(), h.key, icbfs.TypeDir)
 	for _, e := range entries {
 		attr, err := d.fsys.Stat(ctx(), e.UUID, e.Type)
 		if err != nil {

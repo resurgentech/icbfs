@@ -21,4 +21,13 @@ message Metadata {
   uint32 gid = 3;
   uint32 nlink = 4;
   map<string, bytes> xattrs = 5;
+
+  // Last-access time, nanoseconds since the Unix epoch (ROADMAP.md's
+  // Part G, task G1). Unlike mtime, this has no free ride from the
+  // object store (mtime is derived from the content object's own
+  // LastModified) — atime needs real, explicit storage, and real,
+  // explicit strict semantics: every read updates it, by direct
+  // decision, accepting the cost of a metadata write on every read
+  // rather than a relatime-style approximation.
+  int64 atime_unix_nano = 6;
 }
