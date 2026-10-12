@@ -703,6 +703,72 @@ func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid,
 	return newUUID, attr, contentObj.ETag, nil
 }
 
+// Mknod creates a FIFO, Unix domain socket, or char/block device entry
+// (ROADMAP.md's Part G, task G2) — typ must be TypeFifo, TypeSocket,
+// TypeCharDevice, or TypeBlockDevice; rdev is only meaningful (and only
+// stored) for the two device types.
+//
+// Deliberately built as a thin variant of Create, not a separate
+// mechanism: none of these types have any real byte-stream content
+// (a FIFO's "content" is a transient kernel pipe object; a device
+// node's is the real device, serviced by the kernel's own char/block
+// driver tables; a Unix socket's is the kernel's AF_UNIX
+// implementation) — the FUSE driver's only real job for any of them
+// is reporting the right type/mode bit via Lookup/Getattr, confirmed
+// before scoping this task at all (ROADMAP.md's Part G intro). So
+// this reuses exactly the same two-object shape Create already
+// established (an empty, never-touched-again content object plus a
+// .metadata object) purely so Stat/SetAttr/TouchAtime keep working
+// unchanged for these types too, with no special-casing needed
+// anywhere else in this package.
+//
+// No OpenFile/ETag returned, unlike Create — these types are never
+// opened for byte-level read/write through this driver (go-fuse's own
+// NodeMknoder has no file-handle return either, for the same reason:
+// the kernel intercepts real I/O against a special file before it
+// ever reaches this filesystem's Open/Read/Write).
+func (f *Filesystem) Mknod(ctx context.Context, dirKey, name string, mode uint32, typ EntryType, rdev, uid, gid uint32) (string, Attr, error) {
+	if err := f.checkWritable(); err != nil {
+		return "", Attr{}, err
+	}
+	if err := f.checkName(name); err != nil {
+		return "", Attr{}, err
+	}
+	newUUID, err := f.newKey()
+	if err != nil {
+		return "", Attr{}, err
+	}
+	contentObj, err := f.store.Put(ctx, newUUID, bytes.NewReader(nil), nil, "")
+	if err != nil {
+		return "", Attr{}, err
+	}
+
+	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1}
+	if typ == TypeCharDevice || typ == TypeBlockDevice {
+		attr.Rdev = rdev
+	}
+	metaData, err := encodeFileMetadata(attr)
+	if err != nil {
+		_ = f.store.Delete(ctx, newUUID, "")
+		return "", Attr{}, err
+	}
+	metaObj, err := f.store.Put(ctx, metadataObjectKey(newUUID), bytes.NewReader(metaData), nil, "")
+	if err != nil {
+		_ = f.store.Delete(ctx, newUUID, "")
+		return "", Attr{}, err
+	}
+
+	if err := f.insertEntry(ctx, dirKey, name, newUUID, typ); err != nil {
+		_ = f.store.Delete(ctx, newUUID, "")
+		_ = f.store.Delete(ctx, metadataObjectKey(newUUID), "")
+		return "", Attr{}, err
+	}
+	attr.Btime = Btime(newUUID)
+	attr.Mtime = contentObj.LastModified
+	attr.Ctime = metaObj.LastModified
+	return newUUID, attr, nil
+}
+
 // Symlink creates a new symlink named name inside dirKey, pointing at
 // target. The target string is stored as the object's content; mode/
 // uid/gid/nlink live in metadataObjectKey, same as for a regular file.

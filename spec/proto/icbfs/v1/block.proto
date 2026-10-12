@@ -5,10 +5,18 @@ package icbfs.v1;
 option go_package = "github.com/resurgentech/icbfs/internal/pb";
 
 // EntryType mirrors internal/block.EntryType.
+//
+// FIFO/CHAR_DEVICE/BLOCK_DEVICE/SOCKET (ROADMAP.md's Part G, task G2)
+// are POSIX/FUSE-only — Windows/NTFS has no equivalent concept, so
+// internal/winfspserver never produces or expects these.
 enum EntryType {
   ENTRY_TYPE_FILE = 0;
   ENTRY_TYPE_DIR = 1;
   ENTRY_TYPE_SYMLINK = 2;
+  ENTRY_TYPE_FIFO = 3;
+  ENTRY_TYPE_CHAR_DEVICE = 4;
+  ENTRY_TYPE_BLOCK_DEVICE = 5;
+  ENTRY_TYPE_SOCKET = 6;
 }
 
 // Entry is one row of a leaf block: a name -> UUID mapping.

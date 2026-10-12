@@ -468,6 +468,64 @@ func TestSetAttrRejectsHugeSizeInsteadOfCrashing(t *testing.T) {
 	}
 }
 
+// TestMknodCreatesSpecialFileEntries covers ROADMAP.md's Part G, task
+// G2: a FIFO, a Unix socket, and a char/block device entry can each be
+// created, report the right type via ReadDir, and — devices only —
+// round-trip their device number exactly. None of these types have
+// any real content for this filesystem to materialize or serve (the
+// kernel services their actual I/O once the type bit is reported
+// correctly); this test only proves the metadata/type plumbing is
+// right, which is the entirety of this driver's own job for them.
+func TestMknodCreatesSpecialFileEntries(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+
+	cases := []struct {
+		name string
+		typ  EntryType
+		rdev uint32
+	}{
+		{"a-fifo", TypeFifo, 0},
+		{"a-socket", TypeSocket, 0},
+		{"a-char-device", TypeCharDevice, 0x0105}, // major 1, minor 5 — arbitrary, just non-zero and distinguishable
+		{"a-block-device", TypeBlockDevice, 0x0800},
+	}
+	for _, c := range cases {
+		uuid, attr, err := fsys.Mknod(ctx, root, c.name, 0644, c.typ, c.rdev, 1000, 1000)
+		if err != nil {
+			t.Fatalf("Mknod %s: %v", c.name, err)
+		}
+		if attr.Rdev != c.rdev {
+			t.Fatalf("%s: Mknod's returned Rdev = %#x, want %#x", c.name, attr.Rdev, c.rdev)
+		}
+		stated, err := fsys.Stat(ctx, uuid, c.typ)
+		if err != nil {
+			t.Fatalf("Stat %s: %v", c.name, err)
+		}
+		if stated.Rdev != c.rdev {
+			t.Fatalf("%s: Stat's Rdev = %#x, want %#x", c.name, stated.Rdev, c.rdev)
+		}
+		if stated.Uid != 1000 || stated.Mode != 0644 {
+			t.Fatalf("%s: Stat = uid %d mode %o, want uid 1000 mode 0644", c.name, stated.Uid, stated.Mode)
+		}
+	}
+
+	entries, err := fsys.ReadDir(ctx, root)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	gotTypes := make(map[string]EntryType, len(entries))
+	for _, e := range entries {
+		gotTypes[e.Name] = e.Type
+	}
+	for _, c := range cases {
+		if gotTypes[c.name] != c.typ {
+			t.Fatalf("ReadDir reported %s as type %v, want %v", c.name, gotTypes[c.name], c.typ)
+		}
+	}
+}
+
 // TestTouchAtimeBumpsFileAtime covers ROADMAP.md's Part G, task G1:
 // a brand-new file reports zero Atime (never accessed), and a single
 // TouchAtime call (what a real read(2) triggers via FileHandle.Read/

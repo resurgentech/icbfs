@@ -22,12 +22,20 @@ const (
 )
 
 // EntryType mirrors internal/block.EntryType.
+//
+// FIFO/CHAR_DEVICE/BLOCK_DEVICE/SOCKET (ROADMAP.md's Part G, task G2)
+// are POSIX/FUSE-only — Windows/NTFS has no equivalent concept, so
+// internal/winfspserver never produces or expects these.
 type EntryType int32
 
 const (
-	EntryType_ENTRY_TYPE_FILE    EntryType = 0
-	EntryType_ENTRY_TYPE_DIR     EntryType = 1
-	EntryType_ENTRY_TYPE_SYMLINK EntryType = 2
+	EntryType_ENTRY_TYPE_FILE         EntryType = 0
+	EntryType_ENTRY_TYPE_DIR          EntryType = 1
+	EntryType_ENTRY_TYPE_SYMLINK      EntryType = 2
+	EntryType_ENTRY_TYPE_FIFO         EntryType = 3
+	EntryType_ENTRY_TYPE_CHAR_DEVICE  EntryType = 4
+	EntryType_ENTRY_TYPE_BLOCK_DEVICE EntryType = 5
+	EntryType_ENTRY_TYPE_SOCKET       EntryType = 6
 )
 
 // Enum value maps for EntryType.
@@ -36,11 +44,19 @@ var (
 		0: "ENTRY_TYPE_FILE",
 		1: "ENTRY_TYPE_DIR",
 		2: "ENTRY_TYPE_SYMLINK",
+		3: "ENTRY_TYPE_FIFO",
+		4: "ENTRY_TYPE_CHAR_DEVICE",
+		5: "ENTRY_TYPE_BLOCK_DEVICE",
+		6: "ENTRY_TYPE_SOCKET",
 	}
 	EntryType_value = map[string]int32{
-		"ENTRY_TYPE_FILE":    0,
-		"ENTRY_TYPE_DIR":     1,
-		"ENTRY_TYPE_SYMLINK": 2,
+		"ENTRY_TYPE_FILE":         0,
+		"ENTRY_TYPE_DIR":          1,
+		"ENTRY_TYPE_SYMLINK":      2,
+		"ENTRY_TYPE_FIFO":         3,
+		"ENTRY_TYPE_CHAR_DEVICE":  4,
+		"ENTRY_TYPE_BLOCK_DEVICE": 5,
+		"ENTRY_TYPE_SOCKET":       6,
 	}
 )
 
@@ -309,11 +325,15 @@ const file_spec_proto_icbfs_v1_block_proto_rawDesc = "" +
 	"\x05Block\x12'\n" +
 	"\x04kind\x18\x01 \x01(\x0e2\x13.icbfs.v1.BlockKindR\x04kind\x12)\n" +
 	"\aentries\x18\x02 \x03(\v2\x0f.icbfs.v1.EntryR\aentries\x12+\n" +
-	"\bchildren\x18\x03 \x03(\v2\x0f.icbfs.v1.ChildR\bchildren*L\n" +
+	"\bchildren\x18\x03 \x03(\v2\x0f.icbfs.v1.ChildR\bchildren*\xb1\x01\n" +
 	"\tEntryType\x12\x13\n" +
 	"\x0fENTRY_TYPE_FILE\x10\x00\x12\x12\n" +
 	"\x0eENTRY_TYPE_DIR\x10\x01\x12\x16\n" +
-	"\x12ENTRY_TYPE_SYMLINK\x10\x02*9\n" +
+	"\x12ENTRY_TYPE_SYMLINK\x10\x02\x12\x13\n" +
+	"\x0fENTRY_TYPE_FIFO\x10\x03\x12\x1a\n" +
+	"\x16ENTRY_TYPE_CHAR_DEVICE\x10\x04\x12\x1b\n" +
+	"\x17ENTRY_TYPE_BLOCK_DEVICE\x10\x05\x12\x15\n" +
+	"\x11ENTRY_TYPE_SOCKET\x10\x06*9\n" +
 	"\tBlockKind\x12\x13\n" +
 	"\x0fBLOCK_KIND_LEAF\x10\x00\x12\x17\n" +
 	"\x13BLOCK_KIND_INTERNAL\x10\x01B+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"

@@ -123,6 +123,7 @@ type Attr struct {
 	Ctime  time.Time
 	Btime  time.Time         // derived from the UUIDv7 key; zero if the key isn't a UUIDv7
 	Xattrs map[string][]byte // file/symlink only; nil for directories
+	Rdev   uint32            // TypeCharDevice/TypeBlockDevice only (ROADMAP.md's Part G, task G2); 0 for every other type
 }
 
 // --- Directory attributes: native object metadata on the block object
@@ -215,6 +216,7 @@ func encodeFileMetadata(a Attr) ([]byte, error) {
 		Nlink:         a.Nlink,
 		Xattrs:        a.Xattrs,
 		AtimeUnixNano: atimeNano,
+		Rdev:          a.Rdev,
 	})
 }
 
@@ -242,6 +244,7 @@ func decodeFileMetadata(data []byte) (Attr, error) {
 		Nlink:  m.Nlink,
 		Xattrs: m.Xattrs,
 		Atime:  atime,
+		Rdev:   m.Rdev,
 	}, nil
 }
 
@@ -293,7 +296,11 @@ func Ino(key string) uint64 {
 type EntryType = block.EntryType
 
 const (
-	TypeFile    = block.TypeFile
-	TypeDir     = block.TypeDir
-	TypeSymlink = block.TypeSymlink
+	TypeFile        = block.TypeFile
+	TypeDir         = block.TypeDir
+	TypeSymlink     = block.TypeSymlink
+	TypeFifo        = block.TypeFifo        // ROADMAP.md's Part G, task G2 — POSIX/FUSE-only, no Windows/NTFS equivalent
+	TypeCharDevice  = block.TypeCharDevice  // same
+	TypeBlockDevice = block.TypeBlockDevice // same
+	TypeSocket      = block.TypeSocket      // same
 )

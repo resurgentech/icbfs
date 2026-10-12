@@ -30,4 +30,11 @@ message Metadata {
   // decision, accepting the cost of a metadata write on every read
   // rather than a relatime-style approximation.
   int64 atime_unix_nano = 6;
+
+  // The device number (encoded major/minor, same packing mknod(2)/
+  // stat(2)'s st_rdev uses) for a char/block device entry (ROADMAP.md's
+  // Part G, task G2) — meaningless and always 0 for every other entry
+  // type, including the FIFO/socket special files task G2 also adds
+  // (neither has a device number at all).
+  uint32 rdev = 7;
 }

@@ -26,12 +26,23 @@ import (
 )
 
 // EntryType is the kind of node a directory row points at.
+//
+// TypeFifo/TypeCharDevice/TypeBlockDevice/TypeSocket (ROADMAP.md's
+// Part G, task G2) are POSIX/FUSE-only — Windows/NTFS has no
+// equivalent, so internal/winfspserver never produces or expects
+// these. Order must match spec/proto/icbfs/v1/block.proto's
+// EntryType enum exactly: Encode/Decode cast between the two
+// numerically, not through a translation table.
 type EntryType uint8
 
 const (
 	TypeFile EntryType = iota
 	TypeDir
 	TypeSymlink
+	TypeFifo
+	TypeCharDevice
+	TypeBlockDevice
+	TypeSocket
 )
 
 // Entry is one row of a leaf block.

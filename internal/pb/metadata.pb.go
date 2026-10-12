@@ -47,6 +47,12 @@ type Metadata struct {
 	// decision, accepting the cost of a metadata write on every read
 	// rather than a relatime-style approximation.
 	AtimeUnixNano int64 `protobuf:"varint,6,opt,name=atime_unix_nano,json=atimeUnixNano,proto3" json:"atime_unix_nano,omitempty"`
+	// The device number (encoded major/minor, same packing mknod(2)/
+	// stat(2)'s st_rdev uses) for a char/block device entry (ROADMAP.md's
+	// Part G, task G2) — meaningless and always 0 for every other entry
+	// type, including the FIFO/socket special files task G2 also adds
+	// (neither has a device number at all).
+	Rdev          uint32 `protobuf:"varint,7,opt,name=rdev,proto3" json:"rdev,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -123,18 +129,26 @@ func (x *Metadata) GetAtimeUnixNano() int64 {
 	return 0
 }
 
+func (x *Metadata) GetRdev() uint32 {
+	if x != nil {
+		return x.Rdev
+	}
+	return 0
+}
+
 var File_spec_proto_icbfs_v1_metadata_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\n" +
-	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\"\xf3\x01\n" +
+	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\"\x87\x02\n" +
 	"\bMetadata\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\rR\x04mode\x12\x10\n" +
 	"\x03uid\x18\x02 \x01(\rR\x03uid\x12\x10\n" +
 	"\x03gid\x18\x03 \x01(\rR\x03gid\x12\x14\n" +
 	"\x05nlink\x18\x04 \x01(\rR\x05nlink\x126\n" +
 	"\x06xattrs\x18\x05 \x03(\v2\x1e.icbfs.v1.Metadata.XattrsEntryR\x06xattrs\x12&\n" +
-	"\x0fatime_unix_nano\x18\x06 \x01(\x03R\ratimeUnixNano\x1a9\n" +
+	"\x0fatime_unix_nano\x18\x06 \x01(\x03R\ratimeUnixNano\x12\x12\n" +
+	"\x04rdev\x18\a \x01(\rR\x04rdev\x1a9\n" +
 	"\vXattrsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01B+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"

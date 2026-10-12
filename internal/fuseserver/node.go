@@ -44,6 +44,7 @@ var (
 	_ fs.NodeSetattrer  = (*Node)(nil)
 	_ fs.NodeReaddirer  = (*Node)(nil)
 	_ fs.NodeMkdirer    = (*Node)(nil)
+	_ fs.NodeMknoder    = (*Node)(nil)
 	_ fs.NodeCreater    = (*Node)(nil)
 	_ fs.NodeOpener     = (*Node)(nil)
 	_ fs.NodeUnlinker   = (*Node)(nil)
@@ -93,6 +94,14 @@ func typeToFuseMode(t icbfs.EntryType) uint32 {
 		return syscall.S_IFDIR
 	case icbfs.TypeSymlink:
 		return syscall.S_IFLNK
+	case icbfs.TypeFifo: // ROADMAP.md's Part G, task G2
+		return syscall.S_IFIFO
+	case icbfs.TypeCharDevice:
+		return syscall.S_IFCHR
+	case icbfs.TypeBlockDevice:
+		return syscall.S_IFBLK
+	case icbfs.TypeSocket:
+		return syscall.S_IFSOCK
 	default:
 		return syscall.S_IFREG
 	}
@@ -125,6 +134,7 @@ func fillAttr(out *fuse.Attr, key string, typ icbfs.EntryType, a icbfs.Attr) {
 		out.Nlink = 1
 	}
 	out.Owner = fuse.Owner{Uid: a.Uid, Gid: a.Gid}
+	out.Rdev = a.Rdev // meaningful (and only ever non-zero) for TypeCharDevice/TypeBlockDevice — ROADMAP.md's Part G, task G2
 
 	mtime := a.Mtime
 	if mtime.IsZero() {
@@ -246,6 +256,16 @@ func (n *Node) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
 	}
 	out.Bfree = free
 	out.Bavail = free
+	// A real finding, not previously known: leaving this unset (its
+	// zero value) made pathconf(_PC_NAME_MAX) against a real mount
+	// report 0 — confirmed via pjdfstest's own `pathconf` helper —
+	// which sent one of its test helpers (dirgen_max, used by
+	// mknod/03.t and others) into an effectively-infinite loop
+	// building zero-length path components, hanging the whole test
+	// run. 255 matches NAME_MAX on every common Linux filesystem
+	// (ext4, xfs, btrfs) — this project enforces no shorter limit of
+	// its own anywhere.
+	out.NameLen = 255
 	return 0
 }
 
@@ -313,6 +333,43 @@ func (n *Node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.En
 	}
 	fillAttr(&out.Attr, newUUID, icbfs.TypeDir, attr)
 	return n.newChild(ctx, newUUID, icbfs.TypeDir), 0
+}
+
+// Mknod creates a FIFO, Unix domain socket, or char/block device entry
+// (ROADMAP.md's Part G, task G2). One callback covers all four special-
+// file types — the kernel services their actual runtime I/O itself
+// once the right mode bit is reported (mknod(2) creates the special
+// file via this same syscall/callback for all of them, including
+// AF_UNIX sockets: bind(2) creates its own filesystem entry via the
+// kernel's own vfs_mknod(), the identical path), so there's nothing
+// type-specific for this driver to do beyond dispatching on mode's
+// S_IFMT bits and, for the two device types, carrying dev through.
+func (n *Node) Mknod(ctx context.Context, name string, mode, dev uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	var typ icbfs.EntryType
+	switch mode & syscall.S_IFMT {
+	case syscall.S_IFIFO:
+		typ = icbfs.TypeFifo
+	case syscall.S_IFSOCK:
+		typ = icbfs.TypeSocket
+	case syscall.S_IFCHR:
+		typ = icbfs.TypeCharDevice
+	case syscall.S_IFBLK:
+		typ = icbfs.TypeBlockDevice
+	default:
+		// mknod(2) can also be asked to make a plain regular file
+		// (S_IFREG) or, on some systems, a FIFO via mkfifo(3)'s own
+		// separate libc wrapper that still lands here — neither needs
+		// handling beyond what Create already does, and nothing else
+		// is a valid mknod(2) target at all.
+		return nil, syscall.EINVAL
+	}
+	uid, gid := callerOwner(ctx)
+	newUUID, attr, err := n.fsys.Mknod(ctx, n.key, name, mode&0o7777, typ, dev, uid, gid)
+	if err != nil {
+		return nil, errnoFromErr(err)
+	}
+	fillAttr(&out.Attr, newUUID, typ, attr)
+	return n.newChild(ctx, newUUID, typ), 0
 }
 
 func (n *Node) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {

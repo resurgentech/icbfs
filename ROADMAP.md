@@ -159,6 +159,59 @@ not assumed, before scoping this as one task rather than three.
   `mkdir`, `rmdir`, `unlink`, `symlink`, `utimensat` — currently ~55
   files with partial failures explained by exactly this gap) pass too.
 
+**Done, with two new findings surfaced and documented rather than
+fixed here.** New `EntryType` values landed as planned; one new
+`Mknod` callback in `internal/fuseserver/node.go` dispatches on
+`mode & S_IFMT` to the right type, with `Rdev` threaded through
+`icbfs.Attr`, a new `rdev` field on `.metadata`'s proto schema, and
+`fillAttr`'s own `out.Rdev`. Verified for real against the Linux
+VM, not just the portable `TestMknodCreatesSpecialFileEntries` (new):
+`mkfifo`/`mknod`(char) both create correctly-typed entries with the
+right mode/owner; a real FIFO round-tripped actual piped data through
+the kernel with zero driver-side pipe code, exactly as the "kernel
+services this" reasoning above predicted; a real `AF_UNIX` `bind()`
+created a correctly-typed socket entry the same way.
+
+**A real, blocking bug found and fixed along the way, unrelated to
+special files themselves**: `internal/fuseserver`'s `Statfs` never set
+`StatfsOut.NameLen`, leaving it at its zero value — which made
+`pathconf(_PC_NAME_MAX)` against a real mount report **0**, confirmed
+via pjdfstest's own `pathconf` helper. That sent `dirgen_max` (a
+shared test helper several categories use, not just this one) into an
+effectively-infinite loop building zero-length path components,
+hanging `mknod/03.t` and the whole `prove` run with it — this is why
+the category appeared completely untestable at first, not just
+unsupported. Fixed by setting `out.NameLen = 255` (matching
+`NAME_MAX` on every common Linux filesystem this project doesn't
+impose any shorter limit of its own against). Confirmed fixed:
+`pathconf` now reports 255, and the hang is gone.
+
+With that fixed, `mkfifo`/`mknod` together went from 13 files
+entirely out of scope to 294 of 306 individual assertions passing.
+The remaining 12 (across 5 files) are two separate, genuinely
+cross-cutting, pre-existing gaps this task did not fix, since neither
+is specific to special files at all — found here only because these
+particular test files happened to check for them explicitly where
+other categories' own tests didn't:
+- **Name-length validation isn't enforced anywhere**: `mknod`ing a
+  name one character past `NAME_MAX` (255) succeeds instead of
+  failing with `ENAMETOOLONG`. Would affect `Create`/`Mkdir`/
+  `Symlink` identically if they were tested the same way.
+- **A parent directory's reported mtime/ctime isn't bumped when a
+  child is inserted into it**: `insertEntry`'s write to the
+  directory's own block object changes its *real* S3 `LastModified`,
+  but `dirAttrFromObject` prefers the *explicitly stored*
+  `dirMetaMtime` field (set at creation/`SetAttr` time only) over
+  that real value whenever it's present — so the parent's own mtime
+  silently stays stale after any insert. Same likely blast radius as
+  the finding above: `Create`/`Mkdir`/`Symlink` all share `insertEntry`.
+
+Neither finding was fixed here — both are real, both are
+cross-cutting enough to deserve their own scoped investigation rather
+than a reflexive fix buried inside this task, and both are logged
+here rather than silently left for whoever next runs this category to
+rediscover from scratch.
+
 ### G3. Local disk cache for file content, replacing the in-RAM buffer
 
 Scoped deliberately narrow after discussion corrected an initial
