@@ -243,6 +243,22 @@ func (d *driver) SetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 	if err != nil {
 		return toWinError(err)
 	}
+	// The kernel hands this callback an uppercased name under
+	// task F4's -case-insensitive=true default — the exact same
+	// case-folding gotcha task F9 already found and fixed for
+	// Rename/Cleanup, recurring here because this is a third,
+	// separately-written call site that was never updated to match
+	// (ROADMAP.md's Part G, task G5; confirmed via a real debug trace,
+	// not assumed: CreateSymbolicLinkW's placeholder Create arrives as
+	// "\\link1.txt", but this callback's own SetReparsePoint then
+	// arrives as "\\LINK1.TXT" for the identical operation).
+	// icbfs.Filesystem's own lookups are exact-match only, so an
+	// uppercased base here made Unlink fail with ErrNotFound on every
+	// single symlink creation — which BestEffortCreateSymbolicLinkW's
+	// own fallback-on-ERROR_INVALID_PARAMETER logic doesn't catch,
+	// surfacing as a plain, unconditional failure regardless of
+	// SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE.
+	base = realStoredName(ctx(), d.fsys, parent.Key, base, d.caseInsensitive)
 
 	if h.typ != icbfs.TypeSymlink {
 		if err := d.fsys.Unlink(ctx(), parent.Key, base); err != nil {

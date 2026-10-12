@@ -429,3 +429,42 @@ actually changes about the request, not an unbuilt feature.
   under this specific flag.
 - **Done when:** `winfsp-tests`' `reparse_symlink_test` and
   `reparse_symlink_relative_test` both pass against a real mount.
+
+**Done — and, confirmed by reproducing it directly, nothing to do
+with `SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE` at all.** A raw
+`CreateSymbolicLinkW` P/Invoke with the flag, the same call without
+it, and even plain `cmd /c mklink` all failed identically
+(`ERROR_FILE_NOT_FOUND`) — confirmed not privilege-related at all by
+checking the session held `SeCreateSymbolicLinkPrivilege` and that the
+identical `mklink` succeeded against real NTFS on the same VM. A
+targeted debug trace (`log.Printf` in `Create`/`SetReparsePoint`, the
+same method that found task F9's `Rename` bug and this session's own
+OOM trigger) caught it directly: the kernel hands `SetReparsePoint`
+an **uppercased** name (`"\LINK0.TXT"` for a placeholder actually
+created as `"link0.txt"`) — the exact same case-folding gotcha task
+F9 already found and fixed for `Rename`/`Cleanup`, recurring here
+because `SetReparsePoint`'s own `Unlink`/`Symlink` calls were a third,
+separately-written call site that was never updated to match.
+`icbfs.Filesystem`'s exact-match-only lookups made `Unlink` fail with
+`ErrNotFound` on *every* symlink creation, unconditionally — not
+something `BestEffortCreateSymbolicLinkW`'s
+`ERROR_INVALID_PARAMETER`-only fallback could ever catch, regardless
+of which flag was used.
+
+Fixed with the exact same `realStoredName` helper F9 already built,
+applied to this third call site. Verified against the real VM:
+`reparse_symlink_test`/`reparse_symlink_relative_test` both pass, a
+direct `mklink` round-trip (create, stat, read-through) works
+end to end, and the full 46-test known-good set (42 defaults + 2 G1
+atime fixes + 2 G4 reparse fixes) passes with zero regressions.
+
+**This closes out every test this Part G round set out to fix.** All
+five tasks (G1-G5) are done, each verified against a real mount, not
+just portable tests. `winfsp-tests`' full default suite plus every
+test this round specifically targeted — 46 of 46 — now passes clean
+against icbfs's own WinFsp driver. The separate backlog `test/windows/
+README.md`/`test/linux/README.md` already catalogue (16 other WinFsp
+findings, Linux's `open/06.t` residual, the name-length-validation and
+parent-directory-mtime gaps G2 surfaced) remains open, deliberately
+not folded into this round — a decision for whoever picks up the next
+one, not assumed here.
