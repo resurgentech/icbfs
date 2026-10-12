@@ -3,6 +3,7 @@
 package winfspserver
 
 import (
+	"encoding/binary"
 	"errors"
 	"os"
 	"time"
@@ -33,10 +34,23 @@ import (
 // is authoritative — see attributesFromAttr.
 func (d *driver) fillFileInfo(info *winfsp.FSP_FSCTL_FILE_INFO, key string, typ icbfs.EntryType, a icbfs.Attr) {
 	info.FileAttributes = d.attributesFromAttr(typ, a)
-	if typ == icbfs.TypeSymlink {
+	switch {
+	case typ == icbfs.TypeSymlink:
 		info.ReparseTag = windows.IO_REPARSE_TAG_SYMLINK
-	} else {
-		info.ReparseTag = 0
+	default:
+		// A generic (non-symlink) reparse point (ROADMAP.md's Part G,
+		// task G4) — the tag is the raw stored buffer's own leading
+		// 4 bytes, same layout every FSCTL_SET_REPARSE_POINT caller
+		// already sends. FILE_ATTRIBUTE_REPARSE_POINT must be ORed
+		// in alongside whatever attributesFromAttr already reported
+		// (ReadOnly, Hidden, ...) — real NTFS reparse points combine
+		// freely with other attribute bits, this isn't an either/or.
+		if raw, ok := icbfs.GenericReparseFromXattrs(a.Xattrs); ok && len(raw) >= 4 {
+			info.ReparseTag = binary.LittleEndian.Uint32(raw[0:4])
+			info.FileAttributes |= windows.FILE_ATTRIBUTE_REPARSE_POINT
+		} else {
+			info.ReparseTag = 0
+		}
 	}
 	info.AllocationSize = uint64(a.Size)
 	info.FileSize = uint64(a.Size)

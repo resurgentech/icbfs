@@ -1014,6 +1014,35 @@ func (f *Filesystem) SetWindowsACL(ctx context.Context, uuid string, sddl []byte
 	})
 }
 
+// SetGenericReparseData persists a file's raw, non-symlink reparse
+// point buffer byte-exact (ROADMAP.md's Part G, task G4) — see
+// GenericReparseXattrKey's own doc comment for why this is stored
+// opaquely, unlike the symlink case.
+func (f *Filesystem) SetGenericReparseData(ctx context.Context, uuid string, buf []byte) (Attr, error) {
+	if err := f.checkWritable(); err != nil {
+		return Attr{}, err
+	}
+	return f.updateFileMetadata(ctx, uuid, func(a *Attr) {
+		if a.Xattrs == nil {
+			a.Xattrs = make(map[string][]byte)
+		}
+		a.Xattrs[GenericReparseXattrKey] = buf
+	})
+}
+
+// DeleteGenericReparseData removes a file's stored non-symlink
+// reparse point buffer, if any — FSCTL_DELETE_REPARSE_POINT's real
+// effect (ROADMAP.md's Part G, task G4), reverting the file back to
+// an ordinary one with no reparse point at all.
+func (f *Filesystem) DeleteGenericReparseData(ctx context.Context, uuid string) (Attr, error) {
+	if err := f.checkWritable(); err != nil {
+		return Attr{}, err
+	}
+	return f.updateFileMetadata(ctx, uuid, func(a *Attr) {
+		delete(a.Xattrs, GenericReparseXattrKey)
+	})
+}
+
 // Link creates a hard link named name inside dirKey, pointing at the
 // existing node targetUUID/targetType, incrementing its nlink via the
 // CAS-protected metadataObjectKey object.

@@ -127,23 +127,30 @@ func parseSymlinkReparseBuffer(buf []byte) (string, error) {
 	return windows.UTF16ToString(utf16), nil
 }
 
-// GetReparsePoint serves an already-open symlink handle's target back
-// as a REPARSE_DATA_BUFFER_SYMBOLIC_LINK, e.g. for an explicit
-// FSCTL_GET_REPARSE_POINT call (what readlink(2)-equivalent client
-// code issues).
+// GetReparsePoint serves an already-open handle's reparse data back —
+// a symlink's target, encoded as a REPARSE_DATA_BUFFER_SYMBOLIC_LINK,
+// or (ROADMAP.md's Part G, task G4) a generic, non-symlink reparse
+// point's raw stored buffer, returned byte-exact.
 func (d *driver) GetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name string, buffer []byte) (int, error) {
 	h, ok := d.handle(file)
 	if !ok {
 		return 0, os.ErrNotExist
 	}
-	if h.typ != icbfs.TypeSymlink {
-		return 0, windows.STATUS_NOT_A_REPARSE_POINT
+	if h.typ == icbfs.TypeSymlink {
+		target, err := d.fsys.Readlink(ctx(), h.key)
+		if err != nil {
+			return 0, toWinError(err)
+		}
+		return fillReparseBuffer(buffer, target)
 	}
-	target, err := d.fsys.Readlink(ctx(), h.key)
+	attr, err := d.fsys.Stat(ctx(), h.key, h.typ)
 	if err != nil {
 		return 0, toWinError(err)
 	}
-	return fillReparseBuffer(buffer, target)
+	if raw, ok := icbfs.GenericReparseFromXattrs(attr.Xattrs); ok {
+		return copyReparseBuffer(buffer, raw)
+	}
+	return 0, windows.STATUS_NOT_A_REPARSE_POINT
 }
 
 // GetReparsePointByName is the by-path counterpart, used by WinFsp's
@@ -153,14 +160,20 @@ func (d *driver) GetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 // CreateFile without FILE_FLAG_OPEN_REPARSE_POINT).
 //
 // Returning STATUS_NOT_A_REPARSE_POINT for "this component isn't a
-// symlink" is load-bearing, not a style choice: confirmed by reading
-// WinFsp's own resolver directly after a real failure traced straight
-// to this line — it specifically checks for that exact NTSTATUS to
-// mean "keep walking the path," and treats anything else non-success
+// reparse point this driver can resolve transparently" is load-
+// bearing, not a style choice: confirmed by reading WinFsp's own
+// resolver directly after a real failure traced straight to this
+// line — it specifically checks for that exact NTSTATUS to mean
+// "keep walking the path," and treats anything else non-success
 // (including the os.ErrInvalid this returned at first, which
 // convertNTStatus has no mapping for and falls back to a generic
 // internal error) as "abort the whole resolution," surfacing as
-// Windows' own "Could not find a part of the path" to the caller.
+// Windows' own "Could not find a part of the path" to the caller. A
+// generic (non-symlink) reparse point is deliberately treated the
+// same way here — this driver has no transparent-follow behavior for
+// an opaque, unknown tag, only explicit FSCTL_GET_REPARSE_POINT
+// access (via GetReparsePoint above, through a handle opened with
+// FILE_FLAG_OPEN_REPARSE_POINT).
 func (d *driver) GetReparsePointByName(fs *winfsp.FileSystemRef, name string, isDirectory bool, buffer []byte) (int, error) {
 	r, err := resolvePath(ctx(), d.fsys, name, d.caseInsensitive)
 	if err != nil {
@@ -176,6 +189,16 @@ func (d *driver) GetReparsePointByName(fs *winfsp.FileSystemRef, name string, is
 	return fillReparseBuffer(buffer, target)
 }
 
+// copyReparseBuffer copies a generic reparse point's raw stored bytes
+// back to the caller's buffer, same insufficient-buffer handling as
+// fillReparseBuffer's symlink-specific path.
+func copyReparseBuffer(buffer, raw []byte) (int, error) {
+	if len(raw) > len(buffer) {
+		return 0, syscall.ERROR_INSUFFICIENT_BUFFER
+	}
+	return copy(buffer, raw), nil
+}
+
 func fillReparseBuffer(buffer []byte, target string) (int, error) {
 	buf, err := buildSymlinkReparseBuffer(target)
 	if err != nil {
@@ -187,17 +210,30 @@ func fillReparseBuffer(buffer []byte, target string) (int, error) {
 	return copy(buffer, buf), nil
 }
 
-// SetReparsePoint handles CreateSymbolicLinkW's second half: by the
-// time this fires, Create already made an ordinary icbfs file under
-// this same name (it has no other way to know a symlink was intended
-// — Windows' own CreateFile call that preceded this carries no such
-// signal). Replace that placeholder with a real icbfs symlink entry
-// pointing at the parsed target, and repoint this handle at it.
+// SetReparsePoint handles two genuinely different cases, dispatched
+// on the buffer's own leading ReparseTag:
+//
+//   - IO_REPARSE_TAG_SYMLINK: CreateSymbolicLinkW's second half. By
+//     the time this fires, Create already made an ordinary icbfs file
+//     under this same name (it has no other way to know a symlink was
+//     intended — Windows' own CreateFile call that preceded this
+//     carries no such signal). Replace that placeholder with a real
+//     icbfs symlink entry pointing at the parsed target, and repoint
+//     this handle at it.
+//   - Any other tag (ROADMAP.md's Part G, task G4): a generic reparse
+//     point — store the raw buffer byte-exact against the existing
+//     file, no type change at all (unlike the symlink case, this
+//     stays an ordinary icbfs file with extra stored data).
 func (d *driver) SetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name string, buffer []byte) error {
 	h, ok := d.handle(file)
 	if !ok {
 		return os.ErrNotExist
 	}
+	if len(buffer) >= 4 && binary.LittleEndian.Uint32(buffer[0:4]) != windows.IO_REPARSE_TAG_SYMLINK {
+		_, err := d.fsys.SetGenericReparseData(ctx(), h.key, buffer)
+		return toWinError(err)
+	}
+
 	target, err := parseSymlinkReparseBuffer(buffer)
 	if err != nil {
 		return err
@@ -220,4 +256,25 @@ func (d *driver) SetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 	h.key = newUUID
 	h.typ = icbfs.TypeSymlink
 	return nil
+}
+
+// DeleteReparsePoint handles FSCTL_DELETE_REPARSE_POINT — go-winfsp's
+// own separate BehaviourDeleteReparsePoint hook (ROADMAP.md's Part G,
+// task G4; confirmed not implemented at all before this task, for
+// symlinks or anything else, while scoping this work). Only the
+// generic reparse case is meaningfully reachable here in practice:
+// winfsp-tests' own symlink tests never call this, and this driver
+// has no "revert a symlink back to an ordinary file" operation to
+// call even if a client did — deleting a generic reparse point's
+// stored data is the real, tested behavior this task needs.
+func (d *driver) DeleteReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name string, buffer []byte) error {
+	h, ok := d.handle(file)
+	if !ok {
+		return os.ErrNotExist
+	}
+	if h.typ == icbfs.TypeSymlink {
+		return windows.STATUS_NOT_A_REPARSE_POINT
+	}
+	_, err := d.fsys.DeleteGenericReparseData(ctx(), h.key)
+	return toWinError(err)
 }

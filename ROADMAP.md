@@ -376,6 +376,34 @@ alone.
 - **Done when:** `winfsp-tests`' `reparse_guid_test` and
   `reparse_nfs_test` both pass against a real mount.
 
+**Done — and simpler than scoped, confirmed by actually running it
+rather than assumed.** A new `GenericReparseXattrKey` (`windows.reparse`)
+stores the raw `FSCTL_SET_REPARSE_POINT` buffer byte-exact — no need
+to parse out the tag/GUID/data separately as planned above, since the
+test only ever asks for exactly what it set back, unparsed.
+`SetReparsePoint` dispatches on the buffer's own leading tag
+(symlink vs. anything else); `GetReparsePoint` returns the stored
+bytes exactly; `fillFileInfo` reports the stored tag plus
+`FILE_ATTRIBUTE_REPARSE_POINT` (ORed in alongside whatever attribute
+bits were already set, not replacing them) for the generic case.
+`DeleteReparsePoint` (`BehaviourDeleteReparsePoint`, confirmed missing
+entirely before this task) clears the stored entry.
+
+**The "normal open must fail distinctly" requirement turned out to be
+another kernel freebie, the same pattern F9 already found for share-
+mode/pending-delete** — confirmed by testing, not assumed: no code
+anywhere in this driver returns `STATUS_IO_REPARSE_TAG_NOT_HANDLED` or
+checks for `FILE_FLAG_OPEN_REPARSE_POINT` for the generic case at all,
+and `reparse_guid_test` passed clean on the first real run regardless.
+WinFsp's kernel driver evidently already enforces this once a file
+reports a real `ReparseTag` + `FILE_ATTRIBUTE_REPARSE_POINT`, the same
+IO-manager-level reparse-point convention real NTFS uses.
+
+Verified against the real Windows VM: `reparse_guid_test` and
+`reparse_nfs_test` both pass clean, confirmed alongside the full
+44-test known-good set (42 previously-passing defaults + the 2 G1
+atime fixes) with zero regressions.
+
 ### G5. Fix: symlink creation fails under `SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE`
 
 A real, concrete driver bug — **not** a missing capability, correcting

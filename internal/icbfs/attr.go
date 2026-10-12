@@ -96,6 +96,31 @@ func WindowsACLFromXattrs(xattrs map[string][]byte) (sddl []byte, ok bool) {
 	return v, true
 }
 
+// GenericReparseXattrKey is the well-known xattrs map key a file's
+// *non-symlink* reparse point data is stored under (ROADMAP.md's Part
+// G, task G4) — `winfsp-tests`' own `reparse_guid_test`/
+// `reparse_nfs_test` set an arbitrary custom/NFS-style reparse tag on
+// an ordinary file via `FSCTL_SET_REPARSE_POINT`, carrying an opaque
+// data buffer this driver has no reason to parse — unlike the
+// symlink case (a first-class icbfs entry type, translated to/from
+// Windows' own `REPARSE_DATA_BUFFER_SYMBOLIC_LINK` layout), a generic
+// reparse point's raw buffer is stored and returned byte-exact, same
+// "just another named entry, no special-casing at the storage layer"
+// pattern `windows.acl`/`windows.attributes` already established.
+const GenericReparseXattrKey = "windows.reparse"
+
+// GenericReparseFromXattrs reads a file's raw, natively-stored
+// non-symlink reparse buffer, if SetGenericReparseData has ever been
+// called for it. ok is false if nothing has been stored (including a
+// plain file that's never had any reparse point set at all).
+func GenericReparseFromXattrs(xattrs map[string][]byte) (buf []byte, ok bool) {
+	v, present := xattrs[GenericReparseXattrKey]
+	if !present || len(v) == 0 {
+		return nil, false
+	}
+	return v, true
+}
+
 // Attr is the POSIX-ish attribute set for one inode. Where it comes from
 // differs by type — see ARCHITECTURE.md's Metadata model and Multiple
 // filesystems per bucket sections:
