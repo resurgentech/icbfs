@@ -55,7 +55,7 @@ func (d *driver) Write(fs *winfsp.FileSystemRef, file uintptr, buf []byte, offse
 			if err != nil {
 				return 0, toWinError(err)
 			}
-			d.fillFileInfo(info, h.typ, attr)
+			d.fillFileInfo(info, h.key, h.typ, attr)
 			return 0, nil
 		}
 		if off+int64(len(buf)) > size {
@@ -63,7 +63,9 @@ func (d *driver) Write(fs *winfsp.FileSystemRef, file uintptr, buf []byte, offse
 		}
 	}
 
-	open.WriteAt(buf, off)
+	if err := open.WriteAt(buf, off); err != nil {
+		return 0, toWinError(err)
+	}
 
 	// The underlying object's own Stat still reflects whatever was
 	// last Flushed, not this write — override Size with the current
@@ -75,7 +77,7 @@ func (d *driver) Write(fs *winfsp.FileSystemRef, file uintptr, buf []byte, offse
 		return 0, toWinError(err)
 	}
 	attr.Size = open.Size()
-	d.fillFileInfo(info, h.typ, attr)
+	d.fillFileInfo(info, h.key, h.typ, attr)
 	return len(buf), nil
 }
 
@@ -95,13 +97,13 @@ func (d *driver) Flush(fs *winfsp.FileSystemRef, file uintptr, info *winfsp.FSP_
 		if err != nil {
 			return toWinError(err)
 		}
-		d.fillFileInfo(info, h.typ, attr)
+		d.fillFileInfo(info, h.key, h.typ, attr)
 		return nil
 	}
 	attr, err := open.Flush(ctx())
 	if err != nil {
 		return toWinError(err)
 	}
-	d.fillFileInfo(info, h.typ, attr)
+	d.fillFileInfo(info, h.key, h.typ, attr)
 	return nil
 }

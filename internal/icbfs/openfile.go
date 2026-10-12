@@ -144,24 +144,54 @@ func (o *OpenFile) ReadAt(off, length int64) []byte {
 // in-memory buffer immediately (so a subsequent ReadAt in the same
 // session sees it), and recorded in the edit log so Flush can replay it
 // onto a freshly fetched base if it loses a CAS race.
-func (o *OpenFile) WriteAt(data []byte, off int64) {
+//
+// Returns ErrInvalidArgument for an out-of-range offset/length — see
+// applyLocked's own doc comment for why this is a real, necessary
+// check here too, found via the same pjdfstest run that found
+// SetAttr's identical gap, via a genuinely different code path: a
+// *write* at a huge offset (testing sparse-file/32-bit-off_t-overflow
+// behavior — pjdfstest's own `open` category does this, not a
+// truncate at all), not a truncate/resize request.
+func (o *OpenFile) WriteAt(data []byte, off int64) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	cp := make([]byte, len(data))
 	copy(cp, data)
-	o.applyLocked(cp, off)
+	if err := o.applyLocked(cp, off); err != nil {
+		return err
+	}
 	o.ops = append(o.ops, writeOp{offset: off, data: cp})
 	o.dirty = true
+	return nil
 }
 
-func (o *OpenFile) applyLocked(data []byte, off int64) {
+// applyLocked grows o.data to cover off+len(data) if the write extends
+// past the current end, then copies data in at off.
+//
+// A negative offset, or an end that exceeds maxSetAttrSize, is
+// rejected before ever reaching make([]byte, end) — the exact same
+// "makeslice: len out of range" panic (or, for a merely large-but-not-
+// absurd end, an outright OOM kill of the whole process, confirmed for
+// real on a memory-constrained VM) SetAttr's own identical guard
+// exists to prevent, for the identical underlying reason: this
+// implementation has no sparse-region support, so growing to cover a
+// huge offset always means actually allocating that many real bytes,
+// unlike a real filesystem's sparse "hole."
+func (o *OpenFile) applyLocked(data []byte, off int64) error {
+	if off < 0 {
+		return ErrInvalidArgument
+	}
 	end := off + int64(len(data))
+	if end > maxSetAttrSize {
+		return ErrInvalidArgument
+	}
 	if end > int64(len(o.data)) {
 		grown := make([]byte, end)
 		copy(grown, o.data)
 		o.data = grown
 	}
 	copy(o.data[off:end], data)
+	return nil
 }
 
 // touchedRangeLocked returns the single contiguous span covering every

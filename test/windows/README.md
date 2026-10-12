@@ -256,12 +256,107 @@ is also missing.
    reuse), and the `Path` fix — same pattern as the WinSCP install
    above. VM shut down afterward, per the normal workflow.
 
-Still blocked, and the only remaining piece: `winfsp-tests --external`
-against *icbfs's own* WinFsp driver, which doesn't exist in this
-codebase yet (`ROADMAP.md`'s Part F, now in progress). Everything this
-section proves is that the moment that driver can mount something, this
-VM is immediately ready to point `winfsp-tests` at it — no further
-environment setup needed.
+See "`winfsp-tests --external` against icbfs's own driver" below for the
+real run against icbfs's own driver, once Part F existed to make that
+possible.
+
+## `winfsp-tests --external` against icbfs's own driver
+
+The real point of installing `winfsp-tests` above: pointing it at
+*icbfs's own* WinFsp driver (`cmd/icbfs-winfsp`, mounted against the
+same standalone MinIO container other manual testing in this doc uses)
+instead of WinFsp's own embedded MEMFS reference filesystem.
+`winfsp-tests-x64.exe --external --resilient <mount>\testdir` runs from
+inside the mount under test, and its `ASSERT()` macro `abort()`s
+unconditionally on the first failure (Windows reports this as exit code
+`0xC0000409`, by this harness's own convention — not an actual security
+violation) — `--resilient` only retries transient I/O, not a failed
+logic assertion, so surveying the whole suite meant iterating: run,
+hit the next failure, exclude that one test by name, run again. 22
+iterations (`winfsp-tests-full1.log` through `full22.log` in
+`C:\Windows\Temp` on this VM) reached a run with every remaining test
+passing clean:
+
+```
+create_test............................ OK 0.52s
+...41 tests, all OK...
+exec_rename_dir_test................... OK 2.19s
+--- COMPLETE ---
+```
+
+21 tests had to be excluded to get there — each one's exact assertion,
+below, not paraphrased. A handful match scope decisions this project
+had already made elsewhere in these docs; most are genuinely new,
+open findings this run surfaced, not yet root-caused or fixed:
+
+- **Already explained by an existing, documented decision:**
+  - `create_allocation_test` — `ASSERT(65536 == StandardInfo.AllocationSize.QuadPart)`:
+    `AllocationSize` isn't tracked as a value distinct from `Size` at
+    all — matches the already-known "`AllocationSize` not honored"
+    backlog item.
+  - `getfileinfo_test` — `ASSERT(TimeLo <= ... LastAccessTime ... TimeHi > ...)`
+    and `setfileinfo_test` — `ASSERT(... ftLastAccessTime ...)`: atime
+    isn't tracked at all, exactly as `internal/fuseserver/node.go`'s
+    `fillAttr` doc comment and `ARCHITECTURE.md` already document for
+    the FUSE side — the same simplification, now confirmed to surface
+    identically on the WinFsp side.
+  - `reparse_guid_test` — `ASSERT(Success)` (err `c00000e5`/1359,
+    `ERROR_INTERNAL_ERROR`) and `reparse_nfs_test` (same) — these set a
+    *non-symlink* reparse tag (a generic-GUID-identified reparse point
+    and an NFS-style special-file reparse point respectively).
+    `internal/winfspserver/reparse.go`'s `SetReparsePoint` only parses
+    `IO_REPARSE_TAG_SYMLINK` buffers — `ARCHITECTURE.md`'s own Reparse
+    points entry only ever claims symlink support ("no new work needed
+    *beyond symlink support already planned*"), so a non-symlink
+    reparse tag failing is this project's existing, deliberate scope,
+    not a new gap.
+- **Open findings — confirmed real, not yet root-caused or fixed:**
+  - `create_readonlydir_test` — `ASSERT((FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_READONLY) == FileAttributes)`
+    — a directory's `ReadOnly` bit isn't round-tripping.
+  - `create_notraverse_test` — `ASSERT(!Success)`, `create_backup_test`
+    and `create_restore_test` — both `ASSERT(INVALID_HANDLE_VALUE == Handle)`:
+    all three expect a privilege-gated `CreateFile` call (traverse
+    check, `FILE_FLAG_BACKUP_SEMANTICS` needing `SeBackupPrivilege`,
+    restore needing `SeRestorePrivilege`) to be refused and it isn't —
+    consistent with the already-known "Windows privilege enforcement
+    not modeled" backlog item, but not yet individually confirmed
+    test-by-test the way `AllocationSize`/atime above were.
+  - `getfileattr_test` — `ASSERT(INVALID_FILE_ATTRIBUTES == FileAttributes)`
+    and `getfileinfo_name_test` — `ASSERT(0 == wcscmp(OrigPath, FinalPath))`:
+    not yet investigated at the code level.
+  - `rename_test` — `ASSERT(!Success)` (err `c0000035`/183,
+    `STATUS_OBJECT_NAME_COLLISION`) and `rename_standby_test` —
+    `ASSERT(*P == (rand() & 0xff))` (a data-mismatch assertion, not
+    just a wrong-errno one): not yet investigated; the data-mismatch
+    shape of `rename_standby_test` in particular warrants real
+    attention, not just an errno fix.
+  - `setsecurity_test` — `ASSERT(0 == wcscmp(L"D:P(A;;FA;;;SY)(A;;FA;;;BA)", ConvertedSddl))`:
+    the stored/round-tripped SDDL doesn't match what this specific
+    `SetSecurity` call produced — not yet investigated.
+  - `rdwr_mmap_test` and `rdwr_mixed_test` — both data-mismatch
+    assertions (`*Bgn == (rand() & 0xff)`, `memcmp` of two buffers) —
+    matches the already-known "mmap/overlapped-I/O correctness"
+    concern, but neither individually confirmed before now.
+  - `rdwr_cached_overlapped_test` — `ASSERT(Success)` (err `c0000011`/38) —
+    a distinct overlapped-I/O failure from the mmap ones above.
+  - `querydir_test` — `ASSERT(0 != (FindData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))`:
+    a directory entry's own attribute bits, as reported during
+    enumeration (not via a direct stat), are missing the directory bit.
+  - `dirnotify_test` — `ASSERT(0 == mywcscmp(..."Subdirectory\\file0"..., NotifyInfo->FileName...))`:
+    a change-notification's reported filename doesn't match.
+  - `reparse_symlink_test` and `reparse_symlink_relative_test` — both
+    `ASSERT(ERROR_PRIVILEGE_NOT_HELD == GetLastError())`, both actually
+    got `STATUS_OBJECT_NAME_NOT_FOUND` (err `c0000034`/2) instead —
+    unlike the guid/nfs reparse cases above, these exercise the
+    *symlink* reparse path `reparse.go` actually implements, so this
+    one is not explained by the same "non-symlink tag, out of scope"
+    reasoning; not yet investigated further.
+
+None of this list was fixed in this pass — per `TESTING.md`'s own
+"first confirm everything" framing, this run's job was to survey
+honestly, not to fix every finding before it could finish. The
+already-explained group above needed no new investigation to place;
+the open-findings group is the real backlog this run leaves behind.
 
 ## Building natively on the VM, not just cross-compiling — confirmed necessary, not just more thorough
 

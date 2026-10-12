@@ -30,6 +30,34 @@ const (
 	maxChildrenPerBlock = 8
 )
 
+// maxSetAttrSize bounds how large a resize (SetAttr's ftruncate(2)/
+// truncate(2) path) or a write-extending-the-file (OpenFile.applyLocked's
+// pwrite(2) path) will accept — see both of their own doc comments for
+// why a real ceiling is necessary here, not optional: this
+// implementation has no sparse-region support, so growing to cover any
+// offset/size always means actually materializing that many real
+// bytes as one in-memory []byte, unlike a real filesystem's sparse
+// "hole."
+//
+// 2 GiB (the 32-bit signed off_t boundary, not an arbitrary round
+// number) is deliberately far more conservative than "the largest
+// value Go's runtime will let through": an earlier version of this
+// bound was 1 TiB, reasoning only about the runtime's own hard limits
+// — which missed the real-world failure mode entirely. pjdfstest's
+// `open` category specifically probes a write at offset 2^31+1 (the
+// exact 32-bit boundary, a deliberate, common test pattern — the
+// *same* boundary its utimensat/truncate tests probe for timestamps/
+// sizes) and accepts either real 64-bit support or a clean EFBIG/
+// EINVAL as correct; a 1 TiB bound let that ~2GiB allocation through,
+// and on a real, memory-constrained Linux VM already running the
+// rest of the suite, the Linux kernel's OOM killer SIGKILLed the
+// whole process outright — confirmed directly via dmesg/journalctl,
+// not inferred, with zero Go panic trace at all (unrecoverable by
+// definition). 2 GiB is comfortably above any file this project's own
+// test suite or realistic manual use needs, while actually closing
+// the gap a 1 TiB "the runtime allows it" bound did not.
+const maxSetAttrSize = 1 << 31
+
 var errRetry = errors.New("icbfs: lost a race, retry the whole operation")
 
 // Filesystem is the core, access-layer-independent filesystem logic: it
@@ -1199,6 +1227,31 @@ func (f *Filesystem) WriteFile(ctx context.Context, key string, data []byte, ifM
 func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mode, uid, gid *uint32, size *int64) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
+	}
+	// A negative size is invalid at the syscall level (ftruncate(2)/
+	// truncate(2) reject it with EINVAL) and must be rejected here
+	// too, before it ever reaches make([]byte, *size) below — a real,
+	// serious crash found by running pjdfstest (its truncate/unlink/
+	// utimensat groups exercise exactly this), not a hypothetical:
+	// `make([]byte, -1)` panics with "makeslice: len out of range",
+	// taking down the whole FUSE server process (and every in-flight
+	// request on it) over a single malformed call, not just failing
+	// the one call that made it.
+	//
+	// An excessively large positive size hits the exact same panic
+	// for a different reason — also found via pjdfstest, which
+	// specifically probes `truncate(path, 999999999999999)` (~909TB)
+	// and accepts either EFBIG or EINVAL as correct (real filesystems
+	// have *some* maximum file size; silently succeeding or crashing
+	// are the two wrong answers). maxSetAttrSize is a real, necessary
+	// ceiling for this implementation specifically, not an arbitrary
+	// guess: a resize always materializes the *entire* new size as one
+	// in-memory []byte (no sparse-region support — there's no way to
+	// represent "a hole" in a plain object-store blob), so unlike a
+	// real sparse-aware filesystem, this one cannot accept a huge
+	// logical size without an equally huge real allocation.
+	if size != nil && (*size < 0 || *size > maxSetAttrSize) {
+		return Attr{}, ErrInvalidArgument
 	}
 	if typ == TypeDir {
 		attr, err := f.Stat(ctx, key, TypeDir)

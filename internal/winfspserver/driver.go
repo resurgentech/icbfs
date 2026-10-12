@@ -144,6 +144,12 @@ func toWinError(err error) error {
 		// F9) — no more specific NTSTATUS confirmed for this exact
 		// condition; STATUS_INVALID_PARAMETER is the closest real fit.
 		return windows.STATUS_INVALID_PARAMETER
+	case errors.Is(err, icbfs.ErrInvalidArgument):
+		// A negative SetFileSize request — found as a real crash
+		// (make([]byte, negative) panics) via pjdfstest on the FUSE
+		// side; mapped here too since icbfs.Filesystem.SetAttr is
+		// shared by both access layers.
+		return windows.STATUS_INVALID_PARAMETER
 	default:
 		return err
 	}
@@ -200,7 +206,7 @@ func (d *driver) Open(fs *winfsp.FileSystemRef, name string, createOptions, gran
 	if err != nil {
 		return 0, toWinError(err)
 	}
-	d.fillFileInfo(info, r.Type, r.Attr)
+	d.fillFileInfo(info, r.Key, r.Type, r.Attr)
 	h := &fileHandle{key: r.Key, typ: r.Type}
 	return d.newHandle(h), nil
 }
@@ -247,7 +253,7 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 		if err != nil {
 			return 0, toWinError(err)
 		}
-		d.fillFileInfo(info, icbfs.TypeDir, attr)
+		d.fillFileInfo(info, newUUID, icbfs.TypeDir, attr)
 		return d.newHandle(&fileHandle{key: newUUID, typ: icbfs.TypeDir}), nil
 	}
 
@@ -261,10 +267,21 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 	// — a file created with e.g. FILE_ATTRIBUTE_HIDDEN set should
 	// report it back immediately, not only after an explicit
 	// SetFileAttributes call.
-	if attr, err = d.fsys.SetWindowsAttributes(ctx(), newUUID, fileAttributes); err != nil {
+	//
+	// FILE_ATTRIBUTE_ARCHIVE is always set on a newly created file by
+	// a real Windows filesystem, regardless of what the caller
+	// requested — confirmed a real, previously-missing requirement by
+	// winfsp-tests' own create_fileattr_test (--external, against this
+	// driver), not assumed: it asserts FILE_ATTRIBUTE_ARCHIVE ==
+	// GetFileAttributes() after a plain CreateFileW(...,
+	// FILE_ATTRIBUTE_NORMAL, 0), which this driver failed before this
+	// fix (it only ever stored exactly what the caller passed, masked
+	// to the four real bits — a NORMAL-only create stored and reported
+	// back nothing set at all).
+	if attr, err = d.fsys.SetWindowsAttributes(ctx(), newUUID, fileAttributes|icbfs.WindowsAttrArchive); err != nil {
 		return 0, toWinError(err)
 	}
-	d.fillFileInfo(info, icbfs.TypeFile, attr)
+	d.fillFileInfo(info, newUUID, icbfs.TypeFile, attr)
 	// seeded empty, not nil: a just-created file's content really is
 	// zero bytes, distinct from "not seeded yet" — ensureOpen below
 	// tells the two apart via hasSeed, not a nil check on this slice.
@@ -289,7 +306,7 @@ func (d *driver) Overwrite(fs *winfsp.FileSystemRef, file uintptr, attributes ui
 	h.mu.Lock()
 	h.open = nil // drop any stale buffered OpenFile; next I/O reopens against the now-truncated content
 	h.mu.Unlock()
-	d.fillFileInfo(info, h.typ, attr)
+	d.fillFileInfo(info, h.key, h.typ, attr)
 	return nil
 }
 

@@ -170,6 +170,11 @@ func errnoFromErr(err error) syscall.Errno {
 		// POSIX rename(2)'s EINVAL: "newpath contains a path prefix
 		// of oldpath" (task F9).
 		return syscall.EINVAL
+	case errors.Is(err, icbfs.ErrInvalidArgument):
+		// truncate(2)/ftruncate(2)'s own EINVAL for a negative length
+		// — found as a real crash (make([]byte, negative) panics)
+		// via pjdfstest, not hypothetical.
+		return syscall.EINVAL
 	default:
 		return syscall.EIO
 	}
@@ -411,7 +416,9 @@ func (h *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Rea
 }
 
 func (h *FileHandle) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {
-	h.open.WriteAt(data, off)
+	if err := h.open.WriteAt(data, off); err != nil {
+		return 0, errnoFromErr(err)
+	}
 	return uint32(len(data)), 0
 }
 

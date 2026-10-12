@@ -3,6 +3,7 @@ package icbfs
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -391,6 +392,79 @@ func TestXattrsPosixAndWindowsACLsCoexist(t *testing.T) {
 	}
 	if len(got.Xattrs) != 3 {
 		t.Fatalf("got %d xattrs entries, want exactly 3 (no cross-contamination): %v", len(got.Xattrs), got.Xattrs)
+	}
+}
+
+// TestSetAttrRejectsNegativeSizeInsteadOfCrashing is a real regression
+// test: a negative *size used to reach make([]byte, *size) directly
+// and panic the whole process with "makeslice: len out of range" —
+// found running pjdfstest's real conformance suite against a real
+// FUSE mount (its truncate/unlink/utimensat groups exercise exactly
+// this), which crashed the mount outright, failing every subsequent
+// test in the same run for an unrelated reason. ftruncate(2)/
+// truncate(2) themselves reject a negative length with EINVAL, so
+// this must too, as a real error, not a crash.
+func TestSetAttrRejectsNegativeSizeInsteadOfCrashing(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+
+	uuid, _, _, err := fsys.Create(ctx, root, "truncate-target.txt", 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, _, err := fsys.WriteFile(ctx, uuid, []byte("hello"), ""); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	negative := int64(-1)
+	if _, err := fsys.SetAttr(ctx, uuid, TypeFile, nil, nil, nil, &negative); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("SetAttr with negative size = %v, want ErrInvalidArgument", err)
+	}
+
+	// Content must be untouched by the rejected call.
+	data, _, _, err := fsys.ReadFile(ctx, uuid)
+	if err != nil {
+		t.Fatalf("read after rejected SetAttr: %v", err)
+	}
+	if string(data) != "hello" {
+		t.Fatalf("content disturbed by rejected SetAttr: got %q, want %q", data, "hello")
+	}
+}
+
+// TestSetAttrRejectsHugeSizeInsteadOfCrashing is
+// TestSetAttrRejectsNegativeSizeInsteadOfCrashing's sibling: the exact
+// same "makeslice: len out of range" panic, found via the exact same
+// real pjdfstest run, for a different reason — pjdfstest's own
+// truncate/12.t and ftruncate/12.t specifically probe
+// `truncate(path, 999999999999999)` (~909TB) and accept either EFBIG
+// or EINVAL as correct, since this implementation has no sparse-file
+// support (a resize always materializes the whole new size as one
+// in-memory []byte — see maxSetAttrSize's own doc comment).
+func TestSetAttrRejectsHugeSizeInsteadOfCrashing(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+
+	uuid, _, _, err := fsys.Create(ctx, root, "huge-truncate-target.txt", 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, _, err := fsys.WriteFile(ctx, uuid, []byte("hello"), ""); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	huge := int64(999999999999999)
+	if _, err := fsys.SetAttr(ctx, uuid, TypeFile, nil, nil, nil, &huge); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("SetAttr with huge size = %v, want ErrInvalidArgument", err)
+	}
+
+	data, _, _, err := fsys.ReadFile(ctx, uuid)
+	if err != nil {
+		t.Fatalf("read after rejected SetAttr: %v", err)
+	}
+	if string(data) != "hello" {
+		t.Fatalf("content disturbed by rejected SetAttr: got %q, want %q", data, "hello")
 	}
 }
 

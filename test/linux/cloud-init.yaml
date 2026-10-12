@@ -1,0 +1,47 @@
+#cloud-config
+# ssh_authorized_keys is set here directly rather than relying on
+# virt-install's separate --cloud-init clouduser-ssh-key= option:
+# passing both a full custom user-data file *and* that option at the
+# same time silently didn't inject the key (confirmed the hard way —
+# SSH came up but rejected the key entirely).
+ssh_authorized_keys:
+  - REPLACED_BY_CREATE_VM_SH
+#
+# Unattended setup for the disposable Linux certification VM —
+# TESTING.md's "Stress and crash-consistency" / pjdfstest tier.
+# Mirrors test/windows/'s own unattended-setup philosophy: get to a
+# real SSH session with zero manual steps, with build deps + Go
+# already present so a snapshot can be taken once and reused.
+package_update: true
+package_upgrade: false
+packages:
+  - fuse3
+  - libfuse3-dev
+  - build-essential
+  - autoconf
+  - automake
+  - libtool
+  - pkg-config
+  - perl
+  - git
+  - docker.io
+  - acl
+  - attr
+  - linux-tools-common
+  - linux-tools-generic
+
+runcmd:
+  # Go from the official tarball, not apt's (often stale) package —
+  # same reasoning test/windows/README.md gives for installing Go on
+  # the Windows VM via the official installer rather than relying on
+  # whatever a package manager happens to ship.
+  - curl -fsSL -o /tmp/go.tar.gz https://go.dev/dl/go1.27.0.linux-amd64.tar.gz
+  - tar -C /usr/local -xzf /tmp/go.tar.gz
+  - ln -sf /usr/local/go/bin/go /usr/local/bin/go
+  - ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+  - usermod -aG docker ubuntu
+  - systemctl enable --now docker
+  # fuse3's /dev/fuse needs to be usable by a non-root mount for
+  # go-fuse's own default; root is already free in this disposable VM
+  # (see README.md), so this is just confirming the device exists.
+  - modprobe fuse

@@ -47,6 +47,7 @@ func main() {
 	locking := fset.Bool("locking", false, "enable the Locking feature (flock/fcntl); off by default, per ARCHITECTURE.md's Locking section")
 	enableNotify := fset.Bool("notify", false, "enable the Change notifications feature (ROADMAP.md Part E) via MinIO's ListenBucketNotification; off by default, same opt-in reasoning as --locking. Only the MinIO backend (task E4) is wired up here — Azure/AWS S3 adapters (tasks E5/E6) aren't reachable from this flag.")
 	debug := fset.Bool("debug", false, "log every FUSE operation")
+	allowOther := fset.Bool("allow-other", false, "allow users other than the one running this command (and root) to access the mount; off by default, same opt-in reasoning as --locking/--notify. Without it, FUSE's own kernel-side fuse_allow_current_process check rejects every other uid outright, independent of default_permissions or file modes — a real finding from running pjdfstest's -u/-g permission tests against a root-mounted filesystem, not a hypothetical. Passing this through typically also needs user_allow_other in /etc/fuse.conf, same as any other FUSE filesystem's -o allow_other.")
 	if err := fset.Parse(os.Args[2:]); err != nil {
 		os.Exit(2)
 	}
@@ -116,7 +117,7 @@ func main() {
 
 	root := fuseserver.Root(fsys, fuseSignals)
 	server, err := fs.Mount(mountpoint, root, &fs.Options{
-		MountOptions: fuseMountOptions(*debug),
+		MountOptions: fuseMountOptions(*debug, *allowOther),
 		// Without this, go-fuse silently rewrites a real, stored "0000"
 		// mode to 0644/0755 on every Getattr — found by testing chmod 000
 		// and seeing stat report 644 back.
@@ -146,7 +147,11 @@ func newMinIOClient(endpoint, accessKey, secretKey string) (*minio.Client, error
 	})
 }
 
-func fuseMountOptions(debug bool) fuse.MountOptions {
+func fuseMountOptions(debug, allowOther bool) fuse.MountOptions {
+	options := []string{"default_permissions"}
+	if allowOther {
+		options = append(options, "allow_other")
+	}
 	return fuse.MountOptions{
 		FsName: "icbfs",
 		Name:   "icbfs",
@@ -158,7 +163,20 @@ func fuseMountOptions(debug bool) fuse.MountOptions {
 		// handles root bypass and full supplementary group
 		// membership — preferred over implementing NodeAccesser or
 		// manual checks ourselves.
-		Options: []string{"default_permissions"},
+		//
+		// allow_other is a separate, orthogonal kernel restriction from
+		// default_permissions: without it, FUSE's fuse_allow_current_process
+		// check rejects every caller except the mounting user (and root)
+		// outright, before default_permissions's own mode-based check
+		// ever runs — found while running pjdfstest's -u/-g permission
+		// tests against a root-mounted filesystem, where it looked at
+		// first like a real EACCES bug in icbfs's own permission
+		// enforcement, until isolating it to this separate, well-known
+		// FUSE restriction (confirmed by reproducing the same EACCES
+		// with plain coreutils via sudo -u, independent of pjdfstest
+		// entirely, then confirming it disappeared once allow_other was
+		// added). --allow-other opts into exposing it.
+		Options: options,
 		// EnableLocks (task B8): without this, the kernel never
 		// forwards FUSE_GETLK/SETLK/SETLKW to this driver at all — it
 		// silently falls back to its own local, single-host advisory

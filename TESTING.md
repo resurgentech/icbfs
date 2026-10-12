@@ -3,11 +3,15 @@
 > **Note to other agents:** this is a plan, not wired into any build
 > target, CI job, or `go test` path yet — don't let it redirect work
 > you're already doing elsewhere in the repo unless it's actually
-> relevant. It's no longer purely speculative, though: Jared has asked
-> to move forward with `ROADMAP.md`'s Part F (the WinFsp driver) as of
-> 2026-10-10, and the Windows VM this doc describes is real, verified,
-> and ready — see Part F's own updated intro in `ROADMAP.md` for the
-> current plan and open questions before touching any of this.
+> relevant. As of 2026-10-12, both suites this doc describes have
+> actually been run against icbfs's own drivers, not just unblocked:
+> `winfsp-tests --external` against the WinFsp driver, and pjdfstest
+> against a real FUSE mount. Three real crash bugs were found and
+> fixed (`internal/icbfs`'s `SetAttr`/`OpenFile.WriteAt` — negative/
+> huge truncate size, a huge-offset write that could get the whole
+> process OOM-killed). See `test/windows/README.md` and
+> `test/linux/README.md` for the full results, including the open
+> findings from each run that are real but not yet fixed.
 
 This is a plan for a layer of testing icbfs doesn't have yet: proof, using
 real, independently-written, widely-trusted test suites against a real
@@ -97,10 +101,10 @@ against real NTFS as ground truth. Prebuilt binaries ship directly on
 WinFsp's GitHub releases (`winfsp-tests-<version>.zip`) — no need to
 install Visual Studio just to obtain the test runner.
 
-- **Blocked, not actionable yet**: the WinFsp access layer doesn't exist
-  in this codebase (confirmed design intent in `ARCHITECTURE.md`, not yet
-  built per `ROADMAP.md`). This section is here so the plan exists before
-  the driver does, not because there's anything to run today.
+- **No longer blocked**: the WinFsp access layer (`internal/winfspserver`,
+  `cmd/icbfs-winfsp`) is finished per `ROADMAP.md`'s Part F — see
+  "Where these actually run" below for the real `--external` run against
+  it, not just the plan this section used to be.
 
 ## Supplementary layer: real client ergonomics
 
@@ -130,17 +134,17 @@ Each of these: verify via an independent checksum/`diff -r`, never just
 "the client exited 0" — a client can exit successfully while the
 filesystem silently mangled bytes underneath it.
 
-## A real gap found while drafting this doc
+## A real gap found while drafting this doc — since resolved
 
-`internal/fuseserver/node.go` has no `Rename` method. That's not yet
-called out in `MISSING_FEATURES.md`/`ROADMAP.md`, but it's a real blocker
-for a chunk of this plan: pjdfstest has a whole `rename/` test group,
-`rsync`'s default behavior is "write a temp file, then `rename()` it into
-place," and `git`'s object/index writes lean on the same pattern. Those
-will fail for that reason alone until `Rename` exists — not a finding
-about the suites or client tools. Worth its own line in
-`MISSING_FEATURES.md` separately; not fixing it here, just flagging it so
-it doesn't look like a surprise failure later.
+`internal/fuseserver/node.go` had no `Rename` method when this doc was
+first drafted — a real blocker for a chunk of this plan: pjdfstest has
+a whole `rename/` test group, `rsync`'s default behavior is "write a
+temp file, then `rename()` it into place," and `git`'s object/index
+writes lean on the same pattern. **Resolved as of `ROADMAP.md`'s task
+F9**: `Rename` now exists in core `icbfs.Filesystem`, the FUSE driver,
+and the WinFsp driver alike (it turned out to be missing from all
+three, not just FUSE) — kept here as a record of a real gap this
+document's own drafting surfaced, not removed outright.
 
 ## Where these actually run
 
@@ -149,7 +153,26 @@ mount or hang a kernel thread if icbfs has a bad enough bug. That's not a
 reason to avoid running them — it's the reason to run them somewhere
 disposable instead of the dev machine.
 
-### Linux: a disposable KVM VM — this part is simple and actionable now
+### Linux: verified end to end, documentation and scripts live in `test/linux/`
+
+Fully verified on this host, not just planned — a disposable KVM/
+libvirt VM (`icbfs-fuse-test`), cloud-init-based and fully unattended
+except for one key-injection fix, mirroring `test/windows/`'s pattern.
+pjdfstest's full suite ran clean against a real icbfs FUSE mount after
+three real crash bugs it found (negative/huge truncate size, a
+huge-offset sparse write that got the whole process OOM-killed by the
+kernel) were fixed and verified — see `test/linux/README.md` for the
+full story, the fixes, and a real environment-configuration finding
+(not an icbfs bug) that initially looked like a permission-enforcement
+bug.
+
+See **[`test/linux/README.md`](test/linux/README.md)** for the full
+story and **`test/linux/*.sh`** for the actual runnable scripts
+(`create-vm.sh`, `wait-for-ssh.sh`, `destroy-vm.sh`, `run-pjdfstest.sh`).
+
+The steps below are kept as the original plan this was built from —
+still accurate as a description of the approach, just no longer a
+to-do:
 
 This is exactly the "give it root and go to town" instinct, and KVM
 already being available makes it cheap:
@@ -212,10 +235,11 @@ story and **`test/windows/*.sh`** for the actual runnable scripts
 `destroy-vm.sh`). WinFsp itself and `winfsp-tests` are now installed and
 verified working on this VM too (107/107 of `winfsp-tests`' own default
 suite passing against its embedded reference filesystem) — see
-`test/windows/README.md`'s own section on this. The only piece still
-blocked is running `winfsp-tests --external` against *icbfs's own*
-WinFsp driver, which doesn't exist in this codebase yet
-(`ROADMAP.md`'s Part F, now in progress).
+`test/windows/README.md`'s own section on this. `ROADMAP.md`'s Part F
+(icbfs's own WinFsp driver) is now finished, which unblocks the real
+point of this suite: running `winfsp-tests --external` against icbfs's
+own driver rather than WinFsp's own reference filesystem — see
+`test/windows/README.md` for the actual run and results.
 
 ## Automation shape
 

@@ -233,3 +233,53 @@ func TestCheckRangeLockConflictIgnoresEscalationOnlyEntries(t *testing.T) {
 		t.Fatalf("check against an escalation-only claim = %v, want nil (not a real application lock)", err)
 	}
 }
+
+// TestWriteAtRejectsHugeOffsetInsteadOfCrashing is a real regression
+// test found running pjdfstest's full suite against a real,
+// memory-constrained Linux VM: a write far past the current end of a
+// file (pjdfstest's `open` category tests pwrite-style sparse-file/
+// 32-bit-off_t-overflow behavior, specifically a 1-byte write at
+// offset 2147483649 = 2^31+1) made applyLocked's make([]byte, end) try
+// to materialize the entire ~2GB logical gap as one real allocation —
+// this implementation has no sparse-region support at all. On a 4GB
+// test VM already running a long pjdfstest suite, that allocation got
+// the whole process OOM-killed by the kernel outright (no Go panic at
+// all — SIGKILL can't be recovered), which is strictly worse than
+// SetAttr's "makeslice: len out of range" panic for an equally huge
+// *truncate* request (ROADMAP.md/TESTING.md's own already-fixed
+// finding): a panic at least stops only the one request; this took
+// down every other in-flight operation on the same mount too.
+func TestWriteAtRejectsHugeOffsetInsteadOfCrashing(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+
+	key, _, _, err := fsys.Create(ctx, root, "sparse-write-target.txt", 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	open, err := fsys.Open(ctx, key)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	const hugeOffset = 1<<31 + 1 // the exact value pjdfstest's own open/*.t tests use
+	if err := open.WriteAt([]byte("x"), hugeOffset); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("WriteAt at huge offset = %v, want ErrInvalidArgument", err)
+	}
+
+	// A negative offset must be rejected the same way — pwrite(2)'s
+	// own EINVAL for the identical real-world reason.
+	if err := open.WriteAt([]byte("x"), -1); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("WriteAt at negative offset = %v, want ErrInvalidArgument", err)
+	}
+
+	// The handle must still be usable afterward — a rejected write is
+	// just an error for that one call, not a corrupted session.
+	if err := open.WriteAt([]byte("hello"), 0); err != nil {
+		t.Fatalf("WriteAt after rejected huge write: %v", err)
+	}
+	if got := open.ReadAt(0, 5); string(got) != "hello" {
+		t.Fatalf("content after rejected huge write + real write: got %q, want %q", got, "hello")
+	}
+}

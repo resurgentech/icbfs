@@ -27,7 +27,7 @@ import (
 // A method on *driver (not a free function) so it can consult
 // d.fsys.PrimaryWindows() when deciding which attribute representation
 // is authoritative — see attributesFromAttr.
-func (d *driver) fillFileInfo(info *winfsp.FSP_FSCTL_FILE_INFO, typ icbfs.EntryType, a icbfs.Attr) {
+func (d *driver) fillFileInfo(info *winfsp.FSP_FSCTL_FILE_INFO, key string, typ icbfs.EntryType, a icbfs.Attr) {
 	info.FileAttributes = d.attributesFromAttr(typ, a)
 	if typ == icbfs.TypeSymlink {
 		info.ReparseTag = windows.IO_REPARSE_TAG_SYMLINK
@@ -50,8 +50,21 @@ func (d *driver) fillFileInfo(info *winfsp.FSP_FSCTL_FILE_INFO, typ icbfs.EntryT
 	info.LastWriteTime = ft
 	info.ChangeTime = ft
 
-	info.IndexNumber = 0 // set by the caller via icbfs.Ino where relevant; F3 doesn't yet report WinFsp file IDs (ROADMAP.md F3's Ino reuse note)
-	info.HardLinks = 0   // unimplemented, per FSP_FSCTL_FILE_INFO's own doc comment
+	// A real, stable, distinct-per-object file ID — task F3's own
+	// note had flagged this as unreported (hardcoded 0) "where
+	// relevant," but it turned out to matter a great deal: with every
+	// object reporting IndexNumber 0, a real WinFsp conformance run
+	// (winfsp-tests --external, task F1's own verification tooling)
+	// found that a path deleted and immediately recreated under the
+	// same name could be confused with its predecessor by the
+	// kernel's own FCB/attribute caching, which (like NTFS) uses the
+	// file ID as part of its identity/cache-coherency logic — a brand
+	// new UUID (and thus a different icbfs.Ino hash) per Create call
+	// is exactly what breaks that false "same file" identification.
+	// Same reuse of icbfs.Ino the FUSE driver already relies on for
+	// its own inode numbers.
+	info.IndexNumber = icbfs.Ino(key)
+	info.HardLinks = 0 // unimplemented, per FSP_FSCTL_FILE_INFO's own doc comment
 	info.EaSize = 0
 }
 
@@ -123,7 +136,7 @@ func (d *driver) GetFileInfo(fs *winfsp.FileSystemRef, file uintptr, info *winfs
 	if err != nil {
 		return toWinError(err)
 	}
-	d.fillFileInfo(info, h.typ, attr)
+	d.fillFileInfo(info, h.key, h.typ, attr)
 	return nil
 }
 
@@ -159,7 +172,7 @@ func (d *driver) SetBasicInfo(fs *winfsp.FileSystemRef, file uintptr, flags winf
 			return toWinError(err)
 		}
 	}
-	d.fillFileInfo(info, h.typ, attr)
+	d.fillFileInfo(info, h.key, h.typ, attr)
 	return nil
 }
 
@@ -178,7 +191,7 @@ func (d *driver) SetFileSize(fs *winfsp.FileSystemRef, file uintptr, newSize uin
 		if err != nil {
 			return toWinError(err)
 		}
-		d.fillFileInfo(info, h.typ, attr)
+		d.fillFileInfo(info, h.key, h.typ, attr)
 		return nil
 	}
 	size := int64(newSize)
@@ -189,7 +202,7 @@ func (d *driver) SetFileSize(fs *winfsp.FileSystemRef, file uintptr, newSize uin
 	h.mu.Lock()
 	h.open = nil // drop any stale buffered OpenFile; next I/O reopens against the now-resized content
 	h.mu.Unlock()
-	d.fillFileInfo(info, h.typ, attr)
+	d.fillFileInfo(info, h.key, h.typ, attr)
 	return nil
 }
 
