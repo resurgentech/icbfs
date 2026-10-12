@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -82,13 +84,46 @@ type Filesystem struct {
 	// call (never written after setup), so it's set once, before
 	// concurrent use begins, same usage contract as lockingEnabled.
 	lockNotify <-chan notify.Signal
+
+	// cache is the shared, LRU-bounded local disk cache every OpenFile
+	// session seeds its own private scratch file from (ROADMAP.md's
+	// Part G, task G3) — set by New's own default, overridable via
+	// SetCacheOptions before Bootstrap.
+	cache *diskCache
 }
 
 // New builds a Filesystem for the named filesystem. Call Bootstrap
 // before using it for anything else — New itself does no I/O and
 // doesn't know the filesystem's ID yet.
 func New(store objstore.Store, fsName string) *Filesystem {
-	return &Filesystem{store: store, fsName: fsName}
+	// A real, non-optional default (ROADMAP.md's Part G, task G3) —
+	// unlike Locking/Change-notifications, every OpenFile session goes
+	// through this, so there's no sensible "off" state to default to.
+	// os.TempDir() rather than a fixed path: multiple Filesystem
+	// instances in the same process (common in this project's own test
+	// suite) each get their own cache directory, no collisions.
+	cacheDir, err := os.MkdirTemp("", "icbfs-cache-")
+	if err != nil {
+		// Astronomically unlikely on any real system (a writable temp
+		// directory is assumed throughout this project, e.g. every
+		// test already relies on one) — fall back to a fixed
+		// subdirectory of the temp root rather than making New
+		// fallible over this.
+		cacheDir = filepath.Join(os.TempDir(), "icbfs-cache-fallback")
+	}
+	return &Filesystem{store: store, fsName: fsName, cache: newDiskCache(cacheDir, defaultCacheMaxBytes)}
+}
+
+// SetCacheOptions overrides the local disk cache's directory and
+// total size budget (ROADMAP.md's Part G, task G3) — cmd/icbfs's
+// -cache-dir/-cache-size flags call this before Bootstrap; tests and
+// other callers that don't call it at all get New's own default
+// (a fresh os.TempDir() subdirectory, 512 MiB). Safe to call again
+// later, but only takes effect for OpenFile sessions opened
+// afterward — in-flight sessions keep using whatever cache they
+// already started with.
+func (f *Filesystem) SetCacheOptions(dir string, maxBytes int64) {
+	f.cache = newDiskCache(dir, maxBytes)
 }
 
 // EnableLocking turns on the Locking feature (tasks B2-B6) for this
@@ -1265,10 +1300,23 @@ func (f *Filesystem) ReadFile(ctx context.Context, key string) ([]byte, Attr, st
 // sequence of writes (see OpenFile) can condition the next one on this
 // one without a redundant read-back.
 func (f *Filesystem) WriteFile(ctx context.Context, key string, data []byte, ifMatch string) (Attr, string, error) {
+	return f.writeFileFrom(ctx, key, bytes.NewReader(data), ifMatch)
+}
+
+// writeFileFrom is WriteFile's streaming counterpart (ROADMAP.md's
+// Part G, task G3): OpenFile.Flush passes a local scratch file's own
+// *os.File directly (via io.NewSectionReader) rather than a fully
+// materialized []byte, so a large file's flush never needs to hold
+// its entire content in RAM at once — objstore.Store.Put already
+// accepts io.Reader natively (it always has; whole-object buffering
+// was never a constraint this package's own backend interface
+// imposed, only something OpenFile's own earlier design chose to do
+// above it).
+func (f *Filesystem) writeFileFrom(ctx context.Context, key string, body io.Reader, ifMatch string) (Attr, string, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, "", err
 	}
-	contentObj, err := f.store.Put(ctx, key, bytes.NewReader(data), nil, ifMatch)
+	contentObj, err := f.store.Put(ctx, key, body, nil, ifMatch)
 	if err != nil {
 		return Attr{}, "", err
 	}

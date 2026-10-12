@@ -227,6 +227,11 @@ func (d *driver) Close(fs *winfsp.FileSystemRef, file uintptr) {
 		// this project already accepts elsewhere for best-effort
 		// cleanup paths.
 		_, _ = open.Flush(ctx())
+		// Releases this session's private local scratch file
+		// (ROADMAP.md's Part G, task G3) — without this, every real
+		// close leaks a file on local disk for the life of the mount
+		// process.
+		_ = open.Close()
 	}
 }
 

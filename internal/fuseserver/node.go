@@ -812,6 +812,10 @@ func (h *FileHandle) Release(ctx context.Context) syscall.Errno {
 	for owner := range renewers {
 		h.releaseAllHeldBy(ctx, owner)
 	}
+	// Releases this session's private local scratch file (ROADMAP.md's
+	// Part G, task G3) — without this, every real close(2) would leak
+	// a file on local disk for the life of the mount process.
+	_ = h.open.Close()
 	return 0
 }
 

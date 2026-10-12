@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -249,6 +251,79 @@ func TestCheckRangeLockConflictIgnoresEscalationOnlyEntries(t *testing.T) {
 // *truncate* request (ROADMAP.md/TESTING.md's own already-fixed
 // finding): a panic at least stops only the one request; this took
 // down every other in-flight operation on the same mount too.
+// TestOpenFileTouchAtimeOnlyOncePerSession is a real regression test:
+// a single large read gets split by the kernel into many smaller
+// FUSE/WinFsp Read callback invocations, and an earlier version of
+// OpenFile.TouchAtime called Filesystem.TouchAtime — a real network
+// metadata PUT — on every single one of them, turning one 500 MB
+// read into thousands of synchronous round trips and hanging a real
+// mount in practice (found running task G3's own VM verification,
+// not hypothetical). Confirmed here as a plain call-count assertion,
+// not a timing-based test, since the real-world symptom (a hang) is
+// exactly what a slow CI run must never risk reproducing.
+func TestOpenFileTouchAtimeOnlyOncePerSession(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+
+	key, _, _, err := fsys.Create(ctx, root, "touch-once.txt", 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	open, err := fsys.Open(ctx, key)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	before, err := fsys.Stat(ctx, key, TypeFile)
+	if err != nil {
+		t.Fatalf("stat before: %v", err)
+	}
+	if !before.Atime.IsZero() {
+		t.Fatalf("freshly created file's Atime = %v, want zero", before.Atime)
+	}
+
+	open.mu.Lock()
+	if open.atimeTouched {
+		open.mu.Unlock()
+		t.Fatalf("atimeTouched = true before any TouchAtime call, want false")
+	}
+	open.mu.Unlock()
+
+	if err := open.TouchAtime(ctx); err != nil {
+		t.Fatalf("first TouchAtime: %v", err)
+	}
+	open.mu.Lock()
+	if !open.atimeTouched {
+		open.mu.Unlock()
+		t.Fatalf("atimeTouched = false after the first TouchAtime call, want true")
+	}
+	open.mu.Unlock()
+
+	after, err := fsys.Stat(ctx, key, TypeFile)
+	if err != nil {
+		t.Fatalf("stat after first touch: %v", err)
+	}
+	if after.Atime.IsZero() {
+		t.Fatalf("Atime still zero after the first TouchAtime call — the real update never happened at all")
+	}
+
+	// A second, explicitly different-looking call must be a genuine
+	// no-op (not just "happens not to change anything observable") —
+	// confirmed by making it fail outright if it were to actually run:
+	// Filesystem.TouchAtime against a key that no longer exists would
+	// return a real error, so a nil here can only mean the guard
+	// skipped calling through at all.
+	if err := fsys.Unlink(ctx, root, "touch-once.txt"); err != nil {
+		t.Fatalf("unlink: %v", err)
+	}
+	for i := 0; i < 50; i++ {
+		if err := open.TouchAtime(ctx); err != nil {
+			t.Fatalf("TouchAtime call %d after unlink = %v, want nil (should be a guarded no-op, never reaching the now-deleted key)", i, err)
+		}
+	}
+}
+
 func TestWriteAtRejectsHugeOffsetInsteadOfCrashing(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	ctx := context.Background()
@@ -281,5 +356,98 @@ func TestWriteAtRejectsHugeOffsetInsteadOfCrashing(t *testing.T) {
 	}
 	if got := open.ReadAt(0, 5); string(got) != "hello" {
 		t.Fatalf("content after rejected huge write + real write: got %q, want %q", got, "hello")
+	}
+}
+
+// TestOpenFileCloseRemovesScratchFile covers ROADMAP.md's Part G, task
+// G3: OpenFile's content lives in a private local scratch file, not an
+// in-memory []byte — this confirms that file genuinely exists on disk
+// while the session is open, and is genuinely removed (not just
+// forgotten about) once Close releases it, since a leaked scratch
+// file per open-then-close cycle would defeat the whole point of this
+// task (a real, unbounded local-disk leak instead of an unbounded RAM
+// one).
+func TestOpenFileCloseRemovesScratchFile(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+
+	key, _, _, err := fsys.Create(ctx, root, "scratch-lifecycle.txt", 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	open, err := fsys.Open(ctx, key)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	open.mu.Lock()
+	scratchPath := open.file.Name()
+	open.mu.Unlock()
+
+	if _, err := os.Stat(scratchPath); err != nil {
+		t.Fatalf("scratch file missing while session is open: %v", err)
+	}
+	if err := open.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, err := os.Stat(scratchPath); !os.IsNotExist(err) {
+		t.Fatalf("scratch file still present after Close: stat err = %v, want IsNotExist", err)
+	}
+}
+
+// TestDiskCacheAvoidsRedundantFetchOnValidatedHit covers ROADMAP.md's
+// Part G, task G3's actual point: a second seedScratch call for the
+// same key+etag must not call fetch again — it should be served from
+// the shared cache's own local copy. A fetch counter proves this
+// directly rather than inferring it from timing.
+func TestDiskCacheAvoidsRedundantFetchOnValidatedHit(t *testing.T) {
+	dir := t.TempDir()
+	cache := newDiskCache(dir, 1<<20)
+	ctx := context.Background()
+
+	fetchCount := 0
+	content := []byte("cached content, fetched only once")
+	fetch := func(ctx context.Context) (io.ReadCloser, error) {
+		fetchCount++
+		return io.NopCloser(bytes.NewReader(content)), nil
+	}
+
+	f1, size1, err := cache.seedScratch(ctx, "k1", "etag-a", fetch)
+	if err != nil {
+		t.Fatalf("seedScratch (first, expected miss): %v", err)
+	}
+	defer f1.Close()
+	if fetchCount != 1 {
+		t.Fatalf("fetchCount after first seedScratch = %d, want 1 (a real miss)", fetchCount)
+	}
+	if size1 != int64(len(content)) {
+		t.Fatalf("first seedScratch size = %d, want %d", size1, len(content))
+	}
+
+	f2, size2, err := cache.seedScratch(ctx, "k1", "etag-a", fetch)
+	if err != nil {
+		t.Fatalf("seedScratch (second, expected hit): %v", err)
+	}
+	defer f2.Close()
+	if fetchCount != 1 {
+		t.Fatalf("fetchCount after second seedScratch (same etag) = %d, want still 1 (a cache hit)", fetchCount)
+	}
+	got := make([]byte, size2)
+	if _, err := f2.ReadAt(got, 0); err != nil {
+		t.Fatalf("read back cached copy: %v", err)
+	}
+	if string(got) != string(content) {
+		t.Fatalf("cached copy content = %q, want %q", got, content)
+	}
+
+	// A different etag for the same key must be treated as a real
+	// miss — proving this isn't just "fetch is never called twice,"
+	// but a genuine validity check against the caller-supplied etag.
+	if _, _, err := cache.seedScratch(ctx, "k1", "etag-b", fetch); err != nil {
+		t.Fatalf("seedScratch (stale etag, expected miss): %v", err)
+	}
+	if fetchCount != 2 {
+		t.Fatalf("fetchCount after a different etag = %d, want 2 (a real miss, not a stale hit)", fetchCount)
 	}
 }

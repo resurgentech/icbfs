@@ -53,6 +53,8 @@ func main() {
 	size := fset.Uint64("size", 100<<30, "declared filesystem size in bytes (only used the first time a filesystem name is created)")
 	caseInsensitive := fset.Bool("case-insensitive", true, "case-insensitive name lookup, following the standard NTFS/Samba/WSL2 pattern (ARCHITECTURE.md's Windows compatibility section) — storage itself always stays case-sensitive/case-preserving regardless of this flag")
 	primaryWindows := fset.Bool("primary-windows", true, "mark this filesystem primary-Windows rather than primary-POSIX (ARCHITECTURE.md's \"Windows compatibility: primary mode\" section) — only used the first time a filesystem name is created, immutable afterward, same as --size")
+	cacheDir := fset.String("cache-dir", "", "local disk directory for the file-content cache (ROADMAP.md's Part G, task G3); empty (the default) uses a fresh os.TempDir() subdirectory")
+	cacheSize := fset.Uint64("cache-size", 512<<20, "maximum total bytes the local disk cache (-cache-dir) may hold before evicting the least-recently-used cached file")
 	if err := fset.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
@@ -72,6 +74,9 @@ func main() {
 	store := objstore.NewS3Store(client, *bucket)
 
 	fsys := icbfs.New(store, *fsName)
+	if *cacheDir != "" {
+		fsys.SetCacheOptions(*cacheDir, int64(*cacheSize))
+	}
 	if err := fsys.Bootstrap(ctx, *size, 0755, 0, 0, *primaryWindows); err != nil {
 		log.Fatalf("bootstrap filesystem %q: %v", *fsName, err)
 	}

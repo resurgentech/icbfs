@@ -48,6 +48,8 @@ func main() {
 	enableNotify := fset.Bool("notify", false, "enable the Change notifications feature (ROADMAP.md Part E) via MinIO's ListenBucketNotification; off by default, same opt-in reasoning as --locking. Only the MinIO backend (task E4) is wired up here — Azure/AWS S3 adapters (tasks E5/E6) aren't reachable from this flag.")
 	debug := fset.Bool("debug", false, "log every FUSE operation")
 	allowOther := fset.Bool("allow-other", false, "allow users other than the one running this command (and root) to access the mount; off by default, same opt-in reasoning as --locking/--notify. Without it, FUSE's own kernel-side fuse_allow_current_process check rejects every other uid outright, independent of default_permissions or file modes — a real finding from running pjdfstest's -u/-g permission tests against a root-mounted filesystem, not a hypothetical. Passing this through typically also needs user_allow_other in /etc/fuse.conf, same as any other FUSE filesystem's -o allow_other.")
+	cacheDir := fset.String("cache-dir", "", "local disk directory for the file-content cache (ROADMAP.md's Part G, task G3); empty (the default) uses a fresh os.TempDir() subdirectory. Unlike --locking/--notify, this isn't optional functionality — every open file's content lives here, not in RAM, so there's always a real directory in use even when this flag is left at its default.")
+	cacheSize := fset.Uint64("cache-size", 512<<20, "maximum total bytes the local disk cache (-cache-dir) may hold before evicting the least-recently-used cached file")
 	if err := fset.Parse(os.Args[2:]); err != nil {
 		os.Exit(2)
 	}
@@ -68,6 +70,9 @@ func main() {
 	store := objstore.NewS3Store(client, *bucket)
 
 	fsys := icbfs.New(store, *fsName)
+	if *cacheDir != "" {
+		fsys.SetCacheOptions(*cacheDir, int64(*cacheSize))
+	}
 	// The root is owned by whoever runs this mount command by default
 	// — necessary now that fuseMountOptions enables default_permissions
 	// (task C1): the kernel enforces this ownership for real, so a

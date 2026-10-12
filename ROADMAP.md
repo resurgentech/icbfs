@@ -260,6 +260,87 @@ local-cache-only.
   multi-file access; `go test ./...` — especially Part B's existing
   CAS-retry/escalation suite — still passes unmodified.
 
+**Done, with two real bugs found and fixed during VM verification —
+neither one hypothetical, both found by actually using a large file
+against a real mount, not inferred from code review.** `OpenFile`'s
+`data []byte` field is now a private local scratch file
+(`internal/icbfs/diskcache.go`'s new `diskCache`), seeded via a cheap
+`Head` call plus a shared, LRU-bounded cache of validated snapshots —
+a real cache hit (same ETag) costs a local file-to-file copy, never a
+redundant network fetch. Each session's scratch file is strictly
+private, never shared with another concurrent session of the same
+key — deliberately, since sharing one physical file would let one
+session's uncommitted edits leak into another's before Flush, breaking
+the isolation task B1's CAS-retry-and-reapply correctness depends on.
+`Flush` streams the scratch file directly to `objstore.Store.Put` via
+`io.NewSectionReader` (a new `writeFileFrom`, `WriteFile`'s own
+streaming counterpart) — never re-materialized as a `[]byte` at flush
+time either. New `-cache-dir`/`-cache-size` flags on both `cmd/icbfs`
+and `cmd/icbfs-winfsp` (default: a fresh `os.TempDir()` subdirectory,
+512 MiB — a real default, not optional, since every `OpenFile` session
+goes through this regardless of whether either flag is set).
+
+**Bug 1: the CAS-retry-and-reapply edit log defeated this task's own
+point for exactly the case it was built for.** The first version kept
+`ops []writeOp` exactly as it existed before this task — a growing
+slice of every individual write's own bytes, for replaying onto a
+freshly rebased base after a lost CAS race. For a large sequential
+write (found testing a 500 MB file against the real VM, not a small
+one), that log alone held the *entire file's content a second time*,
+in RAM, even though the scratch file backing `o.data` itself never
+did — RSS grew by roughly the file's own size regardless, the exact
+thing this task exists to prevent. Fixed by recognizing the log didn't
+need to exist as data at all: `applyLocked` already writes every edit
+directly onto the one shared scratch file, in call order, so a later
+overlapping write already wins over an earlier one there, exactly as
+replaying a log would produce. Replaced the log with two `int64`s
+(`touchedStart`/`touchedEnd`, O(1) regardless of how much was
+written) tracking only the touched span; `rebaseLocked` now reads
+that one already-correctly-merged range back from the *old* scratch
+file before discarding it, and reapplies it once onto the freshly
+rebased one — behaviorally identical to the old per-op replay for a
+single session's own edits (confirmed: every existing Part B test,
+including the concurrent-non-overlapping-writers one, passed
+unmodified against this rewrite).
+
+**Bug 2: `TouchAtime` (task G1) turned one large read into thousands
+of synchronous network writes, hanging a real mount.** The kernel's
+own read chunking (`max_read`) splits one application-level `read(2)`
+into many smaller FUSE/WinFsp `Read` callback invocations — a 500 MB
+read is roughly 4,000 of them at a 128 KB chunk size. G1's `TouchAtime`
+call on every single one meant every single chunk blocked on a real
+`PutObject` round trip to the backend before returning — confirmed via
+a `SIGQUIT` goroutine dump catching the mount hung inside exactly that
+call, not a deadlock in this task's own new code. "Strict, not
+relatime" (G1's own explicit decision) means every real access updates
+atime immediately, not that every individual kernel-level chunk of the
+*same* ongoing read re-updates it again — a real filesystem's own
+strict-atime behavior doesn't do that either. Fixed with an
+`atimeTouched` guard on `OpenFile`, making `TouchAtime` a no-op after
+its first real call per session — new regression test
+`TestOpenFileTouchAtimeOnlyOncePerSession`, confirmed discriminating.
+
+**Verified for real against the Linux VM, not just inferred from the
+fix:** a 500 MB write followed by a full-file `sha256sum` read (a much
+heavier, smaller-chunked read pattern than the write) held RSS flat
+throughout — `14.6 MB → 17.6 MB → 20.1 MB`, not the ~500 MB spike (and,
+pre-fix, the outright OOM-kill and hang) the old design and the two
+bugs above respectively produced. A full `pjdfstest` run afterward
+(238 files, 8798 assertions) finished clean — mount alive throughout,
+zero crashes, zero hangs, and a genuine net *improvement* over the
+pre-G3 baseline (205 of 238 files now pass completely clean, up from
+168) — likely because this task's lower per-operation overhead
+incidentally helped some timing-sensitive checks that a slower,
+RAM-buffered path used to miss by a narrower margin; every remaining
+failure matches the same already-documented, already-accepted
+type-loop/device-exclusion pattern `test/linux/README.md` already
+catalogues, confirmed by spot-checking one (`chmod/00.t`) directly
+against its real source rather than assumed.
+
+**The mmap follow-up flagged above as "not a Done-when requirement"
+is still open** — not revisited in this pass; worth returning to once
+there's time, now that a real local file exists to mmap directly.
+
 ### G4. Generic (non-symlink) reparse-point support
 
 `internal/winfspserver/reparse.go` already handles symlinks correctly
