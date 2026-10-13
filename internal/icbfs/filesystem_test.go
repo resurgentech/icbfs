@@ -745,7 +745,7 @@ func TestSetWindowsAttributesRoundTripsAndMasksUnrelatedBits(t *testing.T) {
 	)
 	in := WindowsAttrHidden | WindowsAttrArchive | fileAttributeDirectory | fileAttributeNormal
 
-	attr, err := fsys.SetWindowsAttributes(ctx, uuid, in)
+	attr, err := fsys.SetWindowsAttributes(ctx, uuid, TypeFile, in)
 	if err != nil {
 		t.Fatalf("SetWindowsAttributes: %v", err)
 	}
@@ -815,7 +815,7 @@ func TestSetWindowsACLRoundTrips(t *testing.T) {
 	}
 
 	sddl := []byte("O:S-1-5-21-1-2-3-1000G:S-1-5-21-1-2-3-1001D:(A;;FA;;;S-1-5-21-1-2-3-1000)")
-	attr, err := fsys.SetWindowsACL(ctx, uuid, sddl)
+	attr, err := fsys.SetWindowsACL(ctx, uuid, TypeFile, sddl)
 	if err != nil {
 		t.Fatalf("SetWindowsACL: %v", err)
 	}
@@ -854,5 +854,119 @@ func TestSetWindowsACLRoundTrips(t *testing.T) {
 	}
 	if _, ok := WindowsACLFromXattrs(otherAttr.Xattrs); ok {
 		t.Fatalf("WindowsACLFromXattrs: ok = true for an entry never touched, xattrs = %v", otherAttr.Xattrs)
+	}
+}
+
+// TestDirectoryMetadataObject covers directories' own .metadata: Mkdir
+// creates it, attribute changes and Windows bits/ACLs round-trip through
+// it, and Rmdir removes it.
+func TestDirectoryMetadataObject(t *testing.T) {
+	fsys, store := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+
+	if _, err := store.Head(ctx, metadataObjectKey(root)); err != nil {
+		t.Fatalf("root .metadata after Bootstrap: %v", err)
+	}
+	dir, _, err := fsys.Mkdir(ctx, root, "d", 0750, 7, 8)
+	if err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if _, err := store.Head(ctx, metadataObjectKey(dir)); err != nil {
+		t.Fatalf("dir .metadata after Mkdir: %v", err)
+	}
+	attr, err := fsys.Stat(ctx, dir, TypeDir)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if attr.Mode != 0750 || attr.Uid != 7 || attr.Gid != 8 || attr.Mtime.IsZero() || !attr.Btime.Equal(Btime(dir)) {
+		t.Fatalf("dir attr = %+v", attr)
+	}
+
+	mode := uint32(0700)
+	mtime := time.Date(2001, 2, 3, 4, 5, 6, 0, time.UTC)
+	if _, err := fsys.SetAttr(ctx, dir, TypeDir, &mode, nil, nil, nil, nil, &mtime, nil); err != nil {
+		t.Fatalf("SetAttr: %v", err)
+	}
+	if _, err := fsys.SetWindowsAttributes(ctx, dir, TypeDir, WindowsAttrReadOnly); err != nil {
+		t.Fatalf("SetWindowsAttributes: %v", err)
+	}
+	if _, err := fsys.SetWindowsACL(ctx, dir, TypeDir, []byte("D:P(A;;FA;;;WD)")); err != nil {
+		t.Fatalf("SetWindowsACL: %v", err)
+	}
+	// Entries changing must not disturb the directory's own attributes.
+	if _, _, _, err := fsys.Create(ctx, dir, "child", 0644, 0, 0); err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	attr, err = fsys.Stat(ctx, dir, TypeDir)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	bits, _ := WindowsAttributesFromXattrs(attr.Xattrs)
+	acl, _ := WindowsACLFromXattrs(attr.Xattrs)
+	if attr.Mode != 0700 || !attr.Mtime.Equal(mtime) || bits != WindowsAttrReadOnly || string(acl) != "D:P(A;;FA;;;WD)" {
+		t.Fatalf("dir attr after updates = %+v", attr)
+	}
+
+	if err := fsys.Unlink(ctx, dir, "child"); err != nil {
+		t.Fatalf("unlink child: %v", err)
+	}
+	if err := fsys.Rmdir(ctx, root, "d"); err != nil {
+		t.Fatalf("rmdir: %v", err)
+	}
+	if _, err := store.Head(ctx, metadataObjectKey(dir)); !objstore.IsNotFound(err) {
+		t.Fatalf("dir .metadata after Rmdir: err = %v, want not found", err)
+	}
+}
+
+// TestLegacyDirectoryMigratesOnFirstWrite covers a directory created
+// before directories had .metadata (attributes in its block's native
+// metadata): it reads correctly as-is, and its first attribute write
+// moves everything into .metadata without losing any of it.
+func TestLegacyDirectoryMigratesOnFirstWrite(t *testing.T) {
+	fsys, store := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+
+	key, err := fsys.newKey()
+	if err != nil {
+		t.Fatalf("newKey: %v", err)
+	}
+	empty, err := (&block.Block{Kind: block.Leaf}).Encode()
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	legacyMtime := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	native := map[string]string{
+		dirMetaMode: "493", dirMetaUid: "11", dirMetaGid: "12", dirMetaNlink: "1",
+		dirMetaMtime: fmt.Sprint(legacyMtime.UnixNano()),
+	}
+	if _, err := store.Put(ctx, key, bytes.NewReader(empty), native, ""); err != nil {
+		t.Fatalf("put legacy block: %v", err)
+	}
+	if err := fsys.insertEntry(ctx, root, "old", key, TypeDir); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	attr, err := fsys.Stat(ctx, key, TypeDir)
+	if err != nil {
+		t.Fatalf("stat legacy: %v", err)
+	}
+	if attr.Mode != 0755 || attr.Uid != 11 || attr.Gid != 12 || !attr.Mtime.Equal(legacyMtime) {
+		t.Fatalf("legacy attr = %+v", attr)
+	}
+
+	if err := fsys.TouchAtime(ctx, key, TypeDir); err != nil {
+		t.Fatalf("TouchAtime: %v", err)
+	}
+	if _, err := store.Head(ctx, metadataObjectKey(key)); err != nil {
+		t.Fatalf(".metadata after first write: %v", err)
+	}
+	after, err := fsys.Stat(ctx, key, TypeDir)
+	if err != nil {
+		t.Fatalf("stat migrated: %v", err)
+	}
+	if after.Mode != 0755 || after.Uid != 11 || after.Gid != 12 || !after.Mtime.Equal(legacyMtime) || after.Atime.IsZero() {
+		t.Fatalf("migrated attr = %+v", after)
 	}
 }

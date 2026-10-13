@@ -135,14 +135,14 @@ func GenericReparseFromXattrs(xattrs map[string][]byte) (buf []byte, ok bool) {
 //     dedicated <uuid>.metadata object's body (Protobuf-encoded, below);
 //     size/mtime/btime come from the content object itself; ctime is
 //     max(contentObject.LastModified, metadataObject.LastModified).
-//   - For a directory (root included): mode/uid/gid live in native
-//     object metadata on the directory block object itself (no
-//     .metadata object — directories aren't hard-linkable, so the
-//     real-CAS-protection reason files/symlinks need one doesn't apply);
-//     mtime is tracked explicitly there too (see dirMetadataFromAttr,
-//     below), since a directory's own body (its entries) and its
-//     attributes share one object, the same conflation problem a
-//     .metadata split fixes for files would otherwise reappear.
+//   - For a directory (root included): everything stored lives in its
+//     own <uuid>.metadata object too, the same Protobuf body as a file's,
+//     CAS-protected the same way; mtime is stored explicitly there
+//     (a directory's root block need not change when its entries do),
+//     and size/ctime come from the root block object. Directories
+//     created before this lived in native metadata on the block object;
+//     those are still read (dirAttrFromObject) and migrate on their
+//     first attribute write.
 type Attr struct {
 	Mode   uint32 // permission bits only (e.g. 0644) — type bits are not stored here
 	Uid    uint32
@@ -152,9 +152,9 @@ type Attr struct {
 	Atime  time.Time
 	Mtime  time.Time
 	Ctime  time.Time
-	Btime  time.Time         // derived from the UUIDv7 key; zero if the key isn't a UUIDv7
-	Xattrs map[string][]byte // directories: only WindowsAttributesXattrKey, if ever set
-	Rdev   uint32            // TypeCharDevice/TypeBlockDevice only (ROADMAP.md's Part G, task G2); 0 for every other type
+	Btime  time.Time // derived from the UUIDv7 key; zero if the key isn't a UUIDv7
+	Xattrs map[string][]byte
+	Rdev   uint32 // TypeCharDevice/TypeBlockDevice only (ROADMAP.md's Part G, task G2); 0 for every other type
 
 	// mtimeOverrideETag is the content ETag an explicit mtime override
 	// (Mtime, as decoded from .metadata) was set against — see
@@ -162,52 +162,19 @@ type Attr struct {
 	mtimeOverrideETag string
 }
 
-// --- Directory attributes: native object metadata on the block object
-// itself (unchanged by the .metadata migration — see Attr's doc comment
-// for why directories stay on this older, simpler mechanism). ---
+// --- Legacy directory attributes: native object metadata on the block
+// object, read only for directories created before directories had
+// .metadata (see Attr's doc comment). Never written any more. ---
 
 const (
-	dirMetaMode  = "mode"
-	dirMetaUid   = "uid"
-	dirMetaGid   = "gid"
-	dirMetaNlink = "nlink"
-	dirMetaMtime = "mtime"
-	dirMetaAtime = "atime"
-	// dirMetaWinAttr holds a directory's Windows attribute bits (e.g.
-	// ReadOnly, Hidden), surfaced through Attr.Xattrs under
-	// WindowsAttributesXattrKey — the same place a file's live — so
-	// access layers read them the same way for both.
+	dirMetaMode    = "mode"
+	dirMetaUid     = "uid"
+	dirMetaGid     = "gid"
+	dirMetaNlink   = "nlink"
+	dirMetaMtime   = "mtime"
+	dirMetaAtime   = "atime"
 	dirMetaWinAttr = "winattr"
 )
-
-// dirMetadataFromAttr builds the object-metadata map a directory block
-// object's mode/uid/gid/nlink/mtime/atime are stored as.
-func dirMetadataFromAttr(a Attr) map[string]string {
-	mtime := a.Mtime
-	if mtime.IsZero() {
-		mtime = time.Now()
-	}
-	m := map[string]string{
-		dirMetaMode:  strconv.FormatUint(uint64(a.Mode), 10),
-		dirMetaUid:   strconv.FormatUint(uint64(a.Uid), 10),
-		dirMetaGid:   strconv.FormatUint(uint64(a.Gid), 10),
-		dirMetaNlink: strconv.FormatUint(uint64(a.Nlink), 10),
-		dirMetaMtime: strconv.FormatInt(mtime.UnixNano(), 10),
-	}
-	// atime is only written when the caller actually has one to set
-	// (Stat's read-bumps-atime path, or an explicit utimensat) — unlike
-	// mtime, a brand-new directory has no meaningful "last accessed"
-	// yet, and omitting the key here lets parseMetaTime's zero-value
-	// default (never accessed) stay honest rather than defaulting to
-	// "now" the way mtime does above.
-	if !a.Atime.IsZero() {
-		m[dirMetaAtime] = strconv.FormatInt(a.Atime.UnixNano(), 10)
-	}
-	if bits, ok := WindowsAttributesFromXattrs(a.Xattrs); ok {
-		m[dirMetaWinAttr] = strconv.FormatUint(uint64(bits), 10)
-	}
-	return m
-}
 
 func parseMetaUint(m map[string]string, key string) uint32 {
 	v, _ := strconv.ParseUint(m[key], 10, 32)

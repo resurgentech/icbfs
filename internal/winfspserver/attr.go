@@ -231,14 +231,10 @@ func (d *driver) SetBasicInfo(fs *winfsp.FileSystemRef, file uintptr, flags winf
 		return toWinError(err)
 	}
 	if flags&winfsp.SetBasicInfoAttributes != 0 {
-		if h.typ == icbfs.TypeDir {
-			// e.g. a read-only directory (winfsp-tests'
-			// create_readonlydir_test), which Windows then refuses to
-			// remove until the bit is cleared.
-			attr, err = d.fsys.SetDirWindowsAttributes(ctx(), h.key, fileAttributes)
-		} else {
-			attr, err = d.fsys.SetWindowsAttributes(ctx(), h.key, fileAttributes)
-		}
+		// Directories too, e.g. a read-only directory (winfsp-tests'
+		// create_readonlydir_test), which Windows then refuses to
+		// remove until the bit is cleared.
+		attr, err = d.fsys.SetWindowsAttributes(ctx(), h.key, h.typ, fileAttributes)
 		if err != nil {
 			return toWinError(err)
 		}
@@ -323,12 +319,11 @@ func fallbackSD() (*windows.SECURITY_DESCRIPTOR, error) {
 }
 
 // securityDescriptorFor resolves the SD to report for typ/attr: a
-// file/symlink's own stored windows.acl xattr if SetSecurity has ever
-// set one (full native fidelity, same "schema always carries the
-// field" principle task F7 already established for attribute bits),
-// falling back to fallbackSD otherwise. Directories never get a stored
-// SD at all — they have no .metadata object to store one in (see
-// Attr's doc comment) — so always report fallbackSD; a corrupt or
+// file's, symlink's or directory's own stored windows.acl xattr if one
+// was set at create time or by SetSecurity (full native fidelity, same
+// "schema always carries the field" principle task F7 already
+// established for attribute bits), falling back to fallbackSD
+// otherwise; a corrupt or
 // unparseable stored SDDL string (which SetSecurity itself should
 // never produce, but a direct store-level edit could) is treated the
 // same as "nothing stored" rather than failing the whole call.
@@ -346,7 +341,7 @@ func (d *driver) securityDescriptorFor(typ icbfs.EntryType, attr icbfs.Attr) (*w
 	// matching the fix this task (C3) found while building the
 	// POSIX-primary enforcement path itself, not assumed correct from
 	// F8 alone.
-	if typ != icbfs.TypeDir && d.fsys.PrimaryWindows() {
+	if d.fsys.PrimaryWindows() {
 		if raw, ok := icbfs.WindowsACLFromXattrs(attr.Xattrs); ok {
 			if sd, err := windows.SecurityDescriptorFromString(string(raw)); err == nil {
 				return sd, nil
@@ -556,9 +551,6 @@ func (d *driver) SetSecurity(fs *winfsp.FileSystemRef, file uintptr, info window
 	if !ok {
 		return os.ErrNotExist
 	}
-	if h.typ == icbfs.TypeDir {
-		return nil
-	}
 	attr, err := d.fsys.Stat(ctx(), h.key, h.typ)
 	if err != nil {
 		return toWinError(err)
@@ -571,7 +563,7 @@ func (d *driver) SetSecurity(fs *winfsp.FileSystemRef, file uintptr, info window
 	if err != nil {
 		return err
 	}
-	if _, err := d.fsys.SetWindowsACL(ctx(), h.key, []byte(merged.String())); err != nil {
+	if _, err := d.fsys.SetWindowsACL(ctx(), h.key, h.typ, []byte(merged.String())); err != nil {
 		return toWinError(err)
 	}
 	return nil

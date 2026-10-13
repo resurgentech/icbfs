@@ -332,6 +332,19 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 		if err != nil {
 			return 0, toWinError(err)
 		}
+		// A directory's security descriptor and attribute bits are
+		// stored like a file's (no Archive bit, as on NTFS) — so a
+		// directory created with a restrictive ACL actually enforces it
+		// (winfsp-tests' create_notraverse/create_restore/getfileattr).
+		if securityDescriptor != nil || fileAttributes&^windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
+			var sddl []byte
+			if securityDescriptor != nil {
+				sddl = []byte(securityDescriptor.String())
+			}
+			if attr, err = d.fsys.SetWindowsCreateMetadata(ctx(), newUUID, icbfs.TypeDir, fileAttributes, sddl); err != nil {
+				return 0, toWinError(err)
+			}
+		}
 		d.fillFileInfo(info, newUUID, icbfs.TypeDir, attr)
 		return d.newHandle(&fileHandle{key: newUUID, typ: icbfs.TypeDir, path: name}), nil
 	}
@@ -367,7 +380,7 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 	if securityDescriptor != nil {
 		sddl = []byte(securityDescriptor.String())
 	}
-	if attr, err = d.fsys.SetWindowsCreateMetadata(ctx(), newUUID, fileAttributes|icbfs.WindowsAttrArchive, sddl); err != nil {
+	if attr, err = d.fsys.SetWindowsCreateMetadata(ctx(), newUUID, icbfs.TypeFile, fileAttributes|icbfs.WindowsAttrArchive, sddl); err != nil {
 		return 0, toWinError(err)
 	}
 	// seeded empty, not nil: a just-created file's content really is
@@ -416,7 +429,7 @@ func (d *driver) Overwrite(fs *winfsp.FileSystemRef, file uintptr, attributes ui
 	if attr, err = d.fsys.SetAttr(ctx(), h.key, h.typ, &mode, nil, nil, nil, nil, nil, nil); err != nil {
 		return toWinError(err)
 	}
-	if attr, err = d.fsys.SetWindowsAttributes(ctx(), h.key, bits); err != nil {
+	if attr, err = d.fsys.SetWindowsAttributes(ctx(), h.key, h.typ, bits); err != nil {
 		return toWinError(err)
 	}
 	d.fillFileInfo(info, h.key, h.typ, attr)

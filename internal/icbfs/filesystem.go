@@ -239,8 +239,17 @@ func (f *Filesystem) Bootstrap(ctx context.Context, size uint64, mode, uid, gid 
 	if err != nil {
 		return err
 	}
+	// .metadata first: if this is interrupted before the block lands,
+	// the next Bootstrap sees no root block and simply redoes both.
 	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1, Mtime: time.Now()}
-	_, err = f.store.Put(ctx, rootKey, bytes.NewReader(empty), dirMetadataFromAttr(attr), "")
+	metaData, err := encodeFileMetadata(attr)
+	if err != nil {
+		return err
+	}
+	if _, err := f.store.Put(ctx, metadataObjectKey(rootKey), bytes.NewReader(metaData), nil, ""); err != nil {
+		return err
+	}
+	_, err = f.store.Put(ctx, rootKey, bytes.NewReader(empty), nil, "")
 	return err
 }
 
@@ -309,8 +318,11 @@ func (f *Filesystem) readBlock(ctx context.Context, key string) (*block.Block, *
 	return blk, obj, nil
 }
 
-// dirAttrFromObject assembles a directory's Attr from its own block
-// object's native metadata (see Attr's doc comment).
+// dirAttrFromObject assembles a directory's Attr from its block object's
+// native metadata — the storage directories used before they had their
+// own .metadata object (see Attr's doc comment). Only read for a
+// directory created before that change; its first attribute write
+// migrates it (updateDirMetadata).
 func dirAttrFromObject(key string, obj *objstore.Object) Attr {
 	mtime := parseMetaTime(obj.Metadata, dirMetaMtime)
 	if mtime.IsZero() {
@@ -388,6 +400,72 @@ func combineFileAttr(key string, metaData []byte, metaLastModified time.Time, co
 	return attr, nil
 }
 
+// combineDirAttr assembles a directory's Attr from its .metadata body and
+// its root block object. Unlike a file's, a directory's mtime is always
+// explicit (set at creation and by SetAttr), since its root block need
+// not change when its entries do; the block's own timestamp is only a
+// fallback.
+func combineDirAttr(key string, metaData []byte, metaLastModified time.Time, blockObj *objstore.Object) (Attr, error) {
+	attr, err := decodeFileMetadata(metaData)
+	if err != nil {
+		return Attr{}, err
+	}
+	attr.mtimeOverrideETag = ""
+	attr.Size = blockObj.Size
+	if attr.Mtime.IsZero() {
+		attr.Mtime = blockObj.LastModified
+	}
+	if attr.Btime.IsZero() {
+		attr.Btime = Btime(key)
+	}
+	attr.Ctime = metaLastModified
+	if blockObj.LastModified.After(attr.Ctime) {
+		attr.Ctime = blockObj.LastModified
+	}
+	return attr, nil
+}
+
+// statDir fetches a directory's root block and .metadata concurrently, as
+// statFile does for a file; a directory without .metadata (created before
+// directories had one) falls back to its block's native metadata.
+func (f *Filesystem) statDir(ctx context.Context, key string) (Attr, error) {
+	var metaData []byte
+	var metaLastModified time.Time
+	var blockObj *objstore.Object
+	var metaErr, blockErr error
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		body, obj, err := f.store.Get(ctx, metadataObjectKey(key))
+		if err != nil {
+			metaErr = mapNotFound(err)
+			return
+		}
+		defer body.Close()
+		metaData, metaErr = io.ReadAll(body)
+		metaLastModified = obj.LastModified
+	}()
+	go func() {
+		defer wg.Done()
+		blockObj, blockErr = f.store.Head(ctx, key)
+		blockErr = mapNotFound(blockErr)
+	}()
+	wg.Wait()
+
+	if blockErr != nil {
+		return Attr{}, blockErr
+	}
+	if errors.Is(metaErr, ErrNotFound) {
+		return dirAttrFromObject(key, blockObj), nil
+	}
+	if metaErr != nil {
+		return Attr{}, metaErr
+	}
+	return combineDirAttr(key, metaData, metaLastModified, blockObj)
+}
+
 // statFile fetches a file/symlink's two objects concurrently — per
 // ARCHITECTURE.md, this is two requests either way, so the latency cost
 // is max() of the two, not the sum.
@@ -433,11 +511,7 @@ func (f *Filesystem) statFile(ctx context.Context, key string) (Attr, error) {
 // know which it's asking about.
 func (f *Filesystem) Stat(ctx context.Context, key string, typ EntryType) (Attr, error) {
 	if typ == TypeDir {
-		obj, err := f.store.Head(ctx, key)
-		if err != nil {
-			return Attr{}, mapNotFound(err)
-		}
-		return dirAttrFromObject(key, obj), nil
+		return f.statDir(ctx, key)
 	}
 	return f.statFile(ctx, key)
 }
@@ -699,10 +773,9 @@ func (f *Filesystem) ReadDir(ctx context.Context, dirKey string) ([]block.Entry,
 	return f.collectEntries(ctx, dirKey)
 }
 
-// Mkdir creates a new, empty directory named name inside dirKey.
-// Directories keep attributes as native object metadata on their own
-// block object — see Attr's doc comment — unaffected by the .metadata
-// split that applies to files/symlinks below.
+// Mkdir creates a new, empty directory named name inside dirKey: its
+// .metadata object, then its (empty) root block, then the entry in the
+// parent — same order and cleanup as Create.
 func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, gid uint32) (string, Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return "", Attr{}, err
@@ -719,12 +792,21 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 		return "", Attr{}, err
 	}
 	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1, Mtime: time.Now()}
-	if _, err := f.store.Put(ctx, newUUID, bytes.NewReader(empty), dirMetadataFromAttr(attr), ""); err != nil {
+	metaData, err := encodeFileMetadata(attr)
+	if err != nil {
+		return "", Attr{}, err
+	}
+	if _, err := f.store.Put(ctx, metadataObjectKey(newUUID), bytes.NewReader(metaData), nil, ""); err != nil {
+		return "", Attr{}, err
+	}
+	if _, err := f.store.Put(ctx, newUUID, bytes.NewReader(empty), nil, ""); err != nil {
+		_ = f.store.Delete(ctx, metadataObjectKey(newUUID), "")
 		return "", Attr{}, err
 	}
 
 	if err := f.insertEntry(ctx, dirKey, name, newUUID, TypeDir); err != nil {
-		_ = f.store.Delete(ctx, newUUID, "") // best-effort cleanup of the orphaned block
+		_ = f.store.Delete(ctx, newUUID, "") // best-effort cleanup of the orphaned objects
+		_ = f.store.Delete(ctx, metadataObjectKey(newUUID), "")
 		return "", Attr{}, err
 	}
 	attr.Btime = Btime(newUUID)
@@ -1009,6 +1091,70 @@ func (f *Filesystem) updateFileMetadata(ctx context.Context, uuid string, mutate
 	return Attr{}, fmt.Errorf("update metadata %s: exceeded %d retries", uuid, maxTreeRetries)
 }
 
+// updateDirMetadata is updateFileMetadata for a directory. A directory
+// created before directories had .metadata is migrated first: its
+// native block metadata becomes the initial .metadata body (created only
+// if still absent, so a concurrent migration can't be overwritten).
+func (f *Filesystem) updateDirMetadata(ctx context.Context, key string, mutate func(*Attr)) (Attr, error) {
+	mk := metadataObjectKey(key)
+	for attempt := 0; attempt < maxTreeRetries; attempt++ {
+		body, obj, err := f.store.Get(ctx, mk)
+		if objstore.IsNotFound(err) {
+			blockObj, herr := f.store.Head(ctx, key)
+			if herr != nil {
+				return Attr{}, mapNotFound(herr)
+			}
+			legacy := dirAttrFromObject(key, blockObj)
+			// Only stored fields go into .metadata; the rest are derived
+			// at read time.
+			initial := Attr{Mode: legacy.Mode, Uid: legacy.Uid, Gid: legacy.Gid, Nlink: legacy.Nlink,
+				Atime: legacy.Atime, Mtime: legacy.Mtime, Xattrs: legacy.Xattrs}
+			data, eerr := encodeFileMetadata(initial)
+			if eerr != nil {
+				return Attr{}, eerr
+			}
+			if _, perr := f.store.PutIfAbsent(ctx, mk, bytes.NewReader(data), nil); perr != nil && !objstore.IsPreconditionFailed(perr) {
+				return Attr{}, perr
+			}
+			continue
+		}
+		if err != nil {
+			return Attr{}, mapNotFound(err)
+		}
+		data, readErr := io.ReadAll(body)
+		body.Close()
+		if readErr != nil {
+			return Attr{}, readErr
+		}
+		attr, err := decodeFileMetadata(data)
+		if err != nil {
+			return Attr{}, err
+		}
+		mutate(&attr)
+		newData, err := encodeFileMetadata(attr)
+		if err != nil {
+			return Attr{}, err
+		}
+		_, err = f.store.Put(ctx, mk, bytes.NewReader(newData), nil, obj.ETag)
+		if objstore.IsPreconditionFailed(err) {
+			continue
+		}
+		if err != nil {
+			return Attr{}, err
+		}
+		return f.statDir(ctx, key)
+	}
+	return Attr{}, fmt.Errorf("update metadata %s: exceeded %d retries", key, maxTreeRetries)
+}
+
+// updateMetadata is updateDirMetadata or updateFileMetadata, by type.
+func (f *Filesystem) updateMetadata(ctx context.Context, key string, typ EntryType, mutate func(*Attr)) (Attr, error) {
+	if typ == TypeDir {
+		return f.updateDirMetadata(ctx, key, mutate)
+	}
+	return f.updateFileMetadata(ctx, key, mutate)
+}
+
 // SetWindowsAttributes persists a file/symlink's Hidden/System/
 // ReadOnly/Archive bits with full native fidelity, regardless of
 // primary mode — ARCHITECTURE.md's "the schema always carries the
@@ -1017,15 +1163,11 @@ func (f *Filesystem) updateFileMetadata(ctx context.Context, uuid string, mutate
 // *read* time is a decision for the caller, based on primary mode —
 // not this method's concern, same division SetAttr already has
 // between storing and interpreting mode/uid/gid.
-//
-// Directories have no .metadata object at all (see Attr's doc
-// comment), so are not supported here — matching ROADMAP.md's F7 scope
-// ("another entry in .metadata's xattrs map").
-func (f *Filesystem) SetWindowsAttributes(ctx context.Context, uuid string, bits uint32) (Attr, error) {
+func (f *Filesystem) SetWindowsAttributes(ctx context.Context, uuid string, typ EntryType, bits uint32) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
 	}
-	return f.updateFileMetadata(ctx, uuid, func(a *Attr) {
+	return f.updateMetadata(ctx, uuid, typ, func(a *Attr) {
 		if a.Xattrs == nil {
 			a.Xattrs = make(map[string][]byte)
 		}
@@ -1047,39 +1189,15 @@ func (f *Filesystem) MarkWindowsDirSymlink(ctx context.Context, uuid string) (At
 	})
 }
 
-// SetDirWindowsAttributes is SetWindowsAttributes for a directory,
-// whose attributes live in native metadata on its block object rather
-// than a .metadata object (see Attr's doc comment). Surfaced back
-// through Attr.Xattrs, same as for a file.
-func (f *Filesystem) SetDirWindowsAttributes(ctx context.Context, key string, bits uint32) (Attr, error) {
+// SetWindowsCreateMetadata stores a new file's or directory's Windows
+// attribute bits and, when sddl is non-nil, its security descriptor, in
+// one metadata write — what a Windows create needs, without a separate
+// round trip for each.
+func (f *Filesystem) SetWindowsCreateMetadata(ctx context.Context, uuid string, typ EntryType, bits uint32, sddl []byte) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
 	}
-	obj, err := f.store.Head(ctx, key)
-	if err != nil {
-		return Attr{}, mapNotFound(err)
-	}
-	meta := make(map[string]string, len(obj.Metadata)+1)
-	for k, v := range obj.Metadata {
-		meta[k] = v
-	}
-	meta[dirMetaWinAttr] = strconv.FormatUint(uint64(bits&windowsAttrMask), 10)
-	updated, err := f.store.UpdateMetadata(ctx, key, meta, "")
-	if err != nil {
-		return Attr{}, err
-	}
-	return dirAttrFromObject(key, updated), nil
-}
-
-// SetWindowsCreateMetadata stores a new file's Windows attribute bits
-// and, when sddl is non-nil, its security descriptor, in one metadata
-// write — what a Windows create needs, without a separate round trip
-// for each.
-func (f *Filesystem) SetWindowsCreateMetadata(ctx context.Context, uuid string, bits uint32, sddl []byte) (Attr, error) {
-	if err := f.checkWritable(); err != nil {
-		return Attr{}, err
-	}
-	return f.updateFileMetadata(ctx, uuid, func(a *Attr) {
+	return f.updateMetadata(ctx, uuid, typ, func(a *Attr) {
 		if a.Xattrs == nil {
 			a.Xattrs = make(map[string][]byte)
 		}
@@ -1090,19 +1208,15 @@ func (f *Filesystem) SetWindowsCreateMetadata(ctx context.Context, uuid string, 
 	})
 }
 
-// SetWindowsACL persists a file/symlink's native Windows security
-// descriptor, given as its SDDL string representation (task F8;
-// WindowsACLXattrKey's own doc comment explains the SDDL choice).
-// Directories have no .metadata object at all (see Attr's doc
-// comment), so are not supported here — same scope restriction task
-// F7's SetWindowsAttributes already applies to its own xattrs-map
-// storage; winfspserver.SetSecurity treats a directory handle as a
-// no-op rather than calling this at all.
-func (f *Filesystem) SetWindowsACL(ctx context.Context, uuid string, sddl []byte) (Attr, error) {
+// SetWindowsACL persists a file's, symlink's or directory's native
+// Windows security descriptor, given as its SDDL string representation
+// (task F8; WindowsACLXattrKey's own doc comment explains the SDDL
+// choice).
+func (f *Filesystem) SetWindowsACL(ctx context.Context, uuid string, typ EntryType, sddl []byte) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
 	}
-	return f.updateFileMetadata(ctx, uuid, func(a *Attr) {
+	return f.updateMetadata(ctx, uuid, typ, func(a *Attr) {
 		if a.Xattrs == nil {
 			a.Xattrs = make(map[string][]byte)
 		}
@@ -1215,7 +1329,14 @@ func (f *Filesystem) Rmdir(ctx context.Context, dirKey, name string) error {
 	if _, err := f.removeEntry(ctx, dirKey, name); err != nil {
 		return err
 	}
-	return f.store.Delete(ctx, entry.UUID, "")
+	if err := f.store.Delete(ctx, entry.UUID, ""); err != nil {
+		return err
+	}
+	// Absent for a directory created before directories had .metadata.
+	if err := f.store.Delete(ctx, metadataObjectKey(entry.UUID), ""); err != nil && !objstore.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 // dirContains reports whether ancestorUUID's own subtree includes
@@ -1469,15 +1590,14 @@ func (f *Filesystem) writeFileFrom(ctx context.Context, key string, body io.Read
 // mtime is an explicit override (Windows' SetFileTime, POSIX
 // utimensat — a pure metadata call, no content write at all) — see
 // combineFileAttr's own doc comment for a file/symlink, or
-// dirMetadataFromAttr for a directory. For a file, the override is
+// combineDirAttr for a directory. For a file, the override is
 // tied to the content version it was set against and lapses on the
 // next real write, so mtime follows content again — at the cost of one
 // Head request per explicit set, nothing on the write path.
 //
 // btime is an explicit creation-time override (Windows' SetFileTime
-// CreationTime), files/symlinks only: a directory's creation time is
-// always the one embedded in its UUIDv7 key, and btime is ignored for
-// directories — a known limitation, not yet needed by any test.
+// CreationTime); unset, creation time is the one embedded in the UUIDv7
+// key.
 func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mode, uid, gid *uint32, size *int64, atime, mtime, btime *time.Time) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
@@ -1508,30 +1628,29 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 		return Attr{}, ErrInvalidArgument
 	}
 	if typ == TypeDir {
-		attr, err := f.Stat(ctx, key, TypeDir)
-		if err != nil {
-			return Attr{}, err
+		if mode == nil && uid == nil && gid == nil && atime == nil && mtime == nil && btime == nil {
+			return f.statDir(ctx, key)
 		}
-		if mode != nil {
-			attr.Mode = *mode
-		}
-		if uid != nil {
-			attr.Uid = *uid
-		}
-		if gid != nil {
-			attr.Gid = *gid
-		}
-		if atime != nil {
-			attr.Atime = *atime
-		}
-		if mtime != nil {
-			attr.Mtime = *mtime
-		}
-		obj, err := f.store.UpdateMetadata(ctx, key, dirMetadataFromAttr(attr), "")
-		if err != nil {
-			return Attr{}, err
-		}
-		return dirAttrFromObject(key, obj), nil
+		return f.updateDirMetadata(ctx, key, func(a *Attr) {
+			if mode != nil {
+				a.Mode = *mode
+			}
+			if uid != nil {
+				a.Uid = *uid
+			}
+			if gid != nil {
+				a.Gid = *gid
+			}
+			if atime != nil {
+				a.Atime = *atime
+			}
+			if mtime != nil {
+				a.Mtime = *mtime
+			}
+			if btime != nil {
+				a.Btime = *btime
+			}
+		})
 	}
 
 	if size != nil {
@@ -1614,26 +1733,7 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 // imprecision than that.
 func (f *Filesystem) TouchAtime(ctx context.Context, key string, typ EntryType) error {
 	now := time.Now()
-	if typ == TypeDir {
-		obj, err := f.store.Head(ctx, key)
-		if err != nil {
-			return mapNotFound(err)
-		}
-		meta := obj.Metadata
-		if meta == nil {
-			meta = map[string]string{}
-		} else {
-			cp := make(map[string]string, len(meta))
-			for k, v := range meta {
-				cp[k] = v
-			}
-			meta = cp
-		}
-		meta[dirMetaAtime] = strconv.FormatInt(now.UnixNano(), 10)
-		_, err = f.store.UpdateMetadata(ctx, key, meta, obj.ETag)
-		return err
-	}
-	_, err := f.updateFileMetadata(ctx, key, func(a *Attr) {
+	_, err := f.updateMetadata(ctx, key, typ, func(a *Attr) {
 		a.Atime = now
 	})
 	return err

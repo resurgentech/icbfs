@@ -136,11 +136,20 @@ Every file/symlink has **two objects, not one**: the content object (the
 actual bytes a reader gets back) and a dedicated `<uuid>.metadata` side
 object holding every mutable attribute — mode, uid, gid, nlink, and any
 future Windows-compatibility fields (ACL, file attribute bits). The
-content object never carries any attribute metadata at all. Directories
-don't get a `.metadata` object — they aren't hard-linkable, so "last
-writer wins" on a directory's own mode/uid/gid is an accepted
-simplification, and their attributes stay in native object metadata on
-the directory block object itself, same as before.
+content object never carries any attribute metadata at all.
+
+Directories have a `<uuid>.metadata` object too, the same encoded record,
+beside their root block. They originally kept their attributes as native
+metadata on the root block, with "last writer wins" accepted since
+directories aren't hard-linkable — but Windows needs per-directory
+security descriptors (an ACL that denies traverse or listing has to be
+enforced), and a place for named streams on directories if those are
+ever supported — exactly the kind of field the `.metadata` record exists
+for. A directory's mtime is
+stored explicitly in its record, since its root block doesn't change
+when entries land in other shards. Directories created before this read
+their old native metadata and move it into `.metadata` on their first
+attribute write.
 
 **Why two objects instead of native object-store metadata on the content
 object itself (the original design):** discovered empirically, not
