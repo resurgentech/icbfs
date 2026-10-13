@@ -44,6 +44,25 @@ type Object struct {
 	Metadata     map[string]string
 }
 
+// Part is one part of a PutParts write: Size bytes, either uploaded from
+// Body or, when Body is nil, copied from [CopyOffset, CopyOffset+Size) of
+// version CopyVersion of the object being written.
+type Part struct {
+	Size        int64
+	Body        io.ReadSeeker
+	CopyVersion string
+	CopyOffset  int64
+}
+
+// Multipart limits, S3's (MinIO's are the same): every part but the
+// last is MinPartSize to MaxPartSize bytes, and an object has at most
+// MaxParts parts.
+const (
+	MinPartSize = 5 << 20
+	MaxPartSize = 5 << 30
+	MaxParts    = 10000
+)
+
 // Store is the object-store primitive set icbfs's core is built on.
 type Store interface {
 	// Put writes body as the object body under key, replacing any existing
@@ -127,6 +146,26 @@ type Store interface {
 	// specific combination is unverified here the way PutIfAbsent's own
 	// 412-on-conflict behavior was confirmed against real MinIO.
 	PutIfAbsent(ctx context.Context, key string, body io.Reader, metadata map[string]string) (*Object, error)
+
+	// PutParts writes key as one object assembled from parts, in order —
+	// a multipart upload, for objects too big for one Put, or to rewrite
+	// a big object without resending what didn't change: a part can be
+	// uploaded from its Body or copied server-side from a byte range of
+	// an earlier version of key itself. Conditioned on ifMatch exactly
+	// like Put (checked when the parts are assembled, so a lost race
+	// satisfies IsPreconditionFailed), and all or nothing: on any error
+	// the upload is aborted and key is unchanged. Every part but the last
+	// must be at least MinPartSize, and at most MaxPartSize; there can be
+	// at most MaxParts.
+	//
+	// Confirmed against real MinIO, not assumed: CompleteMultipartUpload
+	// honors If-Match and If-None-Match (412 when stale), and a copied
+	// range comes from the pinned version even after key has moved on.
+	//
+	// Sketch for Azure: Put Block / Put Block From URL per part, then Put
+	// Block List with an If-Match access condition — the same shape,
+	// unverified here.
+	PutParts(ctx context.Context, key string, parts []Part, metadata map[string]string, ifMatch string) (*Object, error)
 
 	// ListByPrefix returns every current object whose key starts with
 	// prefix, paginating internally. Only Key and Size are populated —

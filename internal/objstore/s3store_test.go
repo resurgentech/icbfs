@@ -1,6 +1,7 @@
 package objstore
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"strings"
@@ -379,5 +380,57 @@ func TestServerTimeReturnsRealClockFromDateHeader(t *testing.T) {
 	const skewBudget = 2 * time.Second
 	if got.Before(before.Add(-skewBudget)) || got.After(after.Add(skewBudget)) {
 		t.Fatalf("server time %v is outside [%v, %v] (request window ± %v) — looks like real clock skew, not just Date's whole-second rounding", got, before.Add(-skewBudget), after.Add(skewBudget), skewBudget)
+	}
+}
+
+// TestPutPartsCopiesAndUploadsUnderIfMatch: a multipart write mixing
+// server-side copies of an older version's ranges with uploaded parts
+// assembles exactly those bytes, honors If-Match, and leaves the object
+// alone when it fails.
+func TestPutPartsCopiesAndUploadsUnderIfMatch(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	const mib = 1 << 20
+
+	base := bytes.Repeat([]byte("a"), 12*mib)
+	v1, err := store.Put(ctx, "big", bytes.NewReader(base), nil, "")
+	if err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	middle := bytes.Repeat([]byte("M"), 5*mib)
+	parts := func() []Part {
+		return []Part{
+			{Size: 5 * mib, CopyVersion: v1.VersionID, CopyOffset: 0},
+			{Size: 5 * mib, Body: bytes.NewReader(middle)},
+			{Size: 2 * mib, CopyVersion: v1.VersionID, CopyOffset: 10 * mib},
+		}
+	}
+
+	if _, err := store.PutParts(ctx, "big", parts(), nil, `"stale-etag"`); !IsPreconditionFailed(err) {
+		t.Fatalf("PutParts with a stale If-Match: %v, want precondition failed", err)
+	}
+	v2, err := store.PutParts(ctx, "big", parts(), map[string]string{"k": "v"}, v1.ETag)
+	if err != nil {
+		t.Fatalf("PutParts: %v", err)
+	}
+	want := append(append(bytes.Repeat([]byte("a"), 5*mib), middle...), bytes.Repeat([]byte("a"), 2*mib)...)
+	body, obj, err := store.Get(ctx, "big")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	got, _ := io.ReadAll(body)
+	body.Close()
+	if !bytes.Equal(got, want) || obj.Size != 12*mib || obj.ETag != v2.ETag || obj.Metadata["k"] != "v" {
+		t.Fatalf("assembled object: size %d etag %s (want %s) metadata %v, content equal %v",
+			obj.Size, obj.ETag, v2.ETag, obj.Metadata, bytes.Equal(got, want))
+	}
+
+	// A part below the minimum fails the whole write; nothing changes.
+	bad := []Part{{Size: 1, Body: bytes.NewReader([]byte("x"))}, {Size: 1, Body: bytes.NewReader([]byte("y"))}}
+	if _, err := store.PutParts(ctx, "big", bad, nil, v2.ETag); err == nil {
+		t.Fatal("PutParts with an undersized first part succeeded")
+	}
+	if head, err := store.Head(ctx, "big"); err != nil || head.ETag != v2.ETag {
+		t.Fatalf("object after a failed PutParts: %v, %v; want unchanged %s", head, err, v2.ETag)
 	}
 }

@@ -159,6 +159,20 @@ func (f *Filesystem) EnableChangeNotifications(signals <-chan notify.Signal) {
 // afterward; only meaningful after Bootstrap.
 func (f *Filesystem) PrimaryWindows() bool { return f.primaryWindows }
 
+// partSize is the part size of a multipart content write (see
+// OpenFile.uploadLocked): the smallest power-of-two MiB, at least 8 MiB,
+// that fits a file of this filesystem's max size in objstore.MaxParts
+// parts — 8 MiB for an 8 GiB limit, 128 MiB for the 1 TiB default. A
+// file no bigger than one part is written with a single Put.
+func (f *Filesystem) partSize() int64 {
+	need := (f.maxFileSize + objstore.MaxParts - 1) / objstore.MaxParts
+	p := int64(8 << 20)
+	for p < need {
+		p <<= 1
+	}
+	return p
+}
+
 // SetCreationMaxFileSize sets the largest file a new filesystem will
 // hold, if Bootstrap is the one that creates it — like Bootstrap's size
 // and primary mode, it's fixed at creation and ignored for a filesystem

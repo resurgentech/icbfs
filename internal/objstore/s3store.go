@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -45,6 +46,111 @@ func (s *S3Store) Put(ctx context.Context, key string, body io.Reader, metadata 
 		return nil, fmt.Errorf("put %s: %w", key, err)
 	}
 	return s.headVersion(ctx, key, out.VersionId)
+}
+
+// partConcurrency bounds how many parts PutParts sends at once.
+const partConcurrency = 4
+
+func (s *S3Store) PutParts(ctx context.Context, key string, parts []Part, metadata map[string]string, ifMatch string) (*Object, error) {
+	up, err := s.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket:   aws.String(s.bucket),
+		Key:      aws.String(key),
+		Metadata: metadata,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("put parts %s: %w", key, err)
+	}
+	abort := func() {
+		// Best effort, and with its own context: ctx may be why we're
+		// aborting. A leftover upload holds storage until a bucket
+		// lifecycle rule expires it.
+		actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
+		defer cancel()
+		_, _ = s.client.AbortMultipartUpload(actx, &s3.AbortMultipartUploadInput{
+			Bucket: aws.String(s.bucket), Key: aws.String(key), UploadId: up.UploadId,
+		})
+	}
+
+	pctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	completed := make([]types.CompletedPart, len(parts))
+	errs := make([]error, len(parts))
+	sem := make(chan struct{}, partConcurrency)
+	var wg sync.WaitGroup
+	for i, p := range parts {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, p Part) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			num := aws.Int32(int32(i + 1))
+			var etag *string
+			if p.Body != nil {
+				out, err := s.client.UploadPart(pctx, &s3.UploadPartInput{
+					Bucket: aws.String(s.bucket), Key: aws.String(key), UploadId: up.UploadId,
+					PartNumber: num, Body: p.Body, ContentLength: aws.Int64(p.Size),
+				})
+				if err != nil {
+					errs[i] = err
+					cancel()
+					return
+				}
+				etag = out.ETag
+			} else {
+				out, err := s.client.UploadPartCopy(pctx, &s3.UploadPartCopyInput{
+					Bucket: aws.String(s.bucket), Key: aws.String(key), UploadId: up.UploadId,
+					PartNumber:      num,
+					CopySource:      aws.String(s.bucket + "/" + key + "?versionId=" + p.CopyVersion),
+					CopySourceRange: aws.String(fmt.Sprintf("bytes=%d-%d", p.CopyOffset, p.CopyOffset+p.Size-1)),
+				})
+				if err != nil {
+					errs[i] = err
+					cancel()
+					return
+				}
+				etag = out.CopyPartResult.ETag
+			}
+			completed[i] = types.CompletedPart{PartNumber: num, ETag: etag}
+		}(i, p)
+	}
+	wg.Wait()
+	if err := firstRealError(errs); err != nil {
+		abort()
+		return nil, fmt.Errorf("put parts %s: %w", key, err)
+	}
+
+	in := &s3.CompleteMultipartUploadInput{
+		Bucket: aws.String(s.bucket), Key: aws.String(key), UploadId: up.UploadId,
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: completed},
+	}
+	if ifMatch != "" {
+		in.IfMatch = aws.String(ifMatch)
+	}
+	out, err := s.client.CompleteMultipartUpload(ctx, in)
+	if err != nil {
+		abort()
+		return nil, fmt.Errorf("put parts %s: %w", key, err)
+	}
+	return s.headVersion(ctx, key, out.VersionId)
+}
+
+// firstRealError returns the first error in errs that isn't just a part
+// cancelled because another one failed first.
+func firstRealError(errs []error) error {
+	var cancelled error
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, context.Canceled) {
+			if cancelled == nil {
+				cancelled = err
+			}
+			continue
+		}
+		return err
+	}
+	return cancelled
 }
 
 // PutIfAbsent implements Store.PutIfAbsent via PutObject's IfNoneMatch:

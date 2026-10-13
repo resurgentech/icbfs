@@ -86,6 +86,16 @@ type OpenFile struct {
 	etag  string
 	dirty bool
 
+	// baseVersion and baseSize identify the stored version the scratch
+	// file was seeded from (etag is its ETag): outside the touched range
+	// below, the scratch file still holds exactly its bytes, which is
+	// what lets a multipart flush copy those ranges server-side instead
+	// of uploading them (see partsLocked). baseVersion is empty when
+	// unknown (a session seeded right after Create), and then nothing is
+	// copied.
+	baseVersion string
+	baseSize    int64
+
 	// touchedStart/touchedEnd track the single contiguous span this
 	// session's writes have touched, in O(1) space — not a log of
 	// every individual write's own bytes (ROADMAP.md's Part G, task
@@ -153,7 +163,8 @@ func (f *Filesystem) Open(ctx context.Context, key string) (*OpenFile, error) {
 		file.Close()
 		return nil, err
 	}
-	o := &OpenFile{fsys: f, key: key, holder: holder, file: file, size: size, etag: head.ETag, touchedStart: noTouch}
+	o := &OpenFile{fsys: f, key: key, holder: holder, file: file, size: size, etag: head.ETag,
+		baseVersion: head.VersionID, baseSize: size, touchedStart: noTouch}
 	f.holdOpen(o)
 	return o, nil
 }
@@ -195,7 +206,8 @@ func (f *Filesystem) NewOpenFile(key, etag string, data []byte) *OpenFile {
 			_, _ = file.Seek(0, io.SeekStart)
 		}
 	}
-	o := &OpenFile{fsys: f, key: key, holder: holder, file: file, size: int64(len(data)), etag: etag, touchedStart: noTouch}
+	o := &OpenFile{fsys: f, key: key, holder: holder, file: file, size: int64(len(data)), etag: etag,
+		baseSize: int64(len(data)), touchedStart: noTouch}
 	f.holdOpen(o)
 	return o
 }
@@ -462,6 +474,7 @@ func (o *OpenFile) rebaseLocked(ctx context.Context) error {
 		_ = os.Remove(oldName)
 	}
 	o.etag = head.ETag
+	o.baseVersion, o.baseSize = head.VersionID, size
 	return nil
 }
 
@@ -527,14 +540,8 @@ func (o *OpenFile) Flush(ctx context.Context) (Attr, error) {
 
 	deadline := time.Now().Add(contentWriteRetryBudget)
 	for {
-		attr, newETag, err := o.fsys.writeFileFrom(ctx, o.key, io.NewSectionReader(o.file, 0, o.size), o.etag)
+		attr, err := o.uploadLocked(ctx)
 		if err == nil {
-			o.etag = newETag
-			o.touchedStart = noTouch
-			o.touchedEnd = 0
-			o.dirty = false
-			o.truncated = false
-			o.updateSharedCacheLocked(newETag)
 			return attr, nil
 		}
 		if !objstore.IsPreconditionFailed(err) {
@@ -564,17 +571,59 @@ func (o *OpenFile) Flush(ctx context.Context) (Attr, error) {
 	if err := o.rebaseLocked(ctx); err != nil {
 		return Attr{}, err
 	}
-	attr, newETag, err := o.fsys.writeFileFrom(ctx, o.key, io.NewSectionReader(o.file, 0, o.size), o.etag)
+	return o.uploadLocked(ctx)
+}
+
+// uploadLocked writes the scratch file back to the store, conditioned on
+// the ETag it's based on: one Put for a file that fits in one part, and
+// otherwise a multipart write (partsLocked) that only uploads the parts
+// this session changed. On success the session is clean and based on
+// the version just written.
+func (o *OpenFile) uploadLocked(ctx context.Context) (Attr, error) {
+	if err := o.fsys.checkWritable(); err != nil {
+		return Attr{}, err
+	}
+	var obj *objstore.Object
+	var err error
+	if partSize := o.fsys.partSize(); o.size > partSize {
+		obj, err = o.fsys.store.PutParts(ctx, o.key, o.partsLocked(partSize), nil, o.etag)
+	} else {
+		obj, err = o.fsys.store.Put(ctx, o.key, io.NewSectionReader(o.file, 0, o.size), nil, o.etag)
+	}
 	if err != nil {
 		return Attr{}, err
 	}
-	o.etag = newETag
+	o.etag = obj.ETag
+	o.baseVersion, o.baseSize = obj.VersionID, o.size
 	o.touchedStart = noTouch
 	o.touchedEnd = 0
 	o.dirty = false
 	o.truncated = false
-	o.updateSharedCacheLocked(newETag)
-	return attr, nil
+	o.updateSharedCacheLocked(obj.ETag)
+	return o.fsys.statFile(ctx, o.key)
+}
+
+// partsLocked splits the scratch file into parts of partSize for a
+// multipart write: a part wholly inside the base version and outside
+// the range this session touched is copied server-side from that
+// version; any other part is uploaded from the scratch file. So editing
+// a few bytes of a large file uploads one part, not the file. The copies
+// are pinned to the base version; whether that's still current is
+// checked when the parts are assembled (If-Match), and a lost race
+// rebases and tries again like any other flush.
+func (o *OpenFile) partsLocked(partSize int64) []objstore.Part {
+	var parts []objstore.Part
+	for off := int64(0); off < o.size; off += partSize {
+		n := min(partSize, o.size-off)
+		end := off + n
+		untouched := o.touchedStart == noTouch || end <= o.touchedStart || off >= o.touchedEnd
+		if o.baseVersion != "" && end <= o.baseSize && untouched {
+			parts = append(parts, objstore.Part{Size: n, CopyVersion: o.baseVersion, CopyOffset: off})
+		} else {
+			parts = append(parts, objstore.Part{Size: n, Body: io.NewSectionReader(o.file, off, n)})
+		}
+	}
+	return parts
 }
 
 // updateSharedCacheLocked keeps the shared disk cache representing

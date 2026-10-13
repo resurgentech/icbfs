@@ -24,7 +24,13 @@ generic multi-cloud abstraction is being built.
 ## Core object model
 
 - **No chunking.** Each file's content is a single whole object. Writing a
-  file means writing one object.
+  file means writing one object. A file bigger than one part is written
+  as a multipart upload: parts the flush didn't touch are copied
+  server-side from the version it's based on, so an edit uploads only
+  the parts it changed, still as one conditional (If-Match) write of
+  the whole object. The part size follows the max file size (the
+  smallest power-of-two MiB, at least 8 MiB, that fits it in S3's
+  10,000 parts): 8 MiB for an 8 GiB limit, 128 MiB for 1 TiB.
 - **Max file size** is a per-filesystem setting, fixed at creation in the
   master block (`-max-file-size`): 1 TiB by default. Writes and truncates
   past it fail with `EFBIG` / `STATUS_FILE_TOO_LARGE`. An open file's
@@ -66,6 +72,8 @@ message FilesystemEntry {
   string name = 1;     // empty = this slot is free, available for reuse
   uint64 size = 2;      // declared max size in bytes (the df "Total")
   bool archived = 3;    // see Lifecycle, below
+  bool primary_windows = 4; // fixed at creation; see Windows compatibility
+  uint64 max_file_size = 5; // fixed at creation; 0 = 1 TiB
 }
 message MasterBlock {
   repeated FilesystemEntry filesystems = 1;
