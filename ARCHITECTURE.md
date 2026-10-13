@@ -396,6 +396,15 @@ half.
   lookups don't scale).
 - Lexicographic order is preserved, so sorted listing and prefix scans stay
   cheap (walk the relevant subtree instead of fanning out to every shard).
+- The order is the filesystem's collation, fixed at creation with primary
+  mode: plain byte order for primary-POSIX; for primary-Windows,
+  case-insensitive order first (NTFS's uppercase rule, see Case
+  sensitivity) and byte order to break ties. Under the folded collation
+  every spelling of a name sits in one contiguous run, so a
+  case-insensitive lookup descends to where the run starts and reads on
+  only if the run crosses into the next block. The collation isn't
+  recorded in the blocks themselves; it comes from the master block's
+  primary-mode flag.
 - Splitting on insert-overflow is implemented and proven (against real
   MinIO) to keep lookup, full listing, and removal all correct across
   however many shard levels a directory has grown. **Merging underfull
@@ -670,12 +679,21 @@ Applied:
 - **File attribute bits** (Hidden/System/ReadOnly/Archive) — fit the same
   model: the schema always carries the field, populated/used per primary
   mode.
-- **Case sensitivity** — not governed by primary mode; resolved
-  separately. Storage stays case-sensitive (case-preserving) as the ground
-  truth regardless of primary mode; case-insensitive comparison is a
-  WinFsp-access-layer-only behavior, following the standard NTFS/Samba/
-  WSL2 pattern (case-preserving storage, case-folded comparison only where
-  the consuming side needs it).
+- **Case sensitivity** — names are always stored case-preserving, and
+  two names differing only in case can coexist (a case-sensitive or POSIX
+  mount can create them). Whether a lookup matches case-insensitively is
+  the mount's choice (the WinFsp driver's `-case-insensitive`, on by
+  default), following the standard NTFS/Samba/WSL2 pattern; an exact
+  match always wins over a case-insensitive one. A case-insensitive match
+  means NTFS's rule: each UTF-16 code unit compared after mapping it to
+  its simple uppercase, from a table pinned in the code
+  (`internal/block/upcase_table.go`), not Go's current Unicode tables,
+  because directory order depends on it. Primary mode decides only the
+  cost: a primary-Windows filesystem sorts every directory
+  case-insensitively first (see Large directories), so a case-insensitive
+  lookup is a descent like any other; a primary-POSIX filesystem sorts by
+  bytes, so a case-insensitive lookup with no exact match reads the whole
+  directory.
 - **Creation time** — already solved via UUIDv7 (see core object model
   above); no Windows-specific work needed.
 - **Reparse points** — no new work needed beyond symlink support already

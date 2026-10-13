@@ -13,7 +13,6 @@ package winfspserver
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 
@@ -63,10 +62,12 @@ type resolved struct {
 // stored names exactly (false) or case-foldedly (true, via
 // lookupCaseAware) — ARCHITECTURE.md's Windows compatibility section
 // calls for exactly the standard NTFS/Samba/WSL2 pattern here: storage
-// itself always stays case-sensitive/case-preserving (icbfs.Filesystem's
-// own Lookup is never touched by this), and case-insensitive matching
-// is purely an access-layer behavior, driven by task F4's mount flag
-// (see cmd/icbfs-winfsp's --case-insensitive).
+// itself always stays case-sensitive/case-preserving, and whether a
+// lookup matches case-insensitively is an access-layer choice, driven by
+// task F4's mount flag (see cmd/icbfs-winfsp's --case-insensitive).
+// What primary mode decides is only how fast that is: a primary-Windows
+// filesystem keeps its directories sorted case-insensitively, so
+// icbfs.Filesystem.LookupFold seeks instead of scanning.
 func resolvePath(ctx context.Context, fsys *icbfs.Filesystem, path string, caseInsensitive bool) (resolved, error) {
 	key := fsys.RootKey()
 	segments := splitPath(path)
@@ -126,42 +127,17 @@ func hasIntermediateSymlink(ctx context.Context, fsys *icbfs.Filesystem, path st
 	return false
 }
 
-// lookupCaseAware is fsys.Lookup, with an optional case-insensitive
-// fallback: an exact match is always tried first (and is always what
-// gets returned when one exists, even in case-insensitive mode — this
-// matters when two differently-cased names coexist, a state this
-// driver's own Create never produces but that pre-existing data or a
-// POSIX mount of the same filesystem could), and only on a genuine
-// not-found does case-insensitive mode fall back to a full directory
-// scan for a case-folded match.
-//
-// icbfs.Filesystem itself gains no case-insensitive mode at all —
-// deliberately: storage stays case-sensitive ground truth regardless
-// of how any one mount chooses to look things up (ARCHITECTURE.md).
-// The fallback scan's O(directory size) cost on every case-mismatched
-// lookup is accepted for the same reason ListByPrefix's own listing
-// cost is accepted elsewhere in this project: correct first, and nothing
-// faster exists without new storage-layer indexing this task doesn't
-// call for.
+// lookupCaseAware is fsys.Lookup, or fsys.LookupFold when
+// caseInsensitive: an exact match when one exists (two names differing
+// only in case can coexist — a case-sensitive mount or a POSIX mount of
+// the same filesystem can create them), otherwise a case-insensitive
+// one. Storage itself always stays case-preserving; see
+// ARCHITECTURE.md's Windows compatibility section.
 func lookupCaseAware(ctx context.Context, fsys *icbfs.Filesystem, dirKey, name string, caseInsensitive bool) (block.Entry, icbfs.Attr, error) {
-	entry, attr, err := fsys.Lookup(ctx, dirKey, name)
-	if err == nil || !caseInsensitive || !errors.Is(err, icbfs.ErrNotFound) {
-		return entry, attr, err
+	if caseInsensitive {
+		return fsys.LookupFold(ctx, dirKey, name)
 	}
-	entries, rdErr := fsys.ReadDir(ctx, dirKey)
-	if rdErr != nil {
-		return block.Entry{}, icbfs.Attr{}, err // the original not-found is still the right error to report
-	}
-	for _, e := range entries {
-		if strings.EqualFold(e.Name, name) {
-			a, statErr := fsys.Stat(ctx, e.UUID, e.Type)
-			if statErr != nil {
-				return block.Entry{}, icbfs.Attr{}, statErr
-			}
-			return e, a, nil
-		}
-	}
-	return block.Entry{}, icbfs.Attr{}, err
+	return fsys.Lookup(ctx, dirKey, name)
 }
 
 // maxSymlinkHops bounds resolvePathFollow against a symlink cycle —
@@ -303,7 +279,7 @@ func lookupStream(streams map[string]uint64, name string, caseInsensitive bool) 
 	}
 	if caseInsensitive {
 		for n, id := range streams {
-			if strings.EqualFold(n, name) {
+			if block.EqualFold(n, name) {
 				return n, id, true
 			}
 		}

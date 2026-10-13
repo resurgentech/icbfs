@@ -77,10 +77,16 @@ type Child struct {
 // Block is the decoded body of a directory object: either a Leaf (a
 // sorted list of entries) or an Internal node (a sorted list of child
 // pointers).
+//
+// Collation is the order Entries and Children are sorted in. It isn't
+// stored in the block: it's a property of the whole filesystem (Folded
+// for primary-Windows, Exact otherwise), so whoever decodes a block sets
+// it before searching or changing it.
 type Block struct {
-	Kind     Kind
-	Entries  []Entry
-	Children []Child
+	Kind      Kind
+	Collation Collation
+	Entries   []Entry
+	Children  []Child
 }
 
 // Decode parses a directory block body (Protobuf-encoded, per
@@ -144,9 +150,15 @@ func fromWire(w *pb.Block) *Block {
 
 // --- Leaf operations ---
 
+// search returns the index of the first entry not below name under b's
+// collation.
+func (b *Block) search(name string) int {
+	return sort.Search(len(b.Entries), func(i int) bool { return b.Collation.Compare(b.Entries[i].Name, name) >= 0 })
+}
+
 // Find returns the entry named name, if present. b must be a Leaf.
 func (b *Block) Find(name string) (Entry, bool) {
-	i := sort.Search(len(b.Entries), func(i int) bool { return b.Entries[i].Name >= name })
+	i := b.search(name)
 	if i < len(b.Entries) && b.Entries[i].Name == name {
 		return b.Entries[i], true
 	}
@@ -156,7 +168,7 @@ func (b *Block) Find(name string) (Entry, bool) {
 // Insert adds a new entry in sorted position. It fails if name already
 // exists. b must be a Leaf.
 func (b *Block) Insert(e Entry) error {
-	i := sort.Search(len(b.Entries), func(i int) bool { return b.Entries[i].Name >= e.Name })
+	i := b.search(e.Name)
 	if i < len(b.Entries) && b.Entries[i].Name == e.Name {
 		return fmt.Errorf("insert %q: %w", e.Name, ErrExists)
 	}
@@ -169,7 +181,7 @@ func (b *Block) Insert(e Entry) error {
 // Remove deletes the entry named name. It fails if name is not present.
 // b must be a Leaf.
 func (b *Block) Remove(name string) (Entry, error) {
-	i := sort.Search(len(b.Entries), func(i int) bool { return b.Entries[i].Name >= name })
+	i := b.search(name)
 	if i >= len(b.Entries) || b.Entries[i].Name != name {
 		return Entry{}, fmt.Errorf("remove %q: %w", name, ErrNotFound)
 	}
@@ -178,13 +190,21 @@ func (b *Block) Remove(name string) (Entry, error) {
 	return e, nil
 }
 
+// SeekFold returns the index of the first entry that doesn't sort below
+// name case-insensitively: in a Folded leaf, where the run of entries
+// matching name case-insensitively starts, if it starts in this leaf at
+// all. b must be a Leaf.
+func (b *Block) SeekFold(name string) int {
+	return sort.Search(len(b.Entries), func(i int) bool { return CompareFold(b.Entries[i].Name, name) >= 0 })
+}
+
 // SplitLeaf splits an overflowing leaf at its median key. The left half
 // keeps the keys below the median; the right half (and its MinKey, to be
 // inserted as a new Child in the parent) holds the rest.
 func (b *Block) SplitLeaf() (left, right *Block, rightMinKey string) {
 	mid := len(b.Entries) / 2
-	left = &Block{Kind: Leaf, Entries: append([]Entry{}, b.Entries[:mid]...)}
-	right = &Block{Kind: Leaf, Entries: append([]Entry{}, b.Entries[mid:]...)}
+	left = &Block{Kind: Leaf, Collation: b.Collation, Entries: append([]Entry{}, b.Entries[:mid]...)}
+	right = &Block{Kind: Leaf, Collation: b.Collation, Entries: append([]Entry{}, b.Entries[mid:]...)}
 	return left, right, right.Entries[0].Name
 }
 
@@ -194,16 +214,25 @@ func (b *Block) SplitLeaf() (left, right *Block, rightMinKey string) {
 // Internal and have at least one child (true for every Internal node,
 // which is only ever created by a split that produces exactly two).
 func (b *Block) ChildFor(name string) Child {
-	i := sort.Search(len(b.Children), func(i int) bool { return b.Children[i].MinKey > name })
+	i := sort.Search(len(b.Children), func(i int) bool { return b.Collation.Compare(b.Children[i].MinKey, name) > 0 })
 	if i == 0 {
 		i = 1 // Children[0].MinKey == "" always matches, so i is never truly 0
 	}
 	return b.Children[i-1]
 }
 
+// ChildIndexFold returns the index of the child whose subtree covers the
+// lowest possible name matching name case-insensitively: in a Folded
+// node, the subtree where that run of entries would start. The run can
+// continue into the children after it. b must be Internal.
+func (b *Block) ChildIndexFold(name string) int {
+	i := sort.Search(len(b.Children)-1, func(i int) bool { return CompareFold(b.Children[i+1].MinKey, name) >= 0 })
+	return i // Children[0] has no lower bound, so the answer is never below it
+}
+
 // InsertChild adds a new range pointer in sorted position.
 func (b *Block) InsertChild(c Child) {
-	i := sort.Search(len(b.Children), func(i int) bool { return b.Children[i].MinKey > c.MinKey })
+	i := sort.Search(len(b.Children), func(i int) bool { return b.Collation.Compare(b.Children[i].MinKey, c.MinKey) > 0 })
 	b.Children = append(b.Children, Child{})
 	copy(b.Children[i+1:], b.Children[i:])
 	b.Children[i] = c
@@ -213,8 +242,8 @@ func (b *Block) InsertChild(c Child) {
 // the same way SplitLeaf does for entries.
 func (b *Block) SplitInternal() (left, right *Block, rightMinKey string) {
 	mid := len(b.Children) / 2
-	left = &Block{Kind: Internal, Children: append([]Child{}, b.Children[:mid]...)}
-	right = &Block{Kind: Internal, Children: append([]Child{}, b.Children[mid:]...)}
+	left = &Block{Kind: Internal, Collation: b.Collation, Children: append([]Child{}, b.Children[:mid]...)}
+	right = &Block{Kind: Internal, Collation: b.Collation, Children: append([]Child{}, b.Children[mid:]...)}
 	return left, right, right.Children[0].MinKey
 }
 

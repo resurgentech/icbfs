@@ -315,7 +315,20 @@ func (f *Filesystem) readBlock(ctx context.Context, key string) (*block.Block, *
 	if err != nil {
 		return nil, nil, err
 	}
+	blk.Collation = f.collation()
 	return blk, obj, nil
+}
+
+// collation is the order every directory in this filesystem keeps its
+// entries in: case-insensitive first for primary-Windows filesystems, so
+// LookupFold can seek instead of scanning, and plain byte order
+// otherwise. It's fixed when the filesystem is created, like
+// primaryWindows itself; existing directories are never re-sorted.
+func (f *Filesystem) collation() block.Collation {
+	if f.primaryWindows {
+		return block.Folded
+	}
+	return block.Exact
 }
 
 // dirAttrFromObject assembles a directory's Attr from its block object's
@@ -563,6 +576,56 @@ func (f *Filesystem) findInTree(ctx context.Context, rootKey, name string) (bloc
 	}
 }
 
+// findFoldInTree finds name case-insensitively in the Folded shard tree
+// rooted at rootKey: the entry named exactly name if there is one,
+// otherwise the first (in sorted order) whose name matches it
+// case-insensitively.
+func (f *Filesystem) findFoldInTree(ctx context.Context, rootKey, name string) (block.Entry, bool, error) {
+	var match block.Entry
+	found := false
+	_, err := f.scanFold(ctx, rootKey, name, func(e block.Entry) bool {
+		if !found || e.Name == name {
+			match, found = e, true
+		}
+		return e.Name == name
+	})
+	return match, found, err
+}
+
+// scanFold visits, in sorted order, every entry of the Folded shard tree
+// at key whose name matches name case-insensitively, until visit returns
+// true. Those entries are one contiguous run, so this reads only the
+// blocks on the way down to where the run starts, plus any the run
+// spills into. It returns true once the run is known to be over, so a
+// caller iterating sibling subtrees stops there.
+func (f *Filesystem) scanFold(ctx context.Context, key, name string, visit func(block.Entry) bool) (bool, error) {
+	blk, _, err := f.readBlock(ctx, key)
+	if err != nil {
+		return false, err
+	}
+	if blk.Kind == block.Leaf {
+		for _, e := range blk.Entries[blk.SeekFold(name):] {
+			if block.CompareFold(e.Name, name) != 0 || visit(e) {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	start := blk.ChildIndexFold(name)
+	for i := start; i < len(blk.Children); i++ {
+		// A later child's MinKey bounds everything in it from below: once
+		// that sorts past name, so does the rest of the directory.
+		if i > start && block.CompareFold(blk.Children[i].MinKey, name) > 0 {
+			return true, nil
+		}
+		done, err := f.scanFold(ctx, blk.Children[i].UUID, name, visit)
+		if err != nil || done {
+			return done, err
+		}
+	}
+	return false, nil
+}
+
 // collectEntries gathers every entry in the shard tree rooted at rootKey,
 // across however many levels it currently has.
 func (f *Filesystem) collectEntries(ctx context.Context, rootKey string) ([]block.Entry, error) {
@@ -667,7 +730,7 @@ func (f *Filesystem) writeBackWithSplits(ctx context.Context, path []pathStep, i
 		if err := f.putBlock(ctx, rightUUID, right, step.obj.Metadata, ""); err != nil {
 			return err
 		}
-		newRoot := &block.Block{Kind: block.Internal, Children: []block.Child{
+		newRoot := &block.Block{Kind: block.Internal, Collation: blk.Collation, Children: []block.Child{
 			{MinKey: "", UUID: leftUUID},
 			{MinKey: sep, UUID: rightUUID},
 		}}
@@ -757,6 +820,48 @@ func (f *Filesystem) tryRemove(ctx context.Context, rootKey, name string) (block
 // Lookup finds name within the directory at dirKey.
 func (f *Filesystem) Lookup(ctx context.Context, dirKey, name string) (block.Entry, Attr, error) {
 	entry, ok, err := f.findInTree(ctx, dirKey, name)
+	if err != nil {
+		return block.Entry{}, Attr{}, err
+	}
+	if !ok {
+		return block.Entry{}, Attr{}, ErrNotFound
+	}
+	attr, err := f.Stat(ctx, entry.UUID, entry.Type)
+	if err != nil {
+		return block.Entry{}, Attr{}, err
+	}
+	return entry, attr, nil
+}
+
+// LookupFold is Lookup, matching name case-insensitively (as NTFS does;
+// see block.CompareFold): the entry named exactly name when there is
+// one, otherwise one whose name differs only in case. Storage stays
+// case-preserving either way; this is only how a case-insensitive mount
+// finds things.
+//
+// On a primary-Windows filesystem directories are sorted
+// case-insensitively, so this costs one descent, the same as Lookup. On
+// a primary-POSIX filesystem a name with no exact match means reading
+// the whole directory.
+func (f *Filesystem) LookupFold(ctx context.Context, dirKey, name string) (block.Entry, Attr, error) {
+	var entry block.Entry
+	var ok bool
+	var err error
+	if f.collation() == block.Folded {
+		entry, ok, err = f.findFoldInTree(ctx, dirKey, name)
+	} else {
+		entry, ok, err = f.findInTree(ctx, dirKey, name)
+		if err == nil && !ok {
+			var entries []block.Entry
+			entries, err = f.collectEntries(ctx, dirKey)
+			for _, e := range entries {
+				if block.EqualFold(e.Name, name) {
+					entry, ok = e, true
+					break
+				}
+			}
+		}
+	}
 	if err != nil {
 		return block.Entry{}, Attr{}, err
 	}
