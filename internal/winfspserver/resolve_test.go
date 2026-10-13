@@ -209,6 +209,11 @@ func TestResolvePathCaseInsensitiveMatchesDifferentCase(t *testing.T) {
 		if got.Key != fileUUID {
 			t.Fatalf("case-insensitive resolvePath(%q).Key = %q, want %q", path, got.Key, fileUUID)
 		}
+		// The stored case, whatever case was asked for — what Open and
+		// Create report to WinFsp as the normalized name.
+		if got.Path != `\MixedCase\File.TXT` {
+			t.Fatalf("case-insensitive resolvePath(%q).Path = %q, want stored case", path, got.Path)
+		}
 	}
 }
 

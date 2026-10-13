@@ -30,6 +30,12 @@ type resolved struct {
 	Key  string
 	Type icbfs.EntryType
 	Attr icbfs.Attr
+
+	// Path is the path as requested, spelled with each component's
+	// stored case — what WinFsp's NormalizedName wants (see
+	// normalizedName). For resolvePathFollow it is still the requested
+	// path, not the symlink target's.
+	Path string
 }
 
 // resolvePath walks path — a WinFsp path string, backslash-separated,
@@ -70,11 +76,12 @@ func resolvePath(ctx context.Context, fsys *icbfs.Filesystem, path string, caseI
 		if err != nil {
 			return resolved{}, fmt.Errorf("resolve %q: %w", path, err)
 		}
-		return resolved{Key: key, Type: icbfs.TypeDir, Attr: attr}, nil
+		return resolved{Key: key, Type: icbfs.TypeDir, Attr: attr, Path: `\`}, nil
 	}
 
 	typ := icbfs.TypeDir
 	var attr icbfs.Attr
+	var stored strings.Builder
 	for _, name := range segments {
 		if typ != icbfs.TypeDir {
 			return resolved{}, fmt.Errorf("resolve %q: %w", path, icbfs.ErrNotDir)
@@ -84,8 +91,10 @@ func resolvePath(ctx context.Context, fsys *icbfs.Filesystem, path string, caseI
 			return resolved{}, fmt.Errorf("resolve %q: %w", path, err)
 		}
 		key, typ, attr = entry.UUID, entry.Type, a
+		stored.WriteString(`\`)
+		stored.WriteString(entry.Name)
 	}
-	return resolved{Key: key, Type: typ, Attr: attr}, nil
+	return resolved{Key: key, Type: typ, Attr: attr, Path: stored.String()}, nil
 }
 
 // hasIntermediateSymlink reports whether walking path reaches a symlink
@@ -194,6 +203,7 @@ func resolvePathFollow(ctx context.Context, fsys *icbfs.Filesystem, path string,
 	if err != nil {
 		return resolved{}, err
 	}
+	requested := r.Path
 	dir, _ := splitParent(path)
 	for i := 0; r.Type == icbfs.TypeSymlink; i++ {
 		if i >= maxSymlinkHops {
@@ -210,6 +220,7 @@ func resolvePathFollow(ctx context.Context, fsys *icbfs.Filesystem, path string,
 		}
 		dir, _ = splitParent(next)
 	}
+	r.Path = requested
 	return r, nil
 }
 
@@ -298,4 +309,12 @@ func lookupStream(streams map[string]uint64, name string, caseInsensitive bool) 
 		}
 	}
 	return "", 0, false
+}
+
+// joinPath appends name to a WinFsp directory path.
+func joinPath(dir, name string) string {
+	if dir == `\` || dir == "" {
+		return `\` + name
+	}
+	return dir + `\` + name
 }

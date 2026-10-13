@@ -238,6 +238,16 @@ func (d *driver) allocFor(key string, size int64) uint64 {
 	return max(d.allocs[key], uint64(size))
 }
 
+// setNormalizedName reports the opened name with each component's
+// stored case. info must be the one passed to Create or Open. On a
+// case-insensitive mount the kernel otherwise keeps the upper-cased name
+// it looked the file up by, and reports that back — e.g. "\FILE0" from
+// GetFinalPathNameByHandle for a file created as "file0" (winfsp-tests'
+// getfileinfo_test/getfileinfo_name_test). Same as WinFsp's own memfs.
+func setNormalizedName(info *winfsp.FSP_FSCTL_FILE_INFO, name string) {
+	winfsp.GetOpenFileInfo(info).SetNormalizedName(name)
+}
+
 // fileOpenReparsePoint is NTCreateFile's FILE_OPEN_REPARSE_POINT
 // CreateOptions bit: when set, a caller wants the reparse point itself
 // (e.g. to delete it, or to read its raw target), not whatever it
@@ -290,6 +300,7 @@ func (d *driver) Open(fs *winfsp.FileSystemRef, name string, createOptions, gran
 		}
 	}
 	d.fillFileInfo(info, r.Key, r.Type, r.Attr)
+	setNormalizedName(info, r.Path)
 	h := &fileHandle{key: r.Key, typ: r.Type, path: name}
 	return d.newHandle(h), nil
 }
@@ -366,6 +377,7 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 			}
 		}
 		d.fillFileInfo(info, newUUID, icbfs.TypeDir, attr)
+		setNormalizedName(info, joinPath(parent.Path, base))
 		return d.newHandle(&fileHandle{key: newUUID, typ: icbfs.TypeDir, path: name}), nil
 	}
 
@@ -411,6 +423,7 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 		d.setAlloc(newUUID, allocationSize)
 	}
 	d.fillFileInfo(info, newUUID, icbfs.TypeFile, attr)
+	setNormalizedName(info, joinPath(parent.Path, base))
 	return id, nil
 }
 

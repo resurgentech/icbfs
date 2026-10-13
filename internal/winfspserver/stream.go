@@ -86,6 +86,7 @@ func (d *driver) openStream(r resolved, path, stream string, info *winfsp.FSP_FS
 	}
 	id2 := d.newHandle(h)
 	d.fillStreamInfo(info, h, r.Attr, size)
+	setNormalizedName(info, r.Path+":"+real)
 	return id2, nil
 }
 
@@ -115,6 +116,7 @@ func (d *driver) createStream(path, stream string, allocationSize uint64, info *
 		return 0, toWinError(err)
 	}
 	d.fillStreamInfo(info, h, owner, 0)
+	setNormalizedName(info, r.Path+":"+stream)
 	return id, nil
 }
 
