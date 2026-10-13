@@ -36,8 +36,12 @@ type FilesystemEntry struct {
 	// and ROADMAP.md's Part F, task F5. false (the default) means
 	// primary-POSIX.
 	PrimaryWindows bool `protobuf:"varint,4,opt,name=primary_windows,json=primaryWindows,proto3" json:"primary_windows,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// max_file_size: the largest file this filesystem holds, in bytes; set
+	// once at creation, immutable afterward. 0 (filesystems created before
+	// this field) means the default, 1 TiB.
+	MaxFileSize   uint64 `protobuf:"varint,5,opt,name=max_file_size,json=maxFileSize,proto3" json:"max_file_size,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *FilesystemEntry) Reset() {
@@ -98,6 +102,13 @@ func (x *FilesystemEntry) GetPrimaryWindows() bool {
 	return false
 }
 
+func (x *FilesystemEntry) GetMaxFileSize() uint64 {
+	if x != nil {
+		return x.MaxFileSize
+	}
+	return 0
+}
+
 // MasterBlock is the body of the one, fixed, well-known master-block
 // object per bucket. The list can only ever grow in length, never
 // shrink or reorder — a deleted filesystem's entry is blanked in place
@@ -152,12 +163,13 @@ var File_spec_proto_icbfs_v1_master_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_master_proto_rawDesc = "" +
 	"\n" +
-	" spec/proto/icbfs/v1/master.proto\x12\bicbfs.v1\"~\n" +
+	" spec/proto/icbfs/v1/master.proto\x12\bicbfs.v1\"\xa2\x01\n" +
 	"\x0fFilesystemEntry\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x1a\n" +
 	"\barchived\x18\x03 \x01(\bR\barchived\x12'\n" +
-	"\x0fprimary_windows\x18\x04 \x01(\bR\x0eprimaryWindows\"J\n" +
+	"\x0fprimary_windows\x18\x04 \x01(\bR\x0eprimaryWindows\x12\"\n" +
+	"\rmax_file_size\x18\x05 \x01(\x04R\vmaxFileSize\"J\n" +
 	"\vMasterBlock\x12;\n" +
 	"\vfilesystems\x18\x01 \x03(\v2\x19.icbfs.v1.FilesystemEntryR\vfilesystemsB+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
 

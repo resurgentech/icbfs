@@ -33,6 +33,9 @@ IP="${1:?usage: run-pjdfstest.sh <vm-ip>}"
 ENDPOINT="$ICBFS_MINIO_VM_ENDPOINT"
 BUCKET="$ICBFS_MINIO_BUCKET"
 FS_NAME="pjdfstest-$(date +%Y%m%d%H%M%S)"
+# Test filesystems hold files up to 8 GiB, not the 1 TiB default:
+# testable, and big enough to need multipart uploads.
+MAX_FILE_SIZE=$((8 << 30))
 MNT=/mnt/icbfs-test
 
 REPO="$(cd "$HERE/../.." && pwd)"
@@ -52,7 +55,7 @@ ssh_vm "$IP" "rm -rf $SRC && mkdir -p $SRC && tar -xf /tmp/icbfs-src.tar -C $SRC
 echo "Mounting ${FS_NAME} at ${MNT}..." >&2
 # Unmount before the MinIO underneath goes away, even on failure.
 trap 'ssh_vm "$IP" "sudo umount -l $MNT 2>/dev/null; sudo pkill -x icbfs-cli; true" || true' EXIT
-ssh_vm "$IP" "sudo mkdir -p $MNT; sudo chmod 0755 /mnt; sudo $SRC/icbfs-cli mount -endpoint $ENDPOINT -bucket $BUCKET -fs $FS_NAME -access-key $ICBFS_MINIO_ACCESS_KEY -secret-key $ICBFS_MINIO_SECRET_KEY -uid 0 -gid 0 -allow-other $MNT > /tmp/icbfs-mount-${FS_NAME}.log 2>&1 &"
+ssh_vm "$IP" "sudo mkdir -p $MNT; sudo chmod 0755 /mnt; sudo $SRC/icbfs-cli mount -endpoint $ENDPOINT -bucket $BUCKET -fs $FS_NAME -access-key $ICBFS_MINIO_ACCESS_KEY -secret-key $ICBFS_MINIO_SECRET_KEY -max-file-size $MAX_FILE_SIZE -uid 0 -gid 0 -allow-other $MNT > /tmp/icbfs-mount-${FS_NAME}.log 2>&1 &"
 # Never run the suite against whatever is under $MNT without the mount:
 # that's the VM's own disk, and it passes everything.
 if ! ssh_vm "$IP" "for i in \$(seq 1 30); do findmnt -n -o FSTYPE $MNT | grep -q fuse && exit 0; sleep 0.5; done; exit 1"; then

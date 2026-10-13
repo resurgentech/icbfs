@@ -15,6 +15,7 @@ import (
 	"github.com/resurgentech/icbfs/internal/block"
 	"github.com/resurgentech/icbfs/internal/notify"
 	"github.com/resurgentech/icbfs/internal/objstore"
+	"github.com/resurgentech/icbfs/internal/pb"
 )
 
 // maxTreeRetries bounds the whole-operation retry loop for the tree-aware
@@ -33,33 +34,16 @@ const (
 	maxChildrenPerBlock = 8
 )
 
-// maxSetAttrSize bounds how large a resize (SetAttr's ftruncate(2)/
-// truncate(2) path) or a write-extending-the-file (OpenFile.applyLocked's
-// pwrite(2) path) will accept — see both of their own doc comments for
-// why a real ceiling is necessary here, not optional: this
-// implementation has no sparse-region support, so growing to cover any
-// offset/size always means actually materializing that many real
-// bytes as one in-memory []byte, unlike a real filesystem's sparse
-// "hole."
+// DefaultMaxFileSize is the largest file a filesystem holds unless it
+// was created with another limit (SetCreationMaxFileSize): 1 TiB. Writes
+// and truncates past a filesystem's limit fail with ErrFileTooLarge.
 //
-// 2 GiB (the 32-bit signed off_t boundary, not an arbitrary round
-// number) is deliberately far more conservative than "the largest
-// value Go's runtime will let through": an earlier version of this
-// bound was 1 TiB, reasoning only about the runtime's own hard limits
-// — which missed the real-world failure mode entirely. pjdfstest's
-// `open` category specifically probes a write at offset 2^31+1 (the
-// exact 32-bit boundary, a deliberate, common test pattern — the
-// *same* boundary its utimensat/truncate tests probe for timestamps/
-// sizes) and accepts either real 64-bit support or a clean EFBIG/
-// EINVAL as correct; a 1 TiB bound let that ~2GiB allocation through,
-// and on a real, memory-constrained Linux VM already running the
-// rest of the suite, the Linux kernel's OOM killer SIGKILLed the
-// whole process outright — confirmed directly via dmesg/journalctl,
-// not inferred, with zero Go panic trace at all (unrecoverable by
-// definition). 2 GiB is comfortably above any file this project's own
-// test suite or realistic manual use needs, while actually closing
-// the gap a 1 TiB "the runtime allows it" bound did not.
-const maxSetAttrSize = 1 << 31
+// Content is staged in a local scratch file, not memory, so the limit
+// isn't about RAM (an earlier, in-memory design was OOM-killed by
+// pjdfstest's 2 GiB writes and capped at 2 GiB for it); it bounds what a
+// machine with the file open needs in local disk, and what one upload
+// carries.
+const DefaultMaxFileSize = 1 << 40
 
 var errRetry = errors.New("icbfs: lost a race, retry the whole operation")
 
@@ -77,6 +61,8 @@ type Filesystem struct {
 	id             string // 4-hex-digit prefix, set by Bootstrap
 	archived       bool   // set by Bootstrap; see ErrArchived
 	primaryWindows bool   // set by Bootstrap from the stored master-block value; see PrimaryWindows, task F5
+	maxFileSize    int64  // set by Bootstrap from the stored master-block value; see MaxFileSize
+	newMaxFileSize uint64 // the max file size a filesystem gets if Bootstrap creates it; see SetCreationMaxFileSize
 	lockingEnabled bool   // off by default; see EnableLocking, task B7
 
 	// lockNotify is nil unless EnableChangeNotifications (task B10) was
@@ -173,6 +159,17 @@ func (f *Filesystem) EnableChangeNotifications(signals <-chan notify.Signal) {
 // afterward; only meaningful after Bootstrap.
 func (f *Filesystem) PrimaryWindows() bool { return f.primaryWindows }
 
+// SetCreationMaxFileSize sets the largest file a new filesystem will
+// hold, if Bootstrap is the one that creates it — like Bootstrap's size
+// and primary mode, it's fixed at creation and ignored for a filesystem
+// that already exists. 0, or never calling this, means
+// DefaultMaxFileSize. Call before Bootstrap.
+func (f *Filesystem) SetCreationMaxFileSize(n uint64) { f.newMaxFileSize = n }
+
+// MaxFileSize is the largest file this filesystem holds, in bytes. Only
+// meaningful after Bootstrap.
+func (f *Filesystem) MaxFileSize() int64 { return f.maxFileSize }
+
 // RootKey returns the block key identifying this filesystem's root:
 // "<id>-root-<name>", a derived key, not stored anywhere separately —
 // see ARCHITECTURE.md. Only meaningful after Bootstrap.
@@ -227,13 +224,18 @@ func (f *Filesystem) checkWritable() error {
 // immutable afterward; see PrimaryWindows and ROADMAP.md's Part F,
 // task F5.
 func (f *Filesystem) Bootstrap(ctx context.Context, size uint64, mode, uid, gid uint32, primaryWindows bool) error {
-	id, archived, storedPrimaryWindows, err := registerFilesystem(ctx, f.store, f.fsName, size, primaryWindows)
+	id, entry, err := registerFilesystem(ctx, f.store, &pb.FilesystemEntry{
+		Name: f.fsName, Size: size, PrimaryWindows: primaryWindows, MaxFileSize: f.newMaxFileSize})
 	if err != nil {
 		return err
 	}
 	f.id = id
-	f.archived = archived
-	f.primaryWindows = storedPrimaryWindows
+	f.archived = entry.Archived
+	f.primaryWindows = entry.PrimaryWindows
+	f.maxFileSize = DefaultMaxFileSize
+	if entry.MaxFileSize != 0 && entry.MaxFileSize <= DefaultMaxFileSize {
+		f.maxFileSize = int64(entry.MaxFileSize)
+	}
 
 	rootKey := f.RootKey()
 	if _, err := f.store.Head(ctx, rootKey); err == nil {
@@ -1771,8 +1773,9 @@ func (f *Filesystem) writeFileFrom(ctx context.Context, key string, body io.Read
 // simplification for directories, see Attr's doc comment); size is
 // ignored, since truncating a directory block doesn't mean anything.
 //
-// For a file or symlink, a size change rewrites content via WriteFile
-// (which bumps mtime, correctly, since it's a real content change); a
+// For a file or symlink, a size change rewrites content through an
+// OpenFile session (which bumps mtime, correctly, since it's a real
+// content change); a
 // mode/uid/gid change goes through updateFileMetadata, which — unlike
 // the directory case — *is* real-CAS-protected, a quiet benefit of the
 // .metadata consolidation.
@@ -1792,30 +1795,14 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
 	}
-	// A negative size is invalid at the syscall level (ftruncate(2)/
-	// truncate(2) reject it with EINVAL) and must be rejected here
-	// too, before it ever reaches make([]byte, *size) below — a real,
-	// serious crash found by running pjdfstest (its truncate/unlink/
-	// utimensat groups exercise exactly this), not a hypothetical:
-	// `make([]byte, -1)` panics with "makeslice: len out of range",
-	// taking down the whole FUSE server process (and every in-flight
-	// request on it) over a single malformed call, not just failing
-	// the one call that made it.
-	//
-	// An excessively large positive size hits the exact same panic
-	// for a different reason — also found via pjdfstest, which
-	// specifically probes `truncate(path, 999999999999999)` (~909TB)
-	// and accepts either EFBIG or EINVAL as correct (real filesystems
-	// have *some* maximum file size; silently succeeding or crashing
-	// are the two wrong answers). maxSetAttrSize is a real, necessary
-	// ceiling for this implementation specifically, not an arbitrary
-	// guess: a resize always materializes the *entire* new size as one
-	// in-memory []byte (no sparse-region support — there's no way to
-	// represent "a hole" in a plain object-store blob), so unlike a
-	// real sparse-aware filesystem, this one cannot accept a huge
-	// logical size without an equally huge real allocation.
-	if size != nil && (*size < 0 || *size > maxSetAttrSize) {
+	// A negative size is invalid (truncate(2) says EINVAL); one past this
+	// filesystem's limit is "file too large" (EFBIG) — pjdfstest probes
+	// truncate(path, 999999999999999) and accepts either.
+	if size != nil && *size < 0 {
 		return Attr{}, ErrInvalidArgument
+	}
+	if size != nil && *size > f.maxFileSize {
+		return Attr{}, ErrFileTooLarge
 	}
 	if typ == TypeDir {
 		if mode == nil && uid == nil && gid == nil && atime == nil && mtime == nil && btime == nil {
@@ -1844,22 +1831,20 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 	}
 
 	if size != nil {
-		data, _, _, err := f.ReadFile(ctx, key)
+		// Through an OpenFile session, so the content is staged on local
+		// disk (a grow is a sparse extend there), and the write is the
+		// same CAS-retried flush as any other edit.
+		o, err := f.Open(ctx, key)
 		if err != nil {
 			return Attr{}, err
 		}
-		if *size != int64(len(data)) {
-			resized := make([]byte, *size)
-			copy(resized, data)
-			// Unconditional: ftruncate's "last writer wins" is an
-			// accepted simplification here, same as directory SetAttr
-			// above — task B1's CAS protection is for OpenFile's
-			// buffered-write path (the common case of a process
-			// actually editing a file), not every call that happens to
-			// replace a file's content.
-			if _, _, err := f.WriteFile(ctx, key, resized, ""); err != nil {
-				return Attr{}, err
-			}
+		err = o.Truncate(*size)
+		if err == nil {
+			_, err = o.Flush(ctx)
+		}
+		o.Close()
+		if err != nil {
+			return Attr{}, err
 		}
 	}
 

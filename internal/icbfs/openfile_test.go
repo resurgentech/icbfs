@@ -236,21 +236,6 @@ func TestCheckRangeLockConflictIgnoresEscalationOnlyEntries(t *testing.T) {
 	}
 }
 
-// TestWriteAtRejectsHugeOffsetInsteadOfCrashing is a real regression
-// test found running pjdfstest's full suite against a real,
-// memory-constrained Linux VM: a write far past the current end of a
-// file (pjdfstest's `open` category tests pwrite-style sparse-file/
-// 32-bit-off_t-overflow behavior, specifically a 1-byte write at
-// offset 2147483649 = 2^31+1) made applyLocked's make([]byte, end) try
-// to materialize the entire ~2GB logical gap as one real allocation —
-// this implementation has no sparse-region support at all. On a 4GB
-// test VM already running a long pjdfstest suite, that allocation got
-// the whole process OOM-killed by the kernel outright (no Go panic at
-// all — SIGKILL can't be recovered), which is strictly worse than
-// SetAttr's "makeslice: len out of range" panic for an equally huge
-// *truncate* request (ROADMAP.md/TESTING.md's own already-fixed
-// finding): a panic at least stops only the one request; this took
-// down every other in-flight operation on the same mount too.
 // TestOpenFileTouchAtimeOnlyOncePerSession is a real regression test:
 // a single large read gets split by the kernel into many smaller
 // FUSE/WinFsp Read callback invocations, and an earlier version of
@@ -324,7 +309,13 @@ func TestOpenFileTouchAtimeOnlyOncePerSession(t *testing.T) {
 	}
 }
 
-func TestWriteAtRejectsHugeOffsetInsteadOfCrashing(t *testing.T) {
+// TestWriteAtHugeOffsets: pjdfstest's open/25.t writes 1 byte at
+// 2^31+1. That once OOM-killed the whole mount (the gap was materialized
+// in memory) and was then refused outright; content is staged in a
+// sparse local scratch file now, so it's accepted, and only a write past
+// the filesystem's max file size is refused, before anything is
+// extended.
+func TestWriteAtHugeOffsets(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	ctx := context.Background()
 	root := fsys.RootKey()
@@ -338,9 +329,19 @@ func TestWriteAtRejectsHugeOffsetInsteadOfCrashing(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 
-	const hugeOffset = 1<<31 + 1 // the exact value pjdfstest's own open/*.t tests use
-	if err := open.WriteAt([]byte("x"), hugeOffset); !errors.Is(err, ErrInvalidArgument) {
-		t.Fatalf("WriteAt at huge offset = %v, want ErrInvalidArgument", err)
+	// pjdfstest's open/25.t writes at 2^31+1: a sparse write on the
+	// local scratch file now, well within the 1 TiB default limit.
+	const pjdOffset = 1<<31 + 1
+	if err := open.WriteAt([]byte("x"), pjdOffset); err != nil {
+		t.Fatalf("WriteAt at 2 GiB + 1 = %v, want it accepted", err)
+	}
+	if err := open.Truncate(0); err != nil {
+		t.Fatalf("truncate back to 0: %v", err)
+	}
+	// Past the filesystem's max file size: EFBIG, before the scratch
+	// file is extended at all.
+	if err := open.WriteAt([]byte("x"), fsys.MaxFileSize()); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("WriteAt past the max file size = %v, want ErrFileTooLarge", err)
 	}
 
 	// A negative offset must be rejected the same way — pwrite(2)'s

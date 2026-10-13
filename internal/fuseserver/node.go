@@ -191,6 +191,8 @@ func errnoFromErr(err error) syscall.Errno {
 		return syscall.EINVAL
 	case errors.Is(err, icbfs.ErrNameTooLong):
 		return syscall.ENAMETOOLONG
+	case errors.Is(err, icbfs.ErrFileTooLarge):
+		return syscall.EFBIG
 	case errors.Is(err, icbfs.ErrInvalidRename):
 		// POSIX rename(2)'s EINVAL: "newpath contains a path prefix
 		// of oldpath" (task F9).

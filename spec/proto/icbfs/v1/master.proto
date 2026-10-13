@@ -18,6 +18,10 @@ message FilesystemEntry {
   // and ROADMAP.md's Part F, task F5. false (the default) means
   // primary-POSIX.
   bool primary_windows = 4;
+  // max_file_size: the largest file this filesystem holds, in bytes; set
+  // once at creation, immutable afterward. 0 (filesystems created before
+  // this field) means the default, 1 TiB.
+  uint64 max_file_size = 5;
 }
 
 // MasterBlock is the body of the one, fixed, well-known master-block

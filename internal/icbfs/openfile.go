@@ -64,7 +64,7 @@ const noTouch = -1
 // Open() always materialized a file's entire content as one Go slice,
 // which was the root cause of three real crash/OOM bugs this project
 // found and fixed the hard way running pjdfstest against a real,
-// memory-constrained mount (see maxSetAttrSize's own doc comment).
+// memory-constrained mount (see DefaultMaxFileSize's doc comment).
 // This scratch file is private to this one OpenFile session, never
 // shared with any other concurrent session of the same key — sharing
 // one physical file across sessions would let one session's
@@ -106,6 +106,11 @@ type OpenFile struct {
 	// atimeTouched guards TouchAtime's at-most-once-per-session
 	// behavior — see its own doc comment.
 	atimeTouched bool
+
+	// truncated is set when Truncate has fixed this session's size since
+	// its last flush, so a rebase onto newer content keeps that size
+	// instead of the base's.
+	truncated bool
 
 	// lastWrite is when WriteAt last changed this session's content —
 	// the mtime Stat reports for it until it's flushed (see
@@ -318,25 +323,51 @@ func (o *OpenFile) WriteAt(data []byte, off int64) error {
 	return nil
 }
 
+// Truncate sets this session's content length, as ftruncate(2) does: a
+// shrink drops the tail, a grow extends with zeros (sparsely, on the
+// local scratch file). Like WriteAt, it's flushed by Flush.
+func (o *OpenFile) Truncate(size int64) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if size < 0 || o.file == nil {
+		return ErrInvalidArgument
+	}
+	if size > o.fsys.maxFileSize {
+		return ErrFileTooLarge
+	}
+	if size == o.size {
+		return nil
+	}
+	if err := o.file.Truncate(size); err != nil {
+		return err
+	}
+	lo, hi := min(size, o.size), max(size, o.size)
+	o.size = size
+	if o.touchedStart == noTouch || lo < o.touchedStart {
+		o.touchedStart = lo
+	}
+	if hi > o.touchedEnd {
+		o.touchedEnd = hi
+	}
+	o.dirty = true
+	o.truncated = true
+	o.lastWrite = time.Now()
+	return nil
+}
+
 // applyLocked extends the local scratch file to cover off+len(data) if
 // the write goes past the current end, then writes data in at off.
 //
-// A negative offset, or an end that exceeds maxSetAttrSize, is
-// rejected before ever reaching Truncate — maxSetAttrSize's own bound
-// predates this task (it was sized against the old make([]byte, end)
-// panic/OOM this design no longer has), but it's kept as the same
-// real ceiling regardless: extending a *sparse* local file past this
-// bound would still make Flush's eventual whole-object Put (task G3
-// deliberately keeps the backend protocol whole-object, not
-// range/multipart) try to upload an enormous object, which is exactly
-// as real a problem as the original in-memory allocation was.
+// A negative offset is invalid; an end past the filesystem's max file
+// size is ErrFileTooLarge (see DefaultMaxFileSize), checked before the
+// scratch file is extended.
 func (o *OpenFile) applyLocked(data []byte, off int64) error {
 	if off < 0 {
 		return ErrInvalidArgument
 	}
 	end := off + int64(len(data))
-	if end > maxSetAttrSize {
-		return ErrInvalidArgument
+	if end > o.fsys.maxFileSize {
+		return ErrFileTooLarge
 	}
 	if o.file == nil {
 		return ErrInvalidArgument
@@ -378,8 +409,11 @@ func (o *OpenFile) touchedRangeLocked() (start, end int64) {
 // onto the fresh base, and updates o.etag in place.
 func (o *OpenFile) rebaseLocked(ctx context.Context) error {
 	var ownEdits []byte
-	if o.touchedStart != noTouch && o.file != nil {
-		ownEdits = make([]byte, o.touchedEnd-o.touchedStart)
+	ownSize := o.size
+	if o.touchedStart != noTouch && o.file != nil && o.touchedStart < ownSize {
+		// Only what's still inside this session's content: past its end
+		// is a truncated-away tail, which the size below takes care of.
+		ownEdits = make([]byte, min(o.touchedEnd, ownSize)-o.touchedStart)
 		if _, err := o.file.ReadAt(ownEdits, o.touchedStart); err != nil && err != io.EOF {
 			return err
 		}
@@ -414,6 +448,15 @@ func (o *OpenFile) rebaseLocked(ctx context.Context) error {
 			}
 			return err
 		}
+	}
+	if o.truncated && o.size != ownSize {
+		if err := o.file.Truncate(ownSize); err != nil {
+			if oldName != "" {
+				_ = os.Remove(oldName)
+			}
+			return err
+		}
+		o.size = ownSize
 	}
 	if oldName != "" {
 		_ = os.Remove(oldName)
@@ -465,6 +508,7 @@ func (o *OpenFile) Flush(ctx context.Context) (Attr, error) {
 		// Unlinked while open: nothing can see this content any more,
 		// and its objects go at the last Close. Drop the writes.
 		o.dirty = false
+		o.truncated = false
 		o.touchedStart, o.touchedEnd = noTouch, 0
 		return o.fsys.statFile(ctx, o.key)
 	}
@@ -489,6 +533,7 @@ func (o *OpenFile) Flush(ctx context.Context) (Attr, error) {
 			o.touchedStart = noTouch
 			o.touchedEnd = 0
 			o.dirty = false
+			o.truncated = false
 			o.updateSharedCacheLocked(newETag)
 			return attr, nil
 		}
@@ -527,6 +572,7 @@ func (o *OpenFile) Flush(ctx context.Context) (Attr, error) {
 	o.touchedStart = noTouch
 	o.touchedEnd = 0
 	o.dirty = false
+	o.truncated = false
 	o.updateSharedCacheLocked(newETag)
 	return attr, nil
 }

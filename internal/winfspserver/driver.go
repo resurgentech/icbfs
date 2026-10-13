@@ -174,6 +174,10 @@ func toWinError(err error) error {
 		// NTSTATUS directly rather than stretching an os.Err*/
 		// syscall.Errno value to fit (task F6).
 		return windows.STATUS_OBJECT_NAME_INVALID
+	case errors.Is(err, icbfs.ErrFileTooLarge):
+		// What Windows reports for a file too big for its volume
+		// (ERROR_FILE_TOO_LARGE), e.g. over 4 GiB on FAT32.
+		return windows.STATUS_FILE_TOO_LARGE
 	case errors.Is(err, icbfs.ErrNameTooLong):
 		// What NTFS answers for a component over 255 characters. WinFsp
 		// refuses those itself before they reach this driver (its

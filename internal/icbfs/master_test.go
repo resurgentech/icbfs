@@ -8,7 +8,20 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/resurgentech/icbfs/internal/objstore"
+	"github.com/resurgentech/icbfs/internal/pb"
 )
+
+// registerName registers name with a declared size and every other
+// creation setting at its default.
+func registerName(ctx context.Context, store objstore.Store, name string, size uint64) (id string, archived bool, err error) {
+	id, e, err := registerFilesystem(ctx, store, &pb.FilesystemEntry{Name: name, Size: size})
+	if err != nil {
+		return "", false, err
+	}
+	return id, e.Archived, nil
+}
 
 // TestBootstrapMasterIsIdempotent covers D1's "Done when": a fresh
 // bucket's master block can be bootstrapped, and bootstrapping an
@@ -49,7 +62,7 @@ func TestRegisterFilesystemAllocatesSequentialIDs(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	id0, archived, _, err := registerFilesystem(ctx, store, "fs-a", 1<<30, false)
+	id0, archived, err := registerName(ctx, store, "fs-a", 1<<30)
 	if err != nil {
 		t.Fatalf("register fs-a: %v", err)
 	}
@@ -57,7 +70,7 @@ func TestRegisterFilesystemAllocatesSequentialIDs(t *testing.T) {
 		t.Fatalf("fs-a = (%q, archived=%v), want (0000, false)", id0, archived)
 	}
 
-	id1, archived, _, err := registerFilesystem(ctx, store, "fs-b", 1<<30, false)
+	id1, archived, err := registerName(ctx, store, "fs-b", 1<<30)
 	if err != nil {
 		t.Fatalf("register fs-b: %v", err)
 	}
@@ -67,7 +80,7 @@ func TestRegisterFilesystemAllocatesSequentialIDs(t *testing.T) {
 
 	// Re-registering an existing name is idempotent: same ID back, no
 	// new slot consumed.
-	again, _, _, err := registerFilesystem(ctx, store, "fs-a", 999, false)
+	again, _, err := registerName(ctx, store, "fs-a", 999)
 	if err != nil {
 		t.Fatalf("re-register fs-a: %v", err)
 	}
@@ -92,7 +105,7 @@ func TestRegisterFilesystemConcurrentCreatesGetDistinctIDs(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			id, _, _, err := registerFilesystem(ctx, store, fmt.Sprintf("concurrent-%02d", i), 1<<30, false)
+			id, _, err := registerName(ctx, store, fmt.Sprintf("concurrent-%02d", i), 1<<30)
 			ids[i] = id
 			errs[i] = err
 		}(i)
@@ -122,7 +135,7 @@ func TestPruneFreesSlotForReuse(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	idA, _, _, err := registerFilesystem(ctx, store, "to-prune", 1<<30, false)
+	idA, _, err := registerName(ctx, store, "to-prune", 1<<30)
 	if err != nil {
 		t.Fatalf("register to-prune: %v", err)
 	}
@@ -146,7 +159,7 @@ func TestPruneFreesSlotForReuse(t *testing.T) {
 		t.Fatalf("prune left %d objects behind under prefix %q, want 0", len(objs), idA+"-")
 	}
 
-	idB, _, _, err := registerFilesystem(ctx, store, "reuses-slot", 1<<30, false)
+	idB, _, err := registerName(ctx, store, "reuses-slot", 1<<30)
 	if err != nil {
 		t.Fatalf("register reuses-slot: %v", err)
 	}

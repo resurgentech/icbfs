@@ -25,6 +25,12 @@ generic multi-cloud abstraction is being built.
 
 - **No chunking.** Each file's content is a single whole object. Writing a
   file means writing one object.
+- **Max file size** is a per-filesystem setting, fixed at creation in the
+  master block (`-max-file-size`): 1 TiB by default. Writes and truncates
+  past it fail with `EFBIG` / `STATUS_FILE_TOO_LARGE`. An open file's
+  content is staged in a local scratch file, not memory, so the limit
+  bounds local disk per open file and the size of one upload. The test
+  runners create their filesystems with an 8 GiB limit.
 - **Blobs are identified by UUID, not by filename.** Specifically **UUIDv7**
   — its embedded 48-bit millisecond timestamp gives a free, zero-storage
   `birthtime` and makes keys naturally time-ordered.

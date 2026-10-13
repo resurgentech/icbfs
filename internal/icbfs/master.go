@@ -73,29 +73,30 @@ func readMaster(ctx context.Context, store objstore.Store) (*pb.MasterBlock, *ob
 // new entry (reusing the lowest-indexed free slot, or appending) if this
 // is the first time this name has been seen. Idempotent: calling it
 // again for an already-registered name just returns that name's existing
-// ID, archived status, and primary-mode (primaryWindows is otherwise
-// ignored, same as size already was — both are "only used the first
-// time a filesystem name is created," per Filesystem.Bootstrap's
-// existing no-op-if-already-exists contract for root blocks).
+// ID and stored entry; entry's size, primary mode and max file size are
+// only used the first time a filesystem name is created, per
+// Filesystem.Bootstrap's existing no-op-if-already-exists contract for
+// root blocks.
 //
 // The ID is the slot's position, zero-padded to 4 hex digits — not a
 // separately stored field. See ARCHITECTURE.md for why: the master
 // block's list can only grow, never shrink or reorder, specifically so a
 // slot's position (and therefore the ID every object in that filesystem
 // is already permanently keyed with) never changes once assigned.
-func registerFilesystem(ctx context.Context, store objstore.Store, name string, size uint64, primaryWindows bool) (id string, archived, storedPrimaryWindows bool, err error) {
+func registerFilesystem(ctx context.Context, store objstore.Store, entry *pb.FilesystemEntry) (id string, stored *pb.FilesystemEntry, err error) {
 	if err := bootstrapMaster(ctx, store); err != nil {
-		return "", false, false, err
+		return "", nil, err
 	}
+	name := entry.Name
 	for attempt := 0; attempt < maxTreeRetries; attempt++ {
 		mb, obj, err := readMaster(ctx, store)
 		if err != nil {
-			return "", false, false, err
+			return "", nil, err
 		}
 
 		for i, e := range mb.Filesystems {
 			if e.Name == name {
-				return fsID(i), e.Archived, e.PrimaryWindows, nil
+				return fsID(i), e, nil
 			}
 		}
 
@@ -110,22 +111,23 @@ func registerFilesystem(ctx context.Context, store objstore.Store, name string, 
 			idx = len(mb.Filesystems)
 			mb.Filesystems = append(mb.Filesystems, &pb.FilesystemEntry{})
 		}
-		mb.Filesystems[idx] = &pb.FilesystemEntry{Name: name, Size: size, Archived: false, PrimaryWindows: primaryWindows}
+		created := &pb.FilesystemEntry{Name: name, Size: entry.Size, PrimaryWindows: entry.PrimaryWindows, MaxFileSize: entry.MaxFileSize}
+		mb.Filesystems[idx] = created
 
 		data, err := proto.Marshal(mb)
 		if err != nil {
-			return "", false, false, err
+			return "", nil, err
 		}
 		_, err = store.Put(ctx, masterBlockKey, bytes.NewReader(data), nil, obj.ETag)
 		if objstore.IsPreconditionFailed(err) {
 			continue
 		}
 		if err != nil {
-			return "", false, false, err
+			return "", nil, err
 		}
-		return fsID(idx), false, primaryWindows, nil
+		return fsID(idx), created, nil
 	}
-	return "", false, false, fmt.Errorf("register filesystem %q: exceeded %d retries", name, maxTreeRetries)
+	return "", nil, fmt.Errorf("register filesystem %q: exceeded %d retries", name, maxTreeRetries)
 }
 
 // fsID zero-pads a slot index to the 4-hex-digit filesystem ID format

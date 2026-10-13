@@ -42,6 +42,7 @@ func main() {
 	secretKey := fset.String("secret-key", "minioadmin", "secret key")
 	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
 	size := fset.Uint64("size", 100<<30, "declared filesystem size in bytes, for df (only used the first time a filesystem name is created)")
+	maxFileSize := fset.Uint64("max-file-size", icbfs.DefaultMaxFileSize, "largest file the filesystem holds, in bytes (only used the first time a filesystem name is created, immutable afterward)")
 	uidOverride := fset.Int("uid", -1, "owner uid for the filesystem root (only used the first time a filesystem name is created); defaults to the uid of the user running this command, same as every other FUSE filesystem's -o uid= override (sshfs, NFS, etc.)")
 	gidOverride := fset.Int("gid", -1, "owner gid for the filesystem root (only used the first time a filesystem name is created); defaults to the gid of the user running this command, same as every other FUSE filesystem's -o gid= override (sshfs, NFS, etc.)")
 	locking := fset.Bool("locking", false, "enable the Locking feature (flock/fcntl); off by default, per ARCHITECTURE.md's Locking section")
@@ -93,6 +94,7 @@ func main() {
 	// --primary-windows, default true) — no flag exposed here yet,
 	// since nothing on this access layer reads the stored value today
 	// either way (task F5's own consumers, F6/F8, are Windows-only).
+	fsys.SetCreationMaxFileSize(*maxFileSize)
 	if err := fsys.Bootstrap(ctx, *size, 0755, rootUID, rootGID, false); err != nil {
 		log.Fatalf("bootstrap filesystem %q: %v", *fsName, err)
 	}

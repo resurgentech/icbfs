@@ -7,7 +7,10 @@ param(
     [string]$Exe = "C:\icbfs-test\icbfs-winfsp.exe",
     [string]$Extra = "",
     [string]$Only = "",
-    [string]$Out = "C:\Windows\Temp\winfsp-tests-result.txt"
+    [string]$Out = "C:\Windows\Temp\winfsp-tests-result.txt",
+    # Test filesystems hold files up to 8 GiB, not the 1 TiB default:
+    # testable, and big enough to need multipart uploads.
+    [uint64]$MaxFileSize = 8GB
 )
 # VM side of run-winfsp-tests.sh — copied to the VM and run there.
 #
@@ -52,7 +55,7 @@ function Start-Fs([string]$t) {
             $fs = "w-" + $t.Substring(0, [Math]::Min(30, $t.Length)) + "-" + (Get-Random)
             Start-Process $Exe -WindowStyle Hidden @log -ArgumentList @(
                 "-endpoint",$Endpoint,"-bucket",$Bucket,"-fs",$fs,
-                "-access-key",$AccessKey,"-secret-key",$SecretKey,"-case-insensitive=$ci",$drive) | Out-Null
+                "-access-key",$AccessKey,"-secret-key",$SecretKey,"-max-file-size",$MaxFileSize,"-case-insensitive=$ci",$drive) | Out-Null
         }
     }
     for ($i = 0; $i -lt 40 -and -not (Test-Path "$drive\"); $i++) { Start-Sleep -Milliseconds 250 }

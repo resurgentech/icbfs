@@ -24,7 +24,7 @@ const defaultCacheMaxBytes = 512 << 20
 // materializing a file's entire content as one in-memory []byte on
 // every single Open (the root cause of three real crash/OOM bugs this
 // project already found and fixed the hard way; see
-// maxSetAttrSize's own doc comment). Deliberately NOT the thing an
+// DefaultMaxFileSize's doc comment). Deliberately NOT the thing an
 // OpenFile session reads/writes against directly: each session gets
 // its own private scratch file (seedScratch), copied from this
 // cache's validated snapshot (or fetched fresh, if missing/stale).
@@ -204,7 +204,17 @@ func (c *diskCache) seedScratch(ctx context.Context, key, wantETag string, fetch
 // populate the cache after a real fetch) and by OpenFile.Flush (to
 // keep the shared cache representing what was actually just written,
 // so the very next Open doesn't redundantly re-fetch it).
+//
+// Content bigger than the whole cache budget isn't cached at all: it
+// would only evict everything else and then be evicted itself, after a
+// full local copy (dense, even of a sparse file). Any older entry for
+// key is dropped instead, since it no longer matches.
 func (c *diskCache) updateSharedFrom(key, etag string, content *os.File, size int64) error {
+	if size > c.maxBytes {
+		c.invalidate(key)
+		_, err := content.Seek(0, io.SeekStart)
+		return err
+	}
 	if err := os.MkdirAll(c.sharedDir(), 0700); err != nil {
 		return err
 	}

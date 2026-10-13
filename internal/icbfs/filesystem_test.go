@@ -438,9 +438,8 @@ func TestSetAttrRejectsNegativeSizeInsteadOfCrashing(t *testing.T) {
 // real pjdfstest run, for a different reason — pjdfstest's own
 // truncate/12.t and ftruncate/12.t specifically probe
 // `truncate(path, 999999999999999)` (~909TB) and accept either EFBIG
-// or EINVAL as correct, since this implementation has no sparse-file
-// support (a resize always materializes the whole new size as one
-// in-memory []byte — see maxSetAttrSize's own doc comment).
+// or EINVAL as correct. It's past the filesystem's max file size (see
+// DefaultMaxFileSize), so EFBIG.
 func TestSetAttrRejectsHugeSizeInsteadOfCrashing(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	ctx := context.Background()
@@ -455,8 +454,8 @@ func TestSetAttrRejectsHugeSizeInsteadOfCrashing(t *testing.T) {
 	}
 
 	huge := int64(999999999999999)
-	if _, err := fsys.SetAttr(ctx, uuid, TypeFile, nil, nil, nil, &huge, nil, nil, nil); !errors.Is(err, ErrInvalidArgument) {
-		t.Fatalf("SetAttr with huge size = %v, want ErrInvalidArgument", err)
+	if _, err := fsys.SetAttr(ctx, uuid, TypeFile, nil, nil, nil, &huge, nil, nil, nil); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("SetAttr with huge size = %v, want ErrFileTooLarge", err)
 	}
 
 	data, _, _, err := fsys.ReadFile(ctx, uuid)

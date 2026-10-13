@@ -30,7 +30,7 @@ func TestCompareFoldMatchesNTFS(t *testing.T) {
 		{"a", "aa"},
 		{"K", "K"}, // KELVIN SIGN is already uppercase: Go's EqualFold would match it, NTFS doesn't
 		{"\xff", "\xfe"},
-		{"\xc3", "é"}, // a stray byte never matches a character starting with it
+		{"\xc3", "é"},                // a stray byte never matches a character starting with it
 		{"\U0001d41a", "\U0001d400"}, // mathematical bold a/A: outside the BMP, no case
 	}
 	for _, p := range different {
