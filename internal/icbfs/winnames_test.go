@@ -1,6 +1,10 @@
 package icbfs
 
-import "testing"
+import (
+	"errors"
+	"strings"
+	"testing"
+)
 
 func TestIsWindowsReservedName(t *testing.T) {
 	cases := []struct {
@@ -54,5 +58,42 @@ func TestCheckNamePrimaryWindowsVsPosix(t *testing.T) {
 	posixFS := &Filesystem{primaryWindows: false}
 	if err := posixFS.checkName("CON"); err != nil {
 		t.Fatalf("primary-POSIX checkName(CON) = %v, want nil", err)
+	}
+}
+
+func TestCheckNameLength(t *testing.T) {
+	cjk := func(n int) string { return strings.Repeat("名", n) }   // 3 UTF-8 bytes, 1 UTF-16 unit
+	emoji := func(n int) string { return strings.Repeat("😀", n) } // 4 UTF-8 bytes, 2 UTF-16 units
+	ascii := func(n int) string { return strings.Repeat("a", n) }
+	cases := []struct {
+		name          string
+		posix, window bool // whether it's accepted
+	}{
+		{ascii(255), true, true},
+		{ascii(256), false, false},
+		{cjk(85), true, true},    // 255 bytes
+		{cjk(86), false, true},   // 258 bytes, 86 units
+		{cjk(255), false, true},  // 765 bytes: legal on NTFS
+		{cjk(256), false, false}, // 256 units
+		{emoji(63) + "abc", true, true},
+		{emoji(127), false, true}, // 254 units
+		{emoji(128), false, false},
+	}
+	for _, tc := range cases {
+		for _, primaryWindows := range []bool{false, true} {
+			f := &Filesystem{primaryWindows: primaryWindows}
+			want := tc.posix
+			if primaryWindows {
+				want = tc.window
+			}
+			err := f.checkNameLength(tc.name)
+			if (err == nil) != want {
+				t.Errorf("primaryWindows=%v, %d bytes / %d units: err = %v, want accepted=%v",
+					primaryWindows, len(tc.name), utf16Len(tc.name), err, want)
+			}
+			if err != nil && !errors.Is(err, ErrNameTooLong) {
+				t.Errorf("err = %v, want ErrNameTooLong", err)
+			}
+		}
 	}
 }

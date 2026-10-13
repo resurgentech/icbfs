@@ -27,6 +27,7 @@ var (
 	ErrNotDir          = errors.New("not a directory")
 	ErrIsDir           = errors.New("is a directory")
 	ErrInvalidName     = errors.New("name reserved on a primary-Windows filesystem")
+	ErrNameTooLong     = errors.New("name too long")
 	ErrInvalidRename   = errors.New("new path is inside the directory being renamed")
 	ErrInvalidArgument = errors.New("invalid argument")
 )

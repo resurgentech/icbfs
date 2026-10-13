@@ -676,6 +676,16 @@ Applied:
   behavior — presumably allow the write and handle presentation via
   escaping on the Windows access path — follows the same pattern but is an
   inference, not yet explicitly confirmed.)
+- **Name length** — at most 255 per name, counted the way the primary
+  side counts it: bytes on a primary-POSIX filesystem (ext4, XFS, Btrfs,
+  F2FS, tmpfs, ZFS), UTF-16 code units on a primary-Windows one (NTFS,
+  and Linux's own NTFS/exFAT drivers). Enforced in the core for every
+  access layer, on lookups too, so an over-long name is `ENAMETOOLONG` /
+  `STATUS_OBJECT_NAME_INVALID` rather than "not found"; both access
+  layers report 255 as the limit. Every name within the POSIX limit is
+  within the Windows one, so a primary-POSIX filesystem never holds a
+  name Windows can't open, while a primary-Windows one, mounted on Linux,
+  can hold names longer than 255 bytes, as an NTFS volume does there.
 - **File attribute bits** (Hidden/System/ReadOnly/Archive) — fit the same
   model: the schema always carries the field, populated/used per primary
   mode.

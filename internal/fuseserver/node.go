@@ -189,6 +189,8 @@ func errnoFromErr(err error) syscall.Errno {
 		// WinFsp driver, since primary mode is a property of the
 		// filesystem, not of whichever access layer is mounting it.
 		return syscall.EINVAL
+	case errors.Is(err, icbfs.ErrNameTooLong):
+		return syscall.ENAMETOOLONG
 	case errors.Is(err, icbfs.ErrInvalidRename):
 		// POSIX rename(2)'s EINVAL: "newpath contains a path prefix
 		// of oldpath" (task F9).
@@ -264,9 +266,10 @@ func (n *Node) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
 	// which sent one of its test helpers (dirgen_max, used by
 	// mknod/03.t and others) into an effectively-infinite loop
 	// building zero-length path components, hanging the whole test
-	// run. 255 matches NAME_MAX on every common Linux filesystem
-	// (ext4, xfs, btrfs) — this project enforces no shorter limit of
-	// its own anywhere.
+	// run. 255 is the limit icbfs enforces (see icbfs.Filesystem's
+	// checkName): bytes on a primary-POSIX filesystem, UTF-16 code
+	// units on a primary-Windows one — the same number Linux's own
+	// NTFS and exFAT drivers report for theirs.
 	out.NameLen = 255
 	return 0
 }

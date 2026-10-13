@@ -174,6 +174,11 @@ func toWinError(err error) error {
 		// NTSTATUS directly rather than stretching an os.Err*/
 		// syscall.Errno value to fit (task F6).
 		return windows.STATUS_OBJECT_NAME_INVALID
+	case errors.Is(err, icbfs.ErrNameTooLong):
+		// What NTFS answers for a component over 255 characters. WinFsp
+		// refuses those itself before they reach this driver (its
+		// MaxComponentLength, 255 by default); this covers anything else.
+		return windows.STATUS_OBJECT_NAME_INVALID
 	case errors.Is(err, icbfs.ErrInvalidRename):
 		// Moving a directory into one of its own descendants (task
 		// F9) — no more specific NTSTATUS confirmed for this exact

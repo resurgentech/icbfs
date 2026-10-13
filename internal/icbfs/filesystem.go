@@ -839,6 +839,9 @@ func (f *Filesystem) tryRemove(ctx context.Context, rootKey, name string) (block
 
 // Lookup finds name within the directory at dirKey.
 func (f *Filesystem) Lookup(ctx context.Context, dirKey, name string) (block.Entry, Attr, error) {
+	if err := f.checkNameLength(name); err != nil {
+		return block.Entry{}, Attr{}, err
+	}
 	entry, ok, err := f.findInTree(ctx, dirKey, name)
 	if err != nil {
 		return block.Entry{}, Attr{}, err
@@ -864,6 +867,9 @@ func (f *Filesystem) Lookup(ctx context.Context, dirKey, name string) (block.Ent
 // a primary-POSIX filesystem a name with no exact match means reading
 // the whole directory.
 func (f *Filesystem) LookupFold(ctx context.Context, dirKey, name string) (block.Entry, Attr, error) {
+	if err := f.checkNameLength(name); err != nil {
+		return block.Entry{}, Attr{}, err
+	}
 	var entry block.Entry
 	var ok bool
 	var err error
@@ -1426,6 +1432,9 @@ func (f *Filesystem) Unlink(ctx context.Context, dirKey, name string) error {
 	if err := f.checkWritable(); err != nil {
 		return err
 	}
+	if err := f.checkNameLength(name); err != nil {
+		return err
+	}
 	entry, ok, err := f.findInTree(ctx, dirKey, name)
 	if err != nil {
 		return err
@@ -1451,6 +1460,9 @@ func (f *Filesystem) Unlink(ctx context.Context, dirKey, name string) error {
 // Rmdir removes an empty directory named name from dirKey.
 func (f *Filesystem) Rmdir(ctx context.Context, dirKey, name string) error {
 	if err := f.checkWritable(); err != nil {
+		return err
+	}
+	if err := f.checkNameLength(name); err != nil {
 		return err
 	}
 	entry, ok, err := f.findInTree(ctx, dirKey, name)
@@ -1549,6 +1561,9 @@ func (f *Filesystem) dirContains(ctx context.Context, ancestorUUID, targetUUID s
 // section for the general class of simplification this follows).
 func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, newName string, replace bool) error {
 	if err := f.checkWritable(); err != nil {
+		return err
+	}
+	if err := f.checkNameLength(oldName); err != nil {
 		return err
 	}
 	if err := f.checkName(newName); err != nil {

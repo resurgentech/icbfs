@@ -58,9 +58,52 @@ func isWindowsReservedName(name string) bool {
 // primary-POSIX filesystem never rejects anything here — confirmed at
 // Jared's direction (ROADMAP.md's F6 entry): any POSIX-legal name is
 // allowed, Windows-reserved or not.
+//
+// It also enforces the name length limit; see checkNameLength.
 func (f *Filesystem) checkName(name string) error {
+	if err := f.checkNameLength(name); err != nil {
+		return err
+	}
 	if f.primaryWindows && isWindowsReservedName(name) {
 		return ErrInvalidName
 	}
 	return nil
+}
+
+// maxNameLen is the longest name a directory entry can have: 255 bytes
+// on a primary-POSIX filesystem, as on ext4, XFS, Btrfs, F2FS, tmpfs and
+// ZFS, and 255 UTF-16 code units on a primary-Windows one, as on NTFS
+// (and Linux's own NTFS and exFAT drivers). Every name within the POSIX
+// limit is within the Windows one too, since no UTF-16 code unit takes
+// less than one UTF-8 byte.
+const maxNameLen = 255
+
+// checkNameLength refuses a name longer than maxNameLen in this
+// filesystem's unit. Like checkName, it's a property of the filesystem,
+// whichever access layer is asking — and it applies to lookups too, so a
+// too-long name is "name too long" (ENAMETOOLONG), not "not found".
+func (f *Filesystem) checkNameLength(name string) error {
+	n := len(name)
+	if f.primaryWindows {
+		n = utf16Len(name)
+	}
+	if n > maxNameLen {
+		return ErrNameTooLong
+	}
+	return nil
+}
+
+// utf16Len is name's length in UTF-16 code units: two for a character
+// outside the Basic Multilingual Plane, one for anything else (including
+// a byte that isn't valid UTF-8, which Windows can't produce anyway).
+func utf16Len(name string) int {
+	n := 0
+	for _, r := range name {
+		if r > 0xFFFF {
+			n += 2
+		} else {
+			n++
+		}
+	}
+	return n
 }
