@@ -290,3 +290,24 @@ func TestHasIntermediateSymlink(t *testing.T) {
 		}
 	}
 }
+
+func TestSplitStream(t *testing.T) {
+	cases := []struct {
+		in, path, stream string
+		ok               bool
+	}{
+		{`\dir\file`, `\dir\file`, ``, true},
+		{`\dir\file:foo`, `\dir\file`, `foo`, true},
+		{`\dir\file:foo:$DATA`, `\dir\file`, `foo`, true},
+		{`\dir\file:foo:$data`, `\dir\file`, `foo`, true},
+		{`\dir\file::$DATA`, `\dir\file`, ``, true},
+		{`\dir1:bar`, `\dir1`, `bar`, true},
+		{`\file:foo:$INDEX_ALLOCATION`, ``, ``, false},
+	}
+	for _, c := range cases {
+		path, stream, ok := splitStream(c.in)
+		if path != c.path || stream != c.stream || ok != c.ok {
+			t.Errorf("splitStream(%q) = (%q, %q, %v), want (%q, %q, %v)", c.in, path, stream, ok, c.path, c.stream, c.ok)
+		}
+	}
+}

@@ -470,6 +470,9 @@ func (f *Filesystem) statDir(ctx context.Context, key string) (Attr, error) {
 // ARCHITECTURE.md, this is two requests either way, so the latency cost
 // is max() of the two, not the sum.
 func (f *Filesystem) statFile(ctx context.Context, key string) (Attr, error) {
+	if isStreamKey(key) {
+		return f.statStream(ctx, key)
+	}
 	var metaData []byte
 	var metaLastModified time.Time
 	var contentObj *objstore.Object
@@ -1034,6 +1037,7 @@ func (f *Filesystem) adjustNlink(ctx context.Context, uuid string, delta int) er
 			// CAS race against it. Safe to physically delete now.
 			_ = f.store.Delete(ctx, mk, "")
 			_ = f.store.Delete(ctx, uuid, "")
+			f.deleteStreamObjects(ctx, uuid, attr.Streams)
 			return nil
 		}
 
@@ -1326,12 +1330,17 @@ func (f *Filesystem) Rmdir(ctx context.Context, dirKey, name string) error {
 		return ErrNotEmpty
 	}
 
+	dirAttr, err := f.statDir(ctx, entry.UUID)
+	if err != nil {
+		return err
+	}
 	if _, err := f.removeEntry(ctx, dirKey, name); err != nil {
 		return err
 	}
 	if err := f.store.Delete(ctx, entry.UUID, ""); err != nil {
 		return err
 	}
+	f.deleteStreamObjects(ctx, entry.UUID, dirAttr.Streams)
 	// Absent for a directory created before directories had .metadata.
 	if err := f.store.Delete(ctx, metadataObjectKey(entry.UUID), ""); err != nil && !objstore.IsNotFound(err) {
 		return err
@@ -1489,6 +1498,18 @@ func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, 
 // on not having changed since this read — see ARCHITECTURE.md's Locking
 // section and ROADMAP.md's task B1.
 func (f *Filesystem) ReadFile(ctx context.Context, key string) ([]byte, Attr, string, error) {
+	if isStreamKey(key) {
+		body, obj, err := f.store.Get(ctx, key)
+		if err != nil {
+			return nil, Attr{}, "", mapNotFound(err)
+		}
+		defer body.Close()
+		data, err := io.ReadAll(body)
+		if err != nil {
+			return nil, Attr{}, "", err
+		}
+		return data, Attr{Nlink: 1, Size: obj.Size, Mtime: obj.LastModified, Ctime: obj.LastModified}, obj.ETag, nil
+	}
 	var data []byte
 	var metaData []byte
 	var metaLastModified time.Time
@@ -1732,6 +1753,9 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 // documented cost/benefit tradeoff already accepts far worse
 // imprecision than that.
 func (f *Filesystem) TouchAtime(ctx context.Context, key string, typ EntryType) error {
+	if isStreamKey(key) {
+		return nil // a stream has no .metadata of its own
+	}
 	now := time.Now()
 	_, err := f.updateMetadata(ctx, key, typ, func(a *Attr) {
 		a.Atime = now

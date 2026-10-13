@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package icbfs.v1;
 
+import "google/protobuf/timestamp.proto";
+
 option go_package = "github.com/resurgentech/icbfs/internal/pb";
 
 // Metadata is the body of a file/symlink's dedicated <uuid>.metadata
@@ -22,13 +24,10 @@ message Metadata {
   uint32 nlink = 4;
   map<string, bytes> xattrs = 5;
 
-  // Last-access time, nanoseconds since the Unix epoch (ROADMAP.md's
-  // Part G, task G1). Unlike mtime, this has no free ride from the
-  // object store (mtime is derived from the content object's own
-  // LastModified) — atime needs real, explicit storage, and real,
-  // explicit strict semantics: every read updates it, by direct
-  // decision, accepting the cost of a metadata write on every read
-  // rather than a relatime-style approximation.
+  // Legacy last-access time, nanoseconds since the Unix epoch (ROADMAP.md's
+  // Part G, task G1). Superseded by atime (field 13), which also covers
+  // dates int64 nanoseconds can't (before 1678); still read when atime is
+  // unset, never written.
   int64 atime_unix_nano = 6;
 
   // The device number (encoded major/minor, same packing mknod(2)/
@@ -38,33 +37,38 @@ message Metadata {
   // (neither has a device number at all).
   uint32 rdev = 7;
 
-  // An explicit last-write-time override, nanoseconds since the Unix
-  // epoch (ROADMAP.md's Part G, task G1 follow-up) — set only by a
-  // caller's explicit SetFileTime/utimensat-style LastWriteTime call,
-  // never by an ordinary content write (which gets its mtime for free
-  // from the content object's own LastModified, same as always). Zero
-  // means "no override": fall back to the content object's
-  // LastModified, exactly as before this field existed. Confirmed a
-  // real gap, not a hypothetical one: winfsp-tests' own
-  // setfileinfo_test (--external) sets an arbitrary historical
-  // LastWriteTime via SetFileTime with no accompanying write at all,
-  // then expects it echoed back exactly — a real NTFS honors this
-  // (it's a pure metadata call, the direct Windows analogue of POSIX
-  // touch -t), and this driver silently dropped it before this field
-  // existed.
-  int64 mtime_override_unix_nano = 8;
+  reserved 8, 9; // replaced by mtime_override / btime_override below
 
-  // An explicit creation-time override, nanoseconds since the Unix
-  // epoch — same pattern as mtime_override_unix_nano. Zero means "no
-  // override": fall back to the time embedded in the UUIDv7 key. Set by
-  // Windows' SetFileTime(CreationTime); winfsp-tests' setfileinfo_test
-  // expects it to round-trip.
-  int64 btime_override_unix_nano = 9;
-
-  // The content object's ETag when mtime_override_unix_nano was set.
+  // The content object's ETag when mtime_override was set.
   // The override only applies while the content is still that version:
   // a later real write changes the ETag, so mtime goes back to following
   // the content — as touch -t followed by an append does on any POSIX
   // filesystem or NTFS — with no extra work on the write path itself.
   string mtime_override_etag = 10;
+
+  // Named data streams (Windows alternate data streams): stream name ->
+  // stream id. Each stream's bytes live in their own object,
+  // <uuid>.ads.<id>; ids come from next_stream_id and are never reused,
+  // so a renamed or recreated stream never collides with a stale write
+  // to an old one. Invisible to POSIX access; deleted with the file or
+  // directory that owns them.
+  map<string, uint64> streams = 11;
+  uint64 next_stream_id = 12;
+
+  // Last-access time; unset = never accessed.
+  google.protobuf.Timestamp atime = 13;
+
+  // An explicit last-write-time override, set only by an explicit
+  // SetFileTime/utimensat-style call, never by a content write (which
+  // gets its mtime from the content object's own LastModified). Unset
+  // means "no override". For a file it only applies while the content is
+  // still the version named by mtime_override_etag. For a directory it
+  // is the directory's mtime, set at creation. winfsp-tests'
+  // setfileinfo_test sets an arbitrary historical time with no write at
+  // all and expects it back exactly.
+  google.protobuf.Timestamp mtime_override = 14;
+
+  // An explicit creation-time override (SetFileTime's CreationTime);
+  // unset = the time embedded in the UUIDv7 key.
+  google.protobuf.Timestamp btime_override = 15;
 }

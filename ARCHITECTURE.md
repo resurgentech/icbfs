@@ -685,13 +685,19 @@ Applied:
 - **Delete/rename semantics on open files** — Windows's pending-delete and
   share-mode behavior is emulated in the WinFsp driver layer; not a core
   object-model change.
+- **Alternate data streams** — supported, on files and directories. Each
+  stream's bytes are their own object, `<uuid>.ads.<id>`; the owner's
+  `.metadata` maps stream names to ids (ids are never reused), so creating,
+  renaming and deleting a stream are CAS-protected metadata edits, and
+  streams are deleted with their owner. Invisible from POSIX: FUSE never
+  lists or opens them, so a copy made on Linux doesn't carry them. Stream
+  enumeration needs WinFsp's GetStreamInfo callback, which upstream
+  go-winfsp doesn't expose; the copy vendored under `third_party/go-winfsp`
+  is patched to.
 
 ## Explicitly out of scope
 
 - **8.3 short filenames** — not supported.
-- **Alternate Data Streams** — not supported. Technically feasible at
-  fairly low cost given the object model (each stream would just be
-  another UUID-prefixed blob plus one WinFsp callback), but declined.
 - **Directory junctions / volume mount points** (beyond plain symlinks)
   — declined as redundant given symlinks + hard links already cover the
   real use cases.

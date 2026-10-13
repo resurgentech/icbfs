@@ -96,21 +96,34 @@ func (d *driver) fillFileInfo(info *winfsp.FSP_FSCTL_FILE_INFO, key string, typ 
 	info.EaSize = 0
 }
 
+// unixEpochAsFiletime is 1970-01-01 in FILETIME units (100ns intervals
+// since 1601-01-01).
+const unixEpochAsFiletime = 116444736000000000
+
 // filetimeFromTime converts a Go time.Time into a Windows FILETIME
-// (100ns intervals since 1601-01-01), the same representation
-// FSP_FSCTL_FILE_INFO's time fields use.
+// (100ns intervals since 1601-01-01), the representation
+// FSP_FSCTL_FILE_INFO's time fields use. Computed from whole seconds,
+// not UnixNano, which overflows for dates before 1678 — and SetFileTime
+// accepts any FILETIME (winfsp-tests' stream_setfileinfo_test sets one
+// in 1601). Times before 1601 clamp to 0.
 func filetimeFromTime(t time.Time) uint64 {
-	ft := windows.NsecToFiletime(t.UnixNano())
-	return uint64(ft.HighDateTime)<<32 | uint64(ft.LowDateTime)
+	ticks := t.Unix()*10_000_000 + int64(t.Nanosecond()/100) + unixEpochAsFiletime
+	if ticks < 0 {
+		return 0
+	}
+	return uint64(ticks)
 }
 
 // timeFromFiletime is filetimeFromTime's inverse — needed by
-// SetBasicInfo (ROADMAP.md's Part G, task G1) to turn a caller's
-// explicit SetFileTime-style request back into a Go time.Time before
-// handing it to icbfs.Filesystem.SetAttr.
+// SetBasicInfo to turn a caller's explicit SetFileTime-style request
+// into a Go time.Time before handing it to icbfs.Filesystem.SetAttr.
 func timeFromFiletime(v uint64) time.Time {
-	ft := windows.Filetime{HighDateTime: uint32(v >> 32), LowDateTime: uint32(v)}
-	return time.Unix(0, ft.Nanoseconds()).UTC()
+	ticks := int64(v) - unixEpochAsFiletime
+	sec, rem := ticks/10_000_000, ticks%10_000_000
+	if rem < 0 {
+		sec, rem = sec-1, rem+10_000_000
+	}
+	return time.Unix(sec, rem*100).UTC()
 }
 
 // attributesFromAttr computes the Windows FILE_ATTRIBUTE_* bits to
@@ -182,7 +195,7 @@ func (d *driver) GetFileInfo(fs *winfsp.FileSystemRef, file uintptr, info *winfs
 	if err != nil {
 		return toWinError(err)
 	}
-	d.fillFileInfo(info, h.key, h.typ, attr)
+	d.fillHandleInfo(info, h, attr)
 	return nil
 }
 
@@ -203,8 +216,10 @@ func (d *driver) SetBasicInfo(fs *winfsp.FileSystemRef, file uintptr, flags winf
 	if !ok {
 		return os.ErrNotExist
 	}
+	// A stream's attributes and times are its owner's.
+	key, typ := h.owner()
 	var modeP *uint32
-	if flags&winfsp.SetBasicInfoAttributes != 0 && h.typ != icbfs.TypeDir {
+	if flags&winfsp.SetBasicInfoAttributes != 0 && typ != icbfs.TypeDir {
 		mode := modeFromAttributes(fileAttributes)
 		modeP = &mode
 	}
@@ -226,7 +241,7 @@ func (d *driver) SetBasicInfo(fs *winfsp.FileSystemRef, file uintptr, flags winf
 		m := timeFromFiletime(lastWriteTime)
 		mtimeP = &m
 	}
-	attr, err := d.fsys.SetAttr(ctx(), h.key, h.typ, modeP, nil, nil, nil, atimeP, mtimeP, btimeP)
+	attr, err := d.fsys.SetAttr(ctx(), key, typ, modeP, nil, nil, nil, atimeP, mtimeP, btimeP)
 	if err != nil {
 		return toWinError(err)
 	}
@@ -234,12 +249,12 @@ func (d *driver) SetBasicInfo(fs *winfsp.FileSystemRef, file uintptr, flags winf
 		// Directories too, e.g. a read-only directory (winfsp-tests'
 		// create_readonlydir_test), which Windows then refuses to
 		// remove until the bit is cleared.
-		attr, err = d.fsys.SetWindowsAttributes(ctx(), h.key, h.typ, fileAttributes)
+		attr, err = d.fsys.SetWindowsAttributes(ctx(), key, typ, fileAttributes)
 		if err != nil {
 			return toWinError(err)
 		}
 	}
-	d.fillFileInfo(info, h.key, h.typ, attr)
+	d.fillHandleInfo(info, h, attr)
 	return nil
 }
 
@@ -268,7 +283,7 @@ func (d *driver) SetFileSize(fs *winfsp.FileSystemRef, file uintptr, newSize uin
 			d.invalidateShared(h.key)
 		}
 		d.setAlloc(h.key, newSize)
-		d.fillFileInfo(info, h.key, h.typ, attr)
+		d.fillHandleInfo(info, h, attr)
 		return nil
 	}
 	// Commit buffered writes first, so the resize applies on top of
@@ -282,7 +297,7 @@ func (d *driver) SetFileSize(fs *winfsp.FileSystemRef, file uintptr, newSize uin
 		return toWinError(err)
 	}
 	d.invalidateShared(h.key) // next I/O reopens against the resized content
-	d.fillFileInfo(info, h.key, h.typ, attr)
+	d.fillHandleInfo(info, h, attr)
 	return nil
 }
 
@@ -394,7 +409,11 @@ func approximateDACLFromMode(mode uint32) (*windows.SECURITY_DESCRIPTOR, error) 
 }
 
 func (d *driver) GetSecurityByName(fs *winfsp.FileSystemRef, name string, flags winfsp.GetSecurityByNameFlags) (uint32, *windows.SECURITY_DESCRIPTOR, error) {
-	r, err := resolvePath(ctx(), d.fsys, name, d.caseInsensitive)
+	path, stream, ok := splitStream(name)
+	if !ok {
+		return 0, nil, windows.STATUS_OBJECT_NAME_INVALID
+	}
+	r, err := resolvePath(ctx(), d.fsys, path, d.caseInsensitive)
 	if err != nil {
 		// A symlink mid-path: hand the whole path to WinFsp's own
 		// reparse resolver (see hasIntermediateSymlink). go-winfsp
@@ -403,7 +422,7 @@ func (d *driver) GetSecurityByName(fs *winfsp.FileSystemRef, name string, flags 
 		// path — it skips non-reparse components via
 		// GetReparsePointByName's STATUS_NOT_A_REPARSE_POINT, so the
 		// result is the same, just one extra lookup per component.
-		if hasIntermediateSymlink(ctx(), d.fsys, name, d.caseInsensitive) {
+		if hasIntermediateSymlink(ctx(), d.fsys, path, d.caseInsensitive) {
 			return 0, nil, windows.STATUS_REPARSE
 		}
 		return 0, nil, toWinError(err)
@@ -412,7 +431,18 @@ func (d *driver) GetSecurityByName(fs *winfsp.FileSystemRef, name string, flags 
 	if err != nil {
 		return 0, nil, err
 	}
-	return d.attributesFromAttr(r.Type, r.Attr), sd, nil
+	attrs := d.attributesFromAttr(r.Type, r.Attr)
+	if stream != "" {
+		// A stream has its owner's security; it is never a directory.
+		if _, _, found := lookupStream(r.Attr.Streams, stream, d.caseInsensitive); !found {
+			return 0, nil, os.ErrNotExist
+		}
+		attrs &^= windows.FILE_ATTRIBUTE_DIRECTORY
+		if attrs == 0 {
+			attrs = windows.FILE_ATTRIBUTE_NORMAL
+		}
+	}
+	return attrs, sd, nil
 }
 
 func (d *driver) GetSecurity(fs *winfsp.FileSystemRef, file uintptr) (*windows.SECURITY_DESCRIPTOR, error) {
@@ -420,11 +450,12 @@ func (d *driver) GetSecurity(fs *winfsp.FileSystemRef, file uintptr) (*windows.S
 	if !ok {
 		return nil, os.ErrNotExist
 	}
-	attr, err := d.fsys.Stat(ctx(), h.key, h.typ)
+	key, typ := h.owner()
+	attr, err := d.fsys.Stat(ctx(), key, typ)
 	if err != nil {
 		return nil, toWinError(err)
 	}
-	return d.securityDescriptorFor(h.typ, attr)
+	return d.securityDescriptorFor(typ, attr)
 }
 
 // mergeSecurityDescriptor applies only the components SetSecurity's
@@ -551,11 +582,12 @@ func (d *driver) SetSecurity(fs *winfsp.FileSystemRef, file uintptr, info window
 	if !ok {
 		return os.ErrNotExist
 	}
-	attr, err := d.fsys.Stat(ctx(), h.key, h.typ)
+	key, typ := h.owner()
+	attr, err := d.fsys.Stat(ctx(), key, typ)
 	if err != nil {
 		return toWinError(err)
 	}
-	base, err := d.securityDescriptorFor(h.typ, attr)
+	base, err := d.securityDescriptorFor(typ, attr)
 	if err != nil {
 		return err
 	}
@@ -563,7 +595,7 @@ func (d *driver) SetSecurity(fs *winfsp.FileSystemRef, file uintptr, info window
 	if err != nil {
 		return err
 	}
-	if _, err := d.fsys.SetWindowsACL(ctx(), h.key, h.typ, []byte(merged.String())); err != nil {
+	if _, err := d.fsys.SetWindowsACL(ctx(), key, typ, []byte(merged.String())); err != nil {
 		return toWinError(err)
 	}
 	return nil

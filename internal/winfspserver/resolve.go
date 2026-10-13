@@ -262,3 +262,40 @@ func splitPath(path string) []string {
 	}
 	return segments
 }
+
+// splitStream splits a WinFsp name into the path of the file or
+// directory that owns it and, for a named data stream
+// (`\dir\file:stream`, optionally with a `:$DATA` type), the stream
+// name. `\dir\file::$DATA` is the main stream, i.e. no stream. ok is
+// false for a stream type other than $DATA — the only kind supported.
+func splitStream(name string) (path, stream string, ok bool) {
+	slash := strings.LastIndexByte(name, '\\')
+	colon := strings.IndexByte(name[slash+1:], ':')
+	if colon < 0 {
+		return name, "", true
+	}
+	colon += slash + 1
+	path, rest := name[:colon], name[colon+1:]
+	stream, typ, hasType := strings.Cut(rest, ":")
+	if hasType && !strings.EqualFold(typ, "$DATA") {
+		return "", "", false
+	}
+	return path, stream, true
+}
+
+// lookupStream finds a stream by name among streams, case-insensitively
+// when caseInsensitive (NTFS stream names are), returning its stored
+// spelling and id.
+func lookupStream(streams map[string]uint64, name string, caseInsensitive bool) (string, uint64, bool) {
+	if id, ok := streams[name]; ok {
+		return name, id, true
+	}
+	if caseInsensitive {
+		for n, id := range streams {
+			if strings.EqualFold(n, name) {
+				return n, id, true
+			}
+		}
+	}
+	return "", 0, false
+}

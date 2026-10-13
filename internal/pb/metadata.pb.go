@@ -9,6 +9,7 @@ package pb
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -39,13 +40,10 @@ type Metadata struct {
 	Gid    uint32                 `protobuf:"varint,3,opt,name=gid,proto3" json:"gid,omitempty"`
 	Nlink  uint32                 `protobuf:"varint,4,opt,name=nlink,proto3" json:"nlink,omitempty"`
 	Xattrs map[string][]byte      `protobuf:"bytes,5,rep,name=xattrs,proto3" json:"xattrs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	// Last-access time, nanoseconds since the Unix epoch (ROADMAP.md's
-	// Part G, task G1). Unlike mtime, this has no free ride from the
-	// object store (mtime is derived from the content object's own
-	// LastModified) — atime needs real, explicit storage, and real,
-	// explicit strict semantics: every read updates it, by direct
-	// decision, accepting the cost of a metadata write on every read
-	// rather than a relatime-style approximation.
+	// Legacy last-access time, nanoseconds since the Unix epoch (ROADMAP.md's
+	// Part G, task G1). Superseded by atime (field 13), which also covers
+	// dates int64 nanoseconds can't (before 1678); still read when atime is
+	// unset, never written.
 	AtimeUnixNano int64 `protobuf:"varint,6,opt,name=atime_unix_nano,json=atimeUnixNano,proto3" json:"atime_unix_nano,omitempty"`
 	// The device number (encoded major/minor, same packing mknod(2)/
 	// stat(2)'s st_rdev uses) for a char/block device entry (ROADMAP.md's
@@ -53,35 +51,36 @@ type Metadata struct {
 	// type, including the FIFO/socket special files task G2 also adds
 	// (neither has a device number at all).
 	Rdev uint32 `protobuf:"varint,7,opt,name=rdev,proto3" json:"rdev,omitempty"`
-	// An explicit last-write-time override, nanoseconds since the Unix
-	// epoch (ROADMAP.md's Part G, task G1 follow-up) — set only by a
-	// caller's explicit SetFileTime/utimensat-style LastWriteTime call,
-	// never by an ordinary content write (which gets its mtime for free
-	// from the content object's own LastModified, same as always). Zero
-	// means "no override": fall back to the content object's
-	// LastModified, exactly as before this field existed. Confirmed a
-	// real gap, not a hypothetical one: winfsp-tests' own
-	// setfileinfo_test (--external) sets an arbitrary historical
-	// LastWriteTime via SetFileTime with no accompanying write at all,
-	// then expects it echoed back exactly — a real NTFS honors this
-	// (it's a pure metadata call, the direct Windows analogue of POSIX
-	// touch -t), and this driver silently dropped it before this field
-	// existed.
-	MtimeOverrideUnixNano int64 `protobuf:"varint,8,opt,name=mtime_override_unix_nano,json=mtimeOverrideUnixNano,proto3" json:"mtime_override_unix_nano,omitempty"`
-	// An explicit creation-time override, nanoseconds since the Unix
-	// epoch — same pattern as mtime_override_unix_nano. Zero means "no
-	// override": fall back to the time embedded in the UUIDv7 key. Set by
-	// Windows' SetFileTime(CreationTime); winfsp-tests' setfileinfo_test
-	// expects it to round-trip.
-	BtimeOverrideUnixNano int64 `protobuf:"varint,9,opt,name=btime_override_unix_nano,json=btimeOverrideUnixNano,proto3" json:"btime_override_unix_nano,omitempty"`
-	// The content object's ETag when mtime_override_unix_nano was set.
+	// The content object's ETag when mtime_override was set.
 	// The override only applies while the content is still that version:
 	// a later real write changes the ETag, so mtime goes back to following
 	// the content — as touch -t followed by an append does on any POSIX
 	// filesystem or NTFS — with no extra work on the write path itself.
 	MtimeOverrideEtag string `protobuf:"bytes,10,opt,name=mtime_override_etag,json=mtimeOverrideEtag,proto3" json:"mtime_override_etag,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Named data streams (Windows alternate data streams): stream name ->
+	// stream id. Each stream's bytes live in their own object,
+	// <uuid>.ads.<id>; ids come from next_stream_id and are never reused,
+	// so a renamed or recreated stream never collides with a stale write
+	// to an old one. Invisible to POSIX access; deleted with the file or
+	// directory that owns them.
+	Streams      map[string]uint64 `protobuf:"bytes,11,rep,name=streams,proto3" json:"streams,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
+	NextStreamId uint64            `protobuf:"varint,12,opt,name=next_stream_id,json=nextStreamId,proto3" json:"next_stream_id,omitempty"`
+	// Last-access time; unset = never accessed.
+	Atime *timestamppb.Timestamp `protobuf:"bytes,13,opt,name=atime,proto3" json:"atime,omitempty"`
+	// An explicit last-write-time override, set only by an explicit
+	// SetFileTime/utimensat-style call, never by a content write (which
+	// gets its mtime from the content object's own LastModified). Unset
+	// means "no override". For a file it only applies while the content is
+	// still the version named by mtime_override_etag. For a directory it
+	// is the directory's mtime, set at creation. winfsp-tests'
+	// setfileinfo_test sets an arbitrary historical time with no write at
+	// all and expects it back exactly.
+	MtimeOverride *timestamppb.Timestamp `protobuf:"bytes,14,opt,name=mtime_override,json=mtimeOverride,proto3" json:"mtime_override,omitempty"`
+	// An explicit creation-time override (SetFileTime's CreationTime);
+	// unset = the time embedded in the UUIDv7 key.
+	BtimeOverride *timestamppb.Timestamp `protobuf:"bytes,15,opt,name=btime_override,json=btimeOverride,proto3" json:"btime_override,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Metadata) Reset() {
@@ -163,20 +162,6 @@ func (x *Metadata) GetRdev() uint32 {
 	return 0
 }
 
-func (x *Metadata) GetMtimeOverrideUnixNano() int64 {
-	if x != nil {
-		return x.MtimeOverrideUnixNano
-	}
-	return 0
-}
-
-func (x *Metadata) GetBtimeOverrideUnixNano() int64 {
-	if x != nil {
-		return x.BtimeOverrideUnixNano
-	}
-	return 0
-}
-
 func (x *Metadata) GetMtimeOverrideEtag() string {
 	if x != nil {
 		return x.MtimeOverrideEtag
@@ -184,11 +169,46 @@ func (x *Metadata) GetMtimeOverrideEtag() string {
 	return ""
 }
 
+func (x *Metadata) GetStreams() map[string]uint64 {
+	if x != nil {
+		return x.Streams
+	}
+	return nil
+}
+
+func (x *Metadata) GetNextStreamId() uint64 {
+	if x != nil {
+		return x.NextStreamId
+	}
+	return 0
+}
+
+func (x *Metadata) GetAtime() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Atime
+	}
+	return nil
+}
+
+func (x *Metadata) GetMtimeOverride() *timestamppb.Timestamp {
+	if x != nil {
+		return x.MtimeOverride
+	}
+	return nil
+}
+
+func (x *Metadata) GetBtimeOverride() *timestamppb.Timestamp {
+	if x != nil {
+		return x.BtimeOverride
+	}
+	return nil
+}
+
 var File_spec_proto_icbfs_v1_metadata_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\n" +
-	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\"\xa9\x03\n" +
+	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x98\x05\n" +
 	"\bMetadata\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\rR\x04mode\x12\x10\n" +
 	"\x03uid\x18\x02 \x01(\rR\x03uid\x12\x10\n" +
@@ -196,14 +216,21 @@ const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\x05nlink\x18\x04 \x01(\rR\x05nlink\x126\n" +
 	"\x06xattrs\x18\x05 \x03(\v2\x1e.icbfs.v1.Metadata.XattrsEntryR\x06xattrs\x12&\n" +
 	"\x0fatime_unix_nano\x18\x06 \x01(\x03R\ratimeUnixNano\x12\x12\n" +
-	"\x04rdev\x18\a \x01(\rR\x04rdev\x127\n" +
-	"\x18mtime_override_unix_nano\x18\b \x01(\x03R\x15mtimeOverrideUnixNano\x127\n" +
-	"\x18btime_override_unix_nano\x18\t \x01(\x03R\x15btimeOverrideUnixNano\x12.\n" +
+	"\x04rdev\x18\a \x01(\rR\x04rdev\x12.\n" +
 	"\x13mtime_override_etag\x18\n" +
-	" \x01(\tR\x11mtimeOverrideEtag\x1a9\n" +
+	" \x01(\tR\x11mtimeOverrideEtag\x129\n" +
+	"\astreams\x18\v \x03(\v2\x1f.icbfs.v1.Metadata.StreamsEntryR\astreams\x12$\n" +
+	"\x0enext_stream_id\x18\f \x01(\x04R\fnextStreamId\x120\n" +
+	"\x05atime\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\x05atime\x12A\n" +
+	"\x0emtime_override\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\rmtimeOverride\x12A\n" +
+	"\x0ebtime_override\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\rbtimeOverride\x1a9\n" +
 	"\vXattrsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01B+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
+	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\x1a:\n" +
+	"\fStreamsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01J\x04\b\b\x10\tJ\x04\b\t\x10\n" +
+	"B+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
 
 var (
 	file_spec_proto_icbfs_v1_metadata_proto_rawDescOnce sync.Once
@@ -217,18 +244,24 @@ func file_spec_proto_icbfs_v1_metadata_proto_rawDescGZIP() []byte {
 	return file_spec_proto_icbfs_v1_metadata_proto_rawDescData
 }
 
-var file_spec_proto_icbfs_v1_metadata_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_spec_proto_icbfs_v1_metadata_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
 var file_spec_proto_icbfs_v1_metadata_proto_goTypes = []any{
-	(*Metadata)(nil), // 0: icbfs.v1.Metadata
-	nil,              // 1: icbfs.v1.Metadata.XattrsEntry
+	(*Metadata)(nil),              // 0: icbfs.v1.Metadata
+	nil,                           // 1: icbfs.v1.Metadata.XattrsEntry
+	nil,                           // 2: icbfs.v1.Metadata.StreamsEntry
+	(*timestamppb.Timestamp)(nil), // 3: google.protobuf.Timestamp
 }
 var file_spec_proto_icbfs_v1_metadata_proto_depIdxs = []int32{
 	1, // 0: icbfs.v1.Metadata.xattrs:type_name -> icbfs.v1.Metadata.XattrsEntry
-	1, // [1:1] is the sub-list for method output_type
-	1, // [1:1] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	2, // 1: icbfs.v1.Metadata.streams:type_name -> icbfs.v1.Metadata.StreamsEntry
+	3, // 2: icbfs.v1.Metadata.atime:type_name -> google.protobuf.Timestamp
+	3, // 3: icbfs.v1.Metadata.mtime_override:type_name -> google.protobuf.Timestamp
+	3, // 4: icbfs.v1.Metadata.btime_override:type_name -> google.protobuf.Timestamp
+	5, // [5:5] is the sub-list for method output_type
+	5, // [5:5] is the sub-list for method input_type
+	5, // [5:5] is the sub-list for extension type_name
+	5, // [5:5] is the sub-list for extension extendee
+	0, // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_spec_proto_icbfs_v1_metadata_proto_init() }
@@ -242,7 +275,7 @@ func file_spec_proto_icbfs_v1_metadata_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_spec_proto_icbfs_v1_metadata_proto_rawDesc), len(file_spec_proto_icbfs_v1_metadata_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   3,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

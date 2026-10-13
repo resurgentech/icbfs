@@ -12,6 +12,7 @@ import (
 	"github.com/cespare/xxhash/v2"
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/resurgentech/icbfs/internal/block"
 	"github.com/resurgentech/icbfs/internal/pb"
@@ -154,12 +155,19 @@ type Attr struct {
 	Ctime  time.Time
 	Btime  time.Time // derived from the UUIDv7 key; zero if the key isn't a UUIDv7
 	Xattrs map[string][]byte
-	Rdev   uint32 // TypeCharDevice/TypeBlockDevice only (ROADMAP.md's Part G, task G2); 0 for every other type
+
+	// Streams maps a named data stream's name to its id (see StreamKey)
+	// — Windows alternate data streams; nil when there are none.
+	Streams map[string]uint64
+	Rdev    uint32 // TypeCharDevice/TypeBlockDevice only (ROADMAP.md's Part G, task G2); 0 for every other type
 
 	// mtimeOverrideETag is the content ETag an explicit mtime override
 	// (Mtime, as decoded from .metadata) was set against — see
 	// combineFileAttr. Internal plumbing only, never meaningful to callers.
 	mtimeOverrideETag string
+
+	// nextStreamID is the last stream id handed out (see Streams).
+	nextStreamID uint64
 }
 
 // --- Legacy directory attributes: native object metadata on the block
@@ -212,41 +220,37 @@ func metadataObjectKey(uuid string) string { return uuid + ".metadata" }
 // encodeFileMetadata serializes mode/uid/gid/nlink/xattrs to the wire
 // format stored at metadataObjectKey.
 func encodeFileMetadata(a Attr) ([]byte, error) {
-	var atimeNano int64
-	if !a.Atime.IsZero() {
-		// Go's zero time.Time isn't the Unix epoch — its own
-		// UnixNano() is a large negative number, not 0, so a never-
-		// yet-accessed file must stay at proto3's real 0 default
-		// rather than encoding that nonsense value.
-		atimeNano = a.Atime.UnixNano()
-	}
-	var mtimeOverrideNano int64
-	if !a.Mtime.IsZero() {
-		// Same zero-value care as atime above. a.Mtime here is only
-		// ever the *override* (see combineFileAttr/decodeFileMetadata):
-		// a real content write's mtime always comes for free from the
-		// content object's own LastModified and is never passed through
-		// this struct at all, so there's nothing to accidentally encode
-		// here on an ordinary write.
-		mtimeOverrideNano = a.Mtime.UnixNano()
-	}
-	var btimeOverrideNano int64
-	if !a.Btime.IsZero() {
-		// Same as mtime: a.Btime here is only ever the override.
-		btimeOverrideNano = a.Btime.UnixNano()
-	}
+	// a.Mtime/a.Btime here are only ever overrides (see combineFileAttr):
+	// a real content write's mtime comes from the content object and is
+	// never passed through this struct. Zero times stay unset.
 	return proto.Marshal(&pb.Metadata{
-		Mode:                  a.Mode,
-		Uid:                   a.Uid,
-		Gid:                   a.Gid,
-		Nlink:                 a.Nlink,
-		Xattrs:                a.Xattrs,
-		AtimeUnixNano:         atimeNano,
-		Rdev:                  a.Rdev,
-		MtimeOverrideUnixNano: mtimeOverrideNano,
-		MtimeOverrideEtag:     a.mtimeOverrideETag,
-		BtimeOverrideUnixNano: btimeOverrideNano,
+		Mode:              a.Mode,
+		Uid:               a.Uid,
+		Gid:               a.Gid,
+		Nlink:             a.Nlink,
+		Xattrs:            a.Xattrs,
+		Rdev:              a.Rdev,
+		Atime:             timestampOrNil(a.Atime),
+		MtimeOverride:     timestampOrNil(a.Mtime),
+		MtimeOverrideEtag: a.mtimeOverrideETag,
+		BtimeOverride:     timestampOrNil(a.Btime),
+		Streams:           a.Streams,
+		NextStreamId:      a.nextStreamID,
 	})
+}
+
+func timestampOrNil(t time.Time) *timestamppb.Timestamp {
+	if t.IsZero() {
+		return nil
+	}
+	return timestamppb.New(t)
+}
+
+func timeOrZero(ts *timestamppb.Timestamp) time.Time {
+	if ts == nil {
+		return time.Time{}
+	}
+	return ts.AsTime()
 }
 
 // decodeFileMetadata parses metadataObjectKey's body. Empty input
@@ -262,17 +266,12 @@ func decodeFileMetadata(data []byte) (Attr, error) {
 	if err := proto.Unmarshal(data, &m); err != nil {
 		return Attr{}, err
 	}
-	var atime time.Time
-	if m.AtimeUnixNano != 0 {
-		atime = time.Unix(0, m.AtimeUnixNano).UTC()
+	atime := timeOrZero(m.Atime)
+	if atime.IsZero() && m.AtimeUnixNano != 0 {
+		atime = time.Unix(0, m.AtimeUnixNano).UTC() // legacy field
 	}
-	var mtimeOverride, btimeOverride time.Time
-	if m.MtimeOverrideUnixNano != 0 {
-		mtimeOverride = time.Unix(0, m.MtimeOverrideUnixNano).UTC()
-	}
-	if m.BtimeOverrideUnixNano != 0 {
-		btimeOverride = time.Unix(0, m.BtimeOverrideUnixNano).UTC()
-	}
+	mtimeOverride := timeOrZero(m.MtimeOverride)
+	btimeOverride := timeOrZero(m.BtimeOverride)
 	return Attr{
 		Mode:   m.Mode,
 		Uid:    m.Uid,
@@ -286,6 +285,8 @@ func decodeFileMetadata(data []byte) (Attr, error) {
 		// falls back to when this is zero.
 		Mtime:             mtimeOverride,
 		mtimeOverrideETag: m.MtimeOverrideEtag,
+		Streams:           m.Streams,
+		nextStreamID:      m.NextStreamId,
 		Btime:             btimeOverride, // same: override only; see combineFileAttr
 		Rdev:              m.Rdev,
 	}, nil

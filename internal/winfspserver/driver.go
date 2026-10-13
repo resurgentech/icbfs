@@ -73,6 +73,12 @@ type fileHandle struct {
 	typ  icbfs.EntryType
 	path string // as opened; may be stale after a rename — only used for ReadDirectory's ".."
 
+	// A named-stream handle (stream.go): key/typ are the stream's own
+	// object; the owner's key/type carry its metadata.
+	stream   string
+	ownerKey string
+	ownerTyp icbfs.EntryType
+
 	mu       sync.Mutex
 	shared   *sharedOpen
 	allocKey string // key counted in driver.keyOpens; fixed at newHandle, unlike key
@@ -253,13 +259,20 @@ const fileOpenReparsePoint = 0x00200000
 // actually work, not just the first. See resolvePathFollow's own doc
 // comment and ROADMAP.md's F3 entry.
 func (d *driver) Open(fs *winfsp.FileSystemRef, name string, createOptions, grantedAccess uint32, info *winfsp.FSP_FSCTL_FILE_INFO) (uintptr, error) {
+	path, stream, ok := splitStream(name)
+	if !ok {
+		return 0, windows.STATUS_OBJECT_NAME_INVALID
+	}
 	resolve := resolvePathFollow
 	if createOptions&fileOpenReparsePoint != 0 {
 		resolve = resolvePath
 	}
-	r, err := resolve(ctx(), d.fsys, name, d.caseInsensitive)
+	r, err := resolve(ctx(), d.fsys, path, d.caseInsensitive)
 	if err != nil {
 		return 0, toWinError(err)
+	}
+	if stream != "" {
+		return d.openStream(r, path, stream, info)
 	}
 	// A generic (non-symlink) reparse point (task G4) carries opaque
 	// data this driver never interprets — real NTFS, and winfsp-tests'
@@ -300,6 +313,13 @@ func (d *driver) Close(fs *winfsp.FileSystemRef, file uintptr) {
 // distinguishes a directory request via createOptions' FILE_DIRECTORY_
 // FILE bit.
 func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, grantedAccess, fileAttributes uint32, securityDescriptor *windows.SECURITY_DESCRIPTOR, allocationSize uint64, info *winfsp.FSP_FSCTL_FILE_INFO) (uintptr, error) {
+	path, stream, ok := splitStream(name)
+	if !ok {
+		return 0, windows.STATUS_OBJECT_NAME_INVALID
+	}
+	if stream != "" {
+		return d.createStream(path, stream, allocationSize, info)
+	}
 	dir, base := splitParent(name)
 	parent, err := resolvePath(ctx(), d.fsys, dir, d.caseInsensitive)
 	if err != nil {
@@ -413,6 +433,30 @@ func (d *driver) Overwrite(fs *winfsp.FileSystemRef, file uintptr, attributes ui
 	// flushed — an overwrite replaces the content wholesale.
 	d.invalidateShared(h.key)
 
+	if h.stream != "" {
+		d.fillHandleInfo(info, h, attr)
+		return nil
+	}
+
+	// Superseding a file removes its named streams, except any that are
+	// open right now — same as WinFsp's memfs (winfsp-tests'
+	// stream_create_overwrite_test).
+	if len(attr.Streams) > 0 {
+		var drop []string
+		d.mu.Lock()
+		for name, id := range attr.Streams {
+			if d.keyOpens[icbfs.StreamKey(h.key, id)] == 0 {
+				drop = append(drop, name)
+			}
+		}
+		d.mu.Unlock()
+		if len(drop) > 0 {
+			if _, err := d.fsys.DeleteStreams(ctx(), h.key, h.typ, drop); err != nil {
+				return toWinError(err)
+			}
+		}
+	}
+
 	// CREATE_ALWAYS/TRUNCATE_EXISTING carry attributes too: replace or
 	// merge them per replaceAttributes, with Archive always set, as on
 	// NTFS (winfsp-tests' create_fileattr_test).
@@ -432,7 +476,7 @@ func (d *driver) Overwrite(fs *winfsp.FileSystemRef, file uintptr, attributes ui
 	if attr, err = d.fsys.SetWindowsAttributes(ctx(), h.key, h.typ, bits); err != nil {
 		return toWinError(err)
 	}
-	d.fillFileInfo(info, h.key, h.typ, attr)
+	d.fillHandleInfo(info, h, attr)
 	return nil
 }
 
@@ -447,6 +491,10 @@ func (d *driver) Cleanup(fs *winfsp.FileSystemRef, file uintptr, name string, cl
 	}
 	h, ok := d.handle(file)
 	if !ok {
+		return
+	}
+	if h.stream != "" {
+		_ = d.fsys.DeleteStream(ctx(), h.ownerKey, h.ownerTyp, h.stream)
 		return
 	}
 	dir, base := splitParent(name)
@@ -476,7 +524,7 @@ func (d *driver) CanDelete(fs *winfsp.FileSystemRef, file uintptr, name string) 
 	if !ok {
 		return os.ErrNotExist
 	}
-	if h.typ != icbfs.TypeDir {
+	if h.typ != icbfs.TypeDir || h.stream != "" {
 		return nil
 	}
 	entries, err := d.fsys.ReadDir(ctx(), h.key)
@@ -521,6 +569,45 @@ func realStoredName(ctx context.Context, fsys *icbfs.Filesystem, dirKey, name st
 }
 
 func (d *driver) Rename(fs *winfsp.FileSystemRef, file uintptr, source, target string, replaceIfExist bool) error {
+	// A stream renames only to another stream of the same file or
+	// directory; a stream can't become a file or vice versa here.
+	_, srcStream, ok1 := splitStream(source)
+	dstPath, dstStream, ok2 := splitStream(target)
+	if !ok1 || !ok2 {
+		return windows.STATUS_OBJECT_NAME_INVALID
+	}
+	if srcStream != "" || dstStream != "" {
+		h, ok := d.handle(file)
+		if !ok {
+			return os.ErrNotExist
+		}
+		if srcStream == "" || dstStream == "" || h.stream == "" {
+			return windows.STATUS_INVALID_PARAMETER
+		}
+		dst, err := resolvePath(ctx(), d.fsys, dstPath, d.caseInsensitive)
+		if err != nil {
+			return toWinError(err)
+		}
+		if dst.Key != h.ownerKey {
+			return windows.STATUS_INVALID_PARAMETER
+		}
+		if real, _, found := lookupStream(dst.Attr.Streams, dstStream, d.caseInsensitive); found {
+			if real == h.stream {
+				return nil
+			}
+			if !replaceIfExist {
+				return windows.STATUS_OBJECT_NAME_COLLISION
+			}
+			dstStream = real
+		}
+		if err := d.fsys.RenameStream(ctx(), h.ownerKey, h.ownerTyp, h.stream, dstStream, replaceIfExist); err != nil {
+			return toWinError(err)
+		}
+		h.mu.Lock()
+		h.stream = dstStream
+		h.mu.Unlock()
+		return nil
+	}
 	oldDir, oldBase := splitParent(source)
 	oldParent, err := resolvePath(ctx(), d.fsys, oldDir, d.caseInsensitive)
 	if err != nil {
