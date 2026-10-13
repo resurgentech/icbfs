@@ -52,8 +52,10 @@ ssh_vm "$IP" "powershell -NoProfile -ExecutionPolicy Bypass -File C:\\Windows\\T
 
 echo "" >&2
 echo "=== winfsp-tests $TARGET (full result: $result) ===" >&2
-ok=$(grep -c '\.\.\. OK' "$result")
-bad=$(grep -E '\.\.\. (KO|TIMEOUT|MOUNT-FAILED)' "$result")
+# winfsp-tests pads names with dots to a fixed column, so a long name
+# gets just one.
+ok=$(grep -cE '^[a-z0-9_]+\.+ OK ' "$result")
+bad=$(grep -E '^[a-z0-9_]+\.+ (KO|TIMEOUT|MOUNT-FAILED)' "$result")
 echo "OK: $ok" >&2
 if [ -n "$bad" ]; then
   echo "$bad"
