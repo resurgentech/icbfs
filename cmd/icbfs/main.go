@@ -9,7 +9,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awscreds "github.com/aws/aws-sdk-go-v2/credentials"
@@ -42,6 +45,7 @@ func main() {
 	secretKey := fset.String("secret-key", "minioadmin", "secret key")
 	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
 	size := fset.Uint64("size", 100<<30, "declared filesystem size in bytes, for df (only used the first time a filesystem name is created)")
+	asOf := fset.String("as-of", "", "mount read-only as the filesystem was at this time: a date (2006-01-02, meaning the end of that day), a date-time (2006-01-02T15:04:05) in local time, or RFC 3339 with a zone. Fails if the filesystem didn't exist yet then")
 	maxFileSize := fset.Uint64("max-file-size", icbfs.DefaultMaxFileSize, "largest file the filesystem holds, in bytes (only used the first time a filesystem name is created, immutable afterward)")
 	uidOverride := fset.Int("uid", -1, "owner uid for the filesystem root (only used the first time a filesystem name is created); defaults to the uid of the user running this command, same as every other FUSE filesystem's -o uid= override (sshfs, NFS, etc.)")
 	gidOverride := fset.Int("gid", -1, "owner gid for the filesystem root (only used the first time a filesystem name is created); defaults to the gid of the user running this command, same as every other FUSE filesystem's -o gid= override (sshfs, NFS, etc.)")
@@ -68,7 +72,24 @@ func main() {
 		UsePathStyle: true,
 		Credentials:  awscreds.NewStaticCredentialsProvider(*accessKey, *secretKey, ""),
 	})
-	store := objstore.NewS3Store(client, *bucket)
+	var store objstore.Store = objstore.NewS3Store(client, *bucket)
+
+	var view *objstore.AsOf
+	if *asOf != "" {
+		at, err := icbfs.ParseAsOf(*asOf, time.Local)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if *locking || *enableNotify {
+			log.Fatal("-as-of mounts the past read-only; -locking and -notify don't apply")
+		}
+		view, err = objstore.NewAsOf(ctx, store, at, *cacheDir)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer view.Close()
+		store = view
+	}
 
 	fsys := icbfs.New(store, *fsName)
 	if *cacheDir != "" {
@@ -94,9 +115,16 @@ func main() {
 	// --primary-windows, default true) — no flag exposed here yet,
 	// since nothing on this access layer reads the stored value today
 	// either way (task F5's own consumers, F6/F8, are Windows-only).
-	fsys.SetCreationMaxFileSize(*maxFileSize)
-	if err := fsys.Bootstrap(ctx, *size, 0755, rootUID, rootGID, false); err != nil {
-		log.Fatalf("bootstrap filesystem %q: %v", *fsName, err)
+	if view != nil {
+		if err := fsys.BootstrapReadOnly(ctx); err != nil {
+			view.Close()
+			log.Fatalf("filesystem %q as of %s: %v", *fsName, view.At().Format(time.RFC3339), err)
+		}
+	} else {
+		fsys.SetCreationMaxFileSize(*maxFileSize)
+		if err := fsys.Bootstrap(ctx, *size, 0755, rootUID, rootGID, false); err != nil {
+			log.Fatalf("bootstrap filesystem %q: %v", *fsName, err)
+		}
 	}
 	fsys.EnableLocking(*locking)
 
@@ -124,17 +152,32 @@ func main() {
 
 	root := fuseserver.Root(fsys, fuseSignals)
 	server, err := fs.Mount(mountpoint, root, &fs.Options{
-		MountOptions: fuseMountOptions(*debug, *allowOther),
+		MountOptions: fuseMountOptions(*debug, *allowOther, view != nil),
 		// Without this, go-fuse silently rewrites a real, stored "0000"
 		// mode to 0644/0755 on every Getattr — found by testing chmod 000
 		// and seeing stat report 644 back.
 		NullPermissions: true,
 	})
 	if err != nil {
+		if view != nil {
+			view.Close()
+		}
 		log.Fatalf("mount %s: %v", mountpoint, err)
 	}
 
-	log.Printf("icbfs %q mounted at %s (bucket %s via %s)", *fsName, mountpoint, *bucket, *endpoint)
+	if view != nil {
+		log.Printf("icbfs %q mounted read-only at %s as of %s (bucket %s via %s)", *fsName, mountpoint, view.At().Format(time.RFC3339Nano), *bucket, *endpoint)
+	} else {
+		log.Printf("icbfs %q mounted at %s (bucket %s via %s)", *fsName, mountpoint, *bucket, *endpoint)
+	}
+	// Ctrl+C or SIGTERM unmounts cleanly, so the deferred cleanup (an
+	// as-of mount's version cache) runs.
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigs
+		_ = server.Unmount()
+	}()
 	server.Wait()
 }
 
@@ -154,10 +197,13 @@ func newMinIOClient(endpoint, accessKey, secretKey string) (*minio.Client, error
 	})
 }
 
-func fuseMountOptions(debug, allowOther bool) fuse.MountOptions {
+func fuseMountOptions(debug, allowOther, readOnly bool) fuse.MountOptions {
 	options := []string{"default_permissions"}
 	if allowOther {
 		options = append(options, "allow_other")
+	}
+	if readOnly {
+		options = append(options, "ro")
 	}
 	return fuse.MountOptions{
 		FsName: "icbfs",

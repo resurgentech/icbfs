@@ -42,6 +42,10 @@ type Object struct {
 	Size         int64
 	LastModified time.Time
 	Metadata     map[string]string
+
+	// DeleteMarker is set on a version listing's entry for a delete: the
+	// key didn't exist from LastModified until its next version.
+	DeleteMarker bool
 }
 
 // Part is one part of a PutParts write: Size bytes, either uploaded from
@@ -103,7 +107,10 @@ type Store interface {
 	// assuming Azure needs the same workaround — it shouldn't).
 	UpdateMetadata(ctx context.Context, key string, metadata map[string]string, ifMatch string) (*Object, error)
 
-	// ListVersions returns every version of key, newest first.
+	// ListVersions returns every version of key, newest first, delete
+	// markers included (DeleteMarker set). Newest first is the store's
+	// own order, not a re-sort by LastModified, which would scramble
+	// versions written within the same timestamp.
 	//
 	// Sketch for Azure: (*container.Client).NewListBlobsFlatPager(&container.
 	// ListBlobsFlatOptions{Prefix: &key, Include: container.ListBlobsInclude{
@@ -113,6 +120,16 @@ type Store interface {
 	// ordering unconfirmed (would need checking against this behavior for
 	// real, not assumed from the S3 side's already-confirmed ordering).
 	ListVersions(ctx context.Context, key string) ([]Object, error)
+
+	// ListAllVersions is ListVersions for every key starting with prefix:
+	// each key's history, newest first, delete markers included, keys in
+	// listing order. Only listing fields are filled in (no Metadata).
+	ListAllVersions(ctx context.Context, prefix string) ([]Object, error)
+
+	// GetVersion and HeadVersion are Get and Head for one specific
+	// version of key, current or not.
+	GetVersion(ctx context.Context, key, versionID string) (io.ReadCloser, *Object, error)
+	HeadVersion(ctx context.Context, key, versionID string) (*Object, error)
 
 	// Delete removes key (creating a delete marker on a versioned bucket).
 	// If ifMatch is non-empty, the delete is conditioned on the current

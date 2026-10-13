@@ -173,6 +173,8 @@ func errnoFromErr(err error) syscall.Errno {
 		return syscall.ENOTDIR
 	case errors.Is(err, icbfs.ErrIsDir):
 		return syscall.EISDIR
+	case errors.Is(err, icbfs.ErrReadOnly):
+		return syscall.EROFS
 	case errors.Is(err, icbfs.ErrArchived):
 		return syscall.EROFS
 	case errors.Is(err, icbfs.ErrWriteContention):

@@ -60,6 +60,7 @@ type Filesystem struct {
 	fsName         string
 	id             string // 4-hex-digit prefix, set by Bootstrap
 	archived       bool   // set by Bootstrap; see ErrArchived
+	readOnly       bool   // set by BootstrapReadOnly; see ErrReadOnly
 	primaryWindows bool   // set by Bootstrap from the stored master-block value; see PrimaryWindows, task F5
 	maxFileSize    int64  // set by Bootstrap from the stored master-block value; see MaxFileSize
 	newMaxFileSize uint64 // the max file size a filesystem gets if Bootstrap creates it; see SetCreationMaxFileSize
@@ -80,6 +81,11 @@ type Filesystem struct {
 	// opens is this process's open files; see openSessions.
 	openMu sync.Mutex
 	opens  openSessions
+
+	// usage remembers DiskUsage's answer on a read-only filesystem.
+	usageMu    sync.Mutex
+	usage      int64
+	usageKnown bool
 }
 
 // New builds a Filesystem for the named filesystem. Call Bootstrap
@@ -221,6 +227,9 @@ func (f *Filesystem) Prefix() string { return f.prefix() }
 // call made after Bootstrap resolved archived=false has no effect on
 // this Filesystem until the next Bootstrap (e.g. the next mount).
 func (f *Filesystem) checkWritable() error {
+	if f.readOnly {
+		return ErrReadOnly
+	}
 	if f.archived {
 		return ErrArchived
 	}
@@ -243,13 +252,7 @@ func (f *Filesystem) Bootstrap(ctx context.Context, size uint64, mode, uid, gid 
 	if err != nil {
 		return err
 	}
-	f.id = id
-	f.archived = entry.Archived
-	f.primaryWindows = entry.PrimaryWindows
-	f.maxFileSize = DefaultMaxFileSize
-	if entry.MaxFileSize != 0 && entry.MaxFileSize <= DefaultMaxFileSize {
-		f.maxFileSize = int64(entry.MaxFileSize)
-	}
+	f.applyEntry(id, entry)
 
 	rootKey := f.RootKey()
 	if _, err := f.store.Head(ctx, rootKey); err == nil {
@@ -274,11 +277,76 @@ func (f *Filesystem) Bootstrap(ctx context.Context, size uint64, mode, uid, gid 
 	return err
 }
 
+// applyEntry takes this filesystem's identity and fixed settings from
+// its master-block entry.
+func (f *Filesystem) applyEntry(id string, entry *pb.FilesystemEntry) {
+	f.id = id
+	f.archived = entry.Archived
+	f.primaryWindows = entry.PrimaryWindows
+	f.maxFileSize = DefaultMaxFileSize
+	if entry.MaxFileSize != 0 && entry.MaxFileSize <= DefaultMaxFileSize {
+		f.maxFileSize = int64(entry.MaxFileSize)
+	}
+}
+
+// BootstrapReadOnly opens an existing filesystem without writing
+// anything, for a store that refuses writes: an objstore.AsOf view of a
+// past time. Every mutating operation then fails with ErrReadOnly, and
+// reads don't record access times. It fails with ErrNotFound if the
+// filesystem doesn't exist in the store — for an AsOf view, if it hadn't
+// been created yet at that time.
+func (f *Filesystem) BootstrapReadOnly(ctx context.Context) error {
+	mb, _, err := readMaster(ctx, f.store)
+	if err != nil {
+		return fmt.Errorf("filesystem %q: %w", f.fsName, mapNotFound(err))
+	}
+	found := false
+	for i, e := range mb.Filesystems {
+		if e.Name == f.fsName {
+			f.applyEntry(fsID(i), e)
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("filesystem %q: %w", f.fsName, ErrNotFound)
+	}
+	if _, err := f.store.Head(ctx, f.RootKey()); err != nil {
+		return fmt.Errorf("filesystem %q root: %w", f.fsName, mapNotFound(err))
+	}
+	f.readOnly = true
+	return nil
+}
+
+// ReadOnly reports whether this filesystem was opened with
+// BootstrapReadOnly.
+func (f *Filesystem) ReadOnly() bool { return f.readOnly }
+
 // DiskUsage sums the size of every file under this filesystem's prefix —
 // the "du" half of ARCHITECTURE.md's du/df design. Already free in the
 // sense that it's just a prefix-scoped listing, same mechanism df's
 // "Used" uses, not a tree walk fetching every file's content.
+//
+// On a read-only filesystem (an as-of view of the past) the answer can't
+// change, and computing it means listing the filesystem's whole version
+// history, so it's computed once and remembered.
 func (f *Filesystem) DiskUsage(ctx context.Context) (int64, error) {
+	if f.readOnly {
+		f.usageMu.Lock()
+		defer f.usageMu.Unlock()
+		if !f.usageKnown {
+			u, err := f.diskUsage(ctx)
+			if err != nil {
+				return 0, err // not remembered: the next call tries again
+			}
+			f.usage, f.usageKnown = u, true
+		}
+		return f.usage, nil
+	}
+	return f.diskUsage(ctx)
+}
+
+func (f *Filesystem) diskUsage(ctx context.Context) (int64, error) {
 	objs, err := f.store.ListByPrefix(ctx, f.prefix())
 	if err != nil {
 		return 0, err
@@ -1921,8 +1989,8 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 // documented cost/benefit tradeoff already accepts far worse
 // imprecision than that.
 func (f *Filesystem) TouchAtime(ctx context.Context, key string, typ EntryType) error {
-	if isStreamKey(key) {
-		return nil // a stream has no .metadata of its own
+	if isStreamKey(key) || f.readOnly {
+		return nil // a stream has no .metadata of its own; a read-only view records nothing
 	}
 	now := time.Now()
 	return f.writeMetadata(ctx, key, typ, false, func(a *Attr) {

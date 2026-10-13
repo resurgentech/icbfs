@@ -1433,3 +1433,71 @@ func TestMountUnflushedWritesAndUnlinkedOpenFiles(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// TestMountAsOf mounts an as-of view of a filesystem read-only, the way
+// `icbfs mount -as-of` does, and checks it shows the past through real
+// syscalls, refuses writes with EROFS, and reports the past's df usage.
+func TestMountAsOf(t *testing.T) {
+	ctx := context.Background()
+	store := newMountTestStore(t)
+	live := mountFS(t, store, "past")
+	path := filepath.Join(live, "f")
+	if err := os.WriteFile(path, []byte("before"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	at, err := store.ServerTime(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if err := os.WriteFile(path, []byte("after, and longer"), 0644); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(live, "g"), []byte("new"), 0644); err != nil {
+		t.Fatalf("write g: %v", err)
+	}
+
+	view, err := objstore.NewAsOf(ctx, store, at, t.TempDir())
+	if err != nil {
+		t.Fatalf("as of: %v", err)
+	}
+	defer view.Close()
+	fsys := icbfs.New(view, "past")
+	if err := fsys.BootstrapReadOnly(ctx); err != nil {
+		t.Fatalf("bootstrap read-only: %v", err)
+	}
+	mnt := t.TempDir()
+	server, err := fs.Mount(mnt, Root(fsys, nil), &fs.Options{
+		MountOptions:    fuse.MountOptions{FsName: "icbfs-asof", Name: "icbfs-asof", Options: []string{"default_permissions", "ro"}},
+		NullPermissions: true,
+	})
+	if err != nil {
+		t.Fatalf("mount: %v", err)
+	}
+	defer server.Unmount()
+
+	if data, err := os.ReadFile(filepath.Join(mnt, "f")); err != nil || string(data) != "before" {
+		t.Fatalf("read in the past: %q, %v; want %q", data, err, "before")
+	}
+	if _, err := os.Stat(filepath.Join(mnt, "g")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a file created later is visible in the past: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mnt, "f"), []byte("x"), 0644); !errors.Is(err, syscall.EROFS) {
+		t.Fatalf("write in the past: %v, want EROFS", err)
+	}
+	if err := os.Mkdir(filepath.Join(mnt, "d"), 0755); !errors.Is(err, syscall.EROFS) {
+		t.Fatalf("mkdir in the past: %v, want EROFS", err)
+	}
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(mnt, &st); err != nil {
+		t.Fatalf("statfs: %v", err)
+	}
+	_, used, err := fsys.StatFS(ctx)
+	if err != nil || used == 0 {
+		t.Fatalf("df used as of then: %d, %v", used, err)
+	}
+	if got := (st.Blocks - st.Bfree) * uint64(st.Bsize); got != (used/statfsBlockSize)*statfsBlockSize && got != ((used+statfsBlockSize-1)/statfsBlockSize)*statfsBlockSize {
+		t.Fatalf("statfs used %d bytes, want about %d", got, used)
+	}
+}

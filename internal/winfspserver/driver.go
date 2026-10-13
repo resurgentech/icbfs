@@ -162,6 +162,9 @@ func toWinError(err error) error {
 		return syscall.ENOTDIR
 	case errors.Is(err, icbfs.ErrIsDir):
 		return syscall.EISDIR
+	case errors.Is(err, icbfs.ErrReadOnly):
+		// A read-only volume (an as-of view of the past).
+		return windows.STATUS_MEDIA_WRITE_PROTECTED
 	case errors.Is(err, icbfs.ErrArchived):
 		// No exact NTSTATUS for "this whole volume is read-only" is
 		// wired through convertNTStatus's map; STATUS_ACCESS_DENIED

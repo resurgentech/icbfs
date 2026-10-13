@@ -13,6 +13,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awscreds "github.com/aws/aws-sdk-go-v2/credentials"
@@ -51,6 +54,7 @@ func main() {
 	secretKey := fset.String("secret-key", "minioadmin", "secret key")
 	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
 	size := fset.Uint64("size", 100<<30, "declared filesystem size in bytes (only used the first time a filesystem name is created)")
+	asOf := fset.String("as-of", "", "mount read-only as the filesystem was at this time: a date (2006-01-02, meaning the end of that day), a date-time (2006-01-02T15:04:05) in local time, or RFC 3339 with a zone. Fails if the filesystem didn't exist yet then")
 	maxFileSize := fset.Uint64("max-file-size", icbfs.DefaultMaxFileSize, "largest file the filesystem holds, in bytes (only used the first time a filesystem name is created, immutable afterward)")
 	caseInsensitive := fset.Bool("case-insensitive", true, "case-insensitive name lookup, following the standard NTFS/Samba/WSL2 pattern (ARCHITECTURE.md's Windows compatibility section) — storage itself always stays case-sensitive/case-preserving regardless of this flag")
 	primaryWindows := fset.Bool("primary-windows", true, "mark this filesystem primary-Windows rather than primary-POSIX (ARCHITECTURE.md's \"Windows compatibility: primary mode\" section) — only used the first time a filesystem name is created, immutable afterward, same as --size")
@@ -72,15 +76,38 @@ func main() {
 		UsePathStyle: true,
 		Credentials:  awscreds.NewStaticCredentialsProvider(*accessKey, *secretKey, ""),
 	})
-	store := objstore.NewS3Store(client, *bucket)
+	var store objstore.Store = objstore.NewS3Store(client, *bucket)
+
+	var view *objstore.AsOf
+	if *asOf != "" {
+		at, err := icbfs.ParseAsOf(*asOf, time.Local)
+		if err != nil {
+			log.Fatal(err)
+		}
+		view, err = objstore.NewAsOf(ctx, store, at, *cacheDir)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer view.Close()
+		store = view
+	}
 
 	fsys := icbfs.New(store, *fsName)
 	if *cacheDir != "" {
 		fsys.SetCacheOptions(*cacheDir, int64(*cacheSize))
 	}
-	fsys.SetCreationMaxFileSize(*maxFileSize)
-	if err := fsys.Bootstrap(ctx, *size, 0755, 0, 0, *primaryWindows); err != nil {
-		log.Fatalf("bootstrap filesystem %q: %v", *fsName, err)
+	var attrs uint32
+	if view != nil {
+		if err := fsys.BootstrapReadOnly(ctx); err != nil {
+			view.Close()
+			log.Fatalf("filesystem %q as of %s: %v", *fsName, view.At().Format(time.RFC3339), err)
+		}
+		attrs = winfsp.FspFSAttributeReadOnlyVolume
+	} else {
+		fsys.SetCreationMaxFileSize(*maxFileSize)
+		if err := fsys.Bootstrap(ctx, *size, 0755, 0, 0, *primaryWindows); err != nil {
+			log.Fatalf("bootstrap filesystem %q: %v", *fsName, err)
+		}
 	}
 
 	// winfsp.CaseSensitive and winfspserver.Root's own caseInsensitive
@@ -109,16 +136,29 @@ func main() {
 		// getfileinfo_test (--external) reporting "\FILE0" back for a
 		// file created as "\file0".
 		winfsp.CasePreserveNames(true),
+		// A read-only volume for an as-of mount, so Windows itself
+		// refuses writes before they reach the driver.
+		winfsp.Attributes(attrs),
 	)
 	if err != nil {
+		if view != nil {
+			view.Close()
+		}
 		log.Fatalf("mount %s: %v", mountpoint, err)
 	}
 	defer server.Unmount()
 
-	log.Printf("icbfs %q mounted at %s (bucket %s via %s)", *fsName, mountpoint, *bucket, *endpoint)
+	if view != nil {
+		log.Printf("icbfs %q mounted read-only at %s as of %s (bucket %s via %s)", *fsName, mountpoint, view.At().Format(time.RFC3339Nano), *bucket, *endpoint)
+	} else {
+		log.Printf("icbfs %q mounted at %s (bucket %s via %s)", *fsName, mountpoint, *bucket, *endpoint)
+	}
 	log.Println(winfspAttribution)
 	// winfsp.Mount's dispatcher runs its own background goroutines;
-	// block here until killed, same role cmd/icbfs's server.Wait()
-	// plays for the FUSE side.
-	select {}
+	// block here until Ctrl+C (or SIGTERM), then unmount and run the
+	// deferred cleanup — an as-of mount's version cache. A process
+	// killed outright skips this; the next as-of mount removes its cache.
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
+	<-sigs
 }

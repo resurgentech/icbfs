@@ -358,6 +358,35 @@ at each node (root, then each directory block, down to the leaf), list
 that object's versions and pick the most recent one with `LastModified ≤ T`,
 then descend into that version's children and repeat.
 
+**Implemented as a read-only mount**: `icbfs mount -as-of T` and
+`icbfs-winfsp -as-of T`. T is a date (`2026-10-12`, meaning the end of
+that day), a date-time without a zone (local time), or RFC 3339. The walk
+isn't separate code: `objstore.AsOf` is a read-only view of the store at
+T — every Get/Head returns the newest version at or before T (not found
+if that was a delete, or the object didn't exist yet), every write fails —
+and the ordinary filesystem code runs on top of it unchanged
+(`Filesystem.BootstrapReadOnly`). Details:
+
+- The master block is read as of T too, so mounting a filesystem that
+  hadn't been created yet at T fails, and a name pruned and recreated
+  since resolves to the filesystem that had it then.
+- A T after the object store's own clock is refused (that view would
+  still be changing).
+- Each object's version listing is resolved once and kept in a local
+  SQLite database — the past doesn't change, so it never goes stale. It
+  lives in a fresh directory under `-cache-dir` (or the temp directory),
+  deleted at unmount; a mount killed outright leaves it behind, and the
+  next as-of mount removes caches whose process is gone.
+- `df`/`du` are computed as of T, properly: every version under the
+  filesystem's prefix is listed and summed as it stood at T. That's slow
+  for a long history, so a mount computes it once.
+- Reads don't record access times; FUSE mounts `ro`, WinFsp mounts a
+  read-only volume.
+- Caveats accepted: the store's timestamps are what T is compared with
+  (MinIO lists milliseconds; S3's are coarser), and a multi-object
+  operation in flight at T (a rename is a remove then an insert) can show
+  half done, like copying a live filesystem.
+
 This works because:
 - Every mutation — content or metadata-only — creates a new version with a
   **server-assigned** timestamp, on all three target backends — never

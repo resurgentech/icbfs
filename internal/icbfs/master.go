@@ -24,6 +24,11 @@ const masterBlockKey = "_master"
 // one last time before it's pruned, not to make it disappear outright.
 var ErrArchived = errors.New("filesystem is archived: read-only")
 
+// ErrReadOnly is returned by any mutating operation on a filesystem
+// opened with Filesystem.BootstrapReadOnly — the same error the
+// objstore.AsOf view underneath returns for a write.
+var ErrReadOnly = objstore.ErrReadOnly
+
 // bootstrapMaster ensures the master block exists, creating an empty one
 // if this bucket has never been used for icbfs before.
 //

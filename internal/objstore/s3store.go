@@ -238,33 +238,130 @@ func (s *S3Store) UpdateMetadata(ctx context.Context, key string, metadata map[s
 	return s.headVersion(ctx, key, out.VersionId)
 }
 
-// ListVersions returns every version of key, newest first.
+// listVersionsPageSize is how many entries one ListObjectVersions page
+// asks for; a var so tests can force pagination.
+var listVersionsPageSize int32 = 1000
+
 func (s *S3Store) ListVersions(ctx context.Context, key string) ([]Object, error) {
-	out, err := s.client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
-		Bucket: aws.String(s.bucket),
-		Prefix: aws.String(key),
-	})
+	all, err := s.listVersions(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("list versions %s: %w", key, err)
 	}
-
-	var versions []Object
-	for _, v := range out.Versions {
-		if aws.ToString(v.Key) != key {
-			continue
+	versions := all[:0]
+	for _, v := range all {
+		if v.Key == key {
+			versions = append(versions, v)
 		}
-		versions = append(versions, Object{
-			Key:          key,
-			VersionID:    aws.ToString(v.VersionId),
-			ETag:         aws.ToString(v.ETag),
-			Size:         aws.ToInt64(v.Size),
-			LastModified: aws.ToTime(v.LastModified),
-		})
 	}
-	sort.Slice(versions, func(i, j int) bool {
-		return versions[i].LastModified.After(versions[j].LastModified)
-	})
 	return versions, nil
+}
+
+func (s *S3Store) ListAllVersions(ctx context.Context, prefix string) ([]Object, error) {
+	all, err := s.listVersions(ctx, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list versions under %q: %w", prefix, err)
+	}
+	return all, nil
+}
+
+// listVersions pages through every version and delete marker under
+// prefix. S3 reports a page's versions and delete markers as two separate
+// lists, each newest first per key; they're merged back into one history
+// per key here, by LastModified, with the store's IsLatest flag and then
+// each list's own order breaking ties.
+func (s *S3Store) listVersions(ctx context.Context, prefix string) ([]Object, error) {
+	type entry struct {
+		obj    Object
+		latest bool
+		seq    int
+	}
+	byKey := map[string][]entry{}
+	var keys []string
+	add := func(e entry) {
+		if _, ok := byKey[e.obj.Key]; !ok {
+			keys = append(keys, e.obj.Key)
+		}
+		byKey[e.obj.Key] = append(byKey[e.obj.Key], e)
+	}
+	seq := 0
+	var keyMarker, versionMarker *string
+	for {
+		out, err := s.client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+			Bucket:          aws.String(s.bucket),
+			Prefix:          aws.String(prefix),
+			KeyMarker:       keyMarker,
+			VersionIdMarker: versionMarker,
+			MaxKeys:         aws.Int32(listVersionsPageSize),
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, v := range out.Versions {
+			seq++
+			add(entry{obj: Object{
+				Key:          aws.ToString(v.Key),
+				VersionID:    aws.ToString(v.VersionId),
+				ETag:         aws.ToString(v.ETag),
+				Size:         aws.ToInt64(v.Size),
+				LastModified: aws.ToTime(v.LastModified),
+			}, latest: aws.ToBool(v.IsLatest), seq: seq})
+		}
+		for _, m := range out.DeleteMarkers {
+			seq++
+			add(entry{obj: Object{
+				Key:          aws.ToString(m.Key),
+				VersionID:    aws.ToString(m.VersionId),
+				LastModified: aws.ToTime(m.LastModified),
+				DeleteMarker: true,
+			}, latest: aws.ToBool(m.IsLatest), seq: seq + 1<<30}) // after versions on a tie
+		}
+		if !aws.ToBool(out.IsTruncated) {
+			break
+		}
+		keyMarker, versionMarker = out.NextKeyMarker, out.NextVersionIdMarker
+	}
+
+	var all []Object
+	for _, k := range keys {
+		es := byKey[k]
+		sort.SliceStable(es, func(i, j int) bool {
+			a, b := es[i], es[j]
+			if !a.obj.LastModified.Equal(b.obj.LastModified) {
+				return a.obj.LastModified.After(b.obj.LastModified)
+			}
+			if a.latest != b.latest {
+				return a.latest
+			}
+			return a.seq < b.seq
+		})
+		for _, e := range es {
+			all = append(all, e.obj)
+		}
+	}
+	return all, nil
+}
+
+func (s *S3Store) GetVersion(ctx context.Context, key, versionID string) (io.ReadCloser, *Object, error) {
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket:    aws.String(s.bucket),
+		Key:       aws.String(key),
+		VersionId: aws.String(versionID),
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("get %s version %s: %w", key, versionID, err)
+	}
+	return out.Body, &Object{
+		Key:          key,
+		VersionID:    aws.ToString(out.VersionId),
+		ETag:         aws.ToString(out.ETag),
+		Size:         aws.ToInt64(out.ContentLength),
+		LastModified: aws.ToTime(out.LastModified),
+		Metadata:     out.Metadata,
+	}, nil
+}
+
+func (s *S3Store) HeadVersion(ctx context.Context, key, versionID string) (*Object, error) {
+	return s.headVersion(ctx, key, aws.String(versionID))
 }
 
 func (s *S3Store) Delete(ctx context.Context, key string, ifMatch string) error {

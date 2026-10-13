@@ -50,6 +50,22 @@ fully in step yet. See:
 All three require object versioning enabled on the bucket/container —
 that's the mechanism snapshotting is built on.
 
+## Mounting the past
+
+Either mount command can show a filesystem read-only as it was at an
+earlier time:
+
+```
+icbfs mount -as-of 2026-10-12 ... /mnt/yesterday        # as the day ended, local time
+icbfs mount -as-of 2026-10-12T15:04:05 ... /mnt/then    # local time
+icbfs-winfsp -as-of 2026-10-12T22:04:05Z ... Y:         # RFC 3339
+```
+
+The mount fails if the filesystem didn't exist yet at that time, or if
+the time is in the future. Unmount as usual (or Ctrl+C the command); its
+local version cache is deleted then. See `ARCHITECTURE.md`'s Snapshots
+section for how it works and what it costs.
+
 ## Windows mount: install WinFsp first
 
 `cmd/icbfs-winfsp` does **not** carry or install
