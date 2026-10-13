@@ -64,11 +64,12 @@ fi
 echo "Running pjdfstest (needs root; this can take several minutes against real network storage)..." >&2
 set +e
 ssh_vm "$IP" "sudo bash -c 'cd $MNT && prove -r /home/ubuntu/pjdfstest/tests'" > "$WORK_DIR/pjdfstest-${FS_NAME}.log" 2>&1
-RET=$?
 set -e
 
 echo "" >&2
 echo "=== pjdfstest summary (full log: $WORK_DIR/pjdfstest-${FS_NAME}.log) ===" >&2
-tail -30 "$WORK_DIR/pjdfstest-${FS_NAME}.log"
-echo "exit code: $RET" >&2
-exit $RET
+sed -n '/^Test Summary Report/,$p' "$WORK_DIR/pjdfstest-${FS_NAME}.log"
+echo "" >&2
+# Pass/fail is judged against the accepted differences in
+# pjdfstest-known.txt, not prove's own exit code.
+"$HERE/pjdfstest-check.sh" "$WORK_DIR/pjdfstest-${FS_NAME}.log"

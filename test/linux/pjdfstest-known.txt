@@ -1,0 +1,8 @@
+# pjdfstest assertions icbfs fails on purpose: accepted differences, not
+# bugs. run-pjdfstest.sh (via pjdfstest-check.sh) passes when every
+# failure is listed here, and reports both unexpected failures and listed
+# assertions that have started passing (so this list can't go stale).
+#
+# Format: <test file> <assertion numbers, comma-separated, a-b ranges ok> <reason>
+
+rename/24.t 4-5,8-9 A directory's link count stays 1, as on Btrfs: icbfs stores no "." or ".." entries and directories can't be hard-linked, so 1 is the true number of names pointing at one. Nothing relies on 2 + subdirectories (find treats 1 as "unknown"), and pjdfstest marks these same assertions todo on Btrfs.

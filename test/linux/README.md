@@ -178,6 +178,17 @@ completely clean. Of the 70 that don't:
   exhaustive per-assertion audit, but a confirmed pattern.
 - **`open/06.t`** — the one genuinely open finding above.
 
+## Accepted differences
+
+`run-pjdfstest.sh` doesn't pass or fail on prove's own exit code. It
+hands the log to `pjdfstest-check.sh`, which accepts failing assertions
+listed, with their reasons, in `pjdfstest-known.txt` (e.g. directory
+link counts staying 1, as on Btrfs), and fails the run on anything else:
+an unlisted failure, a test file that crashed, or a run that never
+finished. It also lists accepted assertions that have started passing,
+so the list doesn't go stale. Rerun it on any saved log with
+`test/linux/pjdfstest-check.sh test/linux/work/<log>`.
+
 ## Environment specifics
 
 - VM: `icbfs-fuse-test`, Ubuntu 24.04, user `ubuntu` (SSH key auth,
