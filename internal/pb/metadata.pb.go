@@ -74,8 +74,14 @@ type Metadata struct {
 	// Windows' SetFileTime(CreationTime); winfsp-tests' setfileinfo_test
 	// expects it to round-trip.
 	BtimeOverrideUnixNano int64 `protobuf:"varint,9,opt,name=btime_override_unix_nano,json=btimeOverrideUnixNano,proto3" json:"btime_override_unix_nano,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	// The content object's ETag when mtime_override_unix_nano was set.
+	// The override only applies while the content is still that version:
+	// a later real write changes the ETag, so mtime goes back to following
+	// the content — as touch -t followed by an append does on any POSIX
+	// filesystem or NTFS — with no extra work on the write path itself.
+	MtimeOverrideEtag string `protobuf:"bytes,10,opt,name=mtime_override_etag,json=mtimeOverrideEtag,proto3" json:"mtime_override_etag,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *Metadata) Reset() {
@@ -171,11 +177,18 @@ func (x *Metadata) GetBtimeOverrideUnixNano() int64 {
 	return 0
 }
 
+func (x *Metadata) GetMtimeOverrideEtag() string {
+	if x != nil {
+		return x.MtimeOverrideEtag
+	}
+	return ""
+}
+
 var File_spec_proto_icbfs_v1_metadata_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\n" +
-	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\"\xf9\x02\n" +
+	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\"\xa9\x03\n" +
 	"\bMetadata\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\rR\x04mode\x12\x10\n" +
 	"\x03uid\x18\x02 \x01(\rR\x03uid\x12\x10\n" +
@@ -185,7 +198,9 @@ const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\x0fatime_unix_nano\x18\x06 \x01(\x03R\ratimeUnixNano\x12\x12\n" +
 	"\x04rdev\x18\a \x01(\rR\x04rdev\x127\n" +
 	"\x18mtime_override_unix_nano\x18\b \x01(\x03R\x15mtimeOverrideUnixNano\x127\n" +
-	"\x18btime_override_unix_nano\x18\t \x01(\x03R\x15btimeOverrideUnixNano\x1a9\n" +
+	"\x18btime_override_unix_nano\x18\t \x01(\x03R\x15btimeOverrideUnixNano\x12.\n" +
+	"\x13mtime_override_etag\x18\n" +
+	" \x01(\tR\x11mtimeOverrideEtag\x1a9\n" +
 	"\vXattrsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01B+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"

@@ -363,6 +363,13 @@ func combineFileAttr(key string, metaData []byte, metaLastModified time.Time, co
 	if attr.Btime.IsZero() {
 		attr.Btime = keyBtime
 	}
+	// An explicit override only holds while the content is still the
+	// version it was set against; any real write since has changed the
+	// ETag, and mtime follows the content again.
+	if !attr.Mtime.IsZero() && attr.mtimeOverrideETag != contentObj.ETag {
+		attr.Mtime = time.Time{}
+	}
+	attr.mtimeOverrideETag = ""
 	if attr.Mtime.IsZero() {
 		attr.Mtime = contentObj.LastModified
 		// S3's Last-Modified only has 1-second resolution and is floored,
@@ -1462,15 +1469,10 @@ func (f *Filesystem) writeFileFrom(ctx context.Context, key string, body io.Read
 // mtime is an explicit override (Windows' SetFileTime, POSIX
 // utimensat — a pure metadata call, no content write at all) — see
 // combineFileAttr's own doc comment for a file/symlink, or
-// dirMetadataFromAttr for a directory. It intentionally does *not* get
-// cleared by a later real content write: this driver has no cheap way
-// to know, at write time, whether an override is even set without an
-// extra round trip on every single write, and a write happening to
-// land after an explicit timestamp override is rare enough that this
-// driver accepts the override simply persisting until the next
-// explicit SetAttr mtime call, rather than paying that cost on every
-// write to guard against it — a known, deliberate limitation, not an
-// oversight.
+// dirMetadataFromAttr for a directory. For a file, the override is
+// tied to the content version it was set against and lapses on the
+// next real write, so mtime follows content again — at the cost of one
+// Head request per explicit set, nothing on the write path.
 //
 // btime is an explicit creation-time override (Windows' SetFileTime
 // CreationTime), files/symlinks only: a directory's creation time is
@@ -1552,6 +1554,16 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 		}
 	}
 
+	var contentETag string
+	if mtime != nil {
+		// Tie the override to the current content version — see
+		// combineFileAttr.
+		head, err := f.store.Head(ctx, key)
+		if err != nil {
+			return Attr{}, mapNotFound(err)
+		}
+		contentETag = head.ETag
+	}
 	if mode != nil || uid != nil || gid != nil || atime != nil || mtime != nil || btime != nil {
 		return f.updateFileMetadata(ctx, key, func(a *Attr) {
 			if mode != nil {
@@ -1574,6 +1586,7 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 				// is exactly "set the override," no special-casing
 				// needed to avoid clobbering something else.
 				a.Mtime = *mtime
+				a.mtimeOverrideETag = contentETag
 			}
 			if btime != nil {
 				a.Btime = *btime // likewise only ever the override here

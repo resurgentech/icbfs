@@ -60,4 +60,11 @@ message Metadata {
   // Windows' SetFileTime(CreationTime); winfsp-tests' setfileinfo_test
   // expects it to round-trip.
   int64 btime_override_unix_nano = 9;
+
+  // The content object's ETag when mtime_override_unix_nano was set.
+  // The override only applies while the content is still that version:
+  // a later real write changes the ETag, so mtime goes back to following
+  // the content — as touch -t followed by an append does on any POSIX
+  // filesystem or NTFS — with no extra work on the write path itself.
+  string mtime_override_etag = 10;
 }

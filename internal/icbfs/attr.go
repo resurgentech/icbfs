@@ -155,6 +155,11 @@ type Attr struct {
 	Btime  time.Time         // derived from the UUIDv7 key; zero if the key isn't a UUIDv7
 	Xattrs map[string][]byte // directories: only WindowsAttributesXattrKey, if ever set
 	Rdev   uint32            // TypeCharDevice/TypeBlockDevice only (ROADMAP.md's Part G, task G2); 0 for every other type
+
+	// mtimeOverrideETag is the content ETag an explicit mtime override
+	// (Mtime, as decoded from .metadata) was set against — see
+	// combineFileAttr. Internal plumbing only, never meaningful to callers.
+	mtimeOverrideETag string
 }
 
 // --- Directory attributes: native object metadata on the block object
@@ -272,6 +277,7 @@ func encodeFileMetadata(a Attr) ([]byte, error) {
 		AtimeUnixNano:         atimeNano,
 		Rdev:                  a.Rdev,
 		MtimeOverrideUnixNano: mtimeOverrideNano,
+		MtimeOverrideEtag:     a.mtimeOverrideETag,
 		BtimeOverrideUnixNano: btimeOverrideNano,
 	})
 }
@@ -311,9 +317,10 @@ func decodeFileMetadata(data []byte) (Attr, error) {
 		// combineFileAttr, which is what this decode's caller (statFile)
 		// always goes through for the real, content-derived Mtime it
 		// falls back to when this is zero.
-		Mtime: mtimeOverride,
-		Btime: btimeOverride, // same: override only; see combineFileAttr
-		Rdev:  m.Rdev,
+		Mtime:             mtimeOverride,
+		mtimeOverrideETag: m.MtimeOverrideEtag,
+		Btime:             btimeOverride, // same: override only; see combineFileAttr
+		Rdev:              m.Rdev,
 	}, nil
 }
 

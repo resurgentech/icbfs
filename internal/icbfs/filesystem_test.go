@@ -698,6 +698,22 @@ func TestSetAttrExplicitMtimeBtimeOverrides(t *testing.T) {
 	if after.Mode != 0600 {
 		t.Fatalf("mode = %o, want 600", after.Mode)
 	}
+
+	// A real write afterwards: mtime follows content again (the override
+	// was tied to the old content version); the btime override stays.
+	if _, _, err := fsys.WriteFile(ctx, uuid, []byte("new content"), ""); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	written, err := fsys.Stat(ctx, uuid, TypeFile)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if written.Mtime.Equal(mtime) || written.Mtime.Before(Btime(uuid)) {
+		t.Fatalf("Mtime after write = %v, want content time (not override %v)", written.Mtime, mtime)
+	}
+	if !written.Btime.Equal(btime) {
+		t.Fatalf("Btime after write = %v, want override %v", written.Btime, btime)
+	}
 }
 
 // TestSetWindowsAttributesRoundTripsAndMasksUnrelatedBits covers task
