@@ -14,6 +14,7 @@ require (
 	github.com/minio/minio-go/v7 v7.3.0
 	github.com/testcontainers/testcontainers-go/modules/minio v0.44.0
 	github.com/winfsp/go-winfsp v1.0.6
+	golang.org/x/sys v0.47.0
 	google.golang.org/protobuf v1.36.12
 )
 
@@ -85,8 +86,9 @@ require (
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	gopkg.in/ini.v1 v1.67.3 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/winfsp/go-winfsp => ./third_party/go-winfsp
