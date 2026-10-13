@@ -248,11 +248,12 @@ MinIO container that exists only for that run:
 
 ```
 test/linux/run-pjdfstest.sh <vm-ip>             # Linux: pjdfstest
+test/linux/run-largefile-test.sh <vm-ip>        # Linux: 6 GiB file, opt-in only (see test/linux/README.md)
 test/windows/run-winfsp-tests.sh [icbfs-ci|icbfs-cs] [-- -Only a,b]   # Windows
 test/minio/with-minio.sh <any command>          # anything else
 ```
 
-The first two start one themselves. All three do the same thing: start
+The runners start one themselves. All of them do the same thing: start
 a `minio/minio` container under a unique name with a random host port,
 wait for it to become ready, create an empty versioned bucket, and run
 the test. When the script exits, the container and its data volume are

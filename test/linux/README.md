@@ -189,6 +189,18 @@ finished. It also lists accepted assertions that have started passing,
 so the list doesn't go stale. Rerun it on any saved log with
 `test/linux/pjdfstest-check.sh test/linux/work/<log>`.
 
+## Large-file test (opt-in)
+
+`run-largefile-test.sh <vm-ip>` is deliberately not part of the
+regular runs: it moves about 20 GB between the VM and MinIO and takes
+about ten minutes. Run it when a change touches the content write path
+(OpenFile's flush, multipart uploads, truncate, the max-file-size
+limit). On a fresh 8 GiB-limit filesystem it writes a 6 GiB file (past
+S3's 5 GiB single-PUT limit) and checks it reads back intact, edits one
+byte in the middle and checks nothing else moved, and checks that
+growing past 8 GiB is "File too large". It needs about 13 GB free on
+the VM.
+
 ## Environment specifics
 
 - VM: `icbfs-fuse-test`, Ubuntu 24.04, user `ubuntu` (SSH key auth,
