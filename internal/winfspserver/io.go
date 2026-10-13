@@ -14,7 +14,7 @@ func (d *driver) Read(fs *winfsp.FileSystemRef, file uintptr, buf []byte, offset
 	if !ok {
 		return 0, os.ErrNotExist
 	}
-	open, err := h.ensureOpen(d.fsys)
+	open, err := d.openFile(h)
 	if err != nil {
 		return 0, toWinError(err)
 	}
@@ -43,7 +43,7 @@ func (d *driver) Write(fs *winfsp.FileSystemRef, file uintptr, buf []byte, offse
 	if !ok {
 		return 0, os.ErrNotExist
 	}
-	open, err := h.ensureOpen(d.fsys)
+	open, err := d.openFile(h)
 	if err != nil {
 		return 0, toWinError(err)
 	}
@@ -93,9 +93,7 @@ func (d *driver) Flush(fs *winfsp.FileSystemRef, file uintptr, info *winfsp.FSP_
 	if !ok {
 		return os.ErrNotExist
 	}
-	h.mu.Lock()
-	open := h.open
-	h.mu.Unlock()
+	open := d.currentOpen(h.key)
 	if open == nil {
 		attr, err := d.fsys.Stat(ctx(), h.key, h.typ)
 		if err != nil {

@@ -316,16 +316,23 @@ func dirAttrFromObject(key string, obj *objstore.Object) Attr {
 	if mtime.IsZero() {
 		mtime = obj.LastModified // fallback for objects written before mtime tracking existed
 	}
+	var xattrs map[string][]byte
+	if v, ok := obj.Metadata[dirMetaWinAttr]; ok {
+		if bits, err := strconv.ParseUint(v, 10, 32); err == nil {
+			xattrs = map[string][]byte{WindowsAttributesXattrKey: {byte(uint32(bits) & windowsAttrMask)}}
+		}
+	}
 	return Attr{
-		Mode:  parseMetaUint(obj.Metadata, dirMetaMode),
-		Uid:   parseMetaUint(obj.Metadata, dirMetaUid),
-		Gid:   parseMetaUint(obj.Metadata, dirMetaGid),
-		Nlink: parseMetaUint(obj.Metadata, dirMetaNlink),
-		Size:  obj.Size,
-		Atime: parseMetaTime(obj.Metadata, dirMetaAtime), // zero if never read (no fallback — unlike mtime, "never accessed" is a real, honest value here)
-		Mtime: mtime,
-		Ctime: obj.LastModified,
-		Btime: Btime(key),
+		Xattrs: xattrs,
+		Mode:   parseMetaUint(obj.Metadata, dirMetaMode),
+		Uid:    parseMetaUint(obj.Metadata, dirMetaUid),
+		Gid:    parseMetaUint(obj.Metadata, dirMetaGid),
+		Nlink:  parseMetaUint(obj.Metadata, dirMetaNlink),
+		Size:   obj.Size,
+		Atime:  parseMetaTime(obj.Metadata, dirMetaAtime), // zero if never read (no fallback — unlike mtime, "never accessed" is a real, honest value here)
+		Mtime:  mtime,
+		Ctime:  obj.LastModified,
+		Btime:  Btime(key),
 	}
 }
 
@@ -343,9 +350,34 @@ func combineFileAttr(key string, metaData []byte, metaLastModified time.Time, co
 		ctime = contentObj.LastModified
 	}
 	attr.Size = contentObj.Size
-	attr.Mtime = contentObj.LastModified
+	// attr.Mtime, from decodeFileMetadata above, is only ever an
+	// explicit override (SetAttr's mtime parameter) — real content
+	// writes never go through it. No override means the zero value,
+	// so the real, content-derived mtime is the right default; an
+	// override, once set, stays authoritative until SetAttr clears or
+	// replaces it (see SetAttr's own doc comment on why a later real
+	// write doesn't automatically invalidate it).
+	// attr.Btime from decodeFileMetadata is only an explicit override;
+	// otherwise the real creation time is embedded in the UUIDv7 key.
+	keyBtime := Btime(key)
+	if attr.Btime.IsZero() {
+		attr.Btime = keyBtime
+	}
+	if attr.Mtime.IsZero() {
+		attr.Mtime = contentObj.LastModified
+		// S3's Last-Modified only has 1-second resolution and is floored,
+		// so a write moments after creation can report an mtime earlier
+		// than the key's creation time (millisecond precision). Real
+		// content can't be modified before it was created, so that's the
+		// better lower bound. Only applies to the derived mtime — an
+		// explicit override is authoritative even when it's older — and
+		// uses the key's time, not a Btime override, since this corrects
+		// a storage artifact, not anything a caller asserted.
+		if keyBtime.After(attr.Mtime) {
+			attr.Mtime = keyBtime
+		}
+	}
 	attr.Ctime = ctime
-	attr.Btime = Btime(key)
 	return attr, nil
 }
 
@@ -994,6 +1026,63 @@ func (f *Filesystem) SetWindowsAttributes(ctx context.Context, uuid string, bits
 	})
 }
 
+// MarkWindowsDirSymlink records that symlink uuid is a Windows directory
+// symlink (see WindowsDirSymlinkXattrKey).
+func (f *Filesystem) MarkWindowsDirSymlink(ctx context.Context, uuid string) (Attr, error) {
+	if err := f.checkWritable(); err != nil {
+		return Attr{}, err
+	}
+	return f.updateFileMetadata(ctx, uuid, func(a *Attr) {
+		if a.Xattrs == nil {
+			a.Xattrs = make(map[string][]byte)
+		}
+		a.Xattrs[WindowsDirSymlinkXattrKey] = []byte{1}
+	})
+}
+
+// SetDirWindowsAttributes is SetWindowsAttributes for a directory,
+// whose attributes live in native metadata on its block object rather
+// than a .metadata object (see Attr's doc comment). Surfaced back
+// through Attr.Xattrs, same as for a file.
+func (f *Filesystem) SetDirWindowsAttributes(ctx context.Context, key string, bits uint32) (Attr, error) {
+	if err := f.checkWritable(); err != nil {
+		return Attr{}, err
+	}
+	obj, err := f.store.Head(ctx, key)
+	if err != nil {
+		return Attr{}, mapNotFound(err)
+	}
+	meta := make(map[string]string, len(obj.Metadata)+1)
+	for k, v := range obj.Metadata {
+		meta[k] = v
+	}
+	meta[dirMetaWinAttr] = strconv.FormatUint(uint64(bits&windowsAttrMask), 10)
+	updated, err := f.store.UpdateMetadata(ctx, key, meta, "")
+	if err != nil {
+		return Attr{}, err
+	}
+	return dirAttrFromObject(key, updated), nil
+}
+
+// SetWindowsCreateMetadata stores a new file's Windows attribute bits
+// and, when sddl is non-nil, its security descriptor, in one metadata
+// write — what a Windows create needs, without a separate round trip
+// for each.
+func (f *Filesystem) SetWindowsCreateMetadata(ctx context.Context, uuid string, bits uint32, sddl []byte) (Attr, error) {
+	if err := f.checkWritable(); err != nil {
+		return Attr{}, err
+	}
+	return f.updateFileMetadata(ctx, uuid, func(a *Attr) {
+		if a.Xattrs == nil {
+			a.Xattrs = make(map[string][]byte)
+		}
+		a.Xattrs[WindowsAttributesXattrKey] = []byte{byte(bits & windowsAttrMask)}
+		if sddl != nil {
+			a.Xattrs[WindowsACLXattrKey] = sddl
+		}
+	})
+}
+
 // SetWindowsACL persists a file/symlink's native Windows security
 // descriptor, given as its SDDL string representation (task F8;
 // WindowsACLXattrKey's own doc comment explains the SDDL choice).
@@ -1369,7 +1458,25 @@ func (f *Filesystem) writeFileFrom(ctx context.Context, key string, body io.Read
 // mode/uid/gid change goes through updateFileMetadata, which — unlike
 // the directory case — *is* real-CAS-protected, a quiet benefit of the
 // .metadata consolidation.
-func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mode, uid, gid *uint32, size *int64, atime *time.Time) (Attr, error) {
+//
+// mtime is an explicit override (Windows' SetFileTime, POSIX
+// utimensat — a pure metadata call, no content write at all) — see
+// combineFileAttr's own doc comment for a file/symlink, or
+// dirMetadataFromAttr for a directory. It intentionally does *not* get
+// cleared by a later real content write: this driver has no cheap way
+// to know, at write time, whether an override is even set without an
+// extra round trip on every single write, and a write happening to
+// land after an explicit timestamp override is rare enough that this
+// driver accepts the override simply persisting until the next
+// explicit SetAttr mtime call, rather than paying that cost on every
+// write to guard against it — a known, deliberate limitation, not an
+// oversight.
+//
+// btime is an explicit creation-time override (Windows' SetFileTime
+// CreationTime), files/symlinks only: a directory's creation time is
+// always the one embedded in its UUIDv7 key, and btime is ignored for
+// directories — a known limitation, not yet needed by any test.
+func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mode, uid, gid *uint32, size *int64, atime, mtime, btime *time.Time) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
 	}
@@ -1415,6 +1522,9 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 		if atime != nil {
 			attr.Atime = *atime
 		}
+		if mtime != nil {
+			attr.Mtime = *mtime
+		}
 		obj, err := f.store.UpdateMetadata(ctx, key, dirMetadataFromAttr(attr), "")
 		if err != nil {
 			return Attr{}, err
@@ -1442,7 +1552,7 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 		}
 	}
 
-	if mode != nil || uid != nil || gid != nil || atime != nil {
+	if mode != nil || uid != nil || gid != nil || atime != nil || mtime != nil || btime != nil {
 		return f.updateFileMetadata(ctx, key, func(a *Attr) {
 			if mode != nil {
 				a.Mode = *mode
@@ -1455,6 +1565,18 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 			}
 			if atime != nil {
 				a.Atime = *atime
+			}
+			if mtime != nil {
+				// a.Mtime, decoded fresh from this same object by
+				// updateFileMetadata just above, is already only ever
+				// the override (never the real content-derived time —
+				// see combineFileAttr) — so plainly overwriting it here
+				// is exactly "set the override," no special-casing
+				// needed to avoid clobbering something else.
+				a.Mtime = *mtime
+			}
+			if btime != nil {
+				a.Btime = *btime // likewise only ever the override here
 			}
 		})
 	}

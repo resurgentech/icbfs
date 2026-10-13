@@ -35,7 +35,7 @@ sleep 3"
 
 echo "Running pjdfstest (needs root; this can take several minutes against real network storage)..." >&2
 set +e
-ssh_vm "$IP" "sudo bash -c 'cd $MNT && prove -r ~/pjdfstest/tests'" > "$WORK_DIR/pjdfstest-${FS_NAME}.log" 2>&1
+ssh_vm "$IP" "sudo bash -c 'cd $MNT && prove -r /home/ubuntu/pjdfstest/tests'" > "$WORK_DIR/pjdfstest-${FS_NAME}.log" 2>&1
 RET=$?
 set -e
 

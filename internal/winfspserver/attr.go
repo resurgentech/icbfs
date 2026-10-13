@@ -19,9 +19,8 @@ import (
 // WinFsp expects back from Open/Create/GetFileInfo/Overwrite.
 //
 // Known simplification: ctime isn't tracked separately, so
-// CreationTime/LastWriteTime/ChangeTime all report Mtime (falling
-// back to Btime, then now, if Mtime is zero) — same reasoning
-// internal/fuseserver's fillAttr accepts.
+// LastWriteTime/ChangeTime both report Mtime (falling back to Btime,
+// then now, if Mtime is zero). CreationTime reports Btime.
 //
 // LastAccessTime (ROADMAP.md's Part G, task G1) is real, not a copy of
 // Mtime: reports a.Atime when it's been explicitly tracked (by a real
@@ -52,7 +51,7 @@ func (d *driver) fillFileInfo(info *winfsp.FSP_FSCTL_FILE_INFO, key string, typ 
 			info.ReparseTag = 0
 		}
 	}
-	info.AllocationSize = uint64(a.Size)
+	info.AllocationSize = d.allocFor(key, a.Size)
 	info.FileSize = uint64(a.Size)
 
 	mtime := a.Mtime
@@ -63,9 +62,15 @@ func (d *driver) fillFileInfo(info *winfsp.FSP_FSCTL_FILE_INFO, key string, typ 
 		mtime = time.Now()
 	}
 	ft := filetimeFromTime(mtime)
-	info.CreationTime = ft
 	info.LastWriteTime = ft
 	info.ChangeTime = ft
+	// Birth time, not mtime — an explicit SetFileTime on LastWriteTime
+	// must leave CreationTime alone (winfsp-tests' setfileinfo_test).
+	btime := a.Btime
+	if btime.IsZero() {
+		btime = mtime
+	}
+	info.CreationTime = filetimeFromTime(btime)
 
 	atime := a.Atime
 	if atime.IsZero() {
@@ -124,13 +129,22 @@ func timeFromFiletime(v uint64) time.Time {
 func (d *driver) attributesFromAttr(typ icbfs.EntryType, a icbfs.Attr) uint32 {
 	switch typ {
 	case icbfs.TypeDir:
-		return windows.FILE_ATTRIBUTE_DIRECTORY
+		attrs := uint32(windows.FILE_ATTRIBUTE_DIRECTORY)
+		if d.fsys.PrimaryWindows() {
+			if bits, ok := icbfs.WindowsAttributesFromXattrs(a.Xattrs); ok {
+				attrs |= bits
+			}
+		}
+		return attrs
 	case icbfs.TypeSymlink:
 		// Windows has no native concept of a symlink's own
 		// "read-only"-ness distinct from being a reparse point at
 		// all — this attribute is what tells the kernel/clients to
 		// resolve it via GetReparsePoint instead of treating it as
 		// regular file content.
+		if _, ok := a.Xattrs[icbfs.WindowsDirSymlinkXattrKey]; ok {
+			return windows.FILE_ATTRIBUTE_REPARSE_POINT | windows.FILE_ATTRIBUTE_DIRECTORY
+		}
 		return windows.FILE_ATTRIBUTE_REPARSE_POINT
 	default:
 		if d.fsys.PrimaryWindows() {
@@ -164,7 +178,7 @@ func (d *driver) GetFileInfo(fs *winfsp.FileSystemRef, file uintptr, info *winfs
 	if !ok {
 		return os.ErrNotExist
 	}
-	attr, err := d.fsys.Stat(ctx(), h.key, h.typ)
+	attr, err := d.stat(h)
 	if err != nil {
 		return toWinError(err)
 	}
@@ -194,22 +208,37 @@ func (d *driver) SetBasicInfo(fs *winfsp.FileSystemRef, file uintptr, flags winf
 		mode := modeFromAttributes(fileAttributes)
 		modeP = &mode
 	}
-	var atimeP *time.Time
-	// SetFileTime's explicit LastAccessTime set (ROADMAP.md's Part G,
-	// task G1) — a real, previously entirely-ignored call: this
-	// function used to accept creationTime/lastAccessTime/
-	// lastWriteTime/changeTime as parameters and silently do nothing
-	// with any of them.
+	var atimeP, mtimeP, btimeP *time.Time
+	if flags&winfsp.SetBasicInfoCreationTime != 0 {
+		b := timeFromFiletime(creationTime)
+		btimeP = &b
+	}
+	// SetFileTime's explicit LastAccessTime/LastWriteTime set
+	// (ROADMAP.md's Part G, task G1 and its follow-up) — a real,
+	// previously entirely-ignored call: this function used to accept
+	// creationTime/lastAccessTime/lastWriteTime/changeTime as
+	// parameters and silently do nothing with any of them.
 	if flags&winfsp.SetBasicInfoLastAccessTime != 0 {
 		a := timeFromFiletime(lastAccessTime)
 		atimeP = &a
 	}
-	attr, err := d.fsys.SetAttr(ctx(), h.key, h.typ, modeP, nil, nil, nil, atimeP)
+	if flags&winfsp.SetBasicInfoLastWriteTime != 0 {
+		m := timeFromFiletime(lastWriteTime)
+		mtimeP = &m
+	}
+	attr, err := d.fsys.SetAttr(ctx(), h.key, h.typ, modeP, nil, nil, nil, atimeP, mtimeP, btimeP)
 	if err != nil {
 		return toWinError(err)
 	}
-	if flags&winfsp.SetBasicInfoAttributes != 0 && h.typ != icbfs.TypeDir {
-		attr, err = d.fsys.SetWindowsAttributes(ctx(), h.key, fileAttributes)
+	if flags&winfsp.SetBasicInfoAttributes != 0 {
+		if h.typ == icbfs.TypeDir {
+			// e.g. a read-only directory (winfsp-tests'
+			// create_readonlydir_test), which Windows then refuses to
+			// remove until the bit is cleared.
+			attr, err = d.fsys.SetDirWindowsAttributes(ctx(), h.key, fileAttributes)
+		} else {
+			attr, err = d.fsys.SetWindowsAttributes(ctx(), h.key, fileAttributes)
+		}
 		if err != nil {
 			return toWinError(err)
 		}
@@ -224,28 +253,54 @@ func (d *driver) SetFileSize(fs *winfsp.FileSystemRef, file uintptr, newSize uin
 		return os.ErrNotExist
 	}
 	if setAllocationSize {
-		// Allocation-size-only changes (reserving space without
-		// changing the reported file size) have no analog in this
-		// store — a no-op, same as a sparse-file preallocation hint
-		// any backend without real sparse-file support can safely
-		// ignore. Report current info unchanged.
-		attr, err := d.fsys.Stat(ctx(), h.key, h.typ)
+		// Allocation has no storage analog here (no preallocation in an
+		// object store); it's tracked in memory while the file is open
+		// and reported back, as NTFS does. Shrinking allocation below
+		// the data size truncates the data, also as on NTFS.
+		attr, err := d.stat(h)
 		if err != nil {
 			return toWinError(err)
 		}
+		if int64(newSize) < attr.Size {
+			if err := d.flushShared(h.key); err != nil {
+				return toWinError(err)
+			}
+			size := int64(newSize)
+			if attr, err = d.fsys.SetAttr(ctx(), h.key, h.typ, nil, nil, nil, &size, nil, nil, nil); err != nil {
+				return toWinError(err)
+			}
+			d.invalidateShared(h.key)
+		}
+		d.setAlloc(h.key, newSize)
 		d.fillFileInfo(info, h.key, h.typ, attr)
 		return nil
 	}
+	// Commit buffered writes first, so the resize applies on top of
+	// them rather than them being lost (or later flushed over it).
+	if err := d.flushShared(h.key); err != nil {
+		return toWinError(err)
+	}
 	size := int64(newSize)
-	attr, err := d.fsys.SetAttr(ctx(), h.key, h.typ, nil, nil, nil, &size, nil)
+	attr, err := d.fsys.SetAttr(ctx(), h.key, h.typ, nil, nil, nil, &size, nil, nil, nil)
 	if err != nil {
 		return toWinError(err)
 	}
-	h.mu.Lock()
-	h.open = nil // drop any stale buffered OpenFile; next I/O reopens against the now-resized content
-	h.mu.Unlock()
+	d.invalidateShared(h.key) // next I/O reopens against the resized content
 	d.fillFileInfo(info, h.key, h.typ, attr)
 	return nil
+}
+
+// stat is fsys.Stat, but with Size reflecting writes still buffered in
+// the file's shared OpenFile — the store only sees them at Flush.
+func (d *driver) stat(h *fileHandle) (icbfs.Attr, error) {
+	attr, err := d.fsys.Stat(ctx(), h.key, h.typ)
+	if err != nil {
+		return attr, err
+	}
+	if open := d.currentOpen(h.key); open != nil {
+		attr.Size = open.Size()
+	}
+	return attr, nil
 }
 
 // fallbackSD is what GetSecurity/GetSecurityByName report for an entry
@@ -346,6 +401,16 @@ func approximateDACLFromMode(mode uint32) (*windows.SECURITY_DESCRIPTOR, error) 
 func (d *driver) GetSecurityByName(fs *winfsp.FileSystemRef, name string, flags winfsp.GetSecurityByNameFlags) (uint32, *windows.SECURITY_DESCRIPTOR, error) {
 	r, err := resolvePath(ctx(), d.fsys, name, d.caseInsensitive)
 	if err != nil {
+		// A symlink mid-path: hand the whole path to WinFsp's own
+		// reparse resolver (see hasIntermediateSymlink). go-winfsp
+		// doesn't pass back the reparse point index on an error return,
+		// so WinFsp gets 0 and starts its walk at the beginning of the
+		// path — it skips non-reparse components via
+		// GetReparsePointByName's STATUS_NOT_A_REPARSE_POINT, so the
+		// result is the same, just one extra lookup per component.
+		if hasIntermediateSymlink(ctx(), d.fsys, name, d.caseInsensitive) {
+			return 0, nil, windows.STATUS_REPARSE
+		}
 		return 0, nil, toWinError(err)
 	}
 	sd, err := d.securityDescriptorFor(r.Type, r.Attr)
@@ -423,7 +488,62 @@ func mergeSecurityDescriptor(base *windows.SECURITY_DESCRIPTOR, info windows.SEC
 			return nil, err
 		}
 	}
-	return abs.ToSelfRelative()
+	merged, err := abs.ToSelfRelative()
+	if err != nil {
+		return nil, err
+	}
+	if err := mapGenericFileRights(merged); err != nil {
+		return nil, err
+	}
+	return merged, nil
+}
+
+// File-specific equivalents of the generic access rights (winnt.h's
+// FILE_GENERIC_* / FILE_ALL_ACCESS) — the file object type's generic
+// mapping.
+const (
+	fileGenericRead    = 0x00120089
+	fileGenericWrite   = 0x00120116
+	fileGenericExecute = 0x001200A0
+	fileAllAccess      = 0x001F01FF
+)
+
+// mapGenericFileRights rewrites generic rights (GA/GR/GW/GX) in sd's
+// DACL to their file-specific equivalents, in place, as NTFS does when
+// security is set — so a DACL set with GA reads back as FA
+// (winfsp-tests' setsecurity_test). sd must be memory this driver owns
+// (e.g. a fresh ToSelfRelative copy), never the caller's buffer.
+func mapGenericFileRights(sd *windows.SECURITY_DESCRIPTOR) error {
+	dacl, _, err := sd.DACL()
+	if errors.Is(err, windows.ERROR_OBJECT_NOT_FOUND) || dacl == nil {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, i, &ace); err != nil {
+			return err
+		}
+		// Every standard ACE layout (allowed, denied, audit, object
+		// variants) is header-then-mask, so Mask is valid for all.
+		m := uint32(ace.Mask)
+		if m&windows.GENERIC_READ != 0 {
+			m = m&^windows.GENERIC_READ | fileGenericRead
+		}
+		if m&windows.GENERIC_WRITE != 0 {
+			m = m&^windows.GENERIC_WRITE | fileGenericWrite
+		}
+		if m&windows.GENERIC_EXECUTE != 0 {
+			m = m&^windows.GENERIC_EXECUTE | fileGenericExecute
+		}
+		if m&windows.GENERIC_ALL != 0 {
+			m = m&^windows.GENERIC_ALL | fileAllAccess
+		}
+		ace.Mask = windows.ACCESS_MASK(m)
+	}
+	return nil
 }
 
 // SetSecurity persists a merged security descriptor as the real

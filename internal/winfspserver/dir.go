@@ -45,6 +45,35 @@ func (d *driver) ReadDirectory(fs *winfsp.FileSystemRef, file uintptr, pattern s
 	// Best-effort, deliberately not checked — same reasoning as
 	// Read's own TouchAtime call (ROADMAP.md's Part G, task G1).
 	_ = d.fsys.TouchAtime(ctx(), h.key, icbfs.TypeDir)
+
+	// Every non-root directory lists "." and ".." first, as on NTFS
+	// (winfsp-tests' querydir_test). ".." reports the parent's info
+	// when the path this handle was opened with still resolves, and
+	// falls back to the directory's own info otherwise (e.g. after a
+	// rename) — only its directory-ness is load-bearing for callers.
+	if h.key != d.fsys.RootKey() {
+		self, err := d.fsys.Stat(ctx(), h.key, icbfs.TypeDir)
+		if err != nil {
+			return toWinError(err)
+		}
+		var info winfsp.FSP_FSCTL_FILE_INFO
+		d.fillFileInfo(&info, h.key, icbfs.TypeDir, self)
+		if ok, err := fill(".", &info); err != nil || !ok {
+			return err
+		}
+		parentKey, parentAttr := h.key, self
+		if dir, _ := splitParent(h.path); h.path != "" {
+			if p, err := resolvePath(ctx(), d.fsys, dir, d.caseInsensitive); err == nil && p.Type == icbfs.TypeDir {
+				parentKey, parentAttr = p.Key, p.Attr
+			}
+		}
+		info = winfsp.FSP_FSCTL_FILE_INFO{}
+		d.fillFileInfo(&info, parentKey, icbfs.TypeDir, parentAttr)
+		if ok, err := fill("..", &info); err != nil || !ok {
+			return err
+		}
+	}
+
 	for _, e := range entries {
 		attr, err := d.fsys.Stat(ctx(), e.UUID, e.Type)
 		if err != nil {

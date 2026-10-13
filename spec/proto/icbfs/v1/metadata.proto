@@ -37,4 +37,27 @@ message Metadata {
   // type, including the FIFO/socket special files task G2 also adds
   // (neither has a device number at all).
   uint32 rdev = 7;
+
+  // An explicit last-write-time override, nanoseconds since the Unix
+  // epoch (ROADMAP.md's Part G, task G1 follow-up) — set only by a
+  // caller's explicit SetFileTime/utimensat-style LastWriteTime call,
+  // never by an ordinary content write (which gets its mtime for free
+  // from the content object's own LastModified, same as always). Zero
+  // means "no override": fall back to the content object's
+  // LastModified, exactly as before this field existed. Confirmed a
+  // real gap, not a hypothetical one: winfsp-tests' own
+  // setfileinfo_test (--external) sets an arbitrary historical
+  // LastWriteTime via SetFileTime with no accompanying write at all,
+  // then expects it echoed back exactly — a real NTFS honors this
+  // (it's a pure metadata call, the direct Windows analogue of POSIX
+  // touch -t), and this driver silently dropped it before this field
+  // existed.
+  int64 mtime_override_unix_nano = 8;
+
+  // An explicit creation-time override, nanoseconds since the Unix
+  // epoch — same pattern as mtime_override_unix_nano. Zero means "no
+  // override": fall back to the time embedded in the UUIDv7 key. Set by
+  // Windows' SetFileTime(CreationTime); winfsp-tests' setfileinfo_test
+  // expects it to round-trip.
+  int64 btime_override_unix_nano = 9;
 }

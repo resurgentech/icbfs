@@ -30,6 +30,32 @@ type driver struct {
 	mu      sync.Mutex
 	handles map[uintptr]*fileHandle
 	nextID  uintptr
+
+	openMu sync.Mutex
+	opens  map[string]*sharedOpen // by key; see sharedOpen
+
+	// Per-file allocation size (FILE_ALLOCATION_INFORMATION, or a
+	// create's AllocationSize), kept only while the file has open
+	// handles — as on NTFS, unused allocation is released at last
+	// close (winfsp-tests' create_allocation_test). Guarded by mu.
+	keyOpens map[string]int
+	allocs   map[string]uint64
+}
+
+// sharedOpen is the one icbfs.OpenFile every handle on the same file
+// within this mount reads and writes through, reference-counted by
+// handle. Windows keeps one cache/FCB per file, so all handles on it
+// must see each other's writes immediately — with a private OpenFile
+// per handle, a non-cached read through one handle missed data a
+// cached handle had just written (winfsp-tests' rdwr_mixed_test).
+// icbfs.OpenFile's per-session isolation still applies across mounts
+// and clients, which is what its CAS-retry logic is about.
+type sharedOpen struct {
+	key  string
+	refs int // guarded by driver.openMu
+
+	mu   sync.Mutex
+	open *icbfs.OpenFile // nil until first real I/O, or after invalidate
 }
 
 // fileHandle is the file context WinFsp's Open/Create hand back a
@@ -38,19 +64,21 @@ type driver struct {
 // WinFsp itself, exactly like internal/fuseserver's FileHandle plays
 // the same role for go-fuse.
 //
-// open is non-nil only once this handle has actually been read from or
-// written to (lazily opened via ensureOpen) — most handles (directory
-// listings, a plain GetFileInfo-only open) never need icbfs.OpenFile's
-// buffering/CAS-retry machinery at all.
+// shared is non-nil only once this handle has actually been read from
+// or written to (lazily attached via openFile) — most handles
+// (directory listings, a plain GetFileInfo-only open) never need
+// icbfs.OpenFile's buffering/CAS-retry machinery at all.
 type fileHandle struct {
-	key string
-	typ icbfs.EntryType
+	key  string
+	typ  icbfs.EntryType
+	path string // as opened; may be stale after a rename — only used for ReadDirectory's ".."
 
-	mu      sync.Mutex
-	open    *icbfs.OpenFile
-	hasSeed bool
-	etag    string // seeded from Create, used to avoid a redundant read-back on first ensureOpen
-	seeded  []byte // seeded content from Create, paired with etag
+	mu       sync.Mutex
+	shared   *sharedOpen
+	allocKey string // key counted in driver.keyOpens; fixed at newHandle, unlike key
+	hasSeed  bool
+	etag     string // seeded from Create, used to avoid a redundant read-back on first open
+	seeded   []byte // seeded content from Create, paired with etag
 
 	dirBuf winfsp.DirBuffer // directories only; zero value until first use
 }
@@ -74,7 +102,8 @@ type fileHandle struct {
 // around leaves names the kernel already case-folded unable to match
 // at all.
 func Root(fsys *icbfs.Filesystem, caseInsensitive bool) winfsp.BehaviourBase {
-	return &driver{fsys: fsys, caseInsensitive: caseInsensitive, handles: make(map[uintptr]*fileHandle)}
+	return &driver{fsys: fsys, caseInsensitive: caseInsensitive, handles: make(map[uintptr]*fileHandle), opens: make(map[string]*sharedOpen),
+		keyOpens: make(map[string]int), allocs: make(map[string]uint64)}
 }
 
 var (
@@ -161,6 +190,8 @@ func (d *driver) newHandle(h *fileHandle) uintptr {
 	d.nextID++
 	id := d.nextID
 	d.handles[id] = h
+	h.allocKey = h.key
+	d.keyOpens[h.key]++
 	return id
 }
 
@@ -174,7 +205,31 @@ func (d *driver) handle(file uintptr) (*fileHandle, bool) {
 func (d *driver) dropHandle(file uintptr) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	h, ok := d.handles[file]
+	if !ok {
+		return
+	}
 	delete(d.handles, file)
+	if d.keyOpens[h.allocKey]--; d.keyOpens[h.allocKey] <= 0 {
+		delete(d.keyOpens, h.allocKey)
+		delete(d.allocs, h.allocKey)
+	}
+}
+
+// setAlloc records key's allocation size while it has open handles.
+func (d *driver) setAlloc(key string, size uint64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.keyOpens[key] > 0 {
+		d.allocs[key] = size
+	}
+}
+
+// allocFor is key's reported allocation size: at least its data size.
+func (d *driver) allocFor(key string, size int64) uint64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return max(d.allocs[key], uint64(size))
 }
 
 // fileOpenReparsePoint is NTCreateFile's FILE_OPEN_REPARSE_POINT
@@ -206,8 +261,23 @@ func (d *driver) Open(fs *winfsp.FileSystemRef, name string, createOptions, gran
 	if err != nil {
 		return 0, toWinError(err)
 	}
+	// A generic (non-symlink) reparse point (task G4) carries opaque
+	// data this driver never interprets — real NTFS, and winfsp-tests'
+	// own reparse_guid_test/reparse_nfs_test (confirmed against this
+	// exact driver), both require that a normal open of such a file,
+	// without FILE_FLAG_OPEN_REPARSE_POINT, be refused outright rather
+	// than silently handed back as if the reparse data weren't there:
+	// a caller with no way to interpret an opaque tag has no business
+	// reading or writing "through" it. Symlinks are exempt — they're a
+	// first-class type this driver does interpret, and resolve has
+	// already followed them above when appropriate.
+	if createOptions&fileOpenReparsePoint == 0 && r.Type != icbfs.TypeSymlink {
+		if _, ok := icbfs.GenericReparseFromXattrs(r.Attr.Xattrs); ok {
+			return 0, windows.STATUS_IO_REPARSE_TAG_NOT_HANDLED
+		}
+	}
 	d.fillFileInfo(info, r.Key, r.Type, r.Attr)
-	h := &fileHandle{key: r.Key, typ: r.Type}
+	h := &fileHandle{key: r.Key, typ: r.Type, path: name}
 	return d.newHandle(h), nil
 }
 
@@ -217,22 +287,7 @@ func (d *driver) Close(fs *winfsp.FileSystemRef, file uintptr) {
 	if !ok {
 		return
 	}
-	h.mu.Lock()
-	open := h.open
-	h.mu.Unlock()
-	if open != nil {
-		// Best-effort: a close that can't flush has nowhere left to
-		// report the error to (BehaviourBase.Close returns nothing) —
-		// same "the lease/next real write is the backstop" reasoning
-		// this project already accepts elsewhere for best-effort
-		// cleanup paths.
-		_, _ = open.Flush(ctx())
-		// Releases this session's private local scratch file
-		// (ROADMAP.md's Part G, task G3) — without this, every real
-		// close leaks a file on local disk for the life of the mount
-		// process.
-		_ = open.Close()
-	}
+	d.releaseShared(h)
 }
 
 // Create makes a new file or directory. WinFsp's own dispatcher
@@ -253,13 +308,32 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 	uid, gid := callerOwner()
 
 	const fileDirectoryFile = 0x00000001 // FILE_DIRECTORY_FILE, low byte of NtCreateFile's CreateOptions
+	// A *directory* symlink (CreateSymbolicLinkW with
+	// SYMBOLIC_LINK_FLAG_DIRECTORY, ROADMAP.md's Part G, task G4/G5)
+	// sets FILE_DIRECTORY_FILE too, identically to a real mkdir — there
+	// is no reliable createOptions/fileAttributes signal at this point
+	// to tell the two apart. Confirmed empirically, not assumed: a real
+	// debug trace of this exact test (winfsp-tests' own
+	// reparse_symlink_relative_test, --external) showed its own plain
+	// CreateDirectoryW("\1") and its CreateSymbolicLinkW("\ld", ...,
+	// SYMBOLIC_LINK_FLAG_DIRECTORY) placeholder create produce the
+	// *identical* createOptions value (0x02200021) — FILE_DIRECTORY_FILE
+	// and FILE_OPEN_REPARSE_POINT both set in both cases,
+	// FILE_OPEN_FOR_BACKUP_INTENT absent from both. (A separate manual
+	// probe via PowerShell's New-Item/raw CreateDirectoryW did set
+	// FILE_OPEN_FOR_BACKUP_INTENT — a caller-dependent detail, not a
+	// stable protocol signal, and chasing it broke plain mkdir outright
+	// before this was caught.) So: always make a real directory here,
+	// same as before this task; SetReparsePoint (reparse.go) is what
+	// actually resolves the ambiguity, by converting *that* directory
+	// into a symlink if a symlink reparse buffer arrives for it next.
 	if createOptions&fileDirectoryFile != 0 {
 		newUUID, attr, err := d.fsys.Mkdir(ctx(), parent.Key, base, 0755, uid, gid)
 		if err != nil {
 			return 0, toWinError(err)
 		}
 		d.fillFileInfo(info, newUUID, icbfs.TypeDir, attr)
-		return d.newHandle(&fileHandle{key: newUUID, typ: icbfs.TypeDir}), nil
+		return d.newHandle(&fileHandle{key: newUUID, typ: icbfs.TypeDir, path: name}), nil
 	}
 
 	mode := modeFromAttributes(fileAttributes)
@@ -283,14 +357,28 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 	// fix (it only ever stored exactly what the caller passed, masked
 	// to the four real bits — a NORMAL-only create stored and reported
 	// back nothing set at all).
-	if attr, err = d.fsys.SetWindowsAttributes(ctx(), newUUID, fileAttributes|icbfs.WindowsAttrArchive); err != nil {
+	//
+	// The security descriptor WinFsp passes for the new file is stored
+	// too, in the same metadata write — previously it was ignored and
+	// every new file got the default full-access descriptor, so e.g. a
+	// file created with DELETE-only access could still be opened for
+	// reading (winfsp-tests' getfileattr_test).
+	var sddl []byte
+	if securityDescriptor != nil {
+		sddl = []byte(securityDescriptor.String())
+	}
+	if attr, err = d.fsys.SetWindowsCreateMetadata(ctx(), newUUID, fileAttributes|icbfs.WindowsAttrArchive, sddl); err != nil {
 		return 0, toWinError(err)
 	}
-	d.fillFileInfo(info, newUUID, icbfs.TypeFile, attr)
 	// seeded empty, not nil: a just-created file's content really is
-	// zero bytes, distinct from "not seeded yet" — ensureOpen below
+	// zero bytes, distinct from "not seeded yet" — openFile below
 	// tells the two apart via hasSeed, not a nil check on this slice.
-	return d.newHandle(&fileHandle{key: newUUID, typ: icbfs.TypeFile, etag: etag, seeded: []byte{}, hasSeed: true}), nil
+	id := d.newHandle(&fileHandle{key: newUUID, typ: icbfs.TypeFile, path: name, etag: etag, seeded: []byte{}, hasSeed: true})
+	if allocationSize > 0 {
+		d.setAlloc(newUUID, allocationSize)
+	}
+	d.fillFileInfo(info, newUUID, icbfs.TypeFile, attr)
+	return id, nil
 }
 
 // Overwrite truncates an existing file back to empty, same as Windows'
@@ -304,13 +392,33 @@ func (d *driver) Overwrite(fs *winfsp.FileSystemRef, file uintptr, attributes ui
 		return os.ErrNotExist
 	}
 	var zero int64
-	attr, err := d.fsys.SetAttr(ctx(), h.key, h.typ, nil, nil, nil, &zero, nil)
+	attr, err := d.fsys.SetAttr(ctx(), h.key, h.typ, nil, nil, nil, &zero, nil, nil, nil)
 	if err != nil {
 		return toWinError(err)
 	}
-	h.mu.Lock()
-	h.open = nil // drop any stale buffered OpenFile; next I/O reopens against the now-truncated content
-	h.mu.Unlock()
+	// Buffered writes from before the truncate are discarded, not
+	// flushed — an overwrite replaces the content wholesale.
+	d.invalidateShared(h.key)
+
+	// CREATE_ALWAYS/TRUNCATE_EXISTING carry attributes too: replace or
+	// merge them per replaceAttributes, with Archive always set, as on
+	// NTFS (winfsp-tests' create_fileattr_test).
+	bits := attributes
+	if !replaceAttributes {
+		if old, ok := icbfs.WindowsAttributesFromXattrs(attr.Xattrs); ok {
+			bits |= old
+		} else {
+			bits |= d.attributesFromAttr(h.typ, attr)
+		}
+	}
+	bits |= icbfs.WindowsAttrArchive
+	mode := modeFromAttributes(bits)
+	if attr, err = d.fsys.SetAttr(ctx(), h.key, h.typ, &mode, nil, nil, nil, nil, nil, nil); err != nil {
+		return toWinError(err)
+	}
+	if attr, err = d.fsys.SetWindowsAttributes(ctx(), h.key, bits); err != nil {
+		return toWinError(err)
+	}
 	d.fillFileInfo(info, h.key, h.typ, attr)
 	return nil
 }
@@ -414,29 +522,153 @@ func (d *driver) Rename(fs *winfsp.FileSystemRef, file uintptr, source, target s
 	}
 	newBase = realStoredName(ctx(), d.fsys, newParent.Key, newBase, d.caseInsensitive)
 
+	// Windows never lets a rename replace an existing directory, even
+	// with MOVEFILE_REPLACE_EXISTING — STATUS_ACCESS_DENIED, as on NTFS
+	// and WinFsp's own memfs (winfsp-tests' rename_test). POSIX
+	// rename(2) does allow replacing an empty directory, which is what
+	// icbfs.Filesystem.Rename implements, so this is Windows-only.
+	if replaceIfExist {
+		if e, _, err := d.fsys.Lookup(ctx(), newParent.Key, newBase); err == nil && e.Type == icbfs.TypeDir {
+			return windows.STATUS_ACCESS_DENIED
+		}
+	}
+
 	return toWinError(d.fsys.Rename(ctx(), oldParent.Key, oldBase, newParent.Key, newBase, replaceIfExist))
 }
 
-// ensureOpen lazily creates h's icbfs.OpenFile on first real I/O —
-// most handles (a bare GetFileInfo, a directory listing) never touch
-// this at all.
-func (h *fileHandle) ensureOpen(fsys *icbfs.Filesystem) (*icbfs.OpenFile, error) {
+// openFile returns the OpenFile shared by every handle on h's file,
+// attaching h to it (and taking a reference) on first real I/O — most
+// handles (a bare GetFileInfo, a directory listing) never touch this.
+func (d *driver) openFile(h *fileHandle) (*icbfs.OpenFile, error) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.open != nil {
-		return h.open, nil
+	if h.shared == nil {
+		d.openMu.Lock()
+		s := d.opens[h.key]
+		if s == nil {
+			s = &sharedOpen{key: h.key}
+			d.opens[h.key] = s
+		}
+		s.refs++
+		d.openMu.Unlock()
+		h.shared = s
 	}
-	if h.hasSeed {
-		h.open = fsys.NewOpenFile(h.key, h.etag, h.seeded)
-		h.hasSeed = false
-		return h.open, nil
+	s := h.shared
+	hasSeed, etag, seeded := h.hasSeed, h.etag, h.seeded
+	h.hasSeed, h.seeded = false, nil
+	h.mu.Unlock()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.open != nil {
+		return s.open, nil
 	}
-	open, err := fsys.Open(ctx(), h.key)
+	if hasSeed {
+		s.open = d.fsys.NewOpenFile(h.key, etag, seeded)
+		return s.open, nil
+	}
+	open, err := d.fsys.Open(ctx(), h.key)
 	if err != nil {
 		return nil, err
 	}
-	h.open = open
+	s.open = open
 	return open, nil
+}
+
+// currentOpen returns key's shared OpenFile if some handle already has
+// one in use, without creating one.
+func (d *driver) currentOpen(key string) *icbfs.OpenFile {
+	d.openMu.Lock()
+	s := d.opens[key]
+	d.openMu.Unlock()
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.open
+}
+
+// flushShared commits key's shared OpenFile's pending writes, if any.
+// Called before an operation that changes content behind OpenFile's
+// back (Overwrite, SetFileSize), so buffered writes are neither lost
+// nor later flushed on top of that change.
+func (d *driver) flushShared(key string) error {
+	if open := d.currentOpen(key); open != nil {
+		if _, err := open.Flush(ctx()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// invalidateShared drops key's shared OpenFile after its content was
+// changed directly in the store; the next I/O on any handle reopens it.
+// Also discards any handle's unused Create seed for key: a seed is the
+// content as of creation, and using it after a resize made a freshly
+// extended file read as empty — page-in reads got EOF inside the file's
+// reported size, and memory-mapped writes were lost (winfsp-tests'
+// rdwr_mmap_test).
+func (d *driver) invalidateShared(key string) {
+	d.mu.Lock()
+	for _, h := range d.handles {
+		if h.key == key {
+			h.mu.Lock()
+			h.hasSeed, h.seeded = false, nil
+			h.mu.Unlock()
+		}
+	}
+	d.mu.Unlock()
+
+	d.openMu.Lock()
+	s := d.opens[key]
+	d.openMu.Unlock()
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.open != nil {
+		_ = s.open.Close()
+		s.open = nil
+	}
+}
+
+// releaseShared drops h's reference, flushing (every close, as before)
+// and releasing the scratch file once the last handle is gone.
+func (d *driver) releaseShared(h *fileHandle) {
+	h.mu.Lock()
+	s := h.shared
+	h.shared = nil
+	h.mu.Unlock()
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.open != nil {
+		// Best-effort: a close that can't flush has nowhere left to
+		// report the error to (BehaviourBase.Close returns nothing).
+		_, _ = s.open.Flush(ctx())
+	}
+	s.mu.Unlock()
+
+	d.openMu.Lock()
+	s.refs--
+	last := s.refs == 0
+	if last && d.opens[s.key] == s {
+		delete(d.opens, s.key)
+	}
+	d.openMu.Unlock()
+	if last {
+		s.mu.Lock()
+		if s.open != nil {
+			// Releases the private local scratch file (ROADMAP.md's
+			// Part G, task G3) — otherwise it leaks for the life of
+			// the mount process.
+			_ = s.open.Close()
+			s.open = nil
+		}
+		s.mu.Unlock()
+	}
 }
 
 // callerOwner returns the uid/gid new entries this driver creates get.

@@ -97,6 +97,16 @@ func main() {
 		mountpoint,
 		winfsp.FileSystemName("icbfs"),
 		winfsp.CaseSensitive(!*caseInsensitive),
+		// icbfs's storage is always case-preserving (exactly what was
+		// typed at create time is what's stored), regardless of
+		// *caseInsensitive — that flag only loosens *lookup*, per
+		// winfspserver.Root's own doc comment. go-winfsp defaults this
+		// to false ("filesystem does not preserve cases"), which told
+		// the kernel to normalize reported names instead of returning
+		// the real on-disk case — confirmed via winfsp-tests'
+		// getfileinfo_test (--external) reporting "\FILE0" back for a
+		// file created as "\file0".
+		winfsp.CasePreserveNames(true),
 	)
 	if err != nil {
 		log.Fatalf("mount %s: %v", mountpoint, err)

@@ -52,9 +52,30 @@ type Metadata struct {
 	// Part G, task G2) — meaningless and always 0 for every other entry
 	// type, including the FIFO/socket special files task G2 also adds
 	// (neither has a device number at all).
-	Rdev          uint32 `protobuf:"varint,7,opt,name=rdev,proto3" json:"rdev,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Rdev uint32 `protobuf:"varint,7,opt,name=rdev,proto3" json:"rdev,omitempty"`
+	// An explicit last-write-time override, nanoseconds since the Unix
+	// epoch (ROADMAP.md's Part G, task G1 follow-up) — set only by a
+	// caller's explicit SetFileTime/utimensat-style LastWriteTime call,
+	// never by an ordinary content write (which gets its mtime for free
+	// from the content object's own LastModified, same as always). Zero
+	// means "no override": fall back to the content object's
+	// LastModified, exactly as before this field existed. Confirmed a
+	// real gap, not a hypothetical one: winfsp-tests' own
+	// setfileinfo_test (--external) sets an arbitrary historical
+	// LastWriteTime via SetFileTime with no accompanying write at all,
+	// then expects it echoed back exactly — a real NTFS honors this
+	// (it's a pure metadata call, the direct Windows analogue of POSIX
+	// touch -t), and this driver silently dropped it before this field
+	// existed.
+	MtimeOverrideUnixNano int64 `protobuf:"varint,8,opt,name=mtime_override_unix_nano,json=mtimeOverrideUnixNano,proto3" json:"mtime_override_unix_nano,omitempty"`
+	// An explicit creation-time override, nanoseconds since the Unix
+	// epoch — same pattern as mtime_override_unix_nano. Zero means "no
+	// override": fall back to the time embedded in the UUIDv7 key. Set by
+	// Windows' SetFileTime(CreationTime); winfsp-tests' setfileinfo_test
+	// expects it to round-trip.
+	BtimeOverrideUnixNano int64 `protobuf:"varint,9,opt,name=btime_override_unix_nano,json=btimeOverrideUnixNano,proto3" json:"btime_override_unix_nano,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *Metadata) Reset() {
@@ -136,11 +157,25 @@ func (x *Metadata) GetRdev() uint32 {
 	return 0
 }
 
+func (x *Metadata) GetMtimeOverrideUnixNano() int64 {
+	if x != nil {
+		return x.MtimeOverrideUnixNano
+	}
+	return 0
+}
+
+func (x *Metadata) GetBtimeOverrideUnixNano() int64 {
+	if x != nil {
+		return x.BtimeOverrideUnixNano
+	}
+	return 0
+}
+
 var File_spec_proto_icbfs_v1_metadata_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\n" +
-	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\"\x87\x02\n" +
+	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\"\xf9\x02\n" +
 	"\bMetadata\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\rR\x04mode\x12\x10\n" +
 	"\x03uid\x18\x02 \x01(\rR\x03uid\x12\x10\n" +
@@ -148,7 +183,9 @@ const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\x05nlink\x18\x04 \x01(\rR\x05nlink\x126\n" +
 	"\x06xattrs\x18\x05 \x03(\v2\x1e.icbfs.v1.Metadata.XattrsEntryR\x06xattrs\x12&\n" +
 	"\x0fatime_unix_nano\x18\x06 \x01(\x03R\ratimeUnixNano\x12\x12\n" +
-	"\x04rdev\x18\a \x01(\rR\x04rdev\x1a9\n" +
+	"\x04rdev\x18\a \x01(\rR\x04rdev\x127\n" +
+	"\x18mtime_override_unix_nano\x18\b \x01(\x03R\x15mtimeOverrideUnixNano\x127\n" +
+	"\x18btime_override_unix_nano\x18\t \x01(\x03R\x15btimeOverrideUnixNano\x1a9\n" +
 	"\vXattrsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01B+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"

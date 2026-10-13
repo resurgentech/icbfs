@@ -245,3 +245,48 @@ func TestResolvePathThroughNonDirectoryFails(t *testing.T) {
 		t.Fatalf("resolvePath(through a file) = %v, want ErrNotDir", err)
 	}
 }
+
+// TestHasIntermediateSymlink covers the check GetSecurityByName uses to
+// hand a path with a symlink mid-way through it to WinFsp's own reparse
+// resolver: true only when a symlink sits before the last component.
+func TestHasIntermediateSymlink(t *testing.T) {
+	fsys := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+
+	dir1, _, err := fsys.Mkdir(ctx, root, "1", 0755, 0, 0)
+	if err != nil {
+		t.Fatalf("mkdir 1: %v", err)
+	}
+	if _, _, err := fsys.Mkdir(ctx, dir1, "1.1", 0755, 0, 0); err != nil {
+		t.Fatalf("mkdir 1.1: %v", err)
+	}
+	dir2, _, err := fsys.Mkdir(ctx, root, "2", 0755, 0, 0)
+	if err != nil {
+		t.Fatalf("mkdir 2: %v", err)
+	}
+	if _, _, err := fsys.Symlink(ctx, dir2, "l1", `..\1\.`, 0, 0); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if _, _, _, err := fsys.Create(ctx, root, "file.txt", 0644, 0, 0); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{`\2\l1\1.1\x`, true},
+		{`\2\l1\1.1`, true},
+		{`\2\l1`, false},         // last component: not traversed through
+		{`\1\1.1\x`, false},      // plain directories only
+		{`\file.txt\sub`, false}, // a file mid-path is ErrNotDir, not a reparse
+		{`\missing\x`, false},
+		{`\`, false},
+	}
+	for _, c := range cases {
+		if got := hasIntermediateSymlink(ctx, fsys, c.path, false); got != c.want {
+			t.Errorf("hasIntermediateSymlink(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+}

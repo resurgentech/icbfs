@@ -418,7 +418,7 @@ func TestSetAttrRejectsNegativeSizeInsteadOfCrashing(t *testing.T) {
 	}
 
 	negative := int64(-1)
-	if _, err := fsys.SetAttr(ctx, uuid, TypeFile, nil, nil, nil, &negative, nil); !errors.Is(err, ErrInvalidArgument) {
+	if _, err := fsys.SetAttr(ctx, uuid, TypeFile, nil, nil, nil, &negative, nil, nil, nil); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("SetAttr with negative size = %v, want ErrInvalidArgument", err)
 	}
 
@@ -455,7 +455,7 @@ func TestSetAttrRejectsHugeSizeInsteadOfCrashing(t *testing.T) {
 	}
 
 	huge := int64(999999999999999)
-	if _, err := fsys.SetAttr(ctx, uuid, TypeFile, nil, nil, nil, &huge, nil); !errors.Is(err, ErrInvalidArgument) {
+	if _, err := fsys.SetAttr(ctx, uuid, TypeFile, nil, nil, nil, &huge, nil, nil, nil); !errors.Is(err, ErrInvalidArgument) {
 		t.Fatalf("SetAttr with huge size = %v, want ErrInvalidArgument", err)
 	}
 
@@ -624,7 +624,7 @@ func TestSetAttrSetsExplicitAtime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := fsys.SetAttr(ctx, fileUUID, TypeFile, nil, nil, nil, nil, &explicit); err != nil {
+	if _, err := fsys.SetAttr(ctx, fileUUID, TypeFile, nil, nil, nil, nil, &explicit, nil, nil); err != nil {
 		t.Fatalf("SetAttr explicit atime (file): %v", err)
 	}
 	fileAttr, err := fsys.Stat(ctx, fileUUID, TypeFile)
@@ -639,7 +639,7 @@ func TestSetAttrSetsExplicitAtime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	if _, err := fsys.SetAttr(ctx, dirUUID, TypeDir, nil, nil, nil, nil, &explicit); err != nil {
+	if _, err := fsys.SetAttr(ctx, dirUUID, TypeDir, nil, nil, nil, nil, &explicit, nil, nil); err != nil {
 		t.Fatalf("SetAttr explicit atime (dir): %v", err)
 	}
 	dirAttr, err := fsys.Stat(ctx, dirUUID, TypeDir)
@@ -648,6 +648,55 @@ func TestSetAttrSetsExplicitAtime(t *testing.T) {
 	}
 	if !dirAttr.Atime.Equal(explicit) {
 		t.Fatalf("dir Atime = %v, want %v", dirAttr.Atime, explicit)
+	}
+}
+
+// TestSetAttrExplicitMtimeBtimeOverrides covers the nullable mtime/btime
+// overrides: unset, mtime follows content and is never earlier than the
+// creation time; set (even to a date long before creation, as Windows'
+// SetFileTime allows), both round-trip exactly and survive an unrelated
+// metadata change.
+func TestSetAttrExplicitMtimeBtimeOverrides(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+
+	uuid, _, _, err := fsys.Create(ctx, root, "override.txt", 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	before, err := fsys.Stat(ctx, uuid, TypeFile)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if !before.Btime.Equal(Btime(uuid)) {
+		t.Fatalf("Btime without override = %v, want key time %v", before.Btime, Btime(uuid))
+	}
+	if before.Mtime.Before(before.Btime) {
+		t.Fatalf("Mtime %v earlier than Btime %v", before.Mtime, before.Btime)
+	}
+
+	mtime := time.Date(1970, 1, 1, 7, 52, 26, 0, time.UTC)
+	btime := time.Date(1999, 12, 31, 23, 59, 59, 0, time.UTC)
+	if _, err := fsys.SetAttr(ctx, uuid, TypeFile, nil, nil, nil, nil, nil, &mtime, &btime); err != nil {
+		t.Fatalf("SetAttr overrides: %v", err)
+	}
+	mode := uint32(0600)
+	if _, err := fsys.SetAttr(ctx, uuid, TypeFile, &mode, nil, nil, nil, nil, nil, nil); err != nil {
+		t.Fatalf("SetAttr mode: %v", err)
+	}
+	after, err := fsys.Stat(ctx, uuid, TypeFile)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if !after.Mtime.Equal(mtime) {
+		t.Fatalf("Mtime = %v, want override %v", after.Mtime, mtime)
+	}
+	if !after.Btime.Equal(btime) {
+		t.Fatalf("Btime = %v, want override %v", after.Btime, btime)
+	}
+	if after.Mode != 0600 {
+		t.Fatalf("mode = %o, want 600", after.Mode)
 	}
 }
 

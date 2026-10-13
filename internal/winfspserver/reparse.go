@@ -260,7 +260,24 @@ func (d *driver) SetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 	// SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE.
 	base = realStoredName(ctx(), d.fsys, parent.Key, base, d.caseInsensitive)
 
-	if h.typ != icbfs.TypeSymlink {
+	// A *directory* symlink (SYMBOLIC_LINK_FLAG_DIRECTORY) arrives here
+	// as a real icbfs directory, not a file — Create (driver.go) has no
+	// reliable way to tell a directory-symlink placeholder apart from
+	// an ordinary mkdir at create time (confirmed empirically: both
+	// produce identical createOptions for this exact call), so it
+	// always makes a real directory, and resolving the ambiguity is
+	// this call's job instead: Rmdir, not Unlink, for that case —
+	// Unlink on a directory fails outright (icbfs.ErrIsDir), which is
+	// exactly what broke this before (surfaced to the caller as
+	// STATUS_FILE_IS_A_DIRECTORY). The placeholder is always freshly
+	// created and still empty, so Rmdir's "non-empty" rejection never
+	// applies here.
+	wasDir := h.typ == icbfs.TypeDir
+	if wasDir {
+		if err := d.fsys.Rmdir(ctx(), parent.Key, base); err != nil {
+			return toWinError(err)
+		}
+	} else if h.typ != icbfs.TypeSymlink {
 		if err := d.fsys.Unlink(ctx(), parent.Key, base); err != nil {
 			return toWinError(err)
 		}
@@ -268,6 +285,14 @@ func (d *driver) SetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 	newUUID, _, err := d.fsys.Symlink(ctx(), parent.Key, base, target, 0, 0)
 	if err != nil {
 		return toWinError(err)
+	}
+	if wasDir {
+		// Windows treats a directory symlink as a directory from here
+		// on (e.g. RemoveDirectory removes it — winfsp-tests'
+		// reparse_symlink_relative_test); see attributesFromAttr.
+		if _, err := d.fsys.MarkWindowsDirSymlink(ctx(), newUUID); err != nil {
+			return toWinError(err)
+		}
 	}
 	h.key = newUUID
 	h.typ = icbfs.TypeSymlink

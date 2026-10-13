@@ -96,6 +96,12 @@ func WindowsACLFromXattrs(xattrs map[string][]byte) (sddl []byte, ok bool) {
 	return v, true
 }
 
+// WindowsDirSymlinkXattrKey marks a symlink created as a Windows
+// *directory* symlink (CreateSymbolicLinkW's SYMBOLIC_LINK_FLAG_DIRECTORY):
+// Windows reports and opens those as directories (RemoveDirectory, not
+// DeleteFile, removes one), whereas POSIX has no such distinction.
+const WindowsDirSymlinkXattrKey = "windows.symlinkd"
+
 // GenericReparseXattrKey is the well-known xattrs map key a file's
 // *non-symlink* reparse point data is stored under (ROADMAP.md's Part
 // G, task G4) — `winfsp-tests`' own `reparse_guid_test`/
@@ -147,7 +153,7 @@ type Attr struct {
 	Mtime  time.Time
 	Ctime  time.Time
 	Btime  time.Time         // derived from the UUIDv7 key; zero if the key isn't a UUIDv7
-	Xattrs map[string][]byte // file/symlink only; nil for directories
+	Xattrs map[string][]byte // directories: only WindowsAttributesXattrKey, if ever set
 	Rdev   uint32            // TypeCharDevice/TypeBlockDevice only (ROADMAP.md's Part G, task G2); 0 for every other type
 }
 
@@ -162,6 +168,11 @@ const (
 	dirMetaNlink = "nlink"
 	dirMetaMtime = "mtime"
 	dirMetaAtime = "atime"
+	// dirMetaWinAttr holds a directory's Windows attribute bits (e.g.
+	// ReadOnly, Hidden), surfaced through Attr.Xattrs under
+	// WindowsAttributesXattrKey — the same place a file's live — so
+	// access layers read them the same way for both.
+	dirMetaWinAttr = "winattr"
 )
 
 // dirMetadataFromAttr builds the object-metadata map a directory block
@@ -186,6 +197,9 @@ func dirMetadataFromAttr(a Attr) map[string]string {
 	// "now" the way mtime does above.
 	if !a.Atime.IsZero() {
 		m[dirMetaAtime] = strconv.FormatInt(a.Atime.UnixNano(), 10)
+	}
+	if bits, ok := WindowsAttributesFromXattrs(a.Xattrs); ok {
+		m[dirMetaWinAttr] = strconv.FormatUint(uint64(bits), 10)
 	}
 	return m
 }
@@ -234,14 +248,31 @@ func encodeFileMetadata(a Attr) ([]byte, error) {
 		// rather than encoding that nonsense value.
 		atimeNano = a.Atime.UnixNano()
 	}
+	var mtimeOverrideNano int64
+	if !a.Mtime.IsZero() {
+		// Same zero-value care as atime above. a.Mtime here is only
+		// ever the *override* (see combineFileAttr/decodeFileMetadata):
+		// a real content write's mtime always comes for free from the
+		// content object's own LastModified and is never passed through
+		// this struct at all, so there's nothing to accidentally encode
+		// here on an ordinary write.
+		mtimeOverrideNano = a.Mtime.UnixNano()
+	}
+	var btimeOverrideNano int64
+	if !a.Btime.IsZero() {
+		// Same as mtime: a.Btime here is only ever the override.
+		btimeOverrideNano = a.Btime.UnixNano()
+	}
 	return proto.Marshal(&pb.Metadata{
-		Mode:          a.Mode,
-		Uid:           a.Uid,
-		Gid:           a.Gid,
-		Nlink:         a.Nlink,
-		Xattrs:        a.Xattrs,
-		AtimeUnixNano: atimeNano,
-		Rdev:          a.Rdev,
+		Mode:                  a.Mode,
+		Uid:                   a.Uid,
+		Gid:                   a.Gid,
+		Nlink:                 a.Nlink,
+		Xattrs:                a.Xattrs,
+		AtimeUnixNano:         atimeNano,
+		Rdev:                  a.Rdev,
+		MtimeOverrideUnixNano: mtimeOverrideNano,
+		BtimeOverrideUnixNano: btimeOverrideNano,
 	})
 }
 
@@ -262,6 +293,13 @@ func decodeFileMetadata(data []byte) (Attr, error) {
 	if m.AtimeUnixNano != 0 {
 		atime = time.Unix(0, m.AtimeUnixNano).UTC()
 	}
+	var mtimeOverride, btimeOverride time.Time
+	if m.MtimeOverrideUnixNano != 0 {
+		mtimeOverride = time.Unix(0, m.MtimeOverrideUnixNano).UTC()
+	}
+	if m.BtimeOverrideUnixNano != 0 {
+		btimeOverride = time.Unix(0, m.BtimeOverrideUnixNano).UTC()
+	}
 	return Attr{
 		Mode:   m.Mode,
 		Uid:    m.Uid,
@@ -269,7 +307,13 @@ func decodeFileMetadata(data []byte) (Attr, error) {
 		Nlink:  m.Nlink,
 		Xattrs: m.Xattrs,
 		Atime:  atime,
-		Rdev:   m.Rdev,
+		// Mtime here carries only the explicit override, if any — see
+		// combineFileAttr, which is what this decode's caller (statFile)
+		// always goes through for the real, content-derived Mtime it
+		// falls back to when this is zero.
+		Mtime: mtimeOverride,
+		Btime: btimeOverride, // same: override only; see combineFileAttr
+		Rdev:  m.Rdev,
 	}, nil
 }
 

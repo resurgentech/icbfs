@@ -88,6 +88,35 @@ func resolvePath(ctx context.Context, fsys *icbfs.Filesystem, path string, caseI
 	return resolved{Key: key, Type: typ, Attr: attr}, nil
 }
 
+// hasIntermediateSymlink reports whether walking path reaches a symlink
+// before its last component — a symlink a lookup would have to traverse
+// *through*, which resolvePath deliberately never does itself. On
+// Windows that case belongs to WinFsp's own reparse resolver instead:
+// GetSecurityByName answers STATUS_REPARSE for it, the same way
+// WinFsp's reference memfs uses FspFileSystemFindReparsePoint, and WinFsp
+// then walks the path through GetReparsePointByName, handles relative
+// targets and "."/"..", and reissues the open against the result
+// (winfsp-tests' reparse_symlink_relative_test).
+func hasIntermediateSymlink(ctx context.Context, fsys *icbfs.Filesystem, path string, caseInsensitive bool) bool {
+	segments := splitPath(path)
+	key := fsys.RootKey()
+	for _, name := range segments[:max(len(segments)-1, 0)] {
+		entry, _, err := lookupCaseAware(ctx, fsys, key, name, caseInsensitive)
+		if err != nil {
+			return false
+		}
+		switch entry.Type {
+		case icbfs.TypeSymlink:
+			return true
+		case icbfs.TypeDir:
+			key = entry.UUID
+		default:
+			return false
+		}
+	}
+	return false
+}
+
 // lookupCaseAware is fsys.Lookup, with an optional case-insensitive
 // fallback: an exact match is always tried first (and is always what
 // gets returned when one exists, even in case-insensitive mode — this

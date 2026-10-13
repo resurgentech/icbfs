@@ -295,7 +295,11 @@ func (n *Node) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn,
 		atimeP = &a
 	}
 
-	attr, err := n.fsys.SetAttr(ctx, n.key, n.typ, modeP, uidP, gidP, sizeP, atimeP)
+	// mtime (utimensat's explicit LastWriteTime-equivalent) isn't wired
+	// here yet — out of scope for this change, same unaddressed gap as
+	// atime had before task G1, left as nil (no override) rather than
+	// silently extended here.
+	attr, err := n.fsys.SetAttr(ctx, n.key, n.typ, modeP, uidP, gidP, sizeP, atimeP, nil, nil)
 	if err != nil {
 		return errnoFromErr(err)
 	}
