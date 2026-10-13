@@ -1522,3 +1522,35 @@ func TestMountAsOf(t *testing.T) {
 		t.Fatalf("statfs used %d bytes, want about %d", got, used)
 	}
 }
+
+// TestInterruptedFlushStillStores: an interrupt cancels the request's
+// context (and the Go runtime's preemption signals interrupt FUSE
+// requests all the time under load). A flush must finish anyway —
+// cancelled, it used to fail with EIO and leave the data unstored.
+func TestInterruptedFlushStillStores(t *testing.T) {
+	ctx := context.Background()
+	fsys := icbfs.New(newMountTestStore(t), "interrupt")
+	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	key, _, etag, err := fsys.Create(ctx, fsys.RootKey(), "f", 0644, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newFileHandle(fsys.NewOpenFile(key, etag, nil))
+	defer h.open.Close()
+	if _, errno := h.Write(ctx, []byte("kept"), 0); errno != 0 {
+		t.Fatalf("write: %v", errno)
+	}
+	interrupted, cancel := context.WithCancel(ctx)
+	cancel()
+	if errno := h.Flush(interrupted); errno != 0 {
+		t.Fatalf("flush with an interrupted context: %v", errno)
+	}
+	if data, _, _, err := fsys.ReadFile(ctx, key); err != nil || string(data) != "kept" {
+		t.Fatalf("stored content = %q, %v; want %q", data, err, "kept")
+	}
+	if got := errnoFromErr(context.Canceled); got != syscall.EINTR {
+		t.Fatalf("an interrupted blocking wait maps to %v, want EINTR", got)
+	}
+}

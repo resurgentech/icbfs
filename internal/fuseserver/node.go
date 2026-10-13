@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"sync"
 	"sync/atomic"
@@ -211,12 +212,18 @@ func errnoFromErr(err error) syscall.Errno {
 		// — found as a real crash (make([]byte, negative) panics)
 		// via pjdfstest, not hypothetical.
 		return syscall.EINVAL
+	case errors.Is(err, context.Canceled):
+		// An interrupted blocking lock wait (see detach).
+		return syscall.EINTR
 	default:
+		// The kernel only gets "I/O error"; keep the cause.
+		log.Printf("icbfs: %v (reported as EIO)", err)
 		return syscall.EIO
 	}
 }
 
 func (n *Node) newChild(ctx context.Context, key string, typ icbfs.EntryType) *fs.Inode {
+	ctx = detach(ctx)
 	child := &Node{fsys: n.fsys, key: key, typ: typ, watches: n.watches, logger: n.logger}
 	stable := fs.StableAttr{Ino: icbfs.Ino(key), Mode: typeToFuseMode(typ)}
 	// StableAttr.Ino dedups against any already-known inode with the same
@@ -234,6 +241,7 @@ func (n *Node) newChild(ctx context.Context, key string, typ icbfs.EntryType) *f
 }
 
 func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	ctx = detach(ctx)
 	entry, attr, err := n.fsys.Lookup(ctx, n.key, name)
 	if err != nil {
 		return nil, errnoFromErr(err)
@@ -243,6 +251,7 @@ func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 }
 
 func (n *Node) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	ctx = detach(ctx)
 	attr, err := n.fsys.Stat(ctx, n.key, n.typ)
 	if err != nil {
 		return errnoFromErr(err)
@@ -258,6 +267,7 @@ func (n *Node) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) 
 // equal to Bfree (no distinct "reserved for root" reservation exists
 // here, unlike a real block device).
 func (n *Node) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
+	ctx = detach(ctx)
 	total, used, err := n.fsys.StatFS(ctx)
 	if err != nil {
 		return errnoFromErr(err)
@@ -286,6 +296,7 @@ func (n *Node) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
 }
 
 func (n *Node) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	ctx = detach(ctx)
 	var modeP, uidP, gidP *uint32
 	var sizeP *int64
 	var atimeP *time.Time
@@ -325,6 +336,7 @@ func (n *Node) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn,
 }
 
 func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	ctx = detach(ctx)
 	entries, err := n.fsys.ReadDir(ctx, n.key)
 	if err != nil {
 		return nil, errnoFromErr(err)
@@ -348,6 +360,7 @@ func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 }
 
 func (n *Node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	ctx = detach(ctx)
 	uid, gid := callerOwner(ctx)
 	newUUID, attr, err := n.fsys.Mkdir(ctx, n.key, name, mode&0o7777, uid, gid)
 	if err != nil {
@@ -367,6 +380,7 @@ func (n *Node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.En
 // type-specific for this driver to do beyond dispatching on mode's
 // S_IFMT bits and, for the two device types, carrying dev through.
 func (n *Node) Mknod(ctx context.Context, name string, mode, dev uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	ctx = detach(ctx)
 	var typ icbfs.EntryType
 	switch mode & syscall.S_IFMT {
 	case syscall.S_IFIFO:
@@ -395,6 +409,7 @@ func (n *Node) Mknod(ctx context.Context, name string, mode, dev uint32, out *fu
 }
 
 func (n *Node) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
+	ctx = detach(ctx)
 	uid, gid := callerOwner(ctx)
 	newUUID, attr, etag, err := n.fsys.Create(ctx, n.key, name, mode&0o7777, uid, gid)
 	if err != nil {
@@ -408,6 +423,7 @@ func (n *Node) Create(ctx context.Context, name string, flags uint32, mode uint3
 }
 
 func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	ctx = detach(ctx)
 	open, err := n.fsys.Open(ctx, n.key)
 	if err != nil {
 		return nil, 0, errnoFromErr(err)
@@ -421,6 +437,7 @@ func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 }
 
 func (n *Node) Unlink(ctx context.Context, name string) syscall.Errno {
+	ctx = detach(ctx)
 	if err := n.fsys.Unlink(ctx, n.key, name); err != nil {
 		return errnoFromErr(err)
 	}
@@ -429,6 +446,7 @@ func (n *Node) Unlink(ctx context.Context, name string) syscall.Errno {
 }
 
 func (n *Node) Rmdir(ctx context.Context, name string) syscall.Errno {
+	ctx = detach(ctx)
 	if err := n.fsys.Rmdir(ctx, n.key, name); err != nil {
 		return errnoFromErr(err)
 	}
@@ -437,6 +455,7 @@ func (n *Node) Rmdir(ctx context.Context, name string) syscall.Errno {
 }
 
 func (n *Node) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	ctx = detach(ctx)
 	uid, gid := callerOwner(ctx)
 	newUUID, attr, err := n.fsys.Symlink(ctx, n.key, name, target, uid, gid)
 	if err != nil {
@@ -447,6 +466,7 @@ func (n *Node) Symlink(ctx context.Context, target, name string, out *fuse.Entry
 }
 
 func (n *Node) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
+	ctx = detach(ctx)
 	target, err := n.fsys.Readlink(ctx, n.key)
 	if err != nil {
 		return nil, errnoFromErr(err)
@@ -455,6 +475,7 @@ func (n *Node) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
 }
 
 func (n *Node) Link(ctx context.Context, target fs.InodeEmbedder, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	ctx = detach(ctx)
 	tn, ok := target.(*Node)
 	if !ok {
 		return nil, syscall.EINVAL
@@ -486,6 +507,7 @@ const renameExchange = 0x2
 // (its real, documented value, confirmed against golang.org/x/sys/
 // unix.RENAME_NOREPLACE = 0x1, not guessed).
 func (n *Node) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+	ctx = detach(ctx)
 	if flags&renameExchange != 0 {
 		return syscall.ENOSYS
 	}
@@ -536,6 +558,7 @@ var (
 )
 
 func (h *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	ctx = detach(ctx)
 	data := h.open.ReadAt(off, int64(len(dest)))
 	// Best-effort, deliberately not checked — same reasoning as
 	// Node.Readdir's own TouchAtime call: a lost race on this bump
@@ -545,6 +568,7 @@ func (h *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.Rea
 }
 
 func (h *FileHandle) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {
+	ctx = detach(ctx)
 	if err := h.open.WriteAt(data, off); err != nil {
 		return 0, errnoFromErr(err)
 	}
@@ -556,6 +580,7 @@ func (h *FileHandle) Write(ctx context.Context, data []byte, off int64) (uint32,
 // why a write is logged here, after the content is stored: a
 // synchronously logged close returns only once the server has the event.
 func (h *FileHandle) Flush(ctx context.Context) syscall.Errno {
+	ctx = detach(ctx)
 	attr, err := h.open.Flush(ctx)
 	if err != nil {
 		return errnoFromErr(err)
@@ -637,6 +662,7 @@ func lockRangeFromFileLock(lk *fuse.FileLock, flags uint32) (start, end int64) {
 // with the requested one, or L_UNLCK if none would. See
 // fs.NodeGetlker's doc comment.
 func (h *FileHandle) Getlk(ctx context.Context, owner uint64, lk *fuse.FileLock, flags uint32, out *fuse.FileLock) syscall.Errno {
+	ctx = detach(ctx)
 	if lk.Typ == syscall.F_UNLCK {
 		out.Typ = syscall.F_UNLCK
 		return 0
@@ -692,6 +718,9 @@ func (h *FileHandle) Setlkw(ctx context.Context, owner uint64, lk *fuse.FileLock
 // F_WRLCK claim conflicts with every other holder's claim regardless
 // of its type.
 func (h *FileHandle) setlk(ctx context.Context, owner uint64, lk *fuse.FileLock, flags uint32, blocking bool) syscall.Errno {
+	if !blocking {
+		ctx = detach(ctx) // only a blocking wait honors an interrupt
+	}
 	start, end := lockRangeFromFileLock(lk, flags)
 	holder := lockHolderFromOwner(owner)
 	switch lk.Typ {
@@ -845,6 +874,7 @@ func (h *FileHandle) stopRenewal(owner uint64) {
 // too) but not a process that locks via one fd and closes a different
 // one first — see ASSUMPTIONS.md's B8 entry.
 func (h *FileHandle) Release(ctx context.Context) syscall.Errno {
+	ctx = detach(ctx)
 	h.mu.Lock()
 	renewers := h.renewers
 	h.renewers = nil
@@ -884,4 +914,17 @@ func (h *FileHandle) releaseAllHeldBy(ctx context.Context, owner uint64) {
 	for _, r := range ranges {
 		_ = h.open.ReleaseLockRange(ctx, r.Start, r.End, holder)
 	}
+}
+
+// detach returns ctx without its cancellation. go-fuse cancels a
+// request's context when the kernel interrupts it, and the kernel
+// interrupts whenever the calling thread gets a signal — which the Go
+// runtime does constantly to preempt goroutines, in any Go program
+// using the mount under load. Abandoning an operation on that would
+// turn a spurious signal into an I/O error, or worse (a flush cut off
+// mid-upload, a rename between its remove and its insert), so FUSE
+// operations run to completion; only a blocking lock wait (Setlkw)
+// still honors an interrupt, with EINTR.
+func detach(ctx context.Context) context.Context {
+	return context.WithoutCancel(ctx)
 }
