@@ -34,6 +34,27 @@ import (
 // this directly.
 func newMountTestStore(t *testing.T) objstore.Store {
 	t.Helper()
+	return newS3Store(newMinIO(t))
+}
+
+// testMinIO is how to reach a test MinIO's versioned bucket.
+type testMinIO struct {
+	endpoint, bucket, accessKey, secretKey string
+}
+
+func newS3Store(m testMinIO) objstore.Store {
+	client := s3.New(s3.Options{
+		Region:       "us-east-1",
+		BaseEndpoint: aws.String(m.endpoint),
+		UsePathStyle: true,
+		Credentials:  awscreds.NewStaticCredentialsProvider(m.accessKey, m.secretKey, ""),
+	})
+	return objstore.NewS3Store(client, m.bucket)
+}
+
+// newMinIO starts a MinIO container with a versioned bucket.
+func newMinIO(t *testing.T) testMinIO {
+	t.Helper()
 	ctx := context.Background()
 
 	container, err := minio.Run(ctx, "minio/minio:latest")
@@ -74,7 +95,7 @@ func newMountTestStore(t *testing.T) objstore.Store {
 		t.Fatalf("enable bucket versioning: %v", err)
 	}
 
-	return objstore.NewS3Store(client, bucket)
+	return testMinIO{endpoint: "http://" + endpoint, bucket: bucket, accessKey: container.Username, secretKey: container.Password}
 }
 
 // mountFS bootstraps fsName against store and mounts it, returning the

@@ -1,0 +1,65 @@
+// Package fslog is how an icbfs mount reports what happens on it, and
+// gets the credentials it mounts with, through a local daemon
+// (internal/logd, cmd/icbfs-logd) that relays to a server over one
+// websocket — the same shape as host's hostd: local clients on a
+// Unix socket, the daemon holding the only connection to the server.
+//
+// Both hops carry the same JSON Frames: one per line on the Unix socket,
+// one per message on the websocket. Every request has an id, and its
+// reply echoes it.
+package fslog
+
+import "time"
+
+// Frame ops.
+const (
+	OpCreds = "creds" // driver → server: the store credentials to mount FS with
+	OpEvent = "event" // driver → server: log Event
+	OpReply = "reply" // server → driver: the answer to request ID
+)
+
+// Frame is one message on either hop.
+type Frame struct {
+	Op    string `json:"op"`
+	ID    uint64 `json:"id"`
+	FS    string `json:"fs,omitempty"`    // OpCreds: the filesystem being mounted
+	Host  string `json:"host,omitempty"`  // OpCreds: the machine asking
+	Event *Event `json:"event,omitempty"` // OpEvent
+
+	// OpReply: OK, or Error saying why not; Creds for an OpCreds.
+	OK    bool   `json:"ok,omitempty"`
+	Error string `json:"error,omitempty"`
+	Creds *Creds `json:"creds,omitempty"`
+}
+
+// Event kinds.
+const (
+	EventRead    = "read"    // a file opened for reading
+	EventWrite   = "write"   // a file closed after writing; Bytes is its size
+	EventDelete  = "delete"  // a file or directory removed
+	EventList    = "ls"      // a directory listed
+	EventDropped = "dropped" // async logging dropped Bytes events while the daemon was unreachable
+)
+
+// Event is one logged filesystem action.
+type Event struct {
+	ID    string    `json:"id"` // unique; the server ignores a repeat (a resend after a reconnect)
+	Time  time.Time `json:"time"`
+	Host  string    `json:"host"`
+	FS    string    `json:"fs"`
+	Op    string    `json:"op"`
+	Path  string    `json:"path"`
+	Bytes int64     `json:"bytes,omitempty"`
+	Uid   uint32    `json:"uid"`
+	Gid   uint32    `json:"gid"`
+	Pid   uint32    `json:"pid"`
+}
+
+// Creds is how to reach a filesystem's object store.
+type Creds struct {
+	Endpoint  string `json:"endpoint"`
+	Bucket    string `json:"bucket"`
+	Region    string `json:"region"`
+	AccessKey string `json:"accessKey"`
+	SecretKey string `json:"secretKey"`
+}

@@ -189,6 +189,19 @@ finished. It also lists accepted assertions that have started passing,
 so the list doesn't go stale. Rerun it on any saved log with
 `test/linux/pjdfstest-check.sh test/linux/work/<log>`.
 
+## Logging test
+
+`run-logging-test.sh <vm-ip>` runs the logging chain with the real
+binaries: `icbfs-mockserver` on the host (in a container, so the VM can
+reach it past the host firewall, like MinIO), `icbfs-logd` and an icbfs
+mount on the VM. The mount gets its store credentials only from the
+server, through the daemon; a shell then makes a directory, writes,
+reads, lists, appends to, renames and removes a file, removes the
+directory and lists the root, and the server's log must hold exactly the
+seven events those produce. It runs synchronously and with
+`-log-async`, and checks that a filesystem the server doesn't allow
+can't mount. About a minute.
+
 ## Large-file test (opt-in)
 
 `run-largefile-test.sh <vm-ip>` is deliberately not part of the

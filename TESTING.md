@@ -249,6 +249,7 @@ MinIO container that exists only for that run:
 ```
 test/linux/run-pjdfstest.sh <vm-ip>             # Linux: pjdfstest
 test/linux/run-largefile-test.sh <vm-ip>        # Linux: 6 GiB file, opt-in only (see test/linux/README.md)
+test/linux/run-logging-test.sh <vm-ip>          # Linux: mount -> icbfs-logd -> icbfs-mockserver logging
 test/windows/run-winfsp-tests.sh [icbfs-ci|icbfs-cs] [-- -Only a,b]   # Windows
 test/minio/with-minio.sh <any command>          # anything else
 ```

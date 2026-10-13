@@ -24,6 +24,7 @@ import (
 	"github.com/minio/minio-go/v7"
 	miniocreds "github.com/minio/minio-go/v7/pkg/credentials"
 
+	"github.com/resurgentech/icbfs/internal/fslog"
 	"github.com/resurgentech/icbfs/internal/fuseserver"
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/notify"
@@ -45,6 +46,8 @@ func main() {
 	secretKey := fset.String("secret-key", "minioadmin", "secret key")
 	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
 	size := fset.Uint64("size", 100<<30, "declared filesystem size in bytes, for df (only used the first time a filesystem name is created)")
+	logSocket := fset.String("log-socket", "", "log reads, writes, deletes and directory listings through the icbfs-logd daemon on this Unix socket — which also supplies the store's endpoint, bucket and keys (-endpoint, -bucket, -region, -access-key and -secret-key are then ignored); the mount fails without them")
+	logAsync := fset.Bool("log-async", false, "with -log-socket: queue events instead of waiting for the server to log each one; never slows an operation, but drops (and counts) events while the daemon is unreachable")
 	asOf := fset.String("as-of", "", "mount read-only as the filesystem was at this time: a date (2006-01-02, meaning the end of that day), a date-time (2006-01-02T15:04:05) in local time, or RFC 3339 with a zone. Fails if the filesystem didn't exist yet then")
 	maxFileSize := fset.Uint64("max-file-size", icbfs.DefaultMaxFileSize, "largest file the filesystem holds, in bytes (only used the first time a filesystem name is created, immutable afterward)")
 	uidOverride := fset.Int("uid", -1, "owner uid for the filesystem root (only used the first time a filesystem name is created); defaults to the uid of the user running this command, same as every other FUSE filesystem's -o uid= override (sshfs, NFS, etc.)")
@@ -65,6 +68,22 @@ func main() {
 	mountpoint := fset.Arg(0)
 
 	ctx := context.Background()
+
+	var logger *fslog.Client
+	if *logSocket != "" {
+		logger = fslog.NewClient(*logSocket, *fsName, *logAsync)
+		defer logger.Close(10 * time.Second)
+		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		creds, err := logger.Credentials(cctx)
+		cancel()
+		if err != nil {
+			log.Fatalf("no credentials for %q from the logging daemon: %v", *fsName, err)
+		}
+		*endpoint, *bucket, *accessKey, *secretKey = creds.Endpoint, creds.Bucket, creds.AccessKey, creds.SecretKey
+		if creds.Region != "" {
+			*region = creds.Region
+		}
+	}
 
 	client := s3.New(s3.Options{
 		Region:       *region,
@@ -150,7 +169,11 @@ func main() {
 		}
 	}
 
-	root := fuseserver.Root(fsys, fuseSignals)
+	var rootOpts []fuseserver.Option
+	if logger != nil {
+		rootOpts = append(rootOpts, fuseserver.WithLogger(logger))
+	}
+	root := fuseserver.Root(fsys, fuseSignals, rootOpts...)
 	server, err := fs.Mount(mountpoint, root, &fs.Options{
 		MountOptions: fuseMountOptions(*debug, *allowOther, view != nil),
 		// Without this, go-fuse silently rewrites a real, stored "0000"

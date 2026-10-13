@@ -10,12 +10,14 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
+	"github.com/resurgentech/icbfs/internal/fslog"
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/notify"
 )
@@ -35,6 +37,7 @@ type Node struct {
 	key     string
 	typ     icbfs.EntryType
 	watches *watchRegistry
+	logger  Logger // nil unless the mount logs; see WithLogger
 }
 
 var (
@@ -79,13 +82,17 @@ const statfsBlockSize = 4096
 // its own Subscribe() channel; this package has no need to know that
 // Broadcaster exists at all, since all it ever does with signals is
 // range over it.
-func Root(fsys *icbfs.Filesystem, signals <-chan notify.Signal) *Node {
+func Root(fsys *icbfs.Filesystem, signals <-chan notify.Signal, opts ...Option) *Node {
 	var watches *watchRegistry
 	if signals != nil {
 		watches = newWatchRegistry()
 		startNotifyDispatch(signals, watches)
 	}
-	return &Node{fsys: fsys, key: fsys.RootKey(), typ: icbfs.TypeDir, watches: watches}
+	n := &Node{fsys: fsys, key: fsys.RootKey(), typ: icbfs.TypeDir, watches: watches}
+	for _, opt := range opts {
+		opt(n)
+	}
+	return n
 }
 
 func typeToFuseMode(t icbfs.EntryType) uint32 {
@@ -210,7 +217,7 @@ func errnoFromErr(err error) syscall.Errno {
 }
 
 func (n *Node) newChild(ctx context.Context, key string, typ icbfs.EntryType) *fs.Inode {
-	child := &Node{fsys: n.fsys, key: key, typ: typ, watches: n.watches}
+	child := &Node{fsys: n.fsys, key: key, typ: typ, watches: n.watches, logger: n.logger}
 	stable := fs.StableAttr{Ino: icbfs.Ino(key), Mode: typeToFuseMode(typ)}
 	// StableAttr.Ino dedups against any already-known inode with the same
 	// number — this is exactly how hardlinks (Link, below) end up sharing
@@ -328,6 +335,7 @@ func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	// read itself — the directory listing the caller asked for already
 	// succeeded above.
 	_ = n.fsys.TouchAtime(ctx, n.key, icbfs.TypeDir)
+	n.logEvent(ctx, fslog.EventList, n.path(), 0)
 	list := make([]fuse.DirEntry, 0, len(entries))
 	for _, e := range entries {
 		list = append(list, fuse.DirEntry{
@@ -393,8 +401,10 @@ func (n *Node) Create(ctx context.Context, name string, flags uint32, mode uint3
 		return nil, nil, 0, errnoFromErr(err)
 	}
 	fillAttr(&out.Attr, newUUID, icbfs.TypeFile, attr)
+	inode := n.newChild(ctx, newUUID, icbfs.TypeFile)
 	fh := newFileHandle(n.fsys.NewOpenFile(newUUID, etag, nil))
-	return n.newChild(ctx, newUUID, icbfs.TypeFile), fh, 0, 0
+	fh.node = inode.Operations().(*Node)
+	return inode, fh, 0, 0
 }
 
 func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
@@ -402,15 +412,28 @@ func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 	if err != nil {
 		return nil, 0, errnoFromErr(err)
 	}
-	return newFileHandle(open), 0, 0
+	if flags&syscall.O_ACCMODE != syscall.O_WRONLY {
+		n.logEvent(ctx, fslog.EventRead, n.path(), 0)
+	}
+	fh := newFileHandle(open)
+	fh.node = n
+	return fh, 0, 0
 }
 
 func (n *Node) Unlink(ctx context.Context, name string) syscall.Errno {
-	return errnoFromErr(n.fsys.Unlink(ctx, n.key, name))
+	if err := n.fsys.Unlink(ctx, n.key, name); err != nil {
+		return errnoFromErr(err)
+	}
+	n.logEvent(ctx, fslog.EventDelete, n.childPath(name), 0)
+	return 0
 }
 
 func (n *Node) Rmdir(ctx context.Context, name string) syscall.Errno {
-	return errnoFromErr(n.fsys.Rmdir(ctx, n.key, name))
+	if err := n.fsys.Rmdir(ctx, n.key, name); err != nil {
+		return errnoFromErr(err)
+	}
+	n.logEvent(ctx, fslog.EventDelete, n.childPath(name), 0)
+	return 0
 }
 
 func (n *Node) Symlink(ctx context.Context, target, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
@@ -486,6 +509,11 @@ func (n *Node) Rename(ctx context.Context, name string, newParent fs.InodeEmbedd
 // required to construct a usable FileHandle, only to pre-size it.
 type FileHandle struct {
 	open *icbfs.OpenFile
+	node *Node // the file, for logging; nil in tests that build handles directly
+
+	// wrote is set by a write and cleared by the close (Flush) that
+	// logs it, so a file closed after writing is logged once.
+	wrote atomic.Bool
 
 	mu       sync.Mutex
 	renewers map[uint64]context.CancelFunc
@@ -520,12 +548,22 @@ func (h *FileHandle) Write(ctx context.Context, data []byte, off int64) (uint32,
 	if err := h.open.WriteAt(data, off); err != nil {
 		return 0, errnoFromErr(err)
 	}
+	h.wrote.Store(true)
 	return uint32(len(data)), 0
 }
 
+// Flush runs at every close(2) of the file, synchronously — which is
+// why a write is logged here, after the content is stored: a
+// synchronously logged close returns only once the server has the event.
 func (h *FileHandle) Flush(ctx context.Context) syscall.Errno {
-	_, err := h.open.Flush(ctx)
-	return errnoFromErr(err)
+	attr, err := h.open.Flush(ctx)
+	if err != nil {
+		return errnoFromErr(err)
+	}
+	if h.node != nil && h.wrote.Swap(false) {
+		h.node.logEvent(ctx, fslog.EventWrite, h.node.path(), attr.Size)
+	}
+	return 0
 }
 
 // fcntlLockEOF is the fuse.FileLock.End sentinel the kernel sends for

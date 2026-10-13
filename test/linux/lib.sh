@@ -33,7 +33,7 @@ VM_SRC=/home/ubuntu/icbfs-test
 
 # deploy_icbfs <ip> copies this working tree (tracked plus
 # untracked-but-not-ignored files) to the VM fresh and builds icbfs-cli
-# there. Always fresh: a stale checkout on the VM once built an icbfs-cli
+# and icbfs-logd there. Always fresh: a stale checkout on the VM once built an icbfs-cli
 # that rejected -allow-other, and pjdfstest went on to "pass" against the
 # VM's own disk.
 deploy_icbfs() {
@@ -44,7 +44,7 @@ deploy_icbfs() {
   echo "Deploying working tree to ${VM_SRC} and building icbfs-cli..." >&2
   (cd "$repo" && git ls-files -co --exclude-standard -z | tar --null -T - -cf "$tarball") || return 1
   scp_to_vm "$ip" "$tarball" /tmp/icbfs-src.tar >/dev/null || return 1
-  ssh_vm "$ip" "rm -rf $VM_SRC && mkdir -p $VM_SRC && tar -xf /tmp/icbfs-src.tar -C $VM_SRC && cd $VM_SRC && go build -o icbfs-cli ./cmd/icbfs"
+  ssh_vm "$ip" "rm -rf $VM_SRC && mkdir -p $VM_SRC && tar -xf /tmp/icbfs-src.tar -C $VM_SRC && cd $VM_SRC && go build -o icbfs-cli ./cmd/icbfs && go build -o icbfs-logd ./cmd/icbfs-logd"
 }
 
 # mount_icbfs <ip> <mountpoint> <fs name> [mount flags...] mounts that

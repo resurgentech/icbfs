@@ -66,6 +66,28 @@ the time is in the future. Unmount as usual (or Ctrl+C the command); its
 local version cache is deleted then. See `ARCHITECTURE.md`'s Snapshots
 section for how it works and what it costs.
 
+## Logging through a daemon (Linux)
+
+A FUSE mount can log what happens on it, and get the credentials it
+mounts with, through a local daemon that relays over one websocket to a
+server — the same shape as host's `hostd`:
+
+```
+icbfs-mockserver -secret S -log events.jsonl -endpoint ... -bucket ... -access-key ... -secret-key ...
+icbfs-logd -socket /run/icbfs-logd.sock -server ws://server:8090/ws/daemon -secret S
+icbfs mount -log-socket /run/icbfs-logd.sock -fs name /mnt/name      # add -log-async to never wait
+```
+
+With `-log-socket` the mount takes its store endpoint, bucket and keys
+from the server (and can't mount without them), and logs a `read` when a
+file is opened for reading, a `write` (with the size) when a file that
+was written is closed, a `delete` for each unlink and rmdir, and an `ls`
+for each directory listing — each with the caller's uid, gid and pid. By
+default every logged operation waits until the server has written the
+event; with `-log-async` events are queued instead, and dropped (and
+counted) while the daemon is unreachable. `icbfs-mockserver` is a mock:
+one shared secret, one set of credentials, a JSON-lines log.
+
 ## Windows mount: install WinFsp first
 
 `cmd/icbfs-winfsp` does **not** carry or install
