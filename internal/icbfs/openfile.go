@@ -106,6 +106,11 @@ type OpenFile struct {
 	// atimeTouched guards TouchAtime's at-most-once-per-session
 	// behavior — see its own doc comment.
 	atimeTouched bool
+
+	// lastWrite is when WriteAt last changed this session's content —
+	// the mtime Stat reports for it until it's flushed (see
+	// Filesystem.localOverlay).
+	lastWrite time.Time
 }
 
 // newOpenFileHolder mints a unique per-session identity for Flush's
@@ -143,7 +148,9 @@ func (f *Filesystem) Open(ctx context.Context, key string) (*OpenFile, error) {
 		file.Close()
 		return nil, err
 	}
-	return &OpenFile{fsys: f, key: key, holder: holder, file: file, size: size, etag: head.ETag, touchedStart: noTouch}, nil
+	o := &OpenFile{fsys: f, key: key, holder: holder, file: file, size: size, etag: head.ETag, touchedStart: noTouch}
+	f.holdOpen(o)
+	return o, nil
 }
 
 // NewOpenFile seeds an OpenFile directly from a just-created content
@@ -174,14 +181,18 @@ func (f *Filesystem) NewOpenFile(key, etag string, data []byte) *OpenFile {
 		// impossible elsewhere (e.g. the RNG failure above) — a
 		// locally-inconsistent OpenFile that fails on its first real
 		// use is an acceptable, contained consequence.
-		return &OpenFile{fsys: f, key: key, holder: holder, etag: etag, touchedStart: noTouch}
+		o := &OpenFile{fsys: f, key: key, holder: holder, etag: etag, touchedStart: noTouch}
+		f.holdOpen(o)
+		return o
 	}
 	if len(data) > 0 {
 		if _, err := file.Write(data); err == nil {
 			_, _ = file.Seek(0, io.SeekStart)
 		}
 	}
-	return &OpenFile{fsys: f, key: key, holder: holder, file: file, size: int64(len(data)), etag: etag, touchedStart: noTouch}
+	o := &OpenFile{fsys: f, key: key, holder: holder, file: file, size: int64(len(data)), etag: etag, touchedStart: noTouch}
+	f.holdOpen(o)
+	return o
 }
 
 // Close releases this session's private local scratch file — callers
@@ -190,7 +201,11 @@ func (f *Filesystem) NewOpenFile(key, etag string, data []byte) *OpenFile {
 // session genuinely ends, or the scratch file leaks on local disk for
 // the lifetime of the process. Safe to call on an OpenFile whose
 // scratch file failed to create (NewOpenFile's degraded path above).
+//
+// The last Close of a file unlinked while open deletes its objects (see
+// openSessions).
 func (o *OpenFile) Close() error {
+	defer o.fsys.releaseOpen(o)
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.file == nil {
@@ -201,6 +216,14 @@ func (o *OpenFile) Close() error {
 	_ = os.Remove(name)
 	o.file = nil
 	return err
+}
+
+// pending reports this session's unflushed state: its current size, when
+// it last wrote, and whether anything is waiting to be flushed.
+func (o *OpenFile) pending() (size int64, lastWrite time.Time, dirty bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.size, o.lastWrite, o.dirty
 }
 
 // Size returns the current (post-edit, pre-flush) content length.
@@ -291,6 +314,7 @@ func (o *OpenFile) WriteAt(data []byte, off int64) error {
 		o.touchedEnd = end
 	}
 	o.dirty = true
+	o.lastWrite = time.Now()
 	return nil
 }
 
@@ -435,6 +459,13 @@ func (o *OpenFile) Flush(ctx context.Context) (Attr, error) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if !o.dirty {
+		return o.fsys.statFile(ctx, o.key)
+	}
+	if o.fsys.isOrphan(o.key) {
+		// Unlinked while open: nothing can see this content any more,
+		// and its objects go at the last Close. Drop the writes.
+		o.dirty = false
+		o.touchedStart, o.touchedEnd = noTouch, 0
 		return o.fsys.statFile(ctx, o.key)
 	}
 

@@ -90,6 +90,10 @@ type Filesystem struct {
 	// Part G, task G3) — set by New's own default, overridable via
 	// SetCacheOptions before Bootstrap.
 	cache *diskCache
+
+	// opens is this process's open files; see openSessions.
+	openMu sync.Mutex
+	opens  openSessions
 }
 
 // New builds a Filesystem for the named filesystem. Call Bootstrap
@@ -549,7 +553,11 @@ func (f *Filesystem) Stat(ctx context.Context, key string, typ EntryType) (Attr,
 	if typ == TypeDir {
 		return f.statDir(ctx, key)
 	}
-	return f.statFile(ctx, key)
+	a, err := f.statFile(ctx, key)
+	if err != nil {
+		return Attr{}, err
+	}
+	return f.localOverlay(key, a), nil
 }
 
 // --- Directory tree traversal (median-key B-tree; see internal/block) ---
@@ -1172,9 +1180,7 @@ func (f *Filesystem) adjustNlink(ctx context.Context, uuid string, delta int) er
 			// have raced past this point, since it would have observed
 			// either our tombstone (and bailed, above) or lost its own
 			// CAS race against it. Safe to physically delete now.
-			_ = f.store.Delete(ctx, mk, "")
-			_ = f.store.Delete(ctx, uuid, "")
-			f.deleteStreamObjects(ctx, uuid, attr.Streams)
+			f.deleteUnlessOpen(ctx, uuid, attr.Streams)
 			return nil
 		}
 

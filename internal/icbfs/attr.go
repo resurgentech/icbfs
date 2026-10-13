@@ -291,7 +291,7 @@ func decodeFileMetadata(data []byte) (Attr, error) {
 		mtimeOverrideETag: m.MtimeOverrideEtag,
 		Streams:           m.Streams,
 		nextStreamID:      m.NextStreamId,
-		Btime:             btimeOverride, // same: override only; see combineFileAttr
+		Btime:             btimeOverride,       // same: override only; see combineFileAttr
 		Ctime:             timeOrZero(m.Ctime), // the stored status-change time only; see combineFileAttr
 		Rdev:              m.Rdev,
 	}, nil

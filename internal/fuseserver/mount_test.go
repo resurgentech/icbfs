@@ -1356,3 +1356,80 @@ func TestMountFcntlGetlkReportsSharedType(t *testing.T) {
 		t.Fatalf("F_GETLK exclusive query against another process's F_RDLCK reported Type=%d, want F_RDLCK", exclusiveQuery.Type)
 	}
 }
+
+// TestMountUnflushedWritesAndUnlinkedOpenFiles covers two POSIX rules a
+// single mount keeps on its own: fstat (and stat) see a write before it's
+// flushed, and an unlinked file stays usable through its open
+// descriptors until the last one closes (pjdfstest's open/07.t and
+// unlink/14.t).
+func TestMountUnflushedWritesAndUnlinkedOpenFiles(t *testing.T) {
+	mnt, fsys := mountTestFSWithFsys(t)
+	path := filepath.Join(mnt, "f")
+
+	w, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := w.Write([]byte("x")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if fi, err := w.Stat(); err != nil || fi.Size() != 1 {
+		t.Fatalf("fstat after an unflushed write: size %v, %v; want 1", fi.Size(), err)
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Size() != 1 {
+		t.Fatalf("stat by path after an unflushed write: size %v, %v; want 1", fi.Size(), err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Unlink while open: the name goes, the descriptor keeps working.
+	rw, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(rw.Fd()), &st); err != nil {
+		t.Fatalf("fstat: %v", err)
+	}
+	entries, err := fsys.ReadDir(context.Background(), fsys.RootKey())
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("readdir: %v, %v", entries, err)
+	}
+	key := entries[0].UUID
+
+	if _, err := rw.WriteAt([]byte("Hello"), 0); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("unlink: %v", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat after unlink: %v, want not exist", err)
+	}
+	if err := syscall.Fstat(int(rw.Fd()), &st); err != nil || st.Nlink != 0 || st.Size != 5 {
+		t.Fatalf("fstat of the unlinked open file: nlink %d size %d, %v; want nlink 0 size 5", st.Nlink, st.Size, err)
+	}
+	buf := make([]byte, 5)
+	if n, err := rw.ReadAt(buf, 0); err != nil || string(buf[:n]) != "Hello" {
+		t.Fatalf("read of the unlinked open file: %q, %v", buf[:n], err)
+	}
+	if _, err := fsys.Stat(context.Background(), key, icbfs.TypeFile); err != nil {
+		t.Fatalf("objects gone while the file is still open: %v", err)
+	}
+	if err := rw.Close(); err != nil {
+		t.Fatalf("close of the unlinked file: %v", err)
+	}
+	// Release reaches the filesystem asynchronously after close(2).
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		_, err := fsys.Stat(context.Background(), key, icbfs.TypeFile)
+		if errors.Is(err, icbfs.ErrNotFound) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("objects still there after the last close: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}

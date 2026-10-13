@@ -128,8 +128,8 @@ func fillAttr(out *fuse.Attr, key string, typ icbfs.EntryType, a icbfs.Attr) {
 	out.Mode = typeToFuseMode(typ) | (a.Mode & 0o7777)
 	out.Size = uint64(a.Size)
 	out.Nlink = a.Nlink
-	if out.Nlink == 0 {
-		out.Nlink = 1
+	if out.Nlink == 0 && typ == icbfs.TypeDir {
+		out.Nlink = 1 // a directory from before nlink was stored; a file at 0 is unlinked but still open
 	}
 	out.Owner = fuse.Owner{Uid: a.Uid, Gid: a.Gid}
 	out.Rdev = a.Rdev // meaningful (and only ever non-zero) for TypeCharDevice/TypeBlockDevice — ROADMAP.md's Part G, task G2
