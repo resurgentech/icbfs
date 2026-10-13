@@ -262,10 +262,39 @@ possible.
 
 ## `winfsp-tests --external` against icbfs's own driver
 
+**To run it now:**
+
+```
+test/windows/run-winfsp-tests.sh                 # icbfs, case-insensitive
+test/windows/run-winfsp-tests.sh icbfs-cs        # icbfs, -case-insensitive=false
+test/windows/run-winfsp-tests.sh cmemfs-ci       # WinFsp's own memfs, the baseline
+test/windows/run-winfsp-tests.sh icbfs-cs -- -Only querydir_test,stream_create_test
+test/windows/run-winfsp-tests.sh --no-deploy ... # skip the copy and rebuild
+```
+
+The script does the following:
+
+1. Copies the working tree to `C:\icbfs-test` and builds
+   `icbfs-winfsp.exe` there.
+2. Starts a throwaway MinIO for the run.
+3. Runs every test in `winfsp-tests --list` through
+   `run-winfsp-tests.ps1` on the VM. Each test gets a fresh mount and
+   a fresh filesystem name, runs with its cwd on the mount, uses
+   `--external --resilient --no-abort`, and has a 180s timeout.
+4. Saves the result to `test/windows/work/` and removes the MinIO.
+
+It prints the passing count plus any test that failed, timed out or
+couldn't mount, and exits non-zero if there were any. Expect icbfs to
+pass every test that runs case-insensitive. Case-sensitive, it fails
+only `getfileinfo_name_test`, which reopens a file under a different
+case; WinFsp's own memfs fails that test the same way.
+
+The history below is how it got there.
+
 The real point of installing `winfsp-tests` above: pointing it at
-*icbfs's own* WinFsp driver (`cmd/icbfs-winfsp`, mounted against the
-same standalone MinIO container other manual testing in this doc uses)
-instead of WinFsp's own embedded MEMFS reference filesystem.
+*icbfs's own* WinFsp driver (`cmd/icbfs-winfsp`, mounted against a
+MinIO on the host) instead of WinFsp's own embedded MEMFS reference
+filesystem.
 `winfsp-tests-x64.exe --external --resilient <mount>\testdir` runs from
 inside the mount under test, and its `ASSERT()` macro `abort()`s
 unconditionally on the first failure (Windows reports this as exit code
@@ -410,15 +439,17 @@ Used for task F3's functional verification (`cmd/icbfs-winfsp`,
 `ROADMAP.md`) and the right setup for any future task that needs the
 same: a real mount, not just a compiled binary.
 
-- **MinIO reachable from the VM**: a standalone `docker run minio/minio`
-  container on the Linux host (not the per-Go-test `testcontainers`
-  kind — this one needs to outlive a single test run and be reachable
-  from a different machine), published on `0.0.0.0:9000`, reachable
-  from the VM at the host's libvirt bridge address
-  (`192.168.122.1:9000` on this host — confirmed with a plain
-  `Invoke-WebRequest` against `/minio/health/live` from the VM before
-  trusting anything past that). A bucket on it needs versioning
-  enabled, same requirement every other icbfs backend has.
+- **MinIO reachable from the VM**: a throwaway one, started for the
+  session and removed afterwards. Nothing stays running between
+  sessions. `eval "$(test/minio/up.sh)"` on the Linux host starts a
+  fresh `minio/minio` container on a random port, with an empty
+  versioned bucket, and prints `ICBFS_MINIO_VM_ENDPOINT` (the host's
+  libvirt bridge address as the VM sees it, `192.168.122.1:<port>`),
+  `ICBFS_MINIO_BUCKET` and the keys to pass as `-endpoint`/`-bucket`/
+  `-access-key`/`-secret-key`. When you're done,
+  `test/minio/down.sh` removes it with its data. The scripted runs
+  (`run-winfsp-tests.sh`) do this themselves; see `TESTING.md`'s
+  "Object storage for the VM runs".
 - **Mount, exercise, unmount, in one SSH session**: `Start-Process
   C:\icbfs\<built-exe>.exe -ArgumentList "-endpoint",...,"K:"
   -RedirectStandardOutput ... -PassThru`, run real PowerShell/`cmd`

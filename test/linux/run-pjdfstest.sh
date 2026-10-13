@@ -18,29 +18,54 @@
 # separately blocks every uid but the mount's own regardless of file
 # permissions. Both looked at first like a real permission-enforcement
 # bug in icbfs; neither is. See README.md's writeup.
+#
+# Storage is a throwaway MinIO (test/minio/with-minio.sh) that exists
+# only for this run: started here, removed when the script exits however
+# it exits. Nothing is left running between runs.
 set -euo pipefail
-source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -z "${ICBFS_MINIO_VM_ENDPOINT:-}" ]; then
+  exec "$HERE/../minio/with-minio.sh" "$HERE/run-pjdfstest.sh" "$@"
+fi
+source "$HERE/lib.sh"
 
-IP="${1:?usage: run-pjdfstest.sh <vm-ip> [minio-endpoint]}"
-ENDPOINT="${2:-http://192.168.122.1:9000}"
+IP="${1:?usage: run-pjdfstest.sh <vm-ip>}"
+ENDPOINT="$ICBFS_MINIO_VM_ENDPOINT"
+BUCKET="$ICBFS_MINIO_BUCKET"
 FS_NAME="pjdfstest-$(date +%Y%m%d%H%M%S)"
 MNT=/mnt/icbfs-test
 
-echo "Building icbfs-cli on the VM..." >&2
-ssh_vm "$IP" "cd ~/icbfs && go build -o icbfs-cli ./cmd/icbfs"
+REPO="$(cd "$HERE/../.." && pwd)"
+SRC=/home/ubuntu/icbfs-test
+mkdir -p "$WORK_DIR"
+
+# Always test this working tree (tracked plus untracked-but-not-ignored
+# files), freshly copied: a stale checkout on the VM once built an
+# icbfs-cli that rejected -allow-other, and the run went on to "pass"
+# against the VM's own disk.
+echo "Deploying working tree to ${SRC} and building icbfs-cli..." >&2
+tarball="$WORK_DIR/icbfs-src.tar"
+(cd "$REPO" && git ls-files -co --exclude-standard -z | tar --null -T - -cf "$tarball")
+scp_to_vm "$IP" "$tarball" /tmp/icbfs-src.tar >/dev/null
+ssh_vm "$IP" "rm -rf $SRC && mkdir -p $SRC && tar -xf /tmp/icbfs-src.tar -C $SRC && cd $SRC && go build -o icbfs-cli ./cmd/icbfs"
 
 echo "Mounting ${FS_NAME} at ${MNT}..." >&2
-ssh_vm "$IP" "sudo mkdir -p $MNT; sudo chmod 0755 /mnt; sudo /home/ubuntu/icbfs/icbfs-cli mount -endpoint $ENDPOINT -bucket icbfs-winfsp-manual -fs $FS_NAME -access-key minioadmin -secret-key minioadmin -uid 0 -gid 0 -allow-other $MNT > /tmp/icbfs-mount-${FS_NAME}.log 2>&1 &
-sleep 3"
+# Unmount before the MinIO underneath goes away, even on failure.
+trap 'ssh_vm "$IP" "sudo umount -l $MNT 2>/dev/null; sudo pkill -x icbfs-cli; true" || true' EXIT
+ssh_vm "$IP" "sudo mkdir -p $MNT; sudo chmod 0755 /mnt; sudo $SRC/icbfs-cli mount -endpoint $ENDPOINT -bucket $BUCKET -fs $FS_NAME -access-key $ICBFS_MINIO_ACCESS_KEY -secret-key $ICBFS_MINIO_SECRET_KEY -uid 0 -gid 0 -allow-other $MNT > /tmp/icbfs-mount-${FS_NAME}.log 2>&1 &"
+# Never run the suite against whatever is under $MNT without the mount:
+# that's the VM's own disk, and it passes everything.
+if ! ssh_vm "$IP" "for i in \$(seq 1 30); do findmnt -n -o FSTYPE $MNT | grep -q fuse && exit 0; sleep 0.5; done; exit 1"; then
+  echo "icbfs mount at $MNT never came up — mount log:" >&2
+  ssh_vm "$IP" "cat /tmp/icbfs-mount-${FS_NAME}.log" >&2
+  exit 1
+fi
 
 echo "Running pjdfstest (needs root; this can take several minutes against real network storage)..." >&2
 set +e
 ssh_vm "$IP" "sudo bash -c 'cd $MNT && prove -r /home/ubuntu/pjdfstest/tests'" > "$WORK_DIR/pjdfstest-${FS_NAME}.log" 2>&1
 RET=$?
 set -e
-
-echo "Unmounting..." >&2
-ssh_vm "$IP" "sudo umount -l $MNT 2>/dev/null || true"
 
 echo "" >&2
 echo "=== pjdfstest summary (full log: $WORK_DIR/pjdfstest-${FS_NAME}.log) ===" >&2

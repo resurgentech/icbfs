@@ -182,9 +182,13 @@ completely clean. Of the 70 that don't:
 
 - VM: `icbfs-fuse-test`, Ubuntu 24.04, user `ubuntu` (SSH key auth,
   passwordless), `sudo` for root.
-- Reaches the same standalone MinIO container other manual/scripted
-  testing in this repo uses, at the host's libvirt bridge address
-  (`192.168.122.1:9000` on this host), bucket `icbfs-winfsp-manual`.
+- Storage is a throwaway MinIO that `run-pjdfstest.sh` starts on the
+  host for the run, through `test/minio/with-minio.sh`. It listens on a
+  random port at the host's libvirt bridge address
+  (`192.168.122.1:<port>`) and has a fresh versioned bucket. The
+  script removes it, data included, when it exits however it exits;
+  nothing stays running between runs. See `TESTING.md`'s "Object
+  storage for the VM runs".
 - A `clean-base` snapshot exists (`virsh snapshot-create-as
   icbfs-fuse-test clean-base`) from after cloud-init finished but
   *before* pjdfstest/fuse-xfstests were cloned/built — reverting to it

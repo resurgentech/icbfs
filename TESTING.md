@@ -232,7 +232,7 @@ mitigated with an auto-restart loop rather than solved.
 See **[`test/windows/README.md`](test/windows/README.md)** for the full
 story and **`test/windows/*.sh`** for the actual runnable scripts
 (`create-vm.sh`, `wait-for-ssh.sh`, `check-eval-expiry.sh`,
-`destroy-vm.sh`). WinFsp itself and `winfsp-tests` are now installed and
+`destroy-vm.sh`, `run-winfsp-tests.sh`). WinFsp itself and `winfsp-tests` are now installed and
 verified working on this VM too (107/107 of `winfsp-tests`' own default
 suite passing against its embedded reference filesystem) — see
 `test/windows/README.md`'s own section on this. `ROADMAP.md`'s Part F
@@ -240,6 +240,36 @@ suite passing against its embedded reference filesystem) — see
 point of this suite: running `winfsp-tests --external` against icbfs's
 own driver rather than WinFsp's own reference filesystem — see
 `test/windows/README.md` for the actual run and results.
+
+### Object storage for the VM runs: a throwaway MinIO per run, in `test/minio/`
+
+Nothing is left running between test runs. Each VM run gets its own
+MinIO container that exists only for that run:
+
+```
+test/linux/run-pjdfstest.sh <vm-ip>             # Linux: pjdfstest
+test/windows/run-winfsp-tests.sh [icbfs-ci|icbfs-cs] [-- -Only a,b]   # Windows
+test/minio/with-minio.sh <any command>          # anything else
+```
+
+The first two start one themselves. All three do the same thing: start
+a `minio/minio` container under a unique name with a random host port,
+wait for it to become ready, create an empty versioned bucket, and run
+the test. When the script exits, the container and its data volume are
+removed, whether the test passed, failed or was interrupted. The run
+reads the connection details from `ICBFS_MINIO_VM_ENDPOINT` (the
+libvirt bridge address, `192.168.122.1:<port>`, as the VMs see it),
+`ICBFS_MINIO_ENDPOINT` (the same MinIO from this host), plus
+`ICBFS_MINIO_BUCKET`, `ICBFS_MINIO_ACCESS_KEY` and
+`ICBFS_MINIO_SECRET_KEY`. Because each run has its own name and port,
+the Linux and Windows suites can run at the same time.
+
+For poking at a mount by hand, `eval "$(test/minio/up.sh)"` starts
+one and prints those variables; `test/minio/down.sh` removes it again.
+`test/minio/down.sh --all` removes any that a killed shell left behind
+(`docker ps --filter name=icbfs-test-minio` shows whether there are
+any). The Go unit tests don't use any of this; they start their own
+MinIO per test through `testcontainers`.
 
 ## Automation shape
 
