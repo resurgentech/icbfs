@@ -30,9 +30,8 @@ const (
 // Windows ACLs (under "windows.acl"), and ordinary user xattrs — all
 // just named entries, with no special-casing at the storage layer.
 //
-// Directories do not get one of these; they aren't hard-linkable, so
-// their mode/uid/gid stay in native object metadata on the directory
-// block object itself (see internal/icbfs/attr.go).
+// Directories have one too, <uuid>.metadata beside their root block
+// (see internal/icbfs/attr.go).
 type Metadata struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Mode   uint32                 `protobuf:"varint,1,opt,name=mode,proto3" json:"mode,omitempty"`
@@ -79,6 +78,13 @@ type Metadata struct {
 	// An explicit creation-time override (SetFileTime's CreationTime);
 	// unset = the time embedded in the UUIDv7 key.
 	BtimeOverride *timestamppb.Timestamp `protobuf:"bytes,15,opt,name=btime_override,json=btimeOverride,proto3" json:"btime_override,omitempty"`
+	// Last status change (POSIX ctime): set by every change to this
+	// object except a read's atime update, which would otherwise make
+	// every read look like a change. A directory's is also set when an
+	// entry is added to or removed from it. For a file the reported ctime
+	// is the later of this and the content's last write. Unset (objects
+	// written before this field) = this object's own LastModified.
+	Ctime         *timestamppb.Timestamp `protobuf:"bytes,16,opt,name=ctime,proto3" json:"ctime,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -204,11 +210,18 @@ func (x *Metadata) GetBtimeOverride() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *Metadata) GetCtime() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Ctime
+	}
+	return nil
+}
+
 var File_spec_proto_icbfs_v1_metadata_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\n" +
-	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x98\x05\n" +
+	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xca\x05\n" +
 	"\bMetadata\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\rR\x04mode\x12\x10\n" +
 	"\x03uid\x18\x02 \x01(\rR\x03uid\x12\x10\n" +
@@ -223,7 +236,8 @@ const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\x0enext_stream_id\x18\f \x01(\x04R\fnextStreamId\x120\n" +
 	"\x05atime\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\x05atime\x12A\n" +
 	"\x0emtime_override\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\rmtimeOverride\x12A\n" +
-	"\x0ebtime_override\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\rbtimeOverride\x1a9\n" +
+	"\x0ebtime_override\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\rbtimeOverride\x120\n" +
+	"\x05ctime\x18\x10 \x01(\v2\x1a.google.protobuf.TimestampR\x05ctime\x1a9\n" +
 	"\vXattrsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\x1a:\n" +
@@ -257,11 +271,12 @@ var file_spec_proto_icbfs_v1_metadata_proto_depIdxs = []int32{
 	3, // 2: icbfs.v1.Metadata.atime:type_name -> google.protobuf.Timestamp
 	3, // 3: icbfs.v1.Metadata.mtime_override:type_name -> google.protobuf.Timestamp
 	3, // 4: icbfs.v1.Metadata.btime_override:type_name -> google.protobuf.Timestamp
-	5, // [5:5] is the sub-list for method output_type
-	5, // [5:5] is the sub-list for method input_type
-	5, // [5:5] is the sub-list for extension type_name
-	5, // [5:5] is the sub-list for extension extendee
-	0, // [0:5] is the sub-list for field type_name
+	3, // 5: icbfs.v1.Metadata.ctime:type_name -> google.protobuf.Timestamp
+	6, // [6:6] is the sub-list for method output_type
+	6, // [6:6] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_spec_proto_icbfs_v1_metadata_proto_init() }

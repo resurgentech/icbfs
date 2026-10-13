@@ -135,12 +135,14 @@ func GenericReparseFromXattrs(xattrs map[string][]byte) (buf []byte, ok bool) {
 //   - For a file or symlink: mode/uid/gid/nlink/xattrs come from the
 //     dedicated <uuid>.metadata object's body (Protobuf-encoded, below);
 //     size/mtime/btime come from the content object itself; ctime is
-//     max(contentObject.LastModified, metadataObject.LastModified).
+//     the later of the content's last write and the ctime stored in
+//     .metadata (see combineFileAttr).
 //   - For a directory (root included): everything stored lives in its
 //     own <uuid>.metadata object too, the same Protobuf body as a file's,
 //     CAS-protected the same way; mtime is stored explicitly there
 //     (a directory's root block need not change when its entries do),
-//     and size/ctime come from the root block object. Directories
+//     size comes from the root block object, and ctime is stored too,
+//     bumped whenever an entry is added or removed. Directories
 //     created before this lived in native metadata on the block object;
 //     those are still read (dirAttrFromObject) and migrate on their
 //     first attribute write.
@@ -234,6 +236,7 @@ func encodeFileMetadata(a Attr) ([]byte, error) {
 		MtimeOverride:     timestampOrNil(a.Mtime),
 		MtimeOverrideEtag: a.mtimeOverrideETag,
 		BtimeOverride:     timestampOrNil(a.Btime),
+		Ctime:             timestampOrNil(a.Ctime),
 		Streams:           a.Streams,
 		NextStreamId:      a.nextStreamID,
 	})
@@ -288,6 +291,7 @@ func decodeFileMetadata(data []byte) (Attr, error) {
 		Streams:           m.Streams,
 		nextStreamID:      m.NextStreamId,
 		Btime:             btimeOverride, // same: override only; see combineFileAttr
+		Ctime:             timeOrZero(m.Ctime), // the stored status-change time only; see combineFileAttr
 		Rdev:              m.Rdev,
 	}, nil
 }

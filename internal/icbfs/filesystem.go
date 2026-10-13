@@ -241,7 +241,8 @@ func (f *Filesystem) Bootstrap(ctx context.Context, size uint64, mode, uid, gid 
 	}
 	// .metadata first: if this is interrupted before the block lands,
 	// the next Bootstrap sees no root block and simply redoes both.
-	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1, Mtime: time.Now()}
+	now := time.Now()
+	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1, Mtime: now, Ctime: now}
 	metaData, err := encodeFileMetadata(attr)
 	if err != nil {
 		return err
@@ -370,9 +371,13 @@ func combineFileAttr(key string, metaData []byte, metaLastModified time.Time, co
 	if err != nil {
 		return Attr{}, err
 	}
-	ctime := metaLastModified
-	if contentObj.LastModified.After(ctime) {
-		ctime = contentObj.LastModified
+	// ctime is the stored status-change time (see the ctime field in
+	// metadata.proto), which a read's atime update deliberately leaves
+	// alone, so .metadata's own LastModified is only the fallback for
+	// objects written before it existed.
+	ctime := attr.Ctime
+	if ctime.IsZero() {
+		ctime = metaLastModified
 	}
 	attr.Size = contentObj.Size
 	// attr.Mtime, from decodeFileMetadata above, is only ever an
@@ -409,6 +414,16 @@ func combineFileAttr(key string, metaData []byte, metaLastModified time.Time, co
 			attr.Mtime = keyBtime
 		}
 	}
+	// A content write is a status change too, and it doesn't touch
+	// .metadata: the content's own write time counts (floored the same
+	// way as the derived mtime above).
+	written := contentObj.LastModified
+	if keyBtime.After(written) {
+		written = keyBtime
+	}
+	if written.After(ctime) {
+		ctime = written
+	}
 	attr.Ctime = ctime
 	return attr, nil
 }
@@ -431,7 +446,12 @@ func combineDirAttr(key string, metaData []byte, metaLastModified time.Time, blo
 	if attr.Btime.IsZero() {
 		attr.Btime = Btime(key)
 	}
-	attr.Ctime = metaLastModified
+	// Stored ctime as for a file (see combineFileAttr); entry changes
+	// set it explicitly (touchDir), since in a multi-level directory they
+	// needn't rewrite the root block.
+	if attr.Ctime.IsZero() {
+		attr.Ctime = metaLastModified
+	}
 	if blockObj.LastModified.After(attr.Ctime) {
 		attr.Ctime = blockObj.LastModified
 	}
@@ -899,7 +919,8 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 	if err != nil {
 		return "", Attr{}, err
 	}
-	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1, Mtime: time.Now()}
+	now := time.Now()
+	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1, Mtime: now, Ctime: now}
 	metaData, err := encodeFileMetadata(attr)
 	if err != nil {
 		return "", Attr{}, err
@@ -917,6 +938,7 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 		_ = f.store.Delete(ctx, metadataObjectKey(newUUID), "")
 		return "", Attr{}, err
 	}
+	f.touchDir(ctx, dirKey)
 	attr.Btime = Btime(newUUID)
 	return newUUID, attr, nil
 }
@@ -961,6 +983,7 @@ func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid,
 		_ = f.store.Delete(ctx, metadataObjectKey(newUUID), "")
 		return "", Attr{}, "", err
 	}
+	f.touchDir(ctx, dirKey)
 	attr.Btime = Btime(newUUID)
 	attr.Mtime = contentObj.LastModified
 	attr.Ctime = metaObj.LastModified
@@ -1027,6 +1050,7 @@ func (f *Filesystem) Mknod(ctx context.Context, dirKey, name string, mode uint32
 		_ = f.store.Delete(ctx, metadataObjectKey(newUUID), "")
 		return "", Attr{}, err
 	}
+	f.touchDir(ctx, dirKey)
 	attr.Btime = Btime(newUUID)
 	attr.Mtime = contentObj.LastModified
 	attr.Ctime = metaObj.LastModified
@@ -1069,6 +1093,7 @@ func (f *Filesystem) Symlink(ctx context.Context, dirKey, name, target string, u
 		_ = f.store.Delete(ctx, metadataObjectKey(newUUID), "")
 		return "", Attr{}, err
 	}
+	f.touchDir(ctx, dirKey)
 	attr.Size = int64(len(target))
 	attr.Btime = Btime(newUUID)
 	attr.Mtime = contentObj.LastModified
@@ -1121,6 +1146,7 @@ func (f *Filesystem) adjustNlink(ctx context.Context, uuid string, delta int) er
 			return ErrNotFound
 		}
 		newNlink := int(attr.Nlink) + delta
+		attr.Ctime = time.Now() // a link count change is a status change
 
 		if newNlink <= 0 {
 			attr.Nlink = nlinkZero
@@ -1167,93 +1193,20 @@ func (f *Filesystem) adjustNlink(ctx context.Context, uuid string, delta int) er
 // native metadata, as the pre-.metadata design did) means a concurrent
 // chmod and a concurrent Link now correctly serialize against each other
 // through the same mechanism, as a side effect of the consolidation.
+// Any change through it is a status change (see writeMetadata).
 func (f *Filesystem) updateFileMetadata(ctx context.Context, uuid string, mutate func(*Attr)) (Attr, error) {
-	mk := metadataObjectKey(uuid)
-	for attempt := 0; attempt < maxTreeRetries; attempt++ {
-		body, obj, err := f.store.Get(ctx, mk)
-		if err != nil {
-			return Attr{}, mapNotFound(err)
-		}
-		data, readErr := io.ReadAll(body)
-		body.Close()
-		if readErr != nil {
-			return Attr{}, readErr
-		}
-		attr, err := decodeFileMetadata(data)
-		if err != nil {
-			return Attr{}, err
-		}
-		mutate(&attr)
-		newData, err := encodeFileMetadata(attr)
-		if err != nil {
-			return Attr{}, err
-		}
-		_, err = f.store.Put(ctx, mk, bytes.NewReader(newData), nil, obj.ETag)
-		if objstore.IsPreconditionFailed(err) {
-			continue
-		}
-		if err != nil {
-			return Attr{}, err
-		}
-		return f.statFile(ctx, uuid)
+	if err := f.writeMetadata(ctx, uuid, TypeFile, true, mutate); err != nil {
+		return Attr{}, err
 	}
-	return Attr{}, fmt.Errorf("update metadata %s: exceeded %d retries", uuid, maxTreeRetries)
+	return f.statFile(ctx, uuid)
 }
 
-// updateDirMetadata is updateFileMetadata for a directory. A directory
-// created before directories had .metadata is migrated first: its
-// native block metadata becomes the initial .metadata body (created only
-// if still absent, so a concurrent migration can't be overwritten).
+// updateDirMetadata is updateFileMetadata for a directory.
 func (f *Filesystem) updateDirMetadata(ctx context.Context, key string, mutate func(*Attr)) (Attr, error) {
-	mk := metadataObjectKey(key)
-	for attempt := 0; attempt < maxTreeRetries; attempt++ {
-		body, obj, err := f.store.Get(ctx, mk)
-		if objstore.IsNotFound(err) {
-			blockObj, herr := f.store.Head(ctx, key)
-			if herr != nil {
-				return Attr{}, mapNotFound(herr)
-			}
-			legacy := dirAttrFromObject(key, blockObj)
-			// Only stored fields go into .metadata; the rest are derived
-			// at read time.
-			initial := Attr{Mode: legacy.Mode, Uid: legacy.Uid, Gid: legacy.Gid, Nlink: legacy.Nlink,
-				Atime: legacy.Atime, Mtime: legacy.Mtime, Xattrs: legacy.Xattrs}
-			data, eerr := encodeFileMetadata(initial)
-			if eerr != nil {
-				return Attr{}, eerr
-			}
-			if _, perr := f.store.PutIfAbsent(ctx, mk, bytes.NewReader(data), nil); perr != nil && !objstore.IsPreconditionFailed(perr) {
-				return Attr{}, perr
-			}
-			continue
-		}
-		if err != nil {
-			return Attr{}, mapNotFound(err)
-		}
-		data, readErr := io.ReadAll(body)
-		body.Close()
-		if readErr != nil {
-			return Attr{}, readErr
-		}
-		attr, err := decodeFileMetadata(data)
-		if err != nil {
-			return Attr{}, err
-		}
-		mutate(&attr)
-		newData, err := encodeFileMetadata(attr)
-		if err != nil {
-			return Attr{}, err
-		}
-		_, err = f.store.Put(ctx, mk, bytes.NewReader(newData), nil, obj.ETag)
-		if objstore.IsPreconditionFailed(err) {
-			continue
-		}
-		if err != nil {
-			return Attr{}, err
-		}
-		return f.statDir(ctx, key)
+	if err := f.writeMetadata(ctx, key, TypeDir, true, mutate); err != nil {
+		return Attr{}, err
 	}
-	return Attr{}, fmt.Errorf("update metadata %s: exceeded %d retries", key, maxTreeRetries)
+	return f.statDir(ctx, key)
 }
 
 // updateMetadata is updateDirMetadata or updateFileMetadata, by type.
@@ -1262,6 +1215,88 @@ func (f *Filesystem) updateMetadata(ctx context.Context, key string, typ EntryTy
 		return f.updateDirMetadata(ctx, key, mutate)
 	}
 	return f.updateFileMetadata(ctx, key, mutate)
+}
+
+// writeMetadata applies mutate to key's .metadata under CAS, retrying on
+// a lost race. statusChange stamps ctime with the time of the write;
+// every change is one except a read's atime update (TouchAtime).
+//
+// A directory created before directories had .metadata is migrated
+// first: its native block metadata becomes the initial .metadata body
+// (created only if still absent, so a concurrent migration can't be
+// overwritten).
+func (f *Filesystem) writeMetadata(ctx context.Context, key string, typ EntryType, statusChange bool, mutate func(*Attr)) error {
+	mk := metadataObjectKey(key)
+	for attempt := 0; attempt < maxTreeRetries; attempt++ {
+		body, obj, err := f.store.Get(ctx, mk)
+		if typ == TypeDir && objstore.IsNotFound(err) {
+			blockObj, herr := f.store.Head(ctx, key)
+			if herr != nil {
+				return mapNotFound(herr)
+			}
+			legacy := dirAttrFromObject(key, blockObj)
+			// Only stored fields go into .metadata; the rest are derived
+			// at read time.
+			initial := Attr{Mode: legacy.Mode, Uid: legacy.Uid, Gid: legacy.Gid, Nlink: legacy.Nlink,
+				Atime: legacy.Atime, Mtime: legacy.Mtime, Ctime: legacy.Ctime, Xattrs: legacy.Xattrs}
+			data, eerr := encodeFileMetadata(initial)
+			if eerr != nil {
+				return eerr
+			}
+			if _, perr := f.store.PutIfAbsent(ctx, mk, bytes.NewReader(data), nil); perr != nil && !objstore.IsPreconditionFailed(perr) {
+				return perr
+			}
+			continue
+		}
+		if err != nil {
+			return mapNotFound(err)
+		}
+		data, readErr := io.ReadAll(body)
+		body.Close()
+		if readErr != nil {
+			return readErr
+		}
+		attr, err := decodeFileMetadata(data)
+		if err != nil {
+			return err
+		}
+		mutate(&attr)
+		if statusChange {
+			attr.Ctime = time.Now()
+		}
+		newData, err := encodeFileMetadata(attr)
+		if err != nil {
+			return err
+		}
+		_, err = f.store.Put(ctx, mk, bytes.NewReader(newData), nil, obj.ETag)
+		if objstore.IsPreconditionFailed(err) {
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("update metadata %s: exceeded %d retries", key, maxTreeRetries)
+}
+
+// touchDir records that an entry was added to or removed from the
+// directory at key: its mtime and ctime become now. Best effort, like
+// TouchAtime — by the time this runs the entry change itself has
+// already happened, and failing that operation over a timestamp would
+// misreport it.
+func (f *Filesystem) touchDir(ctx context.Context, key string) {
+	now := time.Now()
+	_ = f.writeMetadata(ctx, key, TypeDir, true, func(a *Attr) {
+		a.Mtime = now
+	})
+}
+
+// touchCtime records a status change to the file or directory at key
+// that changed nothing else in its .metadata (a rename). Best effort,
+// like touchDir.
+func (f *Filesystem) touchCtime(ctx context.Context, key string, typ EntryType) {
+	if typ != TypeDir {
+		typ = TypeFile
+	}
+	_ = f.writeMetadata(ctx, key, typ, true, func(*Attr) {})
 }
 
 // SetWindowsAttributes persists a file/symlink's Hidden/System/
@@ -1380,6 +1415,7 @@ func (f *Filesystem) Link(ctx context.Context, dirKey, name, targetUUID string, 
 		_ = f.adjustNlink(ctx, targetUUID, -1) // best-effort rollback
 		return Attr{}, err
 	}
+	f.touchDir(ctx, dirKey)
 	return f.Stat(ctx, targetUUID, targetType)
 }
 
@@ -1404,6 +1440,7 @@ func (f *Filesystem) Unlink(ctx context.Context, dirKey, name string) error {
 	if _, err := f.removeEntry(ctx, dirKey, name); err != nil {
 		return err
 	}
+	f.touchDir(ctx, dirKey)
 
 	if err := f.adjustNlink(ctx, entry.UUID, -1); err != nil && !errors.Is(err, ErrNotFound) {
 		return err
@@ -1442,6 +1479,7 @@ func (f *Filesystem) Rmdir(ctx context.Context, dirKey, name string) error {
 	if _, err := f.removeEntry(ctx, dirKey, name); err != nil {
 		return err
 	}
+	f.touchDir(ctx, dirKey)
 	if err := f.store.Delete(ctx, entry.UUID, ""); err != nil {
 		return err
 	}
@@ -1593,6 +1631,11 @@ func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, 
 		_ = f.insertEntry(ctx, oldDirKey, oldName, entry.UUID, entry.Type)
 		return err
 	}
+	f.touchDir(ctx, oldDirKey)
+	if newDirKey != oldDirKey {
+		f.touchDir(ctx, newDirKey)
+	}
+	f.touchCtime(ctx, entry.UUID, entry.Type) // as Linux filesystems do
 	return nil
 }
 
@@ -1862,10 +1905,9 @@ func (f *Filesystem) TouchAtime(ctx context.Context, key string, typ EntryType) 
 		return nil // a stream has no .metadata of its own
 	}
 	now := time.Now()
-	_, err := f.updateMetadata(ctx, key, typ, func(a *Attr) {
+	return f.writeMetadata(ctx, key, typ, false, func(a *Attr) {
 		a.Atime = now
 	})
-	return err
 }
 
 func mapNotFound(err error) error {

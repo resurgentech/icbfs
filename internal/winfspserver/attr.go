@@ -18,9 +18,9 @@ import (
 // fillFileInfo translates an icbfs.Attr into the FSP_FSCTL_FILE_INFO
 // WinFsp expects back from Open/Create/GetFileInfo/Overwrite.
 //
-// Known simplification: ctime isn't tracked separately, so
-// LastWriteTime/ChangeTime both report Mtime (falling back to Btime,
-// then now, if Mtime is zero). CreationTime reports Btime.
+// LastWriteTime and ChangeTime both report Mtime (falling back to Btime,
+// then now, if Mtime is zero), although icbfs tracks a real status-change
+// time (Attr.Ctime) that FUSE reports. CreationTime reports Btime.
 //
 // LastAccessTime (ROADMAP.md's Part G, task G1) is real, not a copy of
 // Mtime: reports a.Atime when it's been explicitly tracked (by a real

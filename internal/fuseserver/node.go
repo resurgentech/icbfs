@@ -114,10 +114,8 @@ func setTime(sec *uint64, nsec *uint32, t time.Time) {
 
 // fillAttr translates an icbfs.Attr into the fuse.Attr the kernel expects.
 //
-// Known simplification: ctime is reported as mtime. ARCHITECTURE.md
-// derives mtime from the current version's LastModified, which also
-// bumps on a metadata-only change — so a true ctime/mtime split would
-// need an explicit extra field.
+// ctime is icbfs's own status-change time (see icbfs.Attr), falling
+// back to mtime only if it's somehow unset.
 //
 // atime (ROADMAP.md's Part G, task G1) is real, not a copy of mtime: a
 // file/directory that's never actually been read reports the zero
@@ -141,7 +139,11 @@ func fillAttr(out *fuse.Attr, key string, typ icbfs.EntryType, a icbfs.Attr) {
 		mtime = time.Now()
 	}
 	setTime(&out.Mtime, &out.Mtimensec, mtime)
-	setTime(&out.Ctime, &out.Ctimensec, mtime)
+	ctime := a.Ctime
+	if ctime.IsZero() {
+		ctime = mtime
+	}
+	setTime(&out.Ctime, &out.Ctimensec, ctime)
 
 	atime := a.Atime
 	if atime.IsZero() {

@@ -14,9 +14,8 @@ option go_package = "github.com/resurgentech/icbfs/internal/pb";
 // Windows ACLs (under "windows.acl"), and ordinary user xattrs — all
 // just named entries, with no special-casing at the storage layer.
 //
-// Directories do not get one of these; they aren't hard-linkable, so
-// their mode/uid/gid stay in native object metadata on the directory
-// block object itself (see internal/icbfs/attr.go).
+// Directories have one too, <uuid>.metadata beside their root block
+// (see internal/icbfs/attr.go).
 message Metadata {
   uint32 mode = 1;
   uint32 uid = 2;
@@ -71,4 +70,12 @@ message Metadata {
   // An explicit creation-time override (SetFileTime's CreationTime);
   // unset = the time embedded in the UUIDv7 key.
   google.protobuf.Timestamp btime_override = 15;
+
+  // Last status change (POSIX ctime): set by every change to this
+  // object except a read's atime update, which would otherwise make
+  // every read look like a change. A directory's is also set when an
+  // entry is added to or removed from it. For a file the reported ctime
+  // is the later of this and the content's last write. Unset (objects
+  // written before this field) = this object's own LastModified.
+  google.protobuf.Timestamp ctime = 16;
 }

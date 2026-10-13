@@ -894,7 +894,11 @@ func TestDirectoryMetadataObject(t *testing.T) {
 	if _, err := fsys.SetWindowsACL(ctx, dir, TypeDir, []byte("D:P(A;;FA;;;WD)")); err != nil {
 		t.Fatalf("SetWindowsACL: %v", err)
 	}
-	// Entries changing must not disturb the directory's own attributes.
+	if attr, err = fsys.Stat(ctx, dir, TypeDir); err != nil || !attr.Mtime.Equal(mtime) {
+		t.Fatalf("dir mtime after SetAttr = %v, %v; want %v", attr.Mtime, err, mtime)
+	}
+	// Entries changing must not disturb the directory's own attributes,
+	// only move its mtime on, as on any POSIX filesystem or NTFS.
 	if _, _, _, err := fsys.Create(ctx, dir, "child", 0644, 0, 0); err != nil {
 		t.Fatalf("create child: %v", err)
 	}
@@ -904,7 +908,7 @@ func TestDirectoryMetadataObject(t *testing.T) {
 	}
 	bits, _ := WindowsAttributesFromXattrs(attr.Xattrs)
 	acl, _ := WindowsACLFromXattrs(attr.Xattrs)
-	if attr.Mode != 0700 || !attr.Mtime.Equal(mtime) || bits != WindowsAttrReadOnly || string(acl) != "D:P(A;;FA;;;WD)" {
+	if attr.Mode != 0700 || !attr.Mtime.After(mtime) || bits != WindowsAttrReadOnly || string(acl) != "D:P(A;;FA;;;WD)" {
 		t.Fatalf("dir attr after updates = %+v", attr)
 	}
 
