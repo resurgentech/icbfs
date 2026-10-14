@@ -26,11 +26,14 @@ type Standalone struct {
 	Buckets map[string]pkgicbfs.S3 `json:"buckets"`
 	// Drives by registry id.
 	Drives map[string]StandaloneDrive `json:"drives"`
-	// SideStore is where drafts go: a bucket id and a filesystem name.
-	SideStore *struct {
-		Bucket     string `json:"bucket"`
-		Filesystem string `json:"filesystem"`
-	} `json:"sideStore,omitempty"`
+	// SideStore is the deployment's side store: where drafts go for a
+	// drive whose bucket has none of its own (and for drives with no
+	// bucket at all).
+	SideStore *SideStoreAt `json:"sideStore,omitempty"`
+	// BucketSideStores gives a bucket its own side store, a filesystem in
+	// that bucket (bucket id → filesystem name), so its drives' drafts
+	// stay in the same storage as their documents.
+	BucketSideStores map[string]string `json:"bucketSideStores,omitempty"`
 	// Profiles by actor, for every drive...
 	Profiles map[string]drive.Profile `json:"profiles"`
 	// ... unless a drive has its own (drive id → actor → profile).
@@ -39,6 +42,12 @@ type Standalone struct {
 	// An actor not listed has every permission.
 	Permissions map[string][]string `json:"permissions,omitempty"`
 	CacheDir    string              `json:"cacheDir,omitempty"`
+}
+
+// SideStoreAt is a side store: a filesystem in a bucket.
+type SideStoreAt struct {
+	Bucket     string `json:"bucket"`
+	Filesystem string `json:"filesystem"`
 }
 
 // StandaloneDrive is one configured drive.
@@ -114,16 +123,49 @@ func (st *Standalone) Config(ctx context.Context) (Config, func(), error) {
 			return actor, st.Profiles[actor], nil
 		},
 	}
-	if st.SideStore != nil {
-		store, ok := stores[st.SideStore.Bucket]
+	// Side stores open (and are made, the first time) on first use.
+	sides := map[SideStoreAt]*drive.Drafts{}
+	var sideMu sync.Mutex
+	openSide := func(ctx context.Context, at SideStoreAt) (*drive.Drafts, error) {
+		sideMu.Lock()
+		defer sideMu.Unlock()
+		if ds, ok := sides[at]; ok {
+			return ds, nil
+		}
+		store, ok := stores[at.Bucket]
 		if !ok {
+			return nil, fmt.Errorf("side store bucket %s isn't configured", at.Bucket)
+		}
+		side, err := icbfsdrive.OpenSideStore(ctx, store, at.Filesystem)
+		if err != nil {
+			return nil, fmt.Errorf("side store %s/%s: %w", at.Bucket, at.Filesystem, err)
+		}
+		ds := &drive.Drafts{Side: side}
+		sides[at] = ds
+		return ds, nil
+	}
+	for b := range st.BucketSideStores {
+		if _, ok := stores[b]; !ok {
+			return Config{}, nil, fmt.Errorf("bucketSideStores: bucket %s isn't configured", b)
+		}
+	}
+	if st.SideStore != nil {
+		if _, ok := stores[st.SideStore.Bucket]; !ok {
 			return Config{}, nil, fmt.Errorf("side store bucket %s isn't configured", st.SideStore.Bucket)
 		}
-		side, err := icbfsdrive.OpenSideStore(ctx, store, st.SideStore.Filesystem)
-		if err != nil {
-			return Config{}, nil, fmt.Errorf("side store: %w", err)
+	}
+	cfg.Drafts = func(ctx context.Context, driveID string) (*drive.Drafts, error) {
+		sd, ok := st.Drives[driveID]
+		if !ok {
+			return nil, fmt.Errorf("drive %s: %w", driveID, drive.ErrNotFound)
 		}
-		cfg.Drafts = &drive.Drafts{Side: side}
+		if fs, ok := st.BucketSideStores[sd.Bucket]; ok {
+			return openSide(ctx, SideStoreAt{Bucket: sd.Bucket, Filesystem: fs})
+		}
+		if st.SideStore != nil {
+			return openSide(ctx, *st.SideStore)
+		}
+		return nil, nil
 	}
 	cleanup := func() {
 		mu.Lock()

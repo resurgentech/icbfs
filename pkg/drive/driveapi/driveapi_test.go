@@ -34,17 +34,21 @@ func serve(t *testing.T) string {
 	t.Helper()
 	_, srv := miniotest.Start(t)
 	st := &Standalone{
-		Token:   token,
-		Buckets: map[string]pkgicbfs.S3{"main": {Endpoint: srv.Endpoint, Bucket: srv.Bucket, AccessKey: srv.AccessKey, SecretKey: srv.SecretKey}},
-		Drives: map[string]StandaloneDrive{
-			"docs":    {Name: "Docs", Bucket: "main", Filesystem: "docs", Root: "/", Writable: true},
-			"archive": {Name: "Archive", Bucket: "main", Filesystem: "docs", Root: "/", Writable: false},
-			"nowhere": {Name: "Nowhere", Bucket: "main", Filesystem: "missing", Root: "/", Writable: true},
+		Token: token,
+		// "shared" is registered separately but is the same bucket, so
+		// both side stores can be seen from "main"'s filesystem list.
+		Buckets: map[string]pkgicbfs.S3{
+			"main":   {Endpoint: srv.Endpoint, Bucket: srv.Bucket, AccessKey: srv.AccessKey, SecretKey: srv.SecretKey},
+			"shared": {Endpoint: srv.Endpoint, Bucket: srv.Bucket, AccessKey: srv.AccessKey, SecretKey: srv.SecretKey},
 		},
-		SideStore: &struct {
-			Bucket     string `json:"bucket"`
-			Filesystem string `json:"filesystem"`
-		}{Bucket: "main", Filesystem: "host-side"},
+		Drives: map[string]StandaloneDrive{
+			"docs":        {Name: "Docs", Bucket: "main", Filesystem: "docs", Root: "/", Writable: true},
+			"shared-docs": {Name: "Docs, via the shared bucket", Bucket: "shared", Filesystem: "docs", Root: "/", Writable: true},
+			"archive":     {Name: "Archive", Bucket: "main", Filesystem: "docs", Root: "/", Writable: false},
+			"nowhere":     {Name: "Nowhere", Bucket: "main", Filesystem: "missing", Root: "/", Writable: true},
+		},
+		SideStore:        &SideStoreAt{Bucket: "main", Filesystem: "host-side"},
+		BucketSideStores: map[string]string{"main": "main-side"},
 		Profiles: map[string]drive.Profile{
 			"admin": {POSIX: &drive.POSIXProfile{Uid: 1000, Gids: []uint32{1000}}},
 			"alice": {POSIX: &drive.POSIXProfile{Uid: 1000, Gids: []uint32{1000}}},
@@ -271,6 +275,35 @@ func TestAPI(t *testing.T) {
 	}
 	if gc, _ := alice.GetContentWithResponse(ctx, "docs", &GetContentParams{Id: ptr(id)}); string(gc.Body) != "drafty" {
 		t.Fatalf("after publish: %q", gc.Body)
+	}
+
+	// Side stores: a bucket with its own keeps its drives' drafts there;
+	// a drive on a bucket without one uses the deployment's.
+	sideStores := func() string {
+		t.Helper()
+		lr, _ := admin.ListFilesystemsWithResponse(ctx, "main")
+		var names []string
+		for _, f := range lr.JSON200.Filesystems {
+			if strings.HasSuffix(f.Name, "-side") {
+				names = append(names, f.Name)
+			}
+		}
+		return strings.Join(names, ",")
+	}
+	if got := sideStores(); got != "main-side" {
+		t.Fatalf("side stores after a draft on main: %q", got)
+	}
+	if r, _ := alice.PutDraftWithBodyWithResponse(ctx, "shared-docs", draftParams, "application/octet-stream", strings.NewReader("elsewhere")); r.StatusCode() != 200 {
+		t.Fatalf("put draft on the shared bucket: %s", r.Body)
+	}
+	if got := sideStores(); got != "main-side,host-side" && got != "host-side,main-side" {
+		t.Fatalf("side stores after a draft on shared: %q", got)
+	}
+	if r, _ := alice.GetDraftWithResponse(ctx, "docs", &GetDraftParams{Id: id}); r.StatusCode() != 404 {
+		t.Fatalf("the shared bucket's draft showed up in main's side store: %d %s", r.StatusCode(), r.Body)
+	}
+	if r, _ := alice.DiscardDraftWithResponse(ctx, "shared-docs", &DiscardDraftParams{Id: id}); r.StatusCode() != 204 {
+		t.Fatalf("discard: %d %s", r.StatusCode(), r.Body)
 	}
 
 	// delete, trash, restore, purge

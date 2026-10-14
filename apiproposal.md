@@ -357,12 +357,17 @@ merge these into its own stream.
 
 ## The side store
 
-An icbfs filesystem set aside for host (**proposed**: one per registered
-bucket, or one per deployment), behind a small interface of its own: keyed
-objects with metadata, versioned. Holds drafts now, and review information —
-comments, feedback, the base version a review started from, the provenance of
-versions an agent writes — for any drive, whatever its backend. Its own
-history and as-of views come with it.
+An icbfs filesystem set aside for host, behind a small interface of its
+own: keyed objects with metadata, versioned. Holds drafts now, and review
+information — comments, feedback, the base version a review started from, the
+provenance of versions an agent writes — for any drive, whatever its backend.
+Its own history and as-of views come with it.
+
+Where it lives is looked up per drive (owner, 2026-10-14): a registered
+bucket may have a side store of its own, a filesystem in that bucket, so its
+drives' drafts and review data stay in the same storage as their documents (a
+customer's own bucket keeps its drafts); every other drive — on a bucket
+without one, or on a backend with no bucket at all — uses the deployment's.
 
 ## Daemon side commands: `icbfs-cli`
 
@@ -431,9 +436,7 @@ item in neither or both.
 
 ## Open questions
 
-1. **Side store placement**: one side-store filesystem per registered bucket,
-   or one per deployment?
-2. **Permission names**: the `drive.*` and `storage.*` set above is a
+1. **Permission names**: the `drive.*` and `storage.*` set above is a
    proposal for host's registry; does it match how host names and
    groups permissions?
 
@@ -447,7 +450,8 @@ item in neither or both.
   The Windows access check is `internal/acl`.
 - `Config` is what host supplies: `Drive` (its registry), `Authorize`
   and `AuthorizeStorage` (its role check, answering the actor and the
-  actor's profile), `Bucket`, `Drafts`, and `Audit`, told of every
+  actor's profile), `Bucket`, `Drafts` (a drive's drafts, from its
+  bucket's side store or the deployment's), and `Audit`, told of every
   operation (actor, profile, route, item, status) for the logging chain.
 - `version=` is a named version when the drive has a name by that value,
   else a version id.

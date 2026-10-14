@@ -48,8 +48,10 @@ type Config struct {
 	AuthorizeStorage func(c fiber.Ctx, bucket, permission string) (actor string, p drive.Profile, err error)
 	// Bucket opens a registered bucket.
 	Bucket func(ctx context.Context, id string) (pkgicbfs.Store, error)
-	// Drafts, in the side store; nil disables the draft endpoints.
-	Drafts *drive.Drafts
+	// Drafts finds a drive's drafts: in the side store of the drive's own
+	// bucket where it has one, else the deployment's. nil (or a nil
+	// answer) means none: the draft endpoints answer not_supported.
+	Drafts func(ctx context.Context, driveID string) (*drive.Drafts, error)
 	// Stop, when closed, ends every event stream (before the app shuts
 	// down, which otherwise waits for them).
 	Stop <-chan struct{}
@@ -281,7 +283,11 @@ func (s *server) getDrive(r *req) error {
 
 // withDrafts marks items that have drafts.
 func (s *server) withDrafts(r *req, items []drive.Item) {
-	if s.cfg.Drafts == nil || len(items) == 0 {
+	if len(items) == 0 {
+		return
+	}
+	ds, err := s.draftsOf(r)
+	if err != nil || ds == nil {
 		return
 	}
 	only := map[string]bool{}
@@ -290,7 +296,7 @@ func (s *server) withDrafts(r *req, items []drive.Item) {
 			only[it.ID] = true
 		}
 	}
-	by, err := s.cfg.Drafts.ByItem(r.ctx, r.id, only)
+	by, err := ds.ByItem(r.ctx, r.id, only)
 	if err != nil {
 		return
 	}
@@ -698,8 +704,12 @@ func (s *server) purge(r *req) error {
 	if err := r.d.Purge(r.ctx, ref, r.flag("allNames")); err != nil {
 		return writeErr(r.c, err)
 	}
-	if s.cfg.Drafts != nil {
-		if err := s.cfg.Drafts.DeleteAll(r.ctx, r.id, id); err != nil {
+	ds, err := s.draftsOf(r)
+	if err != nil {
+		return writeErr(r.c, err)
+	}
+	if ds != nil {
+		if err := ds.DeleteAll(r.ctx, r.id, id); err != nil {
 			return writeErr(r.c, err)
 		}
 	}
@@ -708,8 +718,20 @@ func (s *server) purge(r *req) error {
 
 // --- drafts ---
 
-func (s *server) drafts(r *req) (*drive.Drafts, string, error) {
+// draftsOf is the request's drive's drafts, or nil if it has none.
+func (s *server) draftsOf(r *req) (*drive.Drafts, error) {
 	if s.cfg.Drafts == nil {
+		return nil, nil
+	}
+	return s.cfg.Drafts(r.ctx, r.id)
+}
+
+func (s *server) drafts(r *req) (*drive.Drafts, string, error) {
+	ds, err := s.draftsOf(r)
+	if err != nil {
+		return nil, "", err
+	}
+	if ds == nil {
 		return nil, "", fmt.Errorf("drafts: %w", drive.ErrNotSupported)
 	}
 	if r.actor == "" {
@@ -723,7 +745,7 @@ func (s *server) drafts(r *req) (*drive.Drafts, string, error) {
 	if _, err := r.d.Stat(r.ctx, drive.ItemRef{ID: id}, drive.At{}); err != nil {
 		return nil, "", err
 	}
-	return s.cfg.Drafts, id, nil
+	return ds, id, nil
 }
 
 func (s *server) getDraft(r *req) error {
