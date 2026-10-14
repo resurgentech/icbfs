@@ -175,4 +175,3 @@ func ResolveAsOf(ctx context.Context, store objstore.Store, fsName, arg string, 
 	}
 	return nv.Time, nil
 }
-
