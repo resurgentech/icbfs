@@ -194,6 +194,10 @@ func (f *Filesystem) MaxFileSize() int64 { return f.maxFileSize }
 // RootKey returns the block key identifying this filesystem's root:
 // "<id>-root-<name>", a derived key, not stored anywhere separately —
 // see ARCHITECTURE.md. Only meaningful after Bootstrap.
+// Store is the object store the filesystem is on (an as-of view, for a
+// read-only past filesystem).
+func (f *Filesystem) Store() objstore.Store { return f.store }
+
 func (f *Filesystem) RootKey() string { return f.id + "-root-" + f.fsName }
 
 // newKey mints a fresh, filesystem-scoped object key: this filesystem's
@@ -1449,6 +1453,24 @@ func (f *Filesystem) SetWindowsACL(ctx context.Context, uuid string, typ EntryTy
 			a.Xattrs = make(map[string][]byte)
 		}
 		a.Xattrs[WindowsACLXattrKey] = sddl
+	})
+}
+
+// SetXattr sets (or, with a nil value, removes) one extended attribute
+// of a file, symlink or directory.
+func (f *Filesystem) SetXattr(ctx context.Context, uuid string, typ EntryType, name string, value []byte) (Attr, error) {
+	if err := f.checkWritable(); err != nil {
+		return Attr{}, err
+	}
+	return f.updateMetadata(ctx, uuid, typ, func(a *Attr) {
+		if value == nil {
+			delete(a.Xattrs, name)
+			return
+		}
+		if a.Xattrs == nil {
+			a.Xattrs = make(map[string][]byte)
+		}
+		a.Xattrs[name] = value
 	})
 }
 

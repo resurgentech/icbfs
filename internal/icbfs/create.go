@@ -110,6 +110,26 @@ func (f *Filesystem) Attach(ctx context.Context) error {
 	return fmt.Errorf("no filesystem %q in this bucket: %w", f.fsName, ErrNotFound)
 }
 
+// Archived reports whether the filesystem is archived (read-only for
+// good), as of attaching or the last Refresh.
+func (f *Filesystem) Archived() bool { return f.archived }
+
+// Refresh re-reads the filesystem's master block entry, so a filesystem
+// archived since it was attached stops taking writes.
+func (f *Filesystem) Refresh(ctx context.Context) error {
+	mb, _, err := readMaster(ctx, f.store)
+	if err != nil {
+		return mapNotFound(err)
+	}
+	for i, e := range mb.Filesystems {
+		if e.Name == f.fsName && fsID(i) == f.id {
+			f.archived = e.Archived
+			return nil
+		}
+	}
+	return fmt.Errorf("filesystem %q: %w", f.fsName, ErrNotFound)
+}
+
 // ListFilesystems lists the filesystems in store's bucket.
 func ListFilesystems(ctx context.Context, store objstore.Store) ([]Info, error) {
 	mb, _, err := readMaster(ctx, store)

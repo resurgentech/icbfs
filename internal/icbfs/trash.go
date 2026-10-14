@@ -43,6 +43,9 @@ type DeleteInfo struct {
 	By    string
 	Path  string
 	Batch string
+	// EntryID, if set, is the trash entry's id: a recursive delete gives
+	// the directory it started from its batch's id.
+	EntryID string
 	// NoTrash: an access layer's internal delete (replacing a placeholder),
 	// not a user's, so nothing is recorded.
 	NoTrash bool
@@ -73,9 +76,12 @@ func (f *Filesystem) recordTrash(ctx context.Context, itemID string, typ EntryTy
 	if info.NoTrash {
 		return
 	}
-	id, err := NewUUIDv7()
-	if err != nil {
-		return
+	id := info.EntryID
+	if id == "" {
+		var err error
+		if id, err = NewUUIDv7(); err != nil {
+			return
+		}
 	}
 	e := TrashEntry{
 		EntryID: id, ItemID: itemID, Type: typ, Name: name, ParentID: dirKey,
