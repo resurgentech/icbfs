@@ -179,8 +179,8 @@ bin/icbfs-cli trash list -fs docs
 mkdir -p /tmp/first && bin/icbfs mount -as-of first -fs docs /tmp/first
 ```
 
-The mount commands take their defaults (`http://127.0.0.1:9000`, bucket
-`icbfs`, `minioadmin`) from flags, not from the environment.
+Every command takes the store's connection from the same flags or the
+same `ICBFS_*` variables, so keys need not be on a command line.
 
 ## Documentation
 

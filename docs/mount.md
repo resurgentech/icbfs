@@ -4,14 +4,23 @@ A mount attaches to an existing filesystem. Create one first with
 `icbfs-cli fs create` (see [cli.md](cli.md)), in a bucket with versioning
 turned on.
 
-Both mount commands take the store's connection as flags:
+Both mount commands take the store's connection the way `icbfs-cli` does:
+a flag, or else its environment variable. There are no default keys; a
+mount without them fails.
+
+| flag | environment variable | default |
+|---|---|---|
+| `-endpoint` | `ICBFS_ENDPOINT` | `http://127.0.0.1:9000` |
+| `-bucket` | `ICBFS_BUCKET` | `icbfs` (versioning must be on) |
+| `-region` | `ICBFS_REGION` | `us-east-1` (MinIO ignores it) |
+| `-access-key` | `ICBFS_ACCESS_KEY` | none |
+| `-secret-key` | `ICBFS_SECRET_KEY` | none |
+
+Prefer the variables for the keys: a flag's value is visible to other
+users in the process list.
 
 | flag | default | meaning |
 |---|---|---|
-| `-endpoint` | `http://127.0.0.1:9000` | S3-API endpoint |
-| `-bucket` | `icbfs` | bucket (versioning must be on) |
-| `-region` | `us-east-1` | region (MinIO ignores it) |
-| `-access-key`, `-secret-key` | `minioadmin` | credentials |
 | `-fs` | `default` | the filesystem to mount |
 | `-as-of` | | mount read-only as the filesystem was at a past time or named version (below) |
 | `-cache-dir` | a new temp directory | where open files and the read cache are kept |
@@ -26,7 +35,8 @@ Requirements: FUSE 3 (`fuse3`), and `user_allow_other` in `/etc/fuse.conf`
 if you use `-allow-other`.
 
 ```
-icbfs mount -endpoint http://minio:9000 -bucket icbfs -access-key … -secret-key … -fs docs /mnt/docs
+export ICBFS_ENDPOINT=http://minio:9000 ICBFS_ACCESS_KEY=… ICBFS_SECRET_KEY=…
+icbfs mount -fs docs /mnt/docs
 ```
 
 Unmount with `fusermount3 -u /mnt/docs`, or press Ctrl+C in the
@@ -72,7 +82,10 @@ tested on Windows Server 2025, x64.
 ### Mount
 
 ```
-icbfs-winfsp -endpoint http://minio:9000 -bucket icbfs -access-key … -secret-key … -fs docs X:
+set ICBFS_ENDPOINT=http://minio:9000
+set ICBFS_ACCESS_KEY=…
+set ICBFS_SECRET_KEY=…
+icbfs-winfsp -fs docs X:
 ```
 
 The mount point is a drive letter (`X:`). Stop the command (Ctrl+C) to

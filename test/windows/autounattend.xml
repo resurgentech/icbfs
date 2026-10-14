@@ -63,27 +63,19 @@
       </OOBE>
       <UserAccounts>
         <AdministratorPassword>
-          <Value>REDACTED</Value>
+          <Value>@ADMIN_PASSWORD@</Value>
           <PlainText>true</PlainText>
         </AdministratorPassword>
       </UserAccounts>
       <!--
-        AutoLogon, not a move to the specialize pass: tried
-        RunSynchronousCommand in specialize once (see README.md's
-        "what went wrong" section) and it's the WRONG fix. specialize runs
-        very early, before networking is reliably up, and ANY non-zero
-        exit from a RunSynchronousCommand there aborts Setup outright with
-        "the computer unexpectedly restarted... click OK to restart the
-        installation" (confirmed the hard way). FirstLogonCommands in
-        oobeSystem runs later, once networking is actually up, and a
-        failing command here doesn't nuke the whole install. The ONLY
-        actual problem with FirstLogonCommands was that nothing was
-        logging in to trigger it - AutoLogon below fixes exactly that,
-        nothing else needed to change.
+        AutoLogon, once, so FirstLogonCommands below run with no one at
+        the console. They run in oobeSystem, once networking is up; a
+        failing command there doesn't abort Setup, as one in specialize
+        would.
       -->
       <AutoLogon>
         <Password>
-          <Value>REDACTED</Value>
+          <Value>@ADMIN_PASSWORD@</Value>
           <PlainText>true</PlainText>
         </Password>
         <Enabled>true</Enabled>
@@ -113,6 +105,12 @@
           <Order>4</Order>
           <CommandLine>powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "New-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name DefaultShell -Value 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -PropertyType String -Force -ErrorAction SilentlyContinue *&gt;&gt; C:\Windows\Temp\icbfs-sshd-setup.log; exit 0"</CommandLine>
           <Description>Make PowerShell the default SSH shell</Description>
+          <RequiresUserInput>false</RequiresUserInput>
+        </SynchronousCommand>
+        <SynchronousCommand wcm:action="add">
+          <Order>5</Order>
+          <CommandLine>powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "New-Item -ItemType Directory C:\ProgramData\ssh -Force | Out-Null; Set-Content -Path C:\ProgramData\ssh\administrators_authorized_keys -Value '@SSH_PUBLIC_KEY@' -Encoding ascii; icacls C:\ProgramData\ssh\administrators_authorized_keys /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' *&gt;&gt; C:\Windows\Temp\icbfs-sshd-setup.log; exit 0"</CommandLine>
+          <Description>Let the host's SSH key log in as Administrator</Description>
           <RequiresUserInput>false</RequiresUserInput>
         </SynchronousCommand>
       </FirstLogonCommands>

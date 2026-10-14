@@ -15,15 +15,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	awscreds "github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-
 	winfsp "github.com/winfsp/go-winfsp"
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore"
+	"github.com/resurgentech/icbfs/internal/storeflags"
 	"github.com/resurgentech/icbfs/internal/winfspserver"
+	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
 )
 
 // winfspAttribution is the exact notice WinFsp's own FLOSS exception
@@ -44,12 +42,8 @@ func main() {
 		fmt.Fprintln(os.Stderr)
 		fmt.Fprintln(os.Stderr, winfspAttribution)
 	}
-	endpoint := fset.String("endpoint", "http://127.0.0.1:9000", "S3-API endpoint (MinIO)")
-	bucket := fset.String("bucket", "icbfs", "bucket name (must have versioning enabled)")
+	conn := storeflags.Add(fset)
 	fsName := fset.String("fs", "default", "filesystem name")
-	accessKey := fset.String("access-key", "minioadmin", "access key")
-	secretKey := fset.String("secret-key", "minioadmin", "secret key")
-	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
 	asOf := fset.String("as-of", "", "mount read-only as the filesystem was at this time: a date (2006-01-02, meaning the end of that day), a date-time (2006-01-02T15:04:05) in local time, or RFC 3339 with a zone; or a version name (icbfs-cli names). Fails if the filesystem didn't exist yet then")
 	caseInsensitive := fset.Bool("case-insensitive", true, "look names up case-insensitively, as NTFS does; names are always stored as given")
 	cacheDir := fset.String("cache-dir", "", "local disk directory for open files and the read cache (default: a new directory under the system temp directory)")
@@ -64,13 +58,10 @@ func main() {
 	mountpoint := fset.Arg(0)
 
 	ctx := context.Background()
-	client := s3.New(s3.Options{
-		Region:       *region,
-		BaseEndpoint: aws.String(*endpoint),
-		UsePathStyle: true,
-		Credentials:  awscreds.NewStaticCredentialsProvider(*accessKey, *secretKey, ""),
-	})
-	var store objstore.Store = objstore.NewS3Store(client, *bucket)
+	if err := storeflags.Check(conn); err != nil {
+		log.Fatal(err)
+	}
+	store := pkgicbfs.OpenS3(*conn)
 
 	var view *objstore.AsOf
 	if *asOf != "" {
@@ -142,9 +133,9 @@ func main() {
 	defer server.Unmount()
 
 	if view != nil {
-		log.Printf("icbfs %q mounted read-only at %s as of %s (bucket %s via %s)", *fsName, mountpoint, view.At().Format(time.RFC3339Nano), *bucket, *endpoint)
+		log.Printf("icbfs %q mounted read-only at %s as of %s (bucket %s via %s)", *fsName, mountpoint, view.At().Format(time.RFC3339Nano), conn.Bucket, conn.Endpoint)
 	} else {
-		log.Printf("icbfs %q mounted at %s (bucket %s via %s)", *fsName, mountpoint, *bucket, *endpoint)
+		log.Printf("icbfs %q mounted at %s (bucket %s via %s)", *fsName, mountpoint, conn.Bucket, conn.Endpoint)
 	}
 	log.Println(winfspAttribution)
 	// winfsp.Mount's dispatcher runs its own background goroutines;

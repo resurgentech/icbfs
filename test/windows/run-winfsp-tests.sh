@@ -29,9 +29,6 @@ if [ $# -gt 0 ] && [ "$1" != "--" ]; then TARGET="$1"; shift; fi
 
 IP=$(vm_ip)
 [ -n "$IP" ] || { echo "no IP for $VM_NAME — is it running?" >&2; exit 1; }
-scp_vm() {
-  sshpass -p "$VM_PASSWORD" scp -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "$@"
-}
 mkdir -p "$WORK_DIR"
 
 if [ "$deploy" = 1 ]; then

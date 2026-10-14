@@ -10,8 +10,9 @@ for the latest results.
 
 ## Setup
 
-Requirements on the host: libvirt and `virt-install`, `sshpass`, `xorriso`
-(for the answer-file ISO), and Docker (for MinIO).
+Requirements on the host: libvirt and `virt-install`, `xorriso` (for the
+answer-file ISO), Docker (for MinIO), and an SSH key at
+`~/.ssh/id_ed25519.pub` (or `$ICBFS_VM_SSH_KEY`).
 
 The only manual step is downloading the ISO. The Windows Server 2025
 evaluation ISO sits behind a registration form at the [Evaluation
@@ -21,13 +22,17 @@ Center](https://www.microsoft.com/en-us/evalcenter/evaluate-windows-server-2025)
 ./create-vm.sh /path/to/windows-server-2025-eval.iso   # unattended install
 ip=$(./wait-for-ssh.sh)                                # prints the IP once SSH is up
 ./check-eval-expiry.sh "$ip"                           # when the evaluation runs out
-ssh Administrator@"$ip"                                # password in lib.sh
+ssh Administrator@"$ip"                                # logs in with your SSH key
 ./destroy-vm.sh
 ```
 
 - `autounattend.xml` installs Windows with an MBR layout (this libvirt
   profile boots SeaBIOS) on emulated SATA and e1000e, so no drivers are
-  needed. It logs on automatically once, to enable OpenSSH.
+  needed. It logs on automatically once, to enable OpenSSH and install your
+  SSH key for Administrator.
+- `build-answer-iso.sh` fills your key and a generated Administrator
+  password into a copy of `autounattend.xml` under `work/`. The password is
+  kept in `work/vm-password` (gitignored); the scripts never use it.
 - `wait-for-ssh.sh` restarts the VM, up to six times, if it stops before
   SSH is up. libvirtd has been seen to SIGTERM the VM during install, for
   reasons not found.

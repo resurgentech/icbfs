@@ -13,10 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	awscreds "github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
@@ -29,6 +25,8 @@ import (
 	"github.com/resurgentech/icbfs/internal/notify"
 	"github.com/resurgentech/icbfs/internal/notify/miniosrc"
 	"github.com/resurgentech/icbfs/internal/objstore"
+	"github.com/resurgentech/icbfs/internal/storeflags"
+	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
 )
 
 func main() {
@@ -38,13 +36,9 @@ func main() {
 	}
 
 	fset := flag.NewFlagSet("mount", flag.ExitOnError)
-	endpoint := fset.String("endpoint", "http://127.0.0.1:9000", "S3-API endpoint (MinIO)")
-	bucket := fset.String("bucket", "icbfs", "bucket name (must have versioning enabled)")
+	conn := storeflags.Add(fset)
 	fsName := fset.String("fs", "default", "filesystem name")
-	accessKey := fset.String("access-key", "minioadmin", "access key")
-	secretKey := fset.String("secret-key", "minioadmin", "secret key")
-	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
-	logSocket := fset.String("log-socket", "", "mount a drive (-drive) through the icbfs-logd daemon on this Unix socket, logging reads, writes, deletes and directory listings: the server says how to reach the store and which filesystem and directory the drive is (-endpoint, -bucket, -region, -access-key, -secret-key and -fs are then not used), and whether this machine may only read it; the mount fails without the answer")
+	logSocket := fset.String("log-socket", "", "mount a drive (-drive) through the icbfs-logd daemon on this Unix socket, logging reads, writes, deletes and directory listings: the server says how to reach the store and which filesystem and directory the drive is (the store flags and -fs are then not used), and whether this machine may only read it; the mount fails without the answer")
 	driveID := fset.String("drive", "", "with -log-socket: the drive to mount (the server's id for it)")
 	logAsync := fset.Bool("log-async", false, "with -log-socket: queue events instead of waiting for the server to log each one; never slows an operation, but drops (and counts) events while the daemon is unreachable")
 	asOf := fset.String("as-of", "", "mount read-only as the filesystem was at this time: a date (2006-01-02, meaning the end of that day), a date-time (2006-01-02T15:04:05) in local time, or RFC 3339 with a zone; or a version name (icbfs-cli names). Fails if the filesystem didn't exist yet then")
@@ -82,20 +76,17 @@ func main() {
 		if err != nil {
 			log.Fatalf("drive %q: %v", *driveID, err)
 		}
-		*endpoint, *bucket, *accessKey, *secretKey = creds.Endpoint, creds.Bucket, creds.AccessKey, creds.SecretKey
+		conn.Endpoint, conn.Bucket, conn.AccessKey, conn.SecretKey = creds.Endpoint, creds.Bucket, creds.AccessKey, creds.SecretKey
 		if creds.Region != "" {
-			*region = creds.Region
+			conn.Region = creds.Region
 		}
 		*fsName, driveRoot, driveReadOnly = m.Filesystem, strings.TrimSuffix(m.Root, "/"), m.ReadOnly
 	}
 
-	client := s3.New(s3.Options{
-		Region:       *region,
-		BaseEndpoint: aws.String(*endpoint),
-		UsePathStyle: true,
-		Credentials:  awscreds.NewStaticCredentialsProvider(*accessKey, *secretKey, ""),
-	})
-	var store objstore.Store = objstore.NewS3Store(client, *bucket)
+	if err := storeflags.Check(conn); err != nil {
+		log.Fatal(err)
+	}
+	store := pkgicbfs.OpenS3(*conn)
 
 	var view *objstore.AsOf
 	if *asOf != "" {
@@ -132,11 +123,11 @@ func main() {
 
 	var fuseSignals <-chan notify.Signal
 	if *enableNotify {
-		minioClient, err := newMinIOClient(*endpoint, *accessKey, *secretKey)
+		minioClient, err := newMinIOClient(conn.Endpoint, conn.AccessKey, conn.SecretKey)
 		if err != nil {
 			log.Fatalf("set up notify backend: %v", err)
 		}
-		src := miniosrc.New(ctx, minioClient, *bucket, fsys.Prefix())
+		src := miniosrc.New(ctx, minioClient, conn.Bucket, fsys.Prefix())
 		defer src.Close()
 
 		// A Broadcaster, not src.Signals() directly: locking's
@@ -178,9 +169,9 @@ func main() {
 	}
 
 	if view != nil {
-		log.Printf("icbfs %q mounted read-only at %s as of %s (bucket %s via %s)", *fsName, mountpoint, view.At().Format(time.RFC3339Nano), *bucket, *endpoint)
+		log.Printf("icbfs %q mounted read-only at %s as of %s (bucket %s via %s)", *fsName, mountpoint, view.At().Format(time.RFC3339Nano), conn.Bucket, conn.Endpoint)
 	} else {
-		log.Printf("icbfs %q mounted at %s (bucket %s via %s)", *fsName, mountpoint, *bucket, *endpoint)
+		log.Printf("icbfs %q mounted at %s (bucket %s via %s)", *fsName, mountpoint, conn.Bucket, conn.Endpoint)
 	}
 	// Ctrl+C or SIGTERM unmounts cleanly, so the deferred cleanup (an
 	// as-of mount's version cache) runs.

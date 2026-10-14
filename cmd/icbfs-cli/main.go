@@ -39,15 +39,13 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	awscreds "github.com/aws/aws-sdk-go-v2/credentials"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
-
 	"github.com/resurgentech/icbfs/internal/fslog"
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/internal/sidecmd"
+	"github.com/resurgentech/icbfs/internal/storeflags"
 	"github.com/resurgentech/icbfs/pkg/drive"
+	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
 )
 
 const usage = `usage: icbfs-cli fs create|list|describe|resize|archive|prune [flags]
@@ -85,35 +83,19 @@ func main() {
 // storeFlags are every command's way to the store: directly, or through
 // the daemon.
 type storeFlags struct {
-	endpoint, bucket, region, accessKey, secretKey, daemon *string
+	conn   *pkgicbfs.S3
+	daemon *string
 }
 
 func addStoreFlags(fset *flag.FlagSet) storeFlags {
-	env := func(name, def string) string {
-		if v := os.Getenv(name); v != "" {
-			return v
-		}
-		return def
-	}
+	daemon := os.Getenv("ICBFS_DAEMON")
 	return storeFlags{
-		endpoint:  fset.String("endpoint", env("ICBFS_ENDPOINT", "http://127.0.0.1:9000"), "S3-API endpoint ($ICBFS_ENDPOINT)"),
-		bucket:    fset.String("bucket", env("ICBFS_BUCKET", "icbfs"), "bucket, with versioning enabled ($ICBFS_BUCKET)"),
-		region:    fset.String("region", env("ICBFS_REGION", "us-east-1"), "region ($ICBFS_REGION)"),
-		accessKey: fset.String("access-key", env("ICBFS_ACCESS_KEY", ""), "access key ($ICBFS_ACCESS_KEY)"),
-		secretKey: fset.String("secret-key", env("ICBFS_SECRET_KEY", ""), "secret key ($ICBFS_SECRET_KEY)"),
-		daemon:    fset.String("daemon", env("ICBFS_DAEMON", ""), "send the command through the daemon's socket instead, to run on the server ($ICBFS_DAEMON)"),
+		conn:   storeflags.Add(fset),
+		daemon: fset.String("daemon", daemon, "send the command through the daemon's socket instead, to run on the server ($ICBFS_DAEMON)"),
 	}
 }
 
-func (s storeFlags) store() objstore.Store {
-	client := s3.New(s3.Options{
-		Region:       *s.region,
-		BaseEndpoint: aws.String(*s.endpoint),
-		UsePathStyle: true,
-		Credentials:  awscreds.NewStaticCredentialsProvider(*s.accessKey, *s.secretKey, ""),
-	})
-	return objstore.NewS3Store(client, *s.bucket)
-}
+func (s storeFlags) store() objstore.Store { return pkgicbfs.OpenS3(*s.conn) }
 
 // run runs a storage command — here, or on the server through the
 // daemon — and decodes its result into out (if not nil).
@@ -130,6 +112,9 @@ func (s storeFlags) runWith(name string, args map[string]string, out any, openDr
 		c := fslog.NewClient(*s.daemon, "", false)
 		result, err = c.Command(ctx(), name, args)
 	} else {
+		if err := storeflags.Check(s.conn); err != nil {
+			return err
+		}
 		result, err = sidecmd.Run(ctx(), sidecmd.Env{Store: s.store(), Drive: openDrive}, sidecmd.Request{Name: name, Args: args, Actor: actor()})
 	}
 	if err != nil {
