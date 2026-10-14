@@ -144,12 +144,12 @@ content:
 - mode, uid, gid, link count, device number;
 - access time, an explicit modification-time override, a creation-time
   override, and the change time;
-- an xattr map holding:
-  - user xattrs;
-  - POSIX ACLs (`system.posix_acl_access` and `system.posix_acl_default`,
-    as Linux stores them);
+- an xattr map, holding:
   - the Windows security descriptor as SDDL (`windows.acl`);
   - the Windows attribute bits (`windows.attributes`);
+  - a non-symlink reparse point's data (`windows.reparse`);
+  - values tools keep, such as icbfs-sync's content hash
+    (`user.sync.sha256`);
 - the alternate-stream table.
 
 **Why a separate object.** An S3 ETag is a hash of the object's body. A
@@ -406,6 +406,9 @@ See [api.md](api.md).
 
 ## Not supported
 
+- **Extended attributes and POSIX ACLs on Linux mounts.** The FUSE driver
+  doesn't implement `getxattr` or `setxattr`, so `setfacl` and user xattrs
+  fail there, though the core stores xattrs.
 - **Object stores:**
   - Azure Blob Storage has no store implementation, only the change-feed
     filter.

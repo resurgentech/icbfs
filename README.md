@@ -20,8 +20,7 @@ a drive.
   trash, kept forever, and a restored item comes back with its whole
   history.
 - **Full metadata on both platforms.**
-  - POSIX: permissions, owners, hard links, symlinks, xattrs, POSIX ACLs,
-    special files.
+  - POSIX: permissions, owners, hard links, symlinks, special files.
   - Windows: security descriptors, attribute bits, alternate data streams,
     case-insensitive lookup.
 - **No other infrastructure.** Concurrency is compare-and-swap on the
@@ -75,7 +74,7 @@ flowchart LR
 | **Past views** | mount read-only as of any time (`-as-of 2026-10-12T15:04`) or a named version |
 | **Named versions** | a name for a moment: a snapshot that copies nothing |
 | **Trash** | every delete recorded forever; restore with full history; permanent purge |
-| **POSIX** | modes, owners, hard links, symlinks, xattrs, POSIX ACLs, FIFOs, sockets, device nodes, `utimensat` |
+| **POSIX** | modes, owners, hard links, symlinks, FIFOs, sockets, device nodes, `utimensat` |
 | **Windows** | security descriptors (SDDL), ACL inheritance, attribute bits, alternate data streams, case-insensitive lookup, share modes |
 | **Large files** | multipart uploads that send only the parts an edit changed; per-filesystem max file size (default 1 TiB) |
 | **Locking** | optional `flock`/`fcntl` byte-range locks shared between Linux mounts, with leases |
@@ -130,28 +129,36 @@ Requirements:
 - To mount on Windows: [WinFsp](https://github.com/winfsp/winfsp/releases/latest),
   installed on the machine. It isn't needed to build.
 - To run the Go tests: Docker. The tests start their own MinIO containers.
+- [just](https://github.com/casey/just), for the recipes below (optional:
+  each is a plain `go` command).
 
 Everything is pure Go (`CGO_ENABLED=0` works), and cross-compiles from any
 OS:
 
 ```sh
-# Linux
-go build -o bin/ ./cmd/icbfs ./cmd/icbfs-cli ./cmd/icbfs-logd ./cmd/icbfs-mockserver ./cmd/drive-api
+just build          # Linux and Windows commands into bin/
+just test           # the Go tests (Docker; the FUSE tests need /dev/fuse)
+just ci             # what CI runs: fmt, tidy and vet checks, both builds, tests with -race
+just                # every recipe, including the VM suites
+```
 
-# Windows
+Without just:
+
+```sh
+go build -o bin/ ./cmd/icbfs ./cmd/icbfs-cli ./cmd/icbfs-logd ./cmd/icbfs-mockserver ./cmd/drive-api
 GOOS=windows go build -o bin/ ./cmd/icbfs-winfsp ./cmd/icbfs-cli ./cmd/drive-api
 GOOS=windows go build -ldflags -H=windowsgui -o bin/icbfs-sync.exe ./cmd/icbfs-sync
-
-# tests (needs Docker; the FUSE tests need /dev/fuse)
 go test ./...
 ```
 
-The generated code is checked in. Regenerate it only after changing a
-schema:
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs `just ci` on
+Linux, with Docker and FUSE, and builds and runs the portable tests on
+Windows. The VM suites are run by hand ([docs/testing.md](docs/testing.md)).
 
-- the drive API: `go generate ./pkg/drive/driveapi`, from
-  `spec/openapi/drive.yaml`;
-- Protobuf: see [spec/proto/README.md](spec/proto/README.md).
+The generated code is checked in. `just generate` regenerates it after a
+schema change: the drive API from `spec/openapi/drive.yaml`, and the
+Protobuf code from `spec/proto` (needs `protoc`; see
+[spec/proto/README.md](spec/proto/README.md)).
 
 ## Quick start
 

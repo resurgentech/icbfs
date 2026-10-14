@@ -25,10 +25,15 @@ MinIO for each run.
 ## Go tests
 
 ```sh
-go test ./...                 # everything (needs Docker; the FUSE tests need /dev/fuse and fusermount3)
-go test -short ./...          # skips the code-generator check
-go test -race ./internal/syncer/...
+just test                     # go test ./... (needs Docker; the FUSE tests need /dev/fuse and fusermount3)
+just test-short               # skips the code-generator check
+just test-ci                  # with -race, skipping the flaky lease-renewal test, as CI does
+just test-windows             # the packages that run on Windows without Docker
 ```
+
+CI runs `just ci` on every push and pull request, on GitHub's Linux
+runners (Docker and FUSE available), and `just build-windows` and
+`just test-windows` on Windows runners.
 
 - Each test that needs storage starts its own MinIO container through
   testcontainers (`internal/testutil/miniotest`), with a fresh versioned
@@ -120,6 +125,11 @@ case-sensitive.
   multipart file, a one-byte edit in the middle, and the max-file-size
   limit.
 
+From the repository root, `just pjdfstest`, `just logging-test`,
+`just largefile-test`, `just winfsp-tests [icbfs-ci|icbfs-cs|cmemfs-ci]`
+and `just sync-test` run the VM suites (the Linux ones find the VM's
+address themselves), and `just vm-tests` runs all but the large-file one.
+
 The VMs, and how to set them up, are described in
 [test/linux](../test/linux/README.md) and
 [test/windows](../test/windows/README.md). Every VM run starts its own
@@ -143,6 +153,11 @@ test/minio/down.sh             # remove it; --all removes any left behind
   - Production leases are 30 seconds, renewed every 10.
   - Until the cause is found, lease renewal under load should be treated
     as unproven.
+- **`TestConcurrentLinkRaceDoesNotLoseUpdates` failed once** in four
+  runs of the whole suite under `-race` on 2026-10-14, and passed alone
+  and in the other runs. Fifteen concurrent links to one file may be
+  running out of the 20 retries a link gets under the race detector's
+  slowdown; the error wasn't captured.
 - **`fcntl` locks are released per file handle, not per process.**
   Closing a different descriptor on the same file doesn't release a
   process's locks, as POSIX says it should. The usual case, one
