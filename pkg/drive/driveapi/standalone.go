@@ -38,7 +38,7 @@ type Standalone struct {
 	Profiles map[string]drive.Profile `json:"profiles"`
 	// ... unless a drive has its own (drive id → actor → profile).
 	DriveProfiles map[string]map[string]drive.Profile `json:"driveProfiles,omitempty"`
-	// Permissions by actor: patterns like "drive.*", "storage.read", "*".
+	// Permissions by actor: patterns like "drive.*", "bucket.read", "*".
 	// An actor not listed has every permission.
 	Permissions map[string][]string `json:"permissions,omitempty"`
 	CacheDir    string              `json:"cacheDir,omitempty"`
@@ -56,7 +56,6 @@ type StandaloneDrive struct {
 	Bucket     string `json:"bucket"`
 	Filesystem string `json:"filesystem"`
 	Root       string `json:"root"`
-	Writable   bool   `json:"writable"`
 }
 
 // Config turns the standalone configuration into the handlers' Config.
@@ -81,7 +80,7 @@ func (st *Standalone) Config(ctx context.Context) (Config, func(), error) {
 			if !ok {
 				return nil, DriveEntry{}, fmt.Errorf("drive %s: %w", id, drive.ErrNotFound)
 			}
-			entry := DriveEntry{Name: sd.Name, Kind: "icbfs", Writable: sd.Writable}
+			entry := DriveEntry{Name: sd.Name, Kind: "icbfs"}
 			mu.Lock()
 			defer mu.Unlock()
 			if d, ok := open[id]; ok {
@@ -115,7 +114,7 @@ func (st *Standalone) Config(ctx context.Context) (Config, func(), error) {
 			}
 			return actor, p, nil
 		},
-		AuthorizeStorage: func(c fiber.Ctx, bucket, permission string) (string, drive.Profile, error) {
+		AuthorizeBucket: func(c fiber.Ctx, bucket, permission string) (string, drive.Profile, error) {
 			actor, err := st.authenticate(c, permission)
 			if err != nil {
 				return "", drive.Profile{}, err

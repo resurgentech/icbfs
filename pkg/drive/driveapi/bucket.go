@@ -12,7 +12,7 @@ import (
 	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
 )
 
-// sreq is one storage request, authorized.
+// sreq is one bucket request, authorized.
 type sreq struct {
 	c       fiber.Ctx
 	ctx     context.Context
@@ -21,13 +21,13 @@ type sreq struct {
 	profile drive.Profile
 }
 
-func (s *server) storage(permission string, h func(*sreq) error) fiber.Handler {
+func (s *server) bucket(permission string, h func(*sreq) error) fiber.Handler {
 	return func(c fiber.Ctx) error {
-		if s.cfg.AuthorizeStorage == nil || s.cfg.Bucket == nil {
-			return writeErr(c, fmt.Errorf("storage: %w", drive.ErrNotSupported))
+		if s.cfg.AuthorizeBucket == nil || s.cfg.Bucket == nil {
+			return writeErr(c, fmt.Errorf("buckets: %w", drive.ErrNotSupported))
 		}
 		bucket := strings.Clone(c.Params("bucket"))
-		actor, p, err := s.cfg.AuthorizeStorage(c, bucket, permission)
+		actor, p, err := s.cfg.AuthorizeBucket(c, bucket, permission)
 		if err != nil {
 			return writeErr(c, err)
 		}

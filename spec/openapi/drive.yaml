@@ -15,7 +15,7 @@ servers:
   - url: /api/v1
 tags:
   - name: drive
-  - name: storage
+  - name: bucket
 paths:
   /drives/{drive}:
     parameters: [{$ref: '#/components/parameters/DriveParam'}]
@@ -343,39 +343,39 @@ paths:
         '200': {description: The stream., content: {text/event-stream: {schema: {type: string}}}}
         default: {$ref: '#/components/responses/Error'}
 
-  /storage/{bucket}/filesystems:
+  /buckets/{bucket}/filesystems:
     parameters: [{$ref: '#/components/parameters/BucketParam'}]
     get:
       operationId: listFilesystems
-      tags: [storage]
-      x-permission: storage.read
+      tags: [bucket]
+      x-permission: bucket.read
       responses:
         '200': {description: The bucket's filesystems., content: {application/json: {schema: {$ref: '#/components/schemas/Filesystems'}}}}
         default: {$ref: '#/components/responses/Error'}
     post:
       operationId: createFilesystem
-      tags: [storage]
-      x-permission: storage.admin
+      tags: [bucket]
+      x-permission: bucket.admin
       summary: Create a filesystem; every setting is given. Its root starts with the creating admin's profile holding full control.
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateFilesystemRequest'}}}}
       responses:
         '201': {description: Created., content: {application/json: {schema: {$ref: '#/components/schemas/Filesystem'}}}}
         default: {$ref: '#/components/responses/Error'}
-  /storage/{bucket}/filesystems/{name}:
+  /buckets/{bucket}/filesystems/{name}:
     parameters:
       - {$ref: '#/components/parameters/BucketParam'}
       - {name: name, in: path, required: true, schema: {type: string}}
     get:
       operationId: getFilesystem
-      tags: [storage]
-      x-permission: storage.read
+      tags: [bucket]
+      x-permission: bucket.read
       responses:
         '200': {description: The filesystem., content: {application/json: {schema: {$ref: '#/components/schemas/Filesystem'}}}}
         default: {$ref: '#/components/responses/Error'}
     patch:
       operationId: resizeFilesystem
-      tags: [storage]
-      x-permission: storage.admin
+      tags: [bucket]
+      x-permission: bucket.admin
       summary: The declared size is the one setting that changes after creation.
       requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ResizeRequest'}}}}
       responses:
@@ -383,20 +383,20 @@ paths:
         default: {$ref: '#/components/responses/Error'}
     delete:
       operationId: pruneFilesystem
-      tags: [storage]
-      x-permission: storage.admin
+      tags: [bucket]
+      x-permission: bucket.prune
       summary: Erase an archived filesystem, every version of everything in it. Irreversible.
       responses:
         '204': {description: Gone.}
         default: {$ref: '#/components/responses/Error'}
-  /storage/{bucket}/filesystems/{name}/archive:
+  /buckets/{bucket}/filesystems/{name}/archive:
     parameters:
       - {$ref: '#/components/parameters/BucketParam'}
       - {name: name, in: path, required: true, schema: {type: string}}
     post:
       operationId: archiveFilesystem
-      tags: [storage]
-      x-permission: storage.admin
+      tags: [bucket]
+      x-permission: bucket.admin
       summary: Read-only from now on.
       responses:
         '200': {description: Archived., content: {application/json: {schema: {$ref: '#/components/schemas/Filesystem'}}}}
@@ -458,12 +458,11 @@ components:
             gids: {type: array, items: {type: integer, format: uint32}}
     DriveInfo:
       type: object
-      required: [id, kind, writable, capabilities]
+      required: [id, kind, capabilities]
       properties:
         id: {type: string}
         name: {type: string}
         kind: {type: string}
-        writable: {type: boolean}
         capabilities: {$ref: '#/components/schemas/Capabilities'}
         profile: {$ref: '#/components/schemas/Profile'}
         actor: {type: string}

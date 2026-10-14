@@ -42,10 +42,9 @@ func serve(t *testing.T) string {
 			"shared": {Endpoint: srv.Endpoint, Bucket: srv.Bucket, AccessKey: srv.AccessKey, SecretKey: srv.SecretKey},
 		},
 		Drives: map[string]StandaloneDrive{
-			"docs":        {Name: "Docs", Bucket: "main", Filesystem: "docs", Root: "/", Writable: true},
-			"shared-docs": {Name: "Docs, via the shared bucket", Bucket: "shared", Filesystem: "docs", Root: "/", Writable: true},
-			"archive":     {Name: "Archive", Bucket: "main", Filesystem: "docs", Root: "/", Writable: false},
-			"nowhere":     {Name: "Nowhere", Bucket: "main", Filesystem: "missing", Root: "/", Writable: true},
+			"docs":        {Name: "Docs", Bucket: "main", Filesystem: "docs", Root: "/"},
+			"shared-docs": {Name: "Docs, via the shared bucket", Bucket: "shared", Filesystem: "docs", Root: "/"},
+			"nowhere":     {Name: "Nowhere", Bucket: "main", Filesystem: "missing", Root: "/"},
 		},
 		SideStore:        &SideStoreAt{Bucket: "main", Filesystem: "host-side"},
 		BucketSideStores: map[string]string{"main": "main-side"},
@@ -213,8 +212,10 @@ func TestAPI(t *testing.T) {
 	if r, _ := alice.StatItemWithResponse(ctx, "nowhere", &StatItemParams{Path: ptr("/")}); r.StatusCode() != 404 {
 		t.Fatalf("a drive on a missing filesystem: %d %s", r.StatusCode(), r.Body)
 	}
-	if r, _ := alice.MkdirWithResponse(ctx, "archive", MkdirJSONRequestBody{Path: "/x"}); r.StatusCode() != 409 || code(t, r.Body) != "read_only" {
-		t.Fatalf("write to a read-only drive: %d %s", r.StatusCode(), r.Body)
+	// Read-only for someone is not holding drive.write: no switch on the
+	// drive itself.
+	if r, _ := bob.MkdirWithResponse(ctx, "docs", MkdirJSONRequestBody{Path: "/x"}); r.StatusCode() != 403 || code(t, r.Body) != "forbidden" {
+		t.Fatalf("mkdir without drive.write: %d %s", r.StatusCode(), r.Body)
 	}
 	if r, _ := alice.StatItemWithResponse(ctx, "docs", &StatItemParams{Path: ptr("/missing")}); r.StatusCode() != 404 || code(t, r.Body) != "not_found" {
 		t.Fatalf("missing item: %d %s", r.StatusCode(), r.Body)

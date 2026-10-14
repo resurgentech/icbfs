@@ -26,10 +26,11 @@ import (
 )
 
 // DriveEntry is what host's registry knows of a drive.
+// Whether anyone may write to it isn't here: that's a permission
+// (drive.write), held through a role like every other.
 type DriveEntry struct {
-	Name     string
-	Kind     string // "icbfs", ...
-	Writable bool
+	Name string
+	Kind string // "icbfs", ...
 }
 
 // Config is what the handlers need from their host.
@@ -42,10 +43,10 @@ type Config struct {
 	// the actor and its profile on the drive (drive.ErrNoAccess when it
 	// has none), or drive.ErrNotFound / drive.ErrForbidden.
 	Authorize func(c fiber.Ctx, driveID, permission string) (actor string, p drive.Profile, err error)
-	// AuthorizeStorage is the same for a registered bucket
-	// (storage.read, storage.admin); the profile is who a new
-	// filesystem's root starts out owned by.
-	AuthorizeStorage func(c fiber.Ctx, bucket, permission string) (actor string, p drive.Profile, err error)
+	// AuthorizeBucket is the same for a registered bucket (bucket.read,
+	// bucket.admin, bucket.prune); the profile is who a new filesystem's
+	// root starts out owned by.
+	AuthorizeBucket func(c fiber.Ctx, bucket, permission string) (actor string, p drive.Profile, err error)
 	// Bucket opens a registered bucket.
 	Bucket func(ctx context.Context, id string) (pkgicbfs.Store, error)
 	// Drafts finds a drive's drafts: in the side store of the drive's own
@@ -107,13 +108,13 @@ func Mount(r fiber.Router, cfg Config) {
 	d.Get("/permissions", s.op("drive.permissions.read", s.permissions))
 	d.Get("/events", s.op("drive.read", s.events))
 
-	st := g.Group("/storage/:bucket/filesystems")
-	st.Get("", s.storage("storage.read", s.listFilesystems))
-	st.Post("", s.storage("storage.admin", s.createFilesystem))
-	st.Get("/:name", s.storage("storage.read", s.getFilesystem))
-	st.Patch("/:name", s.storage("storage.admin", s.resizeFilesystem))
-	st.Delete("/:name", s.storage("storage.admin", s.pruneFilesystem))
-	st.Post("/:name/archive", s.storage("storage.admin", s.archiveFilesystem))
+	st := g.Group("/buckets/:bucket/filesystems")
+	st.Get("", s.bucket("bucket.read", s.listFilesystems))
+	st.Post("", s.bucket("bucket.admin", s.createFilesystem))
+	st.Get("/:name", s.bucket("bucket.read", s.getFilesystem))
+	st.Patch("/:name", s.bucket("bucket.admin", s.resizeFilesystem))
+	st.Delete("/:name", s.bucket("bucket.prune", s.pruneFilesystem))
+	st.Post("/:name/archive", s.bucket("bucket.admin", s.archiveFilesystem))
 }
 
 type server struct {
@@ -133,9 +134,6 @@ type req struct {
 	profile drive.Profile
 }
 
-// writes are the permissions that change the drive.
-var writes = map[string]bool{"drive.write": true, "drive.delete": true, "drive.restore": true, "drive.purge": true, "drive.name": true}
-
 func (s *server) op(permission string, h func(*req) error) fiber.Handler {
 	return func(c fiber.Ctx) error {
 		// Fiber's strings point into the request's buffers, reused once
@@ -150,9 +148,6 @@ func (s *server) op(permission string, h func(*req) error) fiber.Handler {
 		d, info, err := s.cfg.Drive(c.Context(), id)
 		if err != nil {
 			return writeErr(c, err)
-		}
-		if writes[permission] && !info.Writable {
-			return writeErr(c, fmt.Errorf("drive %s: %w", id, drive.ErrReadOnly))
 		}
 		ctx := drive.WithProfile(drive.WithActor(c.Context(), actor), p)
 		err = h(&req{c: c, ctx: ctx, id: id, d: d, info: info, actor: actor, profile: p})
@@ -276,7 +271,7 @@ func writeErr(c fiber.Ctx, err error) error {
 // --- the drive ---
 
 func (s *server) getDrive(r *req) error {
-	out := map[string]any{"id": r.id, "name": r.info.Name, "kind": r.info.Kind, "writable": r.info.Writable,
+	out := map[string]any{"id": r.id, "name": r.info.Name, "kind": r.info.Kind,
 		"capabilities": r.d.Capabilities(), "profile": r.profile, "actor": r.actor}
 	return r.c.JSON(out)
 }
@@ -554,12 +549,9 @@ func (s *server) copy(r *req) error {
 		if err != nil {
 			return writeErr(r.c, err)
 		}
-		d, info, err := s.cfg.Drive(r.ctx, t)
+		d, _, err := s.cfg.Drive(r.ctx, t)
 		if err != nil {
 			return writeErr(r.c, err)
-		}
-		if !info.Writable {
-			return writeErr(r.c, fmt.Errorf("drive %s: %w", t, drive.ErrReadOnly))
 		}
 		// The target's checks are made as the actor's profile there.
 		dctx := drive.WithProfile(drive.WithActor(r.ctx, actor), p)

@@ -158,7 +158,6 @@ type DriveInfo struct {
 	Kind         string       `json:"kind"`
 	Name         *string      `json:"name,omitempty"`
 	Profile      *Profile     `json:"profile,omitempty"`
-	Writable     bool         `json:"writable"`
 }
 
 // Error defines model for Error.
@@ -532,6 +531,12 @@ type ListVersionsParams struct {
 	Id *IDParam `form:"id,omitempty" json:"id,omitempty"`
 }
 
+// CreateFilesystemJSONRequestBody defines body for CreateFilesystem for application/json ContentType.
+type CreateFilesystemJSONRequestBody = CreateFilesystemRequest
+
+// ResizeFilesystemJSONRequestBody defines body for ResizeFilesystem for application/json ContentType.
+type ResizeFilesystemJSONRequestBody = ResizeRequest
+
 // CopyJSONRequestBody defines body for Copy for application/json ContentType.
 type CopyJSONRequestBody = CopyRequest
 
@@ -549,12 +554,6 @@ type RestoreVersionJSONRequestBody = RestoreVersionRequest
 
 // RestoreTrashJSONRequestBody defines body for RestoreTrash for application/json ContentType.
 type RestoreTrashJSONRequestBody = RestoreRequest
-
-// CreateFilesystemJSONRequestBody defines body for CreateFilesystem for application/json ContentType.
-type CreateFilesystemJSONRequestBody = CreateFilesystemRequest
-
-// ResizeFilesystemJSONRequestBody defines body for ResizeFilesystem for application/json ContentType.
-type ResizeFilesystemJSONRequestBody = ResizeRequest
 
 // RequestEditorFn  is the function signature for the RequestEditor callback function
 type RequestEditorFn func(ctx context.Context, req *http.Request) error
@@ -629,6 +628,28 @@ func WithRequestEditorFn(fn RequestEditorFn) ClientOption {
 
 // The interface specification for the client above.
 type ClientInterface interface {
+	// ListFilesystems request
+	ListFilesystems(ctx context.Context, bucket BucketParam, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateFilesystemWithBody request with any body
+	CreateFilesystemWithBody(ctx context.Context, bucket BucketParam, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	CreateFilesystem(ctx context.Context, bucket BucketParam, body CreateFilesystemJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PruneFilesystem request
+	PruneFilesystem(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetFilesystem request
+	GetFilesystem(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ResizeFilesystemWithBody request with any body
+	ResizeFilesystemWithBody(ctx context.Context, bucket BucketParam, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ResizeFilesystem(ctx context.Context, bucket BucketParam, name string, body ResizeFilesystemJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ArchiveFilesystem request
+	ArchiveFilesystem(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetDrive request
 	GetDrive(ctx context.Context, drive DriveParam, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -718,28 +739,102 @@ type ClientInterface interface {
 
 	// ListVersions request
 	ListVersions(ctx context.Context, drive DriveParam, params *ListVersionsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+}
 
-	// ListFilesystems request
-	ListFilesystems(ctx context.Context, bucket BucketParam, reqEditors ...RequestEditorFn) (*http.Response, error)
+func (c *Client) ListFilesystems(ctx context.Context, bucket BucketParam, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListFilesystemsRequest(c.Server, bucket)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
 
-	// CreateFilesystemWithBody request with any body
-	CreateFilesystemWithBody(ctx context.Context, bucket BucketParam, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+func (c *Client) CreateFilesystemWithBody(ctx context.Context, bucket BucketParam, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateFilesystemRequestWithBody(c.Server, bucket, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
 
-	CreateFilesystem(ctx context.Context, bucket BucketParam, body CreateFilesystemJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+func (c *Client) CreateFilesystem(ctx context.Context, bucket BucketParam, body CreateFilesystemJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateFilesystemRequest(c.Server, bucket, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
 
-	// PruneFilesystem request
-	PruneFilesystem(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+func (c *Client) PruneFilesystem(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPruneFilesystemRequest(c.Server, bucket, name)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
 
-	// GetFilesystem request
-	GetFilesystem(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+func (c *Client) GetFilesystem(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetFilesystemRequest(c.Server, bucket, name)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
 
-	// ResizeFilesystemWithBody request with any body
-	ResizeFilesystemWithBody(ctx context.Context, bucket BucketParam, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+func (c *Client) ResizeFilesystemWithBody(ctx context.Context, bucket BucketParam, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewResizeFilesystemRequestWithBody(c.Server, bucket, name, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
 
-	ResizeFilesystem(ctx context.Context, bucket BucketParam, name string, body ResizeFilesystemJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+func (c *Client) ResizeFilesystem(ctx context.Context, bucket BucketParam, name string, body ResizeFilesystemJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewResizeFilesystemRequest(c.Server, bucket, name, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
 
-	// ArchiveFilesystem request
-	ArchiveFilesystem(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*http.Response, error)
+func (c *Client) ArchiveFilesystem(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewArchiveFilesystemRequest(c.Server, bucket, name)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
 }
 
 func (c *Client) GetDrive(ctx context.Context, drive DriveParam, reqEditors ...RequestEditorFn) (*http.Response, error) {
@@ -1126,100 +1221,262 @@ func (c *Client) ListVersions(ctx context.Context, drive DriveParam, params *Lis
 	return c.Client.Do(req)
 }
 
-func (c *Client) ListFilesystems(ctx context.Context, bucket BucketParam, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewListFilesystemsRequest(c.Server, bucket)
+// NewListFilesystemsRequest generates requests for ListFilesystems
+func NewListFilesystemsRequest(server string, bucket BucketParam) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "bucket", runtime.ParamLocationPath, bucket)
 	if err != nil {
 		return nil, err
 	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
 		return nil, err
 	}
-	return c.Client.Do(req)
+
+	operationPath := fmt.Sprintf("/buckets/%s/filesystems", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
 }
 
-func (c *Client) CreateFilesystemWithBody(ctx context.Context, bucket BucketParam, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateFilesystemRequestWithBody(c.Server, bucket, contentType, body)
+// NewCreateFilesystemRequest calls the generic CreateFilesystem builder with application/json body
+func NewCreateFilesystemRequest(server string, bucket BucketParam, body CreateFilesystemJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
+	bodyReader = bytes.NewReader(buf)
+	return NewCreateFilesystemRequestWithBody(server, bucket, "application/json", bodyReader)
 }
 
-func (c *Client) CreateFilesystem(ctx context.Context, bucket BucketParam, body CreateFilesystemJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewCreateFilesystemRequest(c.Server, bucket, body)
+// NewCreateFilesystemRequestWithBody generates requests for CreateFilesystem with any type of body
+func NewCreateFilesystemRequestWithBody(server string, bucket BucketParam, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "bucket", runtime.ParamLocationPath, bucket)
 	if err != nil {
 		return nil, err
 	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
 		return nil, err
 	}
-	return c.Client.Do(req)
+
+	operationPath := fmt.Sprintf("/buckets/%s/filesystems", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
 }
 
-func (c *Client) PruneFilesystem(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPruneFilesystemRequest(c.Server, bucket, name)
+// NewPruneFilesystemRequest generates requests for PruneFilesystem
+func NewPruneFilesystemRequest(server string, bucket BucketParam, name string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "bucket", runtime.ParamLocationPath, bucket)
 	if err != nil {
 		return nil, err
 	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
 		return nil, err
 	}
-	return c.Client.Do(req)
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/buckets/%s/filesystems/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
 }
 
-func (c *Client) GetFilesystem(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewGetFilesystemRequest(c.Server, bucket, name)
+// NewGetFilesystemRequest generates requests for GetFilesystem
+func NewGetFilesystemRequest(server string, bucket BucketParam, name string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "bucket", runtime.ParamLocationPath, bucket)
 	if err != nil {
 		return nil, err
 	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
 		return nil, err
 	}
-	return c.Client.Do(req)
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/buckets/%s/filesystems/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
 }
 
-func (c *Client) ResizeFilesystemWithBody(ctx context.Context, bucket BucketParam, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewResizeFilesystemRequestWithBody(c.Server, bucket, name, contentType, body)
+// NewResizeFilesystemRequest calls the generic ResizeFilesystem builder with application/json body
+func NewResizeFilesystemRequest(server string, bucket BucketParam, name string, body ResizeFilesystemJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
 	if err != nil {
 		return nil, err
 	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
-		return nil, err
-	}
-	return c.Client.Do(req)
+	bodyReader = bytes.NewReader(buf)
+	return NewResizeFilesystemRequestWithBody(server, bucket, name, "application/json", bodyReader)
 }
 
-func (c *Client) ResizeFilesystem(ctx context.Context, bucket BucketParam, name string, body ResizeFilesystemJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewResizeFilesystemRequest(c.Server, bucket, name, body)
+// NewResizeFilesystemRequestWithBody generates requests for ResizeFilesystem with any type of body
+func NewResizeFilesystemRequestWithBody(server string, bucket BucketParam, name string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "bucket", runtime.ParamLocationPath, bucket)
 	if err != nil {
 		return nil, err
 	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
 		return nil, err
 	}
-	return c.Client.Do(req)
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/buckets/%s/filesystems/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PATCH", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
 }
 
-func (c *Client) ArchiveFilesystem(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewArchiveFilesystemRequest(c.Server, bucket, name)
+// NewArchiveFilesystemRequest generates requests for ArchiveFilesystem
+func NewArchiveFilesystemRequest(server string, bucket BucketParam, name string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "bucket", runtime.ParamLocationPath, bucket)
 	if err != nil {
 		return nil, err
 	}
-	req = req.WithContext(ctx)
-	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
 		return nil, err
 	}
-	return c.Client.Do(req)
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/buckets/%s/filesystems/%s/archive", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
 }
 
 // NewGetDriveRequest generates requests for GetDrive
@@ -2991,264 +3248,6 @@ func NewListVersionsRequest(server string, drive DriveParam, params *ListVersion
 	return req, nil
 }
 
-// NewListFilesystemsRequest generates requests for ListFilesystems
-func NewListFilesystemsRequest(server string, bucket BucketParam) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "bucket", runtime.ParamLocationPath, bucket)
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/storage/%s/filesystems", pathParam0)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("GET", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewCreateFilesystemRequest calls the generic CreateFilesystem builder with application/json body
-func NewCreateFilesystemRequest(server string, bucket BucketParam, body CreateFilesystemJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewCreateFilesystemRequestWithBody(server, bucket, "application/json", bodyReader)
-}
-
-// NewCreateFilesystemRequestWithBody generates requests for CreateFilesystem with any type of body
-func NewCreateFilesystemRequestWithBody(server string, bucket BucketParam, contentType string, body io.Reader) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "bucket", runtime.ParamLocationPath, bucket)
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/storage/%s/filesystems", pathParam0)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", queryURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
-
-	return req, nil
-}
-
-// NewPruneFilesystemRequest generates requests for PruneFilesystem
-func NewPruneFilesystemRequest(server string, bucket BucketParam, name string) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "bucket", runtime.ParamLocationPath, bucket)
-	if err != nil {
-		return nil, err
-	}
-
-	var pathParam1 string
-
-	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/storage/%s/filesystems/%s", pathParam0, pathParam1)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewGetFilesystemRequest generates requests for GetFilesystem
-func NewGetFilesystemRequest(server string, bucket BucketParam, name string) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "bucket", runtime.ParamLocationPath, bucket)
-	if err != nil {
-		return nil, err
-	}
-
-	var pathParam1 string
-
-	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/storage/%s/filesystems/%s", pathParam0, pathParam1)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("GET", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
-// NewResizeFilesystemRequest calls the generic ResizeFilesystem builder with application/json body
-func NewResizeFilesystemRequest(server string, bucket BucketParam, name string, body ResizeFilesystemJSONRequestBody) (*http.Request, error) {
-	var bodyReader io.Reader
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
-	}
-	bodyReader = bytes.NewReader(buf)
-	return NewResizeFilesystemRequestWithBody(server, bucket, name, "application/json", bodyReader)
-}
-
-// NewResizeFilesystemRequestWithBody generates requests for ResizeFilesystem with any type of body
-func NewResizeFilesystemRequestWithBody(server string, bucket BucketParam, name string, contentType string, body io.Reader) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "bucket", runtime.ParamLocationPath, bucket)
-	if err != nil {
-		return nil, err
-	}
-
-	var pathParam1 string
-
-	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/storage/%s/filesystems/%s", pathParam0, pathParam1)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("PATCH", queryURL.String(), body)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Add("Content-Type", contentType)
-
-	return req, nil
-}
-
-// NewArchiveFilesystemRequest generates requests for ArchiveFilesystem
-func NewArchiveFilesystemRequest(server string, bucket BucketParam, name string) (*http.Request, error) {
-	var err error
-
-	var pathParam0 string
-
-	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "bucket", runtime.ParamLocationPath, bucket)
-	if err != nil {
-		return nil, err
-	}
-
-	var pathParam1 string
-
-	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
-	if err != nil {
-		return nil, err
-	}
-
-	serverURL, err := url.Parse(server)
-	if err != nil {
-		return nil, err
-	}
-
-	operationPath := fmt.Sprintf("/storage/%s/filesystems/%s/archive", pathParam0, pathParam1)
-	if operationPath[0] == '/' {
-		operationPath = "." + operationPath
-	}
-
-	queryURL, err := serverURL.Parse(operationPath)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", queryURL.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-
-	return req, nil
-}
-
 func (c *Client) applyEditors(ctx context.Context, req *http.Request, additionalEditors []RequestEditorFn) error {
 	for _, r := range c.RequestEditors {
 		if err := r(ctx, req); err != nil {
@@ -3292,6 +3291,28 @@ func WithBaseURL(baseURL string) ClientOption {
 
 // ClientWithResponsesInterface is the interface specification for the client with responses above.
 type ClientWithResponsesInterface interface {
+	// ListFilesystemsWithResponse request
+	ListFilesystemsWithResponse(ctx context.Context, bucket BucketParam, reqEditors ...RequestEditorFn) (*ListFilesystemsResponse, error)
+
+	// CreateFilesystemWithBodyWithResponse request with any body
+	CreateFilesystemWithBodyWithResponse(ctx context.Context, bucket BucketParam, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateFilesystemResponse, error)
+
+	CreateFilesystemWithResponse(ctx context.Context, bucket BucketParam, body CreateFilesystemJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateFilesystemResponse, error)
+
+	// PruneFilesystemWithResponse request
+	PruneFilesystemWithResponse(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*PruneFilesystemResponse, error)
+
+	// GetFilesystemWithResponse request
+	GetFilesystemWithResponse(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*GetFilesystemResponse, error)
+
+	// ResizeFilesystemWithBodyWithResponse request with any body
+	ResizeFilesystemWithBodyWithResponse(ctx context.Context, bucket BucketParam, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ResizeFilesystemResponse, error)
+
+	ResizeFilesystemWithResponse(ctx context.Context, bucket BucketParam, name string, body ResizeFilesystemJSONRequestBody, reqEditors ...RequestEditorFn) (*ResizeFilesystemResponse, error)
+
+	// ArchiveFilesystemWithResponse request
+	ArchiveFilesystemWithResponse(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*ArchiveFilesystemResponse, error)
+
 	// GetDriveWithResponse request
 	GetDriveWithResponse(ctx context.Context, drive DriveParam, reqEditors ...RequestEditorFn) (*GetDriveResponse, error)
 
@@ -3381,28 +3402,143 @@ type ClientWithResponsesInterface interface {
 
 	// ListVersionsWithResponse request
 	ListVersionsWithResponse(ctx context.Context, drive DriveParam, params *ListVersionsParams, reqEditors ...RequestEditorFn) (*ListVersionsResponse, error)
+}
 
-	// ListFilesystemsWithResponse request
-	ListFilesystemsWithResponse(ctx context.Context, bucket BucketParam, reqEditors ...RequestEditorFn) (*ListFilesystemsResponse, error)
+type ListFilesystemsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *Filesystems
+	JSONDefault  *Error
+}
 
-	// CreateFilesystemWithBodyWithResponse request with any body
-	CreateFilesystemWithBodyWithResponse(ctx context.Context, bucket BucketParam, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateFilesystemResponse, error)
+// Status returns HTTPResponse.Status
+func (r ListFilesystemsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
 
-	CreateFilesystemWithResponse(ctx context.Context, bucket BucketParam, body CreateFilesystemJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateFilesystemResponse, error)
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListFilesystemsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
 
-	// PruneFilesystemWithResponse request
-	PruneFilesystemWithResponse(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*PruneFilesystemResponse, error)
+type CreateFilesystemResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *Filesystem
+	JSONDefault  *Error
+}
 
-	// GetFilesystemWithResponse request
-	GetFilesystemWithResponse(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*GetFilesystemResponse, error)
+// Status returns HTTPResponse.Status
+func (r CreateFilesystemResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
 
-	// ResizeFilesystemWithBodyWithResponse request with any body
-	ResizeFilesystemWithBodyWithResponse(ctx context.Context, bucket BucketParam, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ResizeFilesystemResponse, error)
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateFilesystemResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
 
-	ResizeFilesystemWithResponse(ctx context.Context, bucket BucketParam, name string, body ResizeFilesystemJSONRequestBody, reqEditors ...RequestEditorFn) (*ResizeFilesystemResponse, error)
+type PruneFilesystemResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSONDefault  *Error
+}
 
-	// ArchiveFilesystemWithResponse request
-	ArchiveFilesystemWithResponse(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*ArchiveFilesystemResponse, error)
+// Status returns HTTPResponse.Status
+func (r PruneFilesystemResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PruneFilesystemResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetFilesystemResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *Filesystem
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r GetFilesystemResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetFilesystemResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ResizeFilesystemResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *Filesystem
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r ResizeFilesystemResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ResizeFilesystemResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ArchiveFilesystemResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *Filesystem
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r ArchiveFilesystemResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ArchiveFilesystemResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
 }
 
 type GetDriveResponse struct {
@@ -3995,141 +4131,74 @@ func (r ListVersionsResponse) StatusCode() int {
 	return 0
 }
 
-type ListFilesystemsResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	JSON200      *Filesystems
-	JSONDefault  *Error
-}
-
-// Status returns HTTPResponse.Status
-func (r ListFilesystemsResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
+// ListFilesystemsWithResponse request returning *ListFilesystemsResponse
+func (c *ClientWithResponses) ListFilesystemsWithResponse(ctx context.Context, bucket BucketParam, reqEditors ...RequestEditorFn) (*ListFilesystemsResponse, error) {
+	rsp, err := c.ListFilesystems(ctx, bucket, reqEditors...)
+	if err != nil {
+		return nil, err
 	}
-	return http.StatusText(0)
+	return ParseListFilesystemsResponse(rsp)
 }
 
-// StatusCode returns HTTPResponse.StatusCode
-func (r ListFilesystemsResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
+// CreateFilesystemWithBodyWithResponse request with arbitrary body returning *CreateFilesystemResponse
+func (c *ClientWithResponses) CreateFilesystemWithBodyWithResponse(ctx context.Context, bucket BucketParam, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateFilesystemResponse, error) {
+	rsp, err := c.CreateFilesystemWithBody(ctx, bucket, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
 	}
-	return 0
+	return ParseCreateFilesystemResponse(rsp)
 }
 
-type CreateFilesystemResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	JSON201      *Filesystem
-	JSONDefault  *Error
-}
-
-// Status returns HTTPResponse.Status
-func (r CreateFilesystemResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
+func (c *ClientWithResponses) CreateFilesystemWithResponse(ctx context.Context, bucket BucketParam, body CreateFilesystemJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateFilesystemResponse, error) {
+	rsp, err := c.CreateFilesystem(ctx, bucket, body, reqEditors...)
+	if err != nil {
+		return nil, err
 	}
-	return http.StatusText(0)
+	return ParseCreateFilesystemResponse(rsp)
 }
 
-// StatusCode returns HTTPResponse.StatusCode
-func (r CreateFilesystemResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
+// PruneFilesystemWithResponse request returning *PruneFilesystemResponse
+func (c *ClientWithResponses) PruneFilesystemWithResponse(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*PruneFilesystemResponse, error) {
+	rsp, err := c.PruneFilesystem(ctx, bucket, name, reqEditors...)
+	if err != nil {
+		return nil, err
 	}
-	return 0
+	return ParsePruneFilesystemResponse(rsp)
 }
 
-type PruneFilesystemResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	JSONDefault  *Error
-}
-
-// Status returns HTTPResponse.Status
-func (r PruneFilesystemResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
+// GetFilesystemWithResponse request returning *GetFilesystemResponse
+func (c *ClientWithResponses) GetFilesystemWithResponse(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*GetFilesystemResponse, error) {
+	rsp, err := c.GetFilesystem(ctx, bucket, name, reqEditors...)
+	if err != nil {
+		return nil, err
 	}
-	return http.StatusText(0)
+	return ParseGetFilesystemResponse(rsp)
 }
 
-// StatusCode returns HTTPResponse.StatusCode
-func (r PruneFilesystemResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
+// ResizeFilesystemWithBodyWithResponse request with arbitrary body returning *ResizeFilesystemResponse
+func (c *ClientWithResponses) ResizeFilesystemWithBodyWithResponse(ctx context.Context, bucket BucketParam, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ResizeFilesystemResponse, error) {
+	rsp, err := c.ResizeFilesystemWithBody(ctx, bucket, name, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
 	}
-	return 0
+	return ParseResizeFilesystemResponse(rsp)
 }
 
-type GetFilesystemResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	JSON200      *Filesystem
-	JSONDefault  *Error
-}
-
-// Status returns HTTPResponse.Status
-func (r GetFilesystemResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
+func (c *ClientWithResponses) ResizeFilesystemWithResponse(ctx context.Context, bucket BucketParam, name string, body ResizeFilesystemJSONRequestBody, reqEditors ...RequestEditorFn) (*ResizeFilesystemResponse, error) {
+	rsp, err := c.ResizeFilesystem(ctx, bucket, name, body, reqEditors...)
+	if err != nil {
+		return nil, err
 	}
-	return http.StatusText(0)
+	return ParseResizeFilesystemResponse(rsp)
 }
 
-// StatusCode returns HTTPResponse.StatusCode
-func (r GetFilesystemResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
+// ArchiveFilesystemWithResponse request returning *ArchiveFilesystemResponse
+func (c *ClientWithResponses) ArchiveFilesystemWithResponse(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*ArchiveFilesystemResponse, error) {
+	rsp, err := c.ArchiveFilesystem(ctx, bucket, name, reqEditors...)
+	if err != nil {
+		return nil, err
 	}
-	return 0
-}
-
-type ResizeFilesystemResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	JSON200      *Filesystem
-	JSONDefault  *Error
-}
-
-// Status returns HTTPResponse.Status
-func (r ResizeFilesystemResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r ResizeFilesystemResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
-}
-
-type ArchiveFilesystemResponse struct {
-	Body         []byte
-	HTTPResponse *http.Response
-	JSON200      *Filesystem
-	JSONDefault  *Error
-}
-
-// Status returns HTTPResponse.Status
-func (r ArchiveFilesystemResponse) Status() string {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.Status
-	}
-	return http.StatusText(0)
-}
-
-// StatusCode returns HTTPResponse.StatusCode
-func (r ArchiveFilesystemResponse) StatusCode() int {
-	if r.HTTPResponse != nil {
-		return r.HTTPResponse.StatusCode
-	}
-	return 0
+	return ParseArchiveFilesystemResponse(rsp)
 }
 
 // GetDriveWithResponse request returning *GetDriveResponse
@@ -4414,74 +4483,195 @@ func (c *ClientWithResponses) ListVersionsWithResponse(ctx context.Context, driv
 	return ParseListVersionsResponse(rsp)
 }
 
-// ListFilesystemsWithResponse request returning *ListFilesystemsResponse
-func (c *ClientWithResponses) ListFilesystemsWithResponse(ctx context.Context, bucket BucketParam, reqEditors ...RequestEditorFn) (*ListFilesystemsResponse, error) {
-	rsp, err := c.ListFilesystems(ctx, bucket, reqEditors...)
+// ParseListFilesystemsResponse parses an HTTP response from a ListFilesystemsWithResponse call
+func ParseListFilesystemsResponse(rsp *http.Response) (*ListFilesystemsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
-	return ParseListFilesystemsResponse(rsp)
+
+	response := &ListFilesystemsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Filesystems
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
 }
 
-// CreateFilesystemWithBodyWithResponse request with arbitrary body returning *CreateFilesystemResponse
-func (c *ClientWithResponses) CreateFilesystemWithBodyWithResponse(ctx context.Context, bucket BucketParam, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateFilesystemResponse, error) {
-	rsp, err := c.CreateFilesystemWithBody(ctx, bucket, contentType, body, reqEditors...)
+// ParseCreateFilesystemResponse parses an HTTP response from a CreateFilesystemWithResponse call
+func ParseCreateFilesystemResponse(rsp *http.Response) (*CreateFilesystemResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
-	return ParseCreateFilesystemResponse(rsp)
+
+	response := &CreateFilesystemResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest Filesystem
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
 }
 
-func (c *ClientWithResponses) CreateFilesystemWithResponse(ctx context.Context, bucket BucketParam, body CreateFilesystemJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateFilesystemResponse, error) {
-	rsp, err := c.CreateFilesystem(ctx, bucket, body, reqEditors...)
+// ParsePruneFilesystemResponse parses an HTTP response from a PruneFilesystemWithResponse call
+func ParsePruneFilesystemResponse(rsp *http.Response) (*PruneFilesystemResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
-	return ParseCreateFilesystemResponse(rsp)
+
+	response := &PruneFilesystemResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
 }
 
-// PruneFilesystemWithResponse request returning *PruneFilesystemResponse
-func (c *ClientWithResponses) PruneFilesystemWithResponse(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*PruneFilesystemResponse, error) {
-	rsp, err := c.PruneFilesystem(ctx, bucket, name, reqEditors...)
+// ParseGetFilesystemResponse parses an HTTP response from a GetFilesystemWithResponse call
+func ParseGetFilesystemResponse(rsp *http.Response) (*GetFilesystemResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
-	return ParsePruneFilesystemResponse(rsp)
+
+	response := &GetFilesystemResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Filesystem
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
 }
 
-// GetFilesystemWithResponse request returning *GetFilesystemResponse
-func (c *ClientWithResponses) GetFilesystemWithResponse(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*GetFilesystemResponse, error) {
-	rsp, err := c.GetFilesystem(ctx, bucket, name, reqEditors...)
+// ParseResizeFilesystemResponse parses an HTTP response from a ResizeFilesystemWithResponse call
+func ParseResizeFilesystemResponse(rsp *http.Response) (*ResizeFilesystemResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
-	return ParseGetFilesystemResponse(rsp)
+
+	response := &ResizeFilesystemResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Filesystem
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
 }
 
-// ResizeFilesystemWithBodyWithResponse request with arbitrary body returning *ResizeFilesystemResponse
-func (c *ClientWithResponses) ResizeFilesystemWithBodyWithResponse(ctx context.Context, bucket BucketParam, name string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ResizeFilesystemResponse, error) {
-	rsp, err := c.ResizeFilesystemWithBody(ctx, bucket, name, contentType, body, reqEditors...)
+// ParseArchiveFilesystemResponse parses an HTTP response from a ArchiveFilesystemWithResponse call
+func ParseArchiveFilesystemResponse(rsp *http.Response) (*ArchiveFilesystemResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
 	if err != nil {
 		return nil, err
 	}
-	return ParseResizeFilesystemResponse(rsp)
-}
 
-func (c *ClientWithResponses) ResizeFilesystemWithResponse(ctx context.Context, bucket BucketParam, name string, body ResizeFilesystemJSONRequestBody, reqEditors ...RequestEditorFn) (*ResizeFilesystemResponse, error) {
-	rsp, err := c.ResizeFilesystem(ctx, bucket, name, body, reqEditors...)
-	if err != nil {
-		return nil, err
+	response := &ArchiveFilesystemResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
 	}
-	return ParseResizeFilesystemResponse(rsp)
-}
 
-// ArchiveFilesystemWithResponse request returning *ArchiveFilesystemResponse
-func (c *ClientWithResponses) ArchiveFilesystemWithResponse(ctx context.Context, bucket BucketParam, name string, reqEditors ...RequestEditorFn) (*ArchiveFilesystemResponse, error) {
-	rsp, err := c.ArchiveFilesystem(ctx, bucket, name, reqEditors...)
-	if err != nil {
-		return nil, err
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Filesystem
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
 	}
-	return ParseArchiveFilesystemResponse(rsp)
+
+	return response, nil
 }
 
 // ParseGetDriveResponse parses an HTTP response from a GetDriveWithResponse call
@@ -5269,197 +5459,6 @@ func ParseListVersionsResponse(rsp *http.Response) (*ListVersionsResponse, error
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest Versions
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest Error
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseListFilesystemsResponse parses an HTTP response from a ListFilesystemsWithResponse call
-func ParseListFilesystemsResponse(rsp *http.Response) (*ListFilesystemsResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &ListFilesystemsResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest Filesystems
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest Error
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseCreateFilesystemResponse parses an HTTP response from a CreateFilesystemWithResponse call
-func ParseCreateFilesystemResponse(rsp *http.Response) (*CreateFilesystemResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &CreateFilesystemResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
-		var dest Filesystem
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON201 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest Error
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParsePruneFilesystemResponse parses an HTTP response from a PruneFilesystemWithResponse call
-func ParsePruneFilesystemResponse(rsp *http.Response) (*PruneFilesystemResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &PruneFilesystemResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest Error
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseGetFilesystemResponse parses an HTTP response from a GetFilesystemWithResponse call
-func ParseGetFilesystemResponse(rsp *http.Response) (*GetFilesystemResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &GetFilesystemResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest Filesystem
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest Error
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseResizeFilesystemResponse parses an HTTP response from a ResizeFilesystemWithResponse call
-func ParseResizeFilesystemResponse(rsp *http.Response) (*ResizeFilesystemResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &ResizeFilesystemResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest Filesystem
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSON200 = &dest
-
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
-		var dest Error
-		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
-			return nil, err
-		}
-		response.JSONDefault = &dest
-
-	}
-
-	return response, nil
-}
-
-// ParseArchiveFilesystemResponse parses an HTTP response from a ArchiveFilesystemWithResponse call
-func ParseArchiveFilesystemResponse(rsp *http.Response) (*ArchiveFilesystemResponse, error) {
-	bodyBytes, err := io.ReadAll(rsp.Body)
-	defer func() { _ = rsp.Body.Close() }()
-	if err != nil {
-		return nil, err
-	}
-
-	response := &ArchiveFilesystemResponse{
-		Body:         bodyBytes,
-		HTTPResponse: rsp,
-	}
-
-	switch {
-	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest Filesystem
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
