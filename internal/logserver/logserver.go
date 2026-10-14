@@ -1,11 +1,11 @@
 // Package logserver is a mock of the server end of icbfs's logging
-// (cmd/icbfs-mockserver): daemons connect over a websocket with a shared
-// secret; it answers mount requests for the drives in its registry,
-// runs side commands (icbfs-cli through the daemon; internal/sidecmd) on
-// the configured store, and appends every event to a JSON-lines log, one event per line,
-// before acknowledging it — so a mount logging synchronously knows its
-// event is on disk. An event ID already logged (a resend after a
-// reconnect) is acknowledged without being written again.
+// (cmd/icbfs-mockserver). Daemons connect over a websocket with a shared
+// secret. It answers mount requests for the drives in its registry, runs
+// side commands (icbfs-cli through the daemon; internal/sidecmd) on the
+// configured store, and appends every event to a JSON-lines log before
+// acknowledging it, so a mount logging synchronously knows its event is on
+// disk. An event ID already logged (a resend after a reconnect) is
+// acknowledged without being written again.
 package logserver
 
 import (

@@ -19,42 +19,36 @@ import (
 	"github.com/resurgentech/icbfs/internal/pb"
 )
 
-// maxTreeRetries bounds the whole-operation retry loop for the tree-aware
-// insert/remove helpers and the file-metadata CAS helpers: on a lost race
-// (a concurrent writer touching the same node), the whole top-down
-// operation is retried from scratch rather than retried node-by-node. See
-// insertEntry/removeEntry/adjustNlink/updateFileMetadata.
+// maxTreeRetries bounds the retry loop of the tree and metadata helpers
+// (insertEntry, removeEntry, adjustNlink, updateFileMetadata): on a lost
+// race the whole top-down operation is retried, not one node.
 const maxTreeRetries = 20
 
-// maxEntriesPerBlock/maxChildrenPerBlock are deliberately small so tests
-// can exercise splitting without creating thousands of files. Real
-// tuning (per docs/architecture.md: around mutation cost, not object size) is
-// a separate, later concern.
+// maxEntriesPerBlock and maxChildrenPerBlock are small so tests exercise
+// splitting without thousands of files. Tuning them for real workloads is
+// about mutation cost, not object size.
 const (
 	maxEntriesPerBlock  = 8
 	maxChildrenPerBlock = 8
 )
 
-// DefaultMaxFileSize is the largest file a filesystem holds unless it
-// was created with another limit (SetCreationMaxFileSize): 1 TiB. Writes
-// and truncates past a filesystem's limit fail with ErrFileTooLarge.
+// DefaultMaxFileSize is the largest file a filesystem holds unless it was
+// created with another limit (SetCreationMaxFileSize): 1 TiB. Writes and
+// truncates past a filesystem's limit fail with ErrFileTooLarge.
 //
 // Content is staged in a local scratch file, not memory, so the limit
-// isn't about RAM (an earlier, in-memory design was OOM-killed by
-// pjdfstest's 2 GiB writes and capped at 2 GiB for it); it bounds what a
-// machine with the file open needs in local disk, and what one upload
-// carries.
+// bounds local disk per open file and the size of one upload, not RAM.
 const DefaultMaxFileSize = 1 << 40
 
 var errRetry = errors.New("icbfs: lost a race, retry the whole operation")
 
-// Filesystem is the core, access-layer-independent filesystem logic: it
-// turns object-store primitives plus the directory block format into
-// lookup/mkdir/create/read/write/link/etc. operations.
+// Filesystem is the filesystem logic every access layer shares: object-
+// store primitives and directory blocks turned into lookup, create, read,
+// write, link, rename and the rest.
 //
-// id and archived are only known after Bootstrap resolves them against
-// the master block (see docs/architecture.md's master block section) — until then, a Filesystem returned by New isn't
-// usable for anything that touches the store.
+// Its ID and archived state are known only after Bootstrap (or Attach)
+// resolves them against the master block; until then it can't touch the
+// store.
 type Filesystem struct {
 	store          objstore.Store
 	fsName         string
@@ -66,10 +60,9 @@ type Filesystem struct {
 	newMaxFileSize uint64 // the max file size a filesystem gets if Bootstrap creates it; see SetCreationMaxFileSize
 	lockingEnabled bool   // off by default; see EnableLocking
 
-	// lockNotify is nil unless EnableChangeNotifications was
-	// called — read concurrently by every in-flight AcquireLockRange
-	// call (never written after setup), so it's set once, before
-	// concurrent use begins, same usage contract as lockingEnabled.
+	// lockNotify is nil unless EnableChangeNotifications was called. It's
+	// set once before concurrent use and only read after, as lockingEnabled
+	// is.
 	lockNotify <-chan notify.Signal
 
 	// cache is the shared, LRU-bounded local disk cache every OpenFile
@@ -91,75 +84,48 @@ type Filesystem struct {
 // before using it for anything else — New itself does no I/O and
 // doesn't know the filesystem's ID yet.
 func New(store objstore.Store, fsName string) *Filesystem {
-	// A real, non-optional default —
-	// unlike Locking/Change-notifications, every OpenFile session goes
-	// through this, so there's no sensible "off" state to default to.
-	// os.TempDir() rather than a fixed path: multiple Filesystem
-	// instances in the same process (common in this project's own test
-	// suite) each get their own cache directory, no collisions.
+	// Every OpenFile goes through the cache, so there's always one. A fresh
+	// temp directory each, so Filesystems in one process (tests) don't
+	// share one.
 	cacheDir, err := os.MkdirTemp("", "icbfs-cache-")
 	if err != nil {
-		// Astronomically unlikely on any real system (a writable temp
-		// directory is assumed throughout this project, e.g. every
-		// test already relies on one) — fall back to a fixed
-		// subdirectory of the temp root rather than making New
-		// fallible over this.
+		// Only if the temp directory isn't writable: fall back to a fixed
+		// directory rather than make New fallible.
 		cacheDir = filepath.Join(os.TempDir(), "icbfs-cache-fallback")
 	}
 	return &Filesystem{store: store, fsName: fsName, cache: newDiskCache(cacheDir, defaultCacheMaxBytes)}
 }
 
-// SetCacheOptions overrides the local disk cache's directory and
-// total size budget — cmd/icbfs's
-// -cache-dir/-cache-size flags call this before Bootstrap; tests and
-// other callers that don't call it at all get New's own default
-// (a fresh os.TempDir() subdirectory, 512 MiB). Safe to call again
-// later, but only takes effect for OpenFile sessions opened
-// afterward — in-flight sessions keep using whatever cache they
-// already started with.
+// SetCacheOptions sets the local disk cache's directory and size budget
+// (the mounts' -cache-dir and -cache-size). Without it, New's default is a
+// fresh temp directory and 512 MiB. It affects only files opened afterward.
 func (f *Filesystem) SetCacheOptions(dir string, maxBytes int64) {
 	f.cache = newDiskCache(dir, maxBytes)
 }
 
-// EnableLocking turns on the Locking feature for this
-// Filesystem — off by default. Unlike archived/size, this is a
-// mount-time, local, in-memory choice, not a stored master-block
-// property: per docs/architecture.md's Locking section, Locking has real
-// costs (an extra .lock object, and B5's escalation using it) "most
-// mounts won't use," so it's opt-in per mount, not a shared,
-// persisted-per-filesystem setting every other mount of the same
-// filesystem is forced into. Call this any time after New, before
-// relying on locking being available — there's no ordering requirement
-// relative to Bootstrap.
+// EnableLocking turns locking on for this Filesystem; it's off by default.
+// It's a per-mount choice, not a stored setting, because locking costs an
+// extra .lock object and round trips that most mounts don't need. It can be
+// called any time after New.
 func (f *Filesystem) EnableLocking(enabled bool) {
 	f.lockingEnabled = enabled
 }
 
-// EnableChangeNotifications wires this Filesystem's blocking lock
-// acquisition (AcquireLockRange) to accelerate via Change
-// notifications: a matching signal on signals makes a
-// waiting acquire retry immediately instead of waiting out its
-// current backoff interval. nil (the default, if this is never
-// called) disables the accelerator entirely — AcquireLockRange falls
-// back to pure polling; this is never a load-bearing dependency for Locking's own
-// correctness, only a latency improvement when available.
+// EnableChangeNotifications lets a blocking lock acquire (AcquireLockRange)
+// retry as soon as a signal names the lock's object, instead of waiting out
+// its backoff. Without it (nil), acquiring just polls; the signals only
+// ever cut latency, never decide correctness.
 //
-// signals should be this Filesystem's own subscription (e.g. from
-// notify.Broadcaster.Subscribe, if the mount also has Change
-// notifications enabled — this is optional on top of two
-// independently-optional features) to the same backend stream the FUSE
-// watch dispatch observes; it must be an independent subscription, not the
-// same single-consumption channel, or the two would steal signals
-// from each other.
+// signals must be this Filesystem's own subscription (for example from
+// notify.Broadcaster.Subscribe), not a channel another consumer also reads,
+// or the two would steal signals from each other.
 func (f *Filesystem) EnableChangeNotifications(signals <-chan notify.Signal) {
 	f.lockNotify = signals
 }
 
-// PrimaryWindows reports whether this filesystem was created as
-// primary-Windows (true) or primary-POSIX (false, the default) — see
-// docs/architecture.md's "Windows compatibility: primary mode" section.
-// Set once at creation, immutable
-// afterward; only meaningful after Bootstrap.
+// PrimaryWindows reports whether this filesystem was created
+// primary-Windows (true) or primary-POSIX (false). It's fixed at creation,
+// and known after Bootstrap.
 func (f *Filesystem) PrimaryWindows() bool { return f.primaryWindows }
 
 // partSize is the part size of a multipart content write (see
@@ -187,21 +153,17 @@ func (f *Filesystem) SetCreationMaxFileSize(n uint64) { f.newMaxFileSize = n }
 // meaningful after Bootstrap.
 func (f *Filesystem) MaxFileSize() int64 { return f.maxFileSize }
 
-// RootKey returns the block key identifying this filesystem's root:
-// "<id>-root-<name>", a derived key, not stored anywhere separately —
-// see docs/architecture.md. Only meaningful after Bootstrap.
 // Store is the object store the filesystem is on (an as-of view, for a
 // read-only past filesystem).
 func (f *Filesystem) Store() objstore.Store { return f.store }
 
+// RootKey is the key of this filesystem's root block, "<id>-root-<name>":
+// derived, never stored. Known after Bootstrap.
 func (f *Filesystem) RootKey() string { return f.id + "-root-" + f.fsName }
 
-// newKey mints a fresh, filesystem-scoped object key: this filesystem's
-// ID prefix plus a new UUIDv7. Every object this filesystem creates
-// (files, directories, their .metadata, future .lock objects) gets a key
-// through this, never a bare NewUUIDv7() — that's what makes a single
-// prefix-scoped listing capture this filesystem's entire footprint (see
-// docs/architecture.md).
+// newKey mints a key for a new object: this filesystem's ID prefix and a
+// new UUIDv7. Every object the filesystem creates gets its key here, so one
+// prefix listing finds all of them.
 func (f *Filesystem) newKey() (string, error) {
 	raw, err := NewUUIDv7()
 	if err != nil {
@@ -215,18 +177,15 @@ func (f *Filesystem) newKey() (string, error) {
 // du/df and Prune.
 func (f *Filesystem) prefix() string { return f.id + "-" }
 
-// Prefix is prefix, exported for callers outside this package that
-// need to scope their own operations to this filesystem's objects —
-// e.g. the MinIO change-notifications adapter, which scopes its
-// server-side ListenBucketNotification subscription to exactly this.
+// Prefix is the key prefix of every object this filesystem owns, for
+// callers that scope to it, such as the MinIO notification adapter's
+// server-side filter.
 func (f *Filesystem) Prefix() string { return f.prefix() }
 
-// checkWritable is called at the top of every mutating operation. See
-// ErrArchived and docs/architecture.md's master block
-// section: this is checked once per operation on an already-open
-// Filesystem, not continuously against the master block — an Archive
-// call made after Bootstrap resolved archived=false has no effect on
-// this Filesystem until the next Bootstrap (e.g. the next mount).
+// checkWritable is called at the top of every mutating operation. It checks
+// the archived state Bootstrap read, not the master block: an archive made
+// after this Filesystem was opened takes effect at its next Bootstrap (the
+// next mount).
 func (f *Filesystem) checkWritable() error {
 	if f.readOnly {
 		return ErrReadOnly
@@ -237,19 +196,15 @@ func (f *Filesystem) checkWritable() error {
 	return nil
 }
 
-// Bootstrap is create-or-attach in one call, for tests and tools that
-// want a filesystem whatever state the bucket is in. Mounts never use it:
-// they Attach, and filesystems are created explicitly (CreateFilesystem).
+// Bootstrap is create-or-attach in one call, for tests and tools that want
+// a filesystem whatever state the bucket is in. Mounts never use it: they
+// Attach, and filesystems are created explicitly (CreateFilesystem).
 //
-// Bootstrap resolves this filesystem's ID and archived status against
-// the master block (registering a new entry with the given declared
-// size if this name has never been seen in this bucket before — size is
-// ignored if the filesystem already exists, same as mode/uid/gid are
-// ignored for an already-existing root, below), then ensures the root
-// block exists, creating an empty one if this is a brand new filesystem.
-// primaryWindows is only consulted the first time f.fsName is created
-// — same idempotency rule size/mode/uid/gid already follow — and is
-// immutable afterward; see PrimaryWindows.
+// It resolves the filesystem's ID and archived state against the master
+// block, registering the name with the given size and primary mode if it's
+// new, and creates an empty root with mode, uid and gid if there is none.
+// For a filesystem that already exists, size, primary mode, mode, uid and
+// gid are all ignored.
 func (f *Filesystem) Bootstrap(ctx context.Context, size uint64, mode, uid, gid uint32, primaryWindows bool) error {
 	id, entry, _, err := registerFilesystem(ctx, f.store, &pb.FilesystemEntry{
 		Name: f.fsName, Size: size, PrimaryWindows: primaryWindows, MaxFileSize: f.newMaxFileSize,
@@ -309,10 +264,8 @@ func (f *Filesystem) BootstrapReadOnly(ctx context.Context) error {
 // BootstrapReadOnly.
 func (f *Filesystem) ReadOnly() bool { return f.readOnly }
 
-// DiskUsage sums the size of every file under this filesystem's prefix —
-// the "du" half of docs/architecture.md's master block section. Already free in the
-// sense that it's just a prefix-scoped listing, same mechanism df's
-// "Used" uses, not a tree walk fetching every file's content.
+// DiskUsage sums the size of every object under this filesystem's prefix:
+// one prefix listing, not a tree walk.
 //
 // On a read-only filesystem (an as-of view of the past) the answer can't
 // change, and computing it means listing the filesystem's whole version
@@ -345,12 +298,9 @@ func (f *Filesystem) diskUsage(ctx context.Context) (int64, error) {
 	return total, nil
 }
 
-// StatFS returns this filesystem's declared capacity ("Total") and
-// current usage ("Used"), per docs/architecture.md's master block section: Total is
-// the master block entry's declared size field, Used is the same
-// prefix-scoped listing DiskUsage performs (so it includes every object
-// this filesystem owns, root and .metadata objects included, not just
-// file content — matching what Prune would actually delete).
+// StatFS returns this filesystem's declared capacity ("Total", from the
+// master block) and usage ("Used", DiskUsage: every object it owns, roots
+// and .metadata included, which is what Prune would delete).
 func (f *Filesystem) StatFS(ctx context.Context) (total, used uint64, err error) {
 	mb, _, err := readMaster(ctx, f.store)
 	if err != nil {
@@ -408,10 +358,9 @@ func (f *Filesystem) collation() block.Collation {
 }
 
 // dirAttrFromObject assembles a directory's Attr from its block object's
-// native metadata — the storage directories used before they had their
-// own .metadata object (see Attr's doc comment). Only read for a
-// directory created before that change; its first attribute write
-// migrates it (updateDirMetadata).
+// native metadata, where directories kept their attributes before they had
+// a .metadata object. It's read only for such a directory; its first
+// attribute write migrates it (updateDirMetadata).
 func dirAttrFromObject(key string, obj *objstore.Object) Attr {
 	mtime := parseMetaTime(obj.Metadata, dirMetaMtime)
 	if mtime.IsZero() {
@@ -455,15 +404,10 @@ func combineFileAttr(key string, metaData []byte, metaLastModified time.Time, co
 		ctime = metaLastModified
 	}
 	attr.Size = contentObj.Size
-	// attr.Mtime, from decodeFileMetadata above, is only ever an
-	// explicit override (SetAttr's mtime parameter) — real content
-	// writes never go through it. No override means the zero value,
-	// so the real, content-derived mtime is the right default; an
-	// override, once set, stays authoritative until SetAttr clears or
-	// replaces it (see SetAttr's own doc comment on why a later real
-	// write doesn't automatically invalidate it).
-	// attr.Btime from decodeFileMetadata is only an explicit override;
-	// otherwise the real creation time is embedded in the UUIDv7 key.
+	// attr.Mtime and attr.Btime from decodeFileMetadata are only explicit
+	// overrides (SetAttr); real content writes never set them. Without an
+	// override, mtime is the content's last write and btime the time in the
+	// UUIDv7 key.
 	keyBtime := Btime(key)
 	if attr.Btime.IsZero() {
 		attr.Btime = keyBtime
@@ -477,14 +421,12 @@ func combineFileAttr(key string, metaData []byte, metaLastModified time.Time, co
 	attr.mtimeOverrideETag = ""
 	if attr.Mtime.IsZero() {
 		attr.Mtime = contentObj.LastModified
-		// S3's Last-Modified only has 1-second resolution and is floored,
-		// so a write moments after creation can report an mtime earlier
-		// than the key's creation time (millisecond precision). Real
-		// content can't be modified before it was created, so that's the
-		// better lower bound. Only applies to the derived mtime — an
-		// explicit override is authoritative even when it's older — and
-		// uses the key's time, not a Btime override, since this corrects
-		// a storage artifact, not anything a caller asserted.
+		// S3's Last-Modified has 1-second resolution and is floored, so a
+		// write just after creation can report an mtime before the key's
+		// (millisecond) creation time. Content can't change before it
+		// exists, so the creation time is the lower bound. This corrects
+		// only the derived mtime, never an explicit override, and uses the
+		// key's time, not a btime override.
 		if keyBtime.After(attr.Mtime) {
 			attr.Mtime = keyBtime
 		}
@@ -615,11 +557,9 @@ func (f *Filesystem) statFile(ctx context.Context, key string) (Attr, error) {
 	return combineFileAttr(key, metaData, metaLastModified, contentObj)
 }
 
-// Stat returns the attributes of the node identified by key (a UUID, or
-// this filesystem's root key). typ must be the node's actual type — a
-// directory's attributes live in a completely different place than a
-// file/symlink's (see Attr's doc comment), so the caller must already
-// know which it's asking about.
+// Stat returns the attributes of the node at key (an item's key, or the
+// root key). typ must be the node's type: a directory's attributes are read
+// differently from a file's.
 func (f *Filesystem) Stat(ctx context.Context, key string, typ EntryType) (Attr, error) {
 	if typ == TypeDir {
 		return f.statDir(ctx, key)
@@ -747,11 +687,9 @@ func (f *Filesystem) collectEntries(ctx context.Context, rootKey string) ([]bloc
 }
 
 // insertEntry adds name -> uuid to the directory rooted at rootKey,
-// splitting nodes top-down as needed. On a lost race against a concurrent
-// writer anywhere along the path, the whole operation is retried from
-// scratch (any already-written split halves from the abandoned attempt
-// are left as harmless orphans — a known simplification, not a
-// correctness problem: nothing ever comes to reference them).
+// splitting nodes top-down as needed. A lost race anywhere along the path
+// retries the whole operation; split halves written by the abandoned
+// attempt are left unreferenced, which is harmless.
 func (f *Filesystem) insertEntry(ctx context.Context, rootKey, name, uuid string, typ EntryType) error {
 	for attempt := 0; attempt < maxTreeRetries; attempt++ {
 		err := f.tryInsert(ctx, rootKey, name, uuid, typ)
@@ -780,15 +718,12 @@ func (f *Filesystem) tryInsert(ctx context.Context, rootKey, name, uuid string, 
 	return f.writeBackWithSplits(ctx, path, len(path)-1, leaf.blk)
 }
 
-// writeBackWithSplits writes path[idx].blk back (now holding one extra
-// entry or child), splitting it and propagating a new sibling pointer
-// upward if it overflows. idx == 0 is rootKey itself: since that key's
-// identity must stay fixed (it's either the filesystem's well-known root
-// name, or a directory's own UUID as referenced by its parent), a split
-// there mints two brand new children and rewrites rootKey's own content
-// as a fresh Internal node pointing at both — unlike every other level,
-// which keeps its existing key for the left half and only mints a new
-// UUID for the right half.
+// writeBackWithSplits writes path[idx].blk back (now one entry or child
+// larger), splitting it and passing the new sibling's pointer up if it
+// overflows. A split keeps the node's key for the left half and mints one
+// for the right, except at idx 0, the directory's own key, which can't
+// move: there both halves get new keys and rootKey becomes an internal node
+// over them.
 func (f *Filesystem) writeBackWithSplits(ctx context.Context, path []pathStep, idx int, blk *block.Block) error {
 	overflowing := (blk.Kind == block.Leaf && len(blk.Entries) > maxEntriesPerBlock) ||
 		(blk.Kind == block.Internal && len(blk.Children) > maxChildrenPerBlock)
@@ -1028,13 +963,10 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 	return newUUID, attr, nil
 }
 
-// Create makes a new, empty regular file named name inside dirKey. The
-// content object carries no attribute metadata at all — mode/uid/gid/
-// nlink live entirely in the new metadataObjectKey side object.
-// Create's third return value is the new (empty) content object's
-// ETag — see ReadFile/WriteFile's doc comments on why callers need it
-// (seeding an OpenFile without a redundant read-back of what was just
-// written).
+// Create makes a new, empty regular file named name in dirKey. Its
+// attributes go in its .metadata object; the content object carries none.
+// The third result is the empty content's ETag, so a caller can open the
+// file for writing without reading it back.
 func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid, gid uint32) (string, Attr, string, error) {
 	if err := f.checkWritable(); err != nil {
 		return "", Attr{}, "", err
@@ -1075,29 +1007,14 @@ func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid,
 	return newUUID, attr, contentObj.ETag, nil
 }
 
-// Mknod creates a FIFO, Unix domain socket, or char/block device entry
-// — typ must be TypeFifo, TypeSocket,
-// TypeCharDevice, or TypeBlockDevice; rdev is only meaningful (and only
-// stored) for the two device types.
+// Mknod creates a FIFO, a Unix socket, or a character or block device (typ
+// TypeFifo, TypeSocket, TypeCharDevice or TypeBlockDevice); rdev is stored
+// only for devices.
 //
-// Deliberately built as a thin variant of Create, not a separate
-// mechanism: none of these types have any real byte-stream content
-// (a FIFO's "content" is a transient kernel pipe object; a device
-// node's is the real device, serviced by the kernel's own char/block
-// driver tables; a Unix socket's is the kernel's AF_UNIX
-// implementation) — the FUSE driver's only real job for any of them
-// is reporting the right type/mode bit via Lookup/Getattr. So this
-// reuses exactly the same two-object shape Create already
-// established (an empty, never-touched-again content object plus a
-// .metadata object) purely so Stat/SetAttr/TouchAtime keep working
-// unchanged for these types too, with no special-casing needed
-// anywhere else in this package.
-//
-// No OpenFile/ETag returned, unlike Create — these types are never
-// opened for byte-level read/write through this driver (go-fuse's own
-// NodeMknoder has no file-handle return either, for the same reason:
-// the kernel intercepts real I/O against a special file before it
-// ever reaches this filesystem's Open/Read/Write).
+// It has the same two objects as a file (an empty content object that is
+// never written again, and .metadata), so Stat, SetAttr and TouchAtime work
+// unchanged. The kernel serves these types' I/O itself, so there is no
+// OpenFile and no ETag.
 func (f *Filesystem) Mknod(ctx context.Context, dirKey, name string, mode uint32, typ EntryType, rdev, uid, gid uint32) (string, Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return "", Attr{}, err
@@ -1201,13 +1118,11 @@ func (f *Filesystem) Readlink(ctx context.Context, key string) (string, error) {
 
 const nlinkZero = 0
 
-// adjustNlink changes uuid's hard link count by delta via a CAS read-
-// modify-write of metadataObjectKey. If the count reaches zero, it
-// writes nlink=0 under the same CAS check (so a concurrent Link racing
-// to increment at the same moment necessarily loses the race at this Put
-// and retries against the fresh state, never silently resurrecting a
-// target this call just decided to delete), then deletes both the
-// metadata object and the content object.
+// adjustNlink changes uuid's link count by delta, a conditional
+// read-modify-write of its .metadata. At zero it first writes nlink=0 under
+// the same condition, so a concurrent Link either sees the tombstone or
+// loses the race and retries; it never revives an item this call is
+// deleting. Then it deletes the item's objects.
 func (f *Filesystem) adjustNlink(ctx context.Context, uuid string, delta int) (deleted bool, err error) {
 	mk := metadataObjectKey(uuid)
 	for attempt := 0; attempt < maxTreeRetries; attempt++ {
@@ -1245,11 +1160,8 @@ func (f *Filesystem) adjustNlink(ctx context.Context, uuid string, delta int) (d
 			if err != nil {
 				return false, err
 			}
-			// We are the one who observed and serialized "really at
-			// zero" via the CAS write above — no concurrent Link can
-			// have raced past this point, since it would have observed
-			// either our tombstone (and bailed, above) or lost its own
-			// CAS race against it. Safe to physically delete now.
+			// This call wrote the zero, so no Link can get past it:
+			// deleting is safe now.
 			f.deleteUnlessOpen(ctx, uuid, attr.Streams)
 			return true, nil
 		}
@@ -1268,14 +1180,10 @@ func (f *Filesystem) adjustNlink(ctx context.Context, uuid string, delta int) (d
 	return false, fmt.Errorf("adjust nlink %s: exceeded %d retries", uuid, maxTreeRetries)
 }
 
-// updateFileMetadata applies mutate to a file/symlink's metadataObjectKey
-// under CAS, retrying on a lost race. This is what makes chmod/chown on a
-// file real-CAS-protected rather than last-writer-wins: consolidating
-// mode/uid/gid/nlink into one object (rather than leaving mode/uid/gid on
-// native metadata, as the pre-.metadata design did) means a concurrent
-// chmod and a concurrent Link now correctly serialize against each other
-// through the same mechanism, as a side effect of the consolidation.
-// Any change through it is a status change (see writeMetadata).
+// updateFileMetadata applies mutate to a file's or symlink's .metadata
+// under compare-and-swap, retrying on a lost race, so concurrent chmod,
+// chown and link serialize instead of losing each other. Any change through
+// it is a status change (see writeMetadata).
 func (f *Filesystem) updateFileMetadata(ctx context.Context, uuid string, mutate func(*Attr)) (Attr, error) {
 	if err := f.writeMetadata(ctx, uuid, TypeFile, true, mutate); err != nil {
 		return Attr{}, err
@@ -1381,14 +1289,10 @@ func (f *Filesystem) touchCtime(ctx context.Context, key string, typ EntryType) 
 	_ = f.writeMetadata(ctx, key, typ, true, func(*Attr) {})
 }
 
-// SetWindowsAttributes persists a file/symlink's Hidden/System/
-// ReadOnly/Archive bits with full native fidelity, regardless of
-// primary mode — docs/architecture.md's "the schema always carries the
-// field" rule. Which representation (these stored bits, vs.
-// deriving ReadOnly from the POSIX mode bit) is authoritative at
-// *read* time is a decision for the caller, based on primary mode —
-// not this method's concern, same division SetAttr already has
-// between storing and interpreting mode/uid/gid.
+// SetWindowsAttributes stores a file's or symlink's ReadOnly, Hidden,
+// System and Archive bits, whatever the primary mode. Whether they or the
+// POSIX mode is authoritative when read is the caller's decision, by
+// primary mode.
 func (f *Filesystem) SetWindowsAttributes(ctx context.Context, uuid string, typ EntryType, bits uint32) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
@@ -1467,10 +1371,8 @@ func (f *Filesystem) SetXattr(ctx context.Context, uuid string, typ EntryType, n
 	})
 }
 
-// SetGenericReparseData persists a file's raw, non-symlink reparse
-// point buffer byte-exact — see
-// GenericReparseXattrKey's own doc comment for why this is stored
-// opaquely, unlike the symlink case.
+// SetGenericReparseData stores a file's raw, non-symlink reparse point
+// buffer as is (see GenericReparseXattrKey).
 func (f *Filesystem) SetGenericReparseData(ctx context.Context, uuid string, buf []byte) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
@@ -1483,10 +1385,9 @@ func (f *Filesystem) SetGenericReparseData(ctx context.Context, uuid string, buf
 	})
 }
 
-// DeleteGenericReparseData removes a file's stored non-symlink
-// reparse point buffer, if any — FSCTL_DELETE_REPARSE_POINT's real
-// effect, reverting the file back to
-// an ordinary one with no reparse point at all.
+// DeleteGenericReparseData removes a file's non-symlink reparse point
+// buffer, if any (FSCTL_DELETE_REPARSE_POINT), making it an ordinary file
+// again.
 func (f *Filesystem) DeleteGenericReparseData(ctx context.Context, uuid string) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
@@ -1607,14 +1508,9 @@ func (f *Filesystem) Rmdir(ctx context.Context, dirKey, name string) error {
 	return nil
 }
 
-// dirContains reports whether ancestorUUID's own subtree includes
-// targetUUID anywhere, ancestorUUID itself included — used by Rename
-// to refuse moving a directory into one of its own descendants
-// (POSIX rename(2)'s EINVAL: "newpath contains a path prefix of
-// oldpath"). This tree has no parent pointers to walk upward from
-// targetUUID instead, so the check walks downward from ancestorUUID —
-// an accepted cost here, same as DiskUsage/Prune's own full recursive
-// walks elsewhere in this file.
+// dirContains reports whether targetUUID is ancestorUUID or anywhere under
+// it, so Rename can refuse to move a directory into itself (EINVAL). There
+// are no parent pointers, so it walks down from ancestorUUID.
 func (f *Filesystem) dirContains(ctx context.Context, ancestorUUID, targetUUID string) (bool, error) {
 	if ancestorUUID == targetUUID {
 		return true, nil
@@ -1638,28 +1534,16 @@ func (f *Filesystem) dirContains(ctx context.Context, ancestorUUID, targetUUID s
 	return false, nil
 }
 
-// Rename moves/renames the entry named oldName inside oldDirKey to
-// newName inside newDirKey (same directory if oldDirKey == newDirKey),
-// matching POSIX rename(2) semantics, here once for every access
-// layer.
+// Rename moves the entry oldName in oldDirKey to newName in newDirKey (the
+// same directory if the keys are equal), with rename(2)'s semantics.
 //
-// replace mirrors POSIX's implicit-overwrite default (true) vs.
-// RENAME_NOREPLACE (false, FUSE's NodeRenamer flags; WinFsp's Rename
-// callback's own replaceIfExist parameter maps the same way) — see the
-// existing-target handling below for the exact rules (matching
-// rename(2): a file can't replace a non-empty directory or vice versa;
-// an already-hardlinked-to-the-same-object source/target is always a
-// no-op regardless of replace).
+// replace false is RENAME_NOREPLACE (FUSE's flag; WinFsp's replaceIfExist).
+// Otherwise an existing target is replaced as rename(2) says: a file can't
+// replace a non-empty directory or the other way round, and two names for
+// the same object are a no-op either way.
 //
-// Known simplification, same "last writer wins" tradeoff already
-// accepted elsewhere in this file (e.g. SetAttr's ftruncate): the
-// remove-then-insert pair below is not one atomic cross-directory
-// transaction (each half is independently CAS-retried, not both
-// together) — a concurrent reader could briefly observe the entry at
-// neither location. A real, documented limitation, not silently
-// assumed away; a distributed cross-directory transaction is out of
-// scope for this project's design (see docs/architecture.md's Locking
-// section for the general class of simplification this follows).
+// Remove and insert are separate conditional writes, not one transaction,
+// so a concurrent reader can briefly see the entry in neither place.
 func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, newName string, replace bool) error {
 	if err := f.checkWritable(); err != nil {
 		return err
@@ -1698,10 +1582,9 @@ func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, 
 	}
 	if existingOK {
 		if existing.UUID == entry.UUID {
-			// oldName and newName are two existing hardlinks to the
-			// same object (or, within one directory, literally the
-			// same entry) — rename(2) does nothing and succeeds,
-			// regardless of replace.
+			// Two names for the same object (or, in one directory, the same
+			// entry): rename(2) does nothing and succeeds, whatever replace
+			// says.
 			return nil
 		}
 		if !replace {
@@ -1769,12 +1652,9 @@ func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, 
 	return nil
 }
 
-// ReadFile returns a regular file's whole content and its attributes,
-// fetching the content and metadataObjectKey objects concurrently.
-// ReadFile also returns the content object's current ETag, so a caller
-// about to edit-then-write-back (see OpenFile) can condition that write
-// on not having changed since this read — see docs/architecture.md's
-// Concurrency section.
+// ReadFile returns a regular file's whole content and attributes, fetching
+// content and .metadata concurrently, and the content's ETag, so a caller
+// that edits and writes back can make that write conditional on it.
 func (f *Filesystem) ReadFile(ctx context.Context, key string) ([]byte, Attr, string, error) {
 	if isStreamKey(key) {
 		body, obj, err := f.store.Get(ctx, key)
@@ -1833,29 +1713,19 @@ func (f *Filesystem) ReadFile(ctx context.Context, key string) ([]byte, Attr, st
 	return data, attr, contentObj.ETag, nil
 }
 
-// WriteFile replaces a regular file's whole content. The content object
-// carries no attribute metadata — mode/uid/gid/nlink live in
-// metadataObjectKey and are untouched by a content write, which is what
-// makes the content object's own LastModified a correct, uncorrupted
-// mtime (see Attr's doc comment).
+// WriteFile replaces a regular file's whole content. Attributes are in
+// .metadata and untouched, so the content object's LastModified is the
+// file's mtime.
 //
-// ifMatch conditions the write on the content object's current ETag,
-// exactly like objstore.Store.Put's own ifMatch — empty means
-// unconditional. Returns the new ETag on success, so a caller doing a
-// sequence of writes (see OpenFile) can condition the next one on this
-// one without a redundant read-back.
+// ifMatch makes the write conditional on the content's current ETag, as
+// objstore.Store.Put's does; empty means unconditional. It returns the new
+// ETag, so the next write can be conditional on this one without a read.
 func (f *Filesystem) WriteFile(ctx context.Context, key string, data []byte, ifMatch string) (Attr, string, error) {
 	return f.writeFileFrom(ctx, key, bytes.NewReader(data), ifMatch)
 }
 
-// writeFileFrom is WriteFile's streaming counterpart: OpenFile.Flush passes a local scratch file's own
-// *os.File directly (via io.NewSectionReader) rather than a fully
-// materialized []byte, so a large file's flush never needs to hold
-// its entire content in RAM at once — objstore.Store.Put already
-// accepts io.Reader natively (it always has; whole-object buffering
-// was never a constraint this package's own backend interface
-// imposed, only something OpenFile's own earlier design chose to do
-// above it).
+// writeFileFrom is WriteFile from a reader: OpenFile.Flush passes its
+// scratch file, so a large file is never held in memory.
 func (f *Filesystem) writeFileFrom(ctx context.Context, key string, body io.Reader, ifMatch string) (Attr, string, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, "", err
@@ -1871,32 +1741,23 @@ func (f *Filesystem) writeFileFrom(ctx context.Context, key string, body io.Read
 	return attr, contentObj.ETag, nil
 }
 
-// SetAttr applies the given field changes (any of which may be nil/unset)
-// to the node at key. typ must be the node's actual type (see Stat).
+// SetAttr applies the given changes (each may be nil) to the node at key.
+// typ must be the node's type (see Stat).
 //
-// For a directory, mode/uid/gid is a metadata-only native-object-metadata
-// update (not CAS-protected — "last writer wins" is an accepted
-// simplification for directories, see Attr's doc comment); size is
-// ignored, since truncating a directory block doesn't mean anything.
+// For a directory, every change goes to its .metadata under
+// compare-and-swap; size is ignored.
 //
-// For a file or symlink, a size change rewrites content through an
-// OpenFile session (which bumps mtime, correctly, since it's a real
-// content change); a
-// mode/uid/gid change goes through updateFileMetadata, which — unlike
-// the directory case — *is* real-CAS-protected, a quiet benefit of the
-// .metadata consolidation.
+// For a file or symlink, a size change rewrites content through an OpenFile
+// session (a real content change, so mtime moves); mode, uid and gid go
+// through updateFileMetadata.
 //
-// mtime is an explicit override (Windows' SetFileTime, POSIX
-// utimensat — a pure metadata call, no content write at all) — see
-// combineFileAttr's own doc comment for a file/symlink, or
-// combineDirAttr for a directory. For a file, the override is
-// tied to the content version it was set against and lapses on the
-// next real write, so mtime follows content again — at the cost of one
-// Head request per explicit set, nothing on the write path.
+// mtime is an explicit override (SetFileTime, utimensat), with no content
+// write. For a file it's tied to the content version it was set on and
+// lapses at the next write, so mtime follows content again; that costs one
+// Head per explicit set, nothing on the write path.
 //
-// btime is an explicit creation-time override (Windows' SetFileTime
-// CreationTime); unset, creation time is the one embedded in the UUIDv7
-// key.
+// btime is an explicit creation-time override (SetFileTime's CreationTime);
+// unset, creation time is the one in the UUIDv7 key.
 func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mode, uid, gid *uint32, size *int64, atime, mtime, btime *time.Time) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
@@ -1979,12 +1840,8 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 				a.Atime = *atime
 			}
 			if mtime != nil {
-				// a.Mtime, decoded fresh from this same object by
-				// updateFileMetadata just above, is already only ever
-				// the override (never the real content-derived time —
-				// see combineFileAttr) — so plainly overwriting it here
-				// is exactly "set the override," no special-casing
-				// needed to avoid clobbering something else.
+				// a.Mtime here is only ever the override (see
+				// combineFileAttr), so setting it is setting the override.
 				a.Mtime = *mtime
 				a.mtimeOverrideETag = contentETag
 			}
@@ -1997,21 +1854,14 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 	return f.Stat(ctx, key, typ)
 }
 
-// TouchAtime bumps key's recorded last-access time to now — called by
-// access layers after a real read(2)/readdir(2), never from Stat/
-// Getattr itself, matching POSIX semantics (stat(2) must not itself
-// update atime). Deliberately strict (not relatime-approximated): a
-// file's first read in each open session, and every directory listing,
-// triggers this, accepting the cost of a metadata write rather than
-// batching or approximating it.
+// TouchAtime sets key's access time to now. Access layers call it after a
+// real read or directory listing, never from stat, which must not change
+// atime. It's strict, not relatime: a file's first read in each open
+// session, and every listing, costs a metadata write.
 //
-// A lost CAS race against a concurrent chmod/chown/write (the
-// underlying updateFileMetadata/UpdateMetadata calls both retry a
-// bounded number of times, same as any other metadata update) just
-// means this read's atime update is superseded by the other writer's
-// own version of the object — acceptable for a field whose own
-// documented cost/benefit tradeoff already accepts far worse
-// imprecision than that.
+// A lost race against a concurrent chmod, chown or write just means this
+// access time is superseded by that writer's version, which is fine for a
+// best-effort field.
 func (f *Filesystem) TouchAtime(ctx context.Context, key string, typ EntryType) error {
 	if isStreamKey(key) || f.readOnly {
 		return nil // a stream has no .metadata of its own; a read-only view records nothing

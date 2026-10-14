@@ -1,26 +1,12 @@
-// Package sqssrc is the AWS S3 (via SQS) backend adapter for Change
-// notifications (docs/architecture.md's Change notifications section):
-// a bucket notification configuration routes
-// S3 events to an SQS queue; this package long-polls that queue.
+// Package sqssrc is the AWS S3 change-notification source
+// (docs/architecture.md's Change notifications section): the bucket's event
+// notifications go to an SQS queue, and this long-polls the queue. It uses
+// aws-sdk-go-v2's SQS client, the same SDK as everything else.
 //
-// Stays within aws-sdk-go-v2 (service/sqs) — no new dependency,
-// unlike MinIO's adapter, which genuinely needed one
-// because the feature it wraps isn't exposed anywhere in the generic
-// S3 API aws-sdk-go-v2 targets. SQS, by contrast, is just another
-// AWS service with its own aws-sdk-go-v2 client, same family as
-// everything else in this project.
-//
-// Setting up the actual S3-bucket-to-SQS notification configuration
-// (PutBucketNotificationConfiguration, with whatever prefix/suffix
-// filter — AWS S3 supports server-side filtering here, unlike Azure's
-// Change Feed) is not this package's job and isn't implemented here:
-// this adapter is the consumption side only, treating that
-// configuration as an externally-provisioned concern. There is no real
-// AWS account to test against — the same constraint azurecf has — so
-// this package's test
-// coverage is a fake queue exercising the consumption/delete logic,
-// with real-account testing an explicit, documented manual gap, not a
-// silently-assumed one.
+// Configuring the bucket to send events to the queue
+// (PutBucketNotificationConfiguration, with a server-side prefix filter) is
+// left to whoever provisions it. With no AWS account to test against, the
+// tests use a fake queue.
 package sqssrc
 
 import (
@@ -35,12 +21,8 @@ import (
 	"github.com/resurgentech/icbfs/internal/notify"
 )
 
-// receiver is the minimal SQS client surface this adapter needs,
-// verified directly against the installed aws-sdk-go-v2/service/sqs
-// source (same "verified not assumed" bar as every other backend API
-// this project touches) — a real *sqs.Client satisfies it (see the
-// assertion below), and a test fake can too, without needing real AWS
-// credentials or network access.
+// receiver is the part of the SQS client this uses; *sqs.Client satisfies
+// it (asserted below), and so does the tests' fake.
 type receiver interface {
 	ReceiveMessage(ctx context.Context, params *sqs.ReceiveMessageInput, optFns ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error)
 	DeleteMessage(ctx context.Context, params *sqs.DeleteMessageInput, optFns ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
@@ -48,15 +30,10 @@ type receiver interface {
 
 var _ receiver = (*sqs.Client)(nil)
 
-// s3EventNotification is the subset of AWS's S3 Event Notification
-// JSON schema (what a bucket notification configuration delivers as
-// an SQS message body) this adapter needs — just enough to pull each
-// record's object key out. This is the same well-established schema
-// MinIO's own notification format mirrors for S3 compatibility
-// (confirmed by inspecting minio-go/v7/pkg/notification's types
-// directly); defined locally here
-// rather than importing that MinIO-specific package from an AWS
-// adapter.
+// s3EventNotification is the part of S3's event notification JSON (an SQS
+// message body) this needs: each record's object key. MinIO's format is the
+// same schema; it's defined here rather than importing MinIO's package into
+// an AWS adapter.
 type s3EventNotification struct {
 	Records []struct {
 		S3 struct {
@@ -72,17 +49,11 @@ type s3EventNotification struct {
 // latency-tolerant by design.
 const waitTimeSeconds = 20
 
-// Source long-polls queueURL, parses each message's body as an S3
-// event notification, filters each record's key against prefix
-// client-side (a redundant safety net — AWS S3 supports server-side
-// prefix filtering on the bucket notification configuration itself,
-// per docs/architecture.md, but that configuration lives outside this
-// package, so this check costs little and keeps this Source's
-// filtering contract consistent with the other two backend adapters'),
-// and deletes each message afterward on a best-effort basis (a failed
-// delete just risks redelivery later, which this feature's "just a
-// wake-up hint" governing principle already tolerates — not treated
-// as fatal).
+// Source long-polls queueURL, parses each message as S3 event
+// notifications, forwards records whose keys start with prefix (a cheap
+// safety net: the bucket's configuration can filter too, but it's outside
+// this package), and deletes each message after, best effort (a failed
+// delete only means redelivery).
 type Source struct {
 	cancel context.CancelFunc
 	ch     chan notify.Signal
@@ -144,10 +115,9 @@ func (s *Source) run(ctx context.Context, client receiver, queueURL, prefix stri
 	}
 }
 
-// deliver parses msg's body and forwards each matching record's key
-// as a Signal. Returns false if ctx ended while trying to send (the
-// caller should stop immediately in that case, without deleting the
-// message it never finished delivering).
+// deliver forwards each matching record in msg as a Signal. It returns
+// false if ctx ended while sending; the caller then stops without deleting
+// the message.
 func (s *Source) deliver(ctx context.Context, msg types.Message, prefix string) bool {
 	if msg.Body == nil {
 		return true

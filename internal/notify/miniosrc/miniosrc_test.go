@@ -13,12 +13,8 @@ import (
 	"github.com/resurgentech/icbfs/internal/testutil"
 )
 
-// TestMinIOSourceReceivesRealNotification: a real MinIO container test
-// proves an actual change
-// produces an actual received notification — the one backend that
-// can be tested the way everything else in this project is (unlike
-// Azure/AWS S3, which have no real account available in
-// this environment).
+// TestMinIOSourceReceivesRealNotification: against a MinIO container, a
+// real write produces a real notification.
 func TestMinIOSourceReceivesRealNotification(t *testing.T) {
 	ctx := context.Background()
 
@@ -54,11 +50,8 @@ func TestMinIOSourceReceivesRealNotification(t *testing.T) {
 	src := New(ctx, client, bucket, prefix)
 	t.Cleanup(func() { src.Close() })
 
-	// Give ListenBucketNotification's first long-poll request a moment
-	// to actually establish before the write below — there's no readiness
-	// signal exposed by the API, so a short, generous wait is the
-	// pragmatic choice here (consistent with this being a latency-
-	// tolerant feature by design).
+	// The API says nothing when its long poll is established, so give it a
+	// moment before writing.
 	time.Sleep(500 * time.Millisecond)
 
 	// A key under prefix should be delivered (matches the server-side

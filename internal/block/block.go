@@ -1,19 +1,8 @@
-// Package block implements the directory block format.
-//
-// A directory's entries are stored as a median-key B-tree, per
-// docs/architecture.md's large-directory design: a Leaf block holds a sorted
-// list of name -> UUID rows directly; once a node overflows a size
-// threshold, it splits at its median key into two children, and an
-// Internal block holds sorted range pointers to its children instead of
-// entries directly. Every directory's own UUID (or, for the filesystem
-// root, its fixed name-key) is always the entry point into its own
-// B-tree, whether that tree is currently one flat Leaf or several levels
-// of Internal nodes underneath it.
-//
-// Known simplification: splitting on insert-overflow is implemented;
-// merging underfull nodes back together on delete is not. An
-// over-sharded, mostly-empty directory just stays taller than necessary
-// rather than being compacted — see docs/architecture.md.
+// Package block is the directory block format: a median-key B-tree. A Leaf
+// holds sorted name -> UUID rows; a node that overflows splits at its
+// median key into two, and an Internal block holds sorted pointers to its
+// children. A directory's own key is always the entry point to its tree,
+// however deep it is. Nodes split but are never merged.
 package block
 
 import (
@@ -25,13 +14,10 @@ import (
 	"github.com/resurgentech/icbfs/internal/pb"
 )
 
-// EntryType is the kind of node a directory row points at.
-//
-// TypeFifo/TypeCharDevice/TypeBlockDevice/TypeSocket are POSIX/FUSE-only — Windows/NTFS has no
-// equivalent, so internal/winfspserver never produces or expects
-// these. Order must match spec/proto/icbfs/v1/block.proto's
-// EntryType enum exactly: Encode/Decode cast between the two
-// numerically, not through a translation table.
+// EntryType is the kind of item a row points at. FIFOs, devices and sockets
+// exist only on Linux; winfspserver never makes them. The order must match
+// spec/proto/icbfs/v1/block.proto's EntryType, which Encode and Decode cast
+// to and from numerically.
 type EntryType uint8
 
 const (
@@ -60,27 +46,22 @@ const (
 	Internal
 )
 
-// Child is one range pointer in an internal node: the subtree reachable
-// through UUID covers every name >= MinKey (up to the next child's
-// MinKey, or unbounded for the last child). The first child in any node
-// always has MinKey == "", meaning "no additional lower bound beyond
-// whatever this node's own position in the tree already implies" — this
-// convention holds even after a split, so split halves never need their
-// MinKey rewritten, only the new sibling inserted into the parent needs a
-// real MinKey (see Block.SplitLeaf/SplitInternal).
+// Child is one pointer in an internal node: the subtree at UUID covers
+// every name >= MinKey, up to the next child's MinKey. A node's first child
+// always has MinKey "" ("nothing below what the node's position implies"),
+// even after a split, so only the new sibling put in the parent needs a
+// real MinKey (SplitLeaf, SplitInternal).
 type Child struct {
 	MinKey string
 	UUID   string
 }
 
-// Block is the decoded body of a directory object: either a Leaf (a
-// sorted list of entries) or an Internal node (a sorted list of child
-// pointers).
+// Block is a decoded directory object: a Leaf (sorted entries) or an
+// Internal node (sorted child pointers).
 //
-// Collation is the order Entries and Children are sorted in. It isn't
-// stored in the block: it's a property of the whole filesystem (Folded
-// for primary-Windows, Exact otherwise), so whoever decodes a block sets
-// it before searching or changing it.
+// Collation is the order they're sorted in. It isn't stored in the block
+// but is the filesystem's (Folded for primary-Windows, Exact otherwise),
+// set by whoever decodes the block.
 type Block struct {
 	Kind      Kind
 	Collation Collation

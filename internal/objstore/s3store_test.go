@@ -121,10 +121,8 @@ func TestHeadReturnsMetadataAndSize(t *testing.T) {
 	}
 }
 
-// TestMetadataUpdateCreatesNewVersion is the core assumption behind
-// docs/architecture.md's Metadata section: a metadata-only update (chmod/chown)
-// must not rewrite the body, and must still create a new version on a
-// versioned bucket — the same mechanism a content write uses.
+// TestMetadataUpdateCreatesNewVersion: a metadata-only update leaves the
+// body alone and still makes a new version.
 func TestMetadataUpdateCreatesNewVersion(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -172,10 +170,8 @@ func TestMetadataUpdateCreatesNewVersion(t *testing.T) {
 	}
 }
 
-// TestListVersionsIsNewestFirstWithTimestamps validates the other load-
-// bearing assumption: docs/architecture.md's point-in-time tree walk depends on
-// being able to list a key's versions with usable timestamps and pick the
-// one current as of some time T.
+// TestListVersionsIsNewestFirstWithTimestamps: a key's versions list newest
+// first with timestamps, which as-of views pick from.
 func TestListVersionsIsNewestFirstWithTimestamps(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -278,18 +274,11 @@ func TestConditionalPutRejectsStaleETag(t *testing.T) {
 	}
 }
 
-// TestConditionalUpdateMetadataIgnoresUnchangedETag documents a real,
-// empirically-discovered limitation (not a bug): ETag on an S3-compatible
-// store is a hash of the object's *body*. A metadata-only update
-// (CopySourceIfMatch, since source and destination are the same key)
-// does not change the body, so it does not change the ETag either — two
-// different metadata states can share the exact same ETag. That means
-// ETag-based CAS cannot detect a lost race between two metadata-only
-// writers, even though it works correctly for content writes (see
-// TestConditionalPutRejectsStaleETag). This is why icbfs's nlink hardening
-// does not use UpdateMetadata's ifMatch for correctness — see
-// icbfs.adjustNlink's doc comment for the actual fix (a dedicated side
-// object whose body really does change).
+// TestConditionalUpdateMetadataIgnoresUnchangedETag records a limit: an
+// ETag is a hash of the body, so a metadata-only update leaves it as it
+// was, and a conditional write can't catch two metadata-only writers racing
+// (content writes are caught: TestConditionalPutRejectsStaleETag). That's
+// why attributes live in .metadata objects, whose bodies change.
 func TestConditionalUpdateMetadataIgnoresUnchangedETag(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -321,12 +310,9 @@ func TestConditionalUpdateMetadataIgnoresUnchangedETag(t *testing.T) {
 	}
 }
 
-// TestConditionalDeleteIgnoresIfMatch documents another empirically-
-// discovered limitation: MinIO does not enforce DeleteObject's If-Match
-// header at all — a delete conditioned on a deliberately stale ETag
-// still succeeds. icbfs's nlink hardening therefore never relies on
-// conditional delete; see icbfs.adjustNlink's doc comment for the
-// tombstone-via-conditional-Put protocol used instead.
+// TestConditionalDeleteIgnoresIfMatch records another: MinIO ignores
+// If-Match on DeleteObject, so icbfs never relies on a conditional delete
+// (adjustNlink writes a tombstone with a conditional Put instead).
 func TestConditionalDeleteIgnoresIfMatch(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -353,15 +339,9 @@ func TestConditionalDeleteIgnoresIfMatch(t *testing.T) {
 	}
 }
 
-// TestServerTimeReturnsRealClockFromDateHeader covers the fix for a
-// real misstep: lock expiry was anchored to the acquiring client's own
-// local clock instead of the object store's, exactly the thing
-// docs/architecture.md's Locking section says to avoid. ServerTime closes
-// that gap by capturing the raw HTTP "Date" response header via SDK
-// middleware — confirmed here, not assumed, that real MinIO actually
-// returns one and that it parses to a value close to wall-clock time
-// (within a generous skew budget that also covers the header's own
-// whole-second — not sub-second — resolution).
+// TestServerTimeReturnsRealClockFromDateHeader: MinIO returns a Date
+// header, and it parses to about now, within a budget covering its
+// whole-second resolution.
 func TestServerTimeReturnsRealClockFromDateHeader(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -373,10 +353,8 @@ func TestServerTimeReturnsRealClockFromDateHeader(t *testing.T) {
 		t.Fatalf("server time: %v", err)
 	}
 
-	// The Date header has whole-second resolution, so got can trail
-	// the true request time by nearly a full second even with zero
-	// real clock skew — budget for that plus a little round-trip
-	// slack, not an exact match.
+	// The header reads in whole seconds, so it can trail the request by
+	// almost a second with no skew at all.
 	const skewBudget = 2 * time.Second
 	if got.Before(before.Add(-skewBudget)) || got.After(after.Add(skewBudget)) {
 		t.Fatalf("server time %v is outside [%v, %v] (request window ± %v) — looks like real clock skew, not just Date's whole-second rounding", got, before.Add(-skewBudget), after.Add(skewBudget), skewBudget)

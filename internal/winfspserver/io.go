@@ -31,12 +31,10 @@ func (d *driver) Read(fs *winfsp.FileSystemRef, file uintptr, buf []byte, offset
 	return copy(buf, data), nil
 }
 
-// Write handles both of WinFsp's special write modes, not just the
-// plain offset case: writeToEndOfFile (append-mode opens, where the
-// real write position is "wherever the file currently ends," not the
-// offset argument) and constrainedIo (memory-mapped writes, which must
-// never grow the file — a write landing partly or fully past the
-// current end is clipped, not rejected or allowed to extend it).
+// Write handles WinFsp's two special modes as well as a plain offset:
+// writeToEndOfFile (append opens, writing at the current end, not at
+// offset) and constrainedIo (memory-mapped writes, which never grow the
+// file: a write past the end is clipped).
 func (d *driver) Write(fs *winfsp.FileSystemRef, file uintptr, buf []byte, offset uint64, writeToEndOfFile, constrainedIo bool, info *winfsp.FSP_FSCTL_FILE_INFO) (int, error) {
 	h, ok := d.handle(file)
 	if !ok {
@@ -70,11 +68,8 @@ func (d *driver) Write(fs *winfsp.FileSystemRef, file uintptr, buf []byte, offse
 		return 0, toWinError(err)
 	}
 
-	// The underlying object's own Stat still reflects whatever was
-	// last Flushed, not this write — override Size with the current
-	// in-memory (post-edit, pre-flush) length so the response reflects
-	// what the caller just wrote, same read-your-own-writes guarantee
-	// icbfs.OpenFile.ReadAt already gives within one open session.
+	// Stat reflects the last flush, not this write; report the session's
+	// current size, as ReadAt reads its own writes.
 	attr, err := d.fsys.Stat(ctx(), h.key, h.typ)
 	if err != nil {
 		return 0, toWinError(err)

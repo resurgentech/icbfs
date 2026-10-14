@@ -8,32 +8,16 @@ import (
 	"sync"
 )
 
-// defaultCacheMaxBytes is the default total local disk budget for the
-// shared read cache — a sensible
-// default is required, not optional, since caching here isn't an
-// opt-in feature the way Locking/Change-notifications are: every
-// OpenFile session goes through it. 512 MiB is comfortably enough to
-// avoid redundant re-fetches for ordinary interactive/dev use without
-// committing to a large default footprint on a dev machine; a real
-// deployment is expected to size this explicitly via SetCacheOptions
-// (cmd/icbfs's -cache-size flag) for its own workload.
+// defaultCacheMaxBytes is the read cache's default size, 512 MiB. Every
+// open file goes through the cache, so there's always one; a deployment
+// sizes it with SetCacheOptions (the mounts' -cache-size).
 const defaultCacheMaxBytes = 512 << 20
 
-// diskCache is a shared, LRU-bounded cache of validated byte
-// snapshots, one per content key, on local disk, so a file's content
-// is never materialized as one in-memory []byte (see
-// DefaultMaxFileSize's doc comment). Deliberately NOT the thing an
-// OpenFile session reads/writes against directly: each session gets
-// its own private scratch file (seedScratch), copied from this
-// cache's validated snapshot (or fetched fresh, if missing/stale).
-// Keeping the shared cache's own files immutable-once-written and
-// read-only from every session's perspective is what makes this safe
-// under concurrent opens without the far harder problem of letting
-// multiple sessions' in-progress, uncommitted edits share one
-// physical file — this project's existing CAS-retry-and-reapply
-// correctness depends on each session's edits staying
-// invisible to every other session until Flush, exactly the isolation
-// a shared mutable file would break.
+// diskCache is a shared LRU cache on local disk of fetched content, one
+// version per key. Sessions never use its files directly: each gets a
+// private scratch file copied from it (seedScratch), so the cache's files
+// are never written once made, and one session's unflushed edits never
+// reach another's, which re-applying after a lost race depends on.
 type diskCache struct {
 	mu       sync.Mutex
 	dir      string // lazily created on first real use
@@ -72,10 +56,8 @@ func (c *diskCache) touchLocked(key string) {
 	c.lru = append(c.lru, key)
 }
 
-// evictLocked removes the oldest shared entries (deleting their local
-// files) until totalBytes is back within budget, skipping newKey
-// itself (the entry this eviction pass is making room for — evicting
-// what was just written would be pointless).
+// evictLocked removes the oldest entries, and their files, until the cache
+// is within budget, sparing newKey, the entry it's making room for.
 func (c *diskCache) evictLocked(newKey string) {
 	for c.totalBytes > c.maxBytes && len(c.lru) > 0 {
 		oldest := c.lru[0]
@@ -105,10 +87,8 @@ func (c *diskCache) validLocked(key, wantETag string) bool {
 	return ok && entry.etag == wantETag
 }
 
-// newScratchFile creates a fresh, private local scratch file for one
-// OpenFile session — never shared with any other session, never
-// reused across sessions, removed by the caller (OpenFile.Close) once
-// the session ends.
+// newScratchFile creates a private scratch file for one session, which the
+// session removes (OpenFile.Close).
 func (c *diskCache) newScratchFile() (*os.File, error) {
 	if err := os.MkdirAll(c.scratchDir(), 0700); err != nil {
 		return nil, err
@@ -116,15 +96,10 @@ func (c *diskCache) newScratchFile() (*os.File, error) {
 	return os.CreateTemp(c.scratchDir(), "scratch-*")
 }
 
-// seedScratch returns a fresh private scratch file seeded with key's
-// content as of wantETag: copied from this cache's own shared
-// snapshot if it's already validated against wantETag, or fetched
-// fresh (via fetch, called at most once) and used to populate both
-// the new scratch file and the shared cache otherwise. Either way, no
-// caller of this function ever needs to hold the full content as a
-// single in-memory []byte — fetch streams directly onto local disk via
-// io.Copy, which uses a small fixed internal buffer regardless of file
-// size.
+// seedScratch returns a new scratch file holding key's content as of
+// wantETag: copied from the cache if it has that version, else fetched
+// (fetch is called at most once) into both the scratch file and the cache.
+// The content is streamed to disk, never held in memory.
 func (c *diskCache) seedScratch(ctx context.Context, key, wantETag string, fetch func(ctx context.Context) (io.ReadCloser, error)) (*os.File, int64, error) {
 	scratch, err := c.newScratchFile()
 	if err != nil {
@@ -150,10 +125,8 @@ func (c *diskCache) seedScratch(ctx context.Context, key, wantETag string, fetch
 				}
 				return scratch, size, nil
 			}
-			// A validated shared entry failed to actually read back
-			// (e.g. deleted out from under us by a concurrent evict) —
-			// fall through to a real fetch rather than erroring out
-			// outright; the cache is an optimization, not a dependency.
+			// The cached copy didn't read back (evicted meanwhile): fetch
+			// instead. The cache only saves work.
 			if _, err := scratch.Seek(0, io.SeekStart); err != nil {
 				scratch.Close()
 				_ = os.Remove(scratch.Name())
@@ -186,27 +159,21 @@ func (c *diskCache) seedScratch(ctx context.Context, key, wantETag string, fetch
 		return nil, 0, err
 	}
 	if err := c.updateSharedFrom(key, wantETag, scratch, size); err != nil {
-		// Same reasoning as the read-back failure above: a failure to
-		// populate the shared cache never fails the caller's own
-		// successful fetch — it only means the next Open won't get a
-		// cache hit either, no worse than if this cache didn't exist.
+		// A failure to fill the cache doesn't fail the fetch; the next Open
+		// just fetches again.
 		_, _ = scratch.Seek(0, io.SeekStart)
 	}
 	return scratch, size, nil
 }
 
-// updateSharedFrom copies size bytes from content (left seeked to
-// wherever the caller wants copying to start) into the shared cache
-// entry for key, replacing whatever was there, then restores
-// content's position to the start — used both by seedScratch (to
-// populate the cache after a real fetch) and by OpenFile.Flush (to
-// keep the shared cache representing what was actually just written,
-// so the very next Open doesn't redundantly re-fetch it).
+// updateSharedFrom puts size bytes of content (from its current position)
+// in the cache as key's entry, replacing any, and seeks content back to the
+// start. seedScratch uses it after a fetch, and OpenFile.Flush after a
+// write, so the next Open needn't fetch.
 //
-// Content bigger than the whole cache budget isn't cached at all: it
-// would only evict everything else and then be evicted itself, after a
-// full local copy (dense, even of a sparse file). Any older entry for
-// key is dropped instead, since it no longer matches.
+// Content larger than the whole budget isn't cached (it would evict
+// everything else and then itself); key's older entry is dropped instead,
+// since it no longer matches.
 func (c *diskCache) updateSharedFrom(key, etag string, content *os.File, size int64) error {
 	if size > c.maxBytes {
 		c.invalidate(key)
@@ -251,10 +218,8 @@ func (c *diskCache) updateSharedFrom(key, etag string, content *os.File, size in
 	return nil
 }
 
-// invalidate drops key's shared cache entry outright (no replacement)
-// — used when a write fails partway through in a way that leaves no
-// trustworthy new content to cache (simpler and safer than caching
-// something that might not match what's actually stored).
+// invalidate drops key's entry, when a failed write leaves nothing
+// trustworthy to cache.
 func (c *diskCache) invalidate(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

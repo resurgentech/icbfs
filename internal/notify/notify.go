@@ -1,21 +1,12 @@
-// Package notify defines the internal event-source abstraction behind
-// icbfs's optional Change notifications feature (docs/architecture.md's
-// Change notifications section): a minimal,
-// backend-independent "something changed, go check current state"
-// wake-up signal, never an authoritative payload of what changed —
-// per docs/architecture.md's governing design principle, this holds
-// regardless of which backend (MinIO, Azure, AWS S3) is in use, and
-// the interface is deliberately too thin to tempt a consumer into
-// trusting it as more than that.
+// Package notify is the change-notification source behind the optional
+// change notifications (docs/architecture.md): a "something changed, go
+// look" signal from any backend, never an authoritative account of what
+// changed.
 package notify
 
-// Signal is a single wake-up notification: the key or prefix that
-// changed. Consumers (the FUSE watch dispatch, locking's lock-polling
-// accelerator) treat this purely as a hint to re-check current state,
-// never as proof of what the change was — a signal can be coarser
-// than the actual writes that produced it (e.g. several rapid writes
-// to the same key coalesced into one signal), and a consumer that
-// assumes otherwise is the one at fault, not this package.
+// Signal is one wake-up: the key that changed. Consumers (the FUSE watch
+// dispatch, locking's acquire accelerator) only re-check state on it. A
+// signal can stand for several writes, coalesced.
 type Signal struct {
 	// Key is the object key (or, for a prefix-scoped subscription,
 	// the key that matched it) that changed.
@@ -25,14 +16,9 @@ type Signal struct {
 // Source is the minimal interface every backend notification adapter
 // implements.
 type Source interface {
-	// Signals returns the channel wake-up signals arrive on. The
-	// channel is closed when the source is done — ctx (passed to
-	// whatever constructed the Source) was cancelled, or the
-	// underlying backend connection ended for any other reason. A
-	// closed channel is not itself an error; callers that need to
-	// distinguish "done cleanly" from "failed" should check context
-	// error state or a backend-specific accessor, not infer it from
-	// channel closure alone.
+	// Signals is the channel signals arrive on. It's closed when the source
+	// ends (its ctx was cancelled, or the backend connection ended);
+	// closing says nothing about why.
 	Signals() <-chan Signal
 
 	// Close stops the source and releases any underlying resources

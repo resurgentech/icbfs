@@ -1,7 +1,6 @@
-// Package icbfs is the core filesystem logic: it ties the object store and
-// the directory block format together into filesystem operations
-// (lookup, mkdir, create, read, write, link, ...), independent of any
-// particular access layer (FUSE, WinFsp, ...).
+// Package icbfs is the filesystem core: the object store and directory
+// blocks made into filesystem operations (lookup, mkdir, create, read,
+// write, link, rename, ...), shared by every access layer.
 package icbfs
 
 import (
@@ -33,15 +32,9 @@ var (
 	ErrInvalidArgument = errors.New("invalid argument")
 )
 
-// Windows FILE_ATTRIBUTE_* bits this project stores with native
-// fidelity for a file/symlink's Hidden/System/ReadOnly/Archive state.
-// These duplicate golang.org/x/sys/windows's own
-// documented Win32 values (not imported from there) so this package
-// stays portable with no Windows dependency — same reasoning
-// winnames.go's own reserved-character constants give. Numerically
-// identical to FILE_ATTRIBUTE_READONLY/HIDDEN/SYSTEM/ARCHIVE, so
-// winfspserver can widen one of these straight into a
-// FSP_FSCTL_FILE_INFO.FileAttributes value with no translation table.
+// The Windows FILE_ATTRIBUTE_* bits stored for an item: Win32's values,
+// written out so this package needs no Windows dependency, and the same
+// numbers, so winfspserver uses them as is.
 const (
 	WindowsAttrReadOnly uint32 = 0x01
 	WindowsAttrHidden   uint32 = 0x02
@@ -51,20 +44,13 @@ const (
 	windowsAttrMask = WindowsAttrReadOnly | WindowsAttrHidden | WindowsAttrSystem | WindowsAttrArchive
 )
 
-// WindowsAttributesXattrKey is the well-known xattrs map key a file/
-// symlink's native Windows attribute byte is stored under — "another
-// entry in .metadata's xattrs map," the same place Windows ACLs
-// (under "windows.acl") and POSIX ACLs keep their
-// own ACL entry (under "system.posix_acl_access"): no special-casing
-// at the storage layer, just another named entry in the union map.
+// WindowsAttributesXattrKey is the xattr key of an item's stored Windows
+// attribute bits.
 const WindowsAttributesXattrKey = "windows.attributes"
 
-// WindowsAttributesFromXattrs reads a file/symlink's natively-stored
-// Windows attribute bits, if any were ever written via
-// SetWindowsAttributes. ok is false if nothing has been stored yet —
-// callers decide what to derive instead (e.g. winfspserver falls back
-// to approximating ReadOnly from the POSIX mode bit, the same
-// approximation used before this field existed at all).
+// WindowsAttributesFromXattrs returns an item's stored Windows attribute
+// bits; ok is false if none were ever stored, and the caller derives them
+// instead (winfspserver takes ReadOnly from the mode).
 func WindowsAttributesFromXattrs(xattrs map[string][]byte) (bits uint32, ok bool) {
 	v, present := xattrs[WindowsAttributesXattrKey]
 	if !present || len(v) == 0 {
@@ -73,21 +59,14 @@ func WindowsAttributesFromXattrs(xattrs map[string][]byte) (bits uint32, ok bool
 	return uint32(v[0]) & windowsAttrMask, true
 }
 
-// WindowsACLXattrKey is the well-known xattrs map key a file/symlink's
-// native Windows security descriptor is stored under — metadata.proto's own doc comment already reserved
-// this name. The value is a security descriptor's SDDL string
-// representation (ASCII, e.g. "O:...G:...D:..."), not the raw
-// self-relative binary layout: SDDL round-trips through
-// golang.org/x/sys/windows's own SecurityDescriptorFromString/
-// (*SECURITY_DESCRIPTOR).String() with no manual struct-layout work on
-// either side, and stores as ordinary bytes in this already-binary-safe
-// map with no further encoding needed, same as every other xattr here.
+// WindowsACLXattrKey is the xattr key of an item's Windows security
+// descriptor, stored as SDDL ("O:...G:...D:..."), which
+// golang.org/x/sys/windows parses and prints, rather than as the binary
+// self-relative layout.
 const WindowsACLXattrKey = "windows.acl"
 
-// WindowsACLFromXattrs reads a file/symlink's natively-stored security
-// descriptor's SDDL string, if SetWindowsACL has ever been called for
-// it. ok is false if nothing has been stored yet — callers (winfspserver)
-// decide what to fall back to (the mounting process's own identity).
+// WindowsACLFromXattrs returns an item's stored SDDL; ok is false if none
+// was stored, and the caller (winfspserver) falls back to a default.
 func WindowsACLFromXattrs(xattrs map[string][]byte) (sddl []byte, ok bool) {
 	v, present := xattrs[WindowsACLXattrKey]
 	if !present || len(v) == 0 {
@@ -102,22 +81,14 @@ func WindowsACLFromXattrs(xattrs map[string][]byte) (sddl []byte, ok bool) {
 // DeleteFile, removes one), whereas POSIX has no such distinction.
 const WindowsDirSymlinkXattrKey = "windows.symlinkd"
 
-// GenericReparseXattrKey is the well-known xattrs map key a file's
-// *non-symlink* reparse point data is stored under — `winfsp-tests`' own `reparse_guid_test`/
-// `reparse_nfs_test` set an arbitrary custom/NFS-style reparse tag on
-// an ordinary file via `FSCTL_SET_REPARSE_POINT`, carrying an opaque
-// data buffer this driver has no reason to parse — unlike the
-// symlink case (a first-class icbfs entry type, translated to/from
-// Windows' own `REPARSE_DATA_BUFFER_SYMBOLIC_LINK` layout), a generic
-// reparse point's raw buffer is stored and returned byte-exact, same
-// "just another named entry, no special-casing at the storage layer"
-// pattern `windows.acl`/`windows.attributes` already established.
+// GenericReparseXattrKey is the xattr key of a file's non-symlink reparse
+// point data (winfsp-tests' reparse_guid_test and reparse_nfs_test set such
+// tags with FSCTL_SET_REPARSE_POINT). Unlike a symlink, which is an icbfs
+// entry type, its buffer is stored and returned exactly as given.
 const GenericReparseXattrKey = "windows.reparse"
 
-// GenericReparseFromXattrs reads a file's raw, natively-stored
-// non-symlink reparse buffer, if SetGenericReparseData has ever been
-// called for it. ok is false if nothing has been stored (including a
-// plain file that's never had any reparse point set at all).
+// GenericReparseFromXattrs returns a file's stored non-symlink reparse
+// buffer; ok is false if it has none.
 func GenericReparseFromXattrs(xattrs map[string][]byte) (buf []byte, ok bool) {
 	v, present := xattrs[GenericReparseXattrKey]
 	if !present || len(v) == 0 {
@@ -126,23 +97,18 @@ func GenericReparseFromXattrs(xattrs map[string][]byte) (buf []byte, ok bool) {
 	return v, true
 }
 
-// Attr is the POSIX-ish attribute set for one inode. Where it comes from
-// differs by type — see docs/architecture.md's Metadata and master block sections:
+// Attr is one item's attributes (docs/architecture.md's Metadata section):
 //
-//   - For a file or symlink: mode/uid/gid/nlink/xattrs come from the
-//     dedicated <uuid>.metadata object's body (Protobuf-encoded, below);
-//     size/mtime/btime come from the content object itself; ctime is
-//     the later of the content's last write and the ctime stored in
-//     .metadata (see combineFileAttr).
-//   - For a directory (root included): everything stored lives in its
-//     own <uuid>.metadata object too, the same Protobuf body as a file's,
-//     CAS-protected the same way; mtime is stored explicitly there
-//     (a directory's root block need not change when its entries do),
-//     size comes from the root block object, and ctime is stored too,
-//     bumped whenever an entry is added or removed. Directories
-//     created before this lived in native metadata on the block object;
-//     those are still read (dirAttrFromObject) and migrate on their
-//     first attribute write.
+//   - For a file or symlink: mode, owner, link count and xattrs come from
+//     its <uuid>.metadata object; size, mtime and btime from the content
+//     object; ctime is the later of the content's last write and the
+//     ctime stored in .metadata (see combineFileAttr).
+//   - For a directory (root included): everything is in its .metadata,
+//     mtime included (its block needn't change when its entries do), and
+//     ctime moves whenever an entry is added or removed; size comes from
+//     its block. A directory from before directories had .metadata keeps
+//     them in its block's native metadata (dirAttrFromObject) until its
+//     first attribute write migrates them.
 type Attr struct {
 	Mode   uint32 // permission bits only (e.g. 0644) — type bits are not stored here
 	Uid    uint32
@@ -199,21 +165,12 @@ func parseMetaTime(m map[string]string, key string) time.Time {
 // --- File/symlink attributes: the dedicated <uuid>.metadata object,
 // Protobuf-encoded (spec/proto/icbfs/v1/metadata.proto). ---
 
-// metadataObjectKey is the dedicated side object holding a file or
-// symlink's mode/uid/gid/nlink/xattrs.
+// metadataObjectKey is the key of an item's .metadata object.
 //
-// This exists because of a hard limitation discovered empirically
-// against real MinIO, not assumed: ETag on an S3-compatible store is a
-// hash of the object's *body*, so a metadata-only update to native
-// object metadata never changes the ETag when the body is unchanged —
-// which means ETag-based CAS gives zero protection to fields stored that
-// way. metadataObjectKey's own body *is* the attribute data, so any real
-// change to it is a real content write, and ETag CAS becomes meaningful
-// again — for every field here, not just nlink, which is what makes
-// consolidating mode/uid/gid/nlink into one object (rather than keeping
-// them on native metadata and only nlink in its own side object, the
-// first iteration of this fix) also quietly close the chmod/chown race
-// gap, as a side effect of the consolidation rather than a separate fix.
+// An S3 ETag is a hash of the body, so native object metadata changes
+// without the ETag changing, and a conditional write can't protect it.
+// .metadata's body is the attributes, so every change moves its ETag, and
+// concurrent chmod, chown and link serialize through compare-and-swap.
 func metadataObjectKey(uuid string) string { return uuid + ".metadata" }
 
 // encodeFileMetadata serializes mode/uid/gid/nlink/xattrs to the wire
@@ -253,11 +210,8 @@ func timeOrZero(ts *timestamppb.Timestamp) time.Time {
 	return ts.AsTime()
 }
 
-// decodeFileMetadata parses metadataObjectKey's body. Empty input
-// decodes to all-zero fields (mode/uid/gid/nlink all 0, no xattrs) —
-// callers should not encounter this in practice, since the object is
-// always written with real content at creation, but it's a safe,
-// unsurprising zero value rather than an error if they ever do.
+// decodeFileMetadata parses a .metadata body. An empty body decodes to all
+// zeros.
 func decodeFileMetadata(data []byte) (Attr, error) {
 	if len(data) == 0 {
 		return Attr{}, nil
@@ -279,10 +233,8 @@ func decodeFileMetadata(data []byte) (Attr, error) {
 		Nlink:  m.Nlink,
 		Xattrs: m.Xattrs,
 		Atime:  atime,
-		// Mtime here carries only the explicit override, if any — see
-		// combineFileAttr, which is what this decode's caller (statFile)
-		// always goes through for the real, content-derived Mtime it
-		// falls back to when this is zero.
+		// Only the explicit override, if any; combineFileAttr falls back to
+		// the content's time.
 		Mtime:             mtimeOverride,
 		mtimeOverrideETag: m.MtimeOverrideEtag,
 		Streams:           m.Streams,
@@ -303,14 +255,9 @@ func NewUUIDv7() (string, error) {
 	return id.String(), nil
 }
 
-// Btime extracts the embedded creation timestamp from a key. Every
-// object a filesystem owns is prefixed with its 4-hex-digit ID (see
-// docs/architecture.md's master block section), so this
-// strips a recognized "<4-hex>-" prefix before trying to parse what
-// remains as a UUIDv7. Returns the zero Time if nothing UUIDv7-shaped is
-// found — e.g. a root key, which is "<id>-root-<name>", not a UUID at
-// all, correctly yields zero here after the prefix strip leaves
-// "root-<name>" behind.
+// Btime is the creation time embedded in an item's key: the UUIDv7 after
+// the "<id>-" prefix. It's zero for a key with none, such as a root key
+// ("<id>-root-<name>").
 func Btime(key string) time.Time {
 	if len(key) > 5 && key[4] == '-' {
 		if _, err := strconv.ParseUint(key[:4], 16, 16); err == nil {
@@ -326,12 +273,9 @@ func Btime(key string) time.Time {
 	return time.UnixMilli(ms).UTC()
 }
 
-// Ino derives a FUSE/stat inode number from a blob's UUID via a
-// high-quality 64-bit hash. This is stateless by design — see
-// docs/architecture.md's FUSE inode mapping decision: inode numbers only need
-// to be unique and stable within one mount's lifetime, so no shared or
-// persisted allocation table is needed, and a deterministic hash also
-// gets us stability across remounts for free.
+// Ino is the inode number for a key: a 64-bit xxhash, stateless and stable
+// across remounts. The kernel pairs it with the mount's device, so it only
+// has to be unique within one mount.
 func Ino(key string) uint64 {
 	return xxhash.Sum64String(key)
 }

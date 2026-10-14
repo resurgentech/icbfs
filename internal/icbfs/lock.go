@@ -20,38 +20,27 @@ import (
 // unexpired claim.
 var ErrLocked = errors.New("lock is currently held")
 
-// ErrNotLockHolder is returned by Release/Renew when the caller does
-// not currently hold the exact (holder, range) claim being operated
-// on — e.g. the lease already expired and a different caller claimed
-// it in the meantime, or it was never held at all under that holder.
+// ErrNotLockHolder is Release's and Renew's answer when the caller doesn't
+// hold that exact claim: its lease expired and someone else took the range,
+// or it never held it.
 var ErrNotLockHolder = errors.New("not the current lock holder")
 
-// ErrLockingDisabled is returned by every real (non-escalation) lock
-// operation when this Filesystem wasn't opted into the Locking feature
-// via EnableLocking — docs/architecture.md's Locking section
-// requires a caller that thinks it's holding a lock when it isn't to
-// get a clear error, not a silent no-op, so this is returned rather
-// than treating every acquire as if it always trivially succeeded.
+// ErrLockingDisabled is every application lock operation's answer when
+// EnableLocking wasn't called: a caller must not believe it holds a lock it
+// doesn't.
 var ErrLockingDisabled = errors.New("locking is not enabled for this mount")
 
-// maxLockCASRetries bounds the CAS retry loop in the Acquire/Release/
-// Renew functions below — same shape of bound as maxTreeRetries, a
-// separate constant since it's an unrelated contention domain (lock
-// objects, not directory blocks).
+// maxLockCASRetries bounds the retry loops of the lock operations below.
 const maxLockCASRetries = 20
 
-// lockWholeFileEnd is the "to end of file" sentinel the whole-file
-// lock wrappers use as a range's end — matching the common real-world
-// convention (e.g. flock(2)'s l_len == 0 meaning "to EOF") of a fixed
-// value rather than the file's actual current size, since a lock
-// taken now must still cover bytes appended after it was acquired.
+// lockWholeFileEnd is the end of a whole-file lock: "to end of file" as a
+// fixed value, not the file's size, so the lock also covers bytes appended
+// after it was taken.
 const lockWholeFileEnd = math.MaxInt64
 
-// lockObjectKey is the dedicated side object holding a file's lock
-// state — see docs/architecture.md's Locking section on why this is its own
-// object, not folded into .metadata: locks are written by a different
-// caller than stat() touches, and can churn far more frequently under
-// contention than attributes ever do.
+// lockObjectKey is the object holding a file's locks. It's separate from
+// .metadata because locks are read by other callers than stat, and can
+// change far more often than attributes.
 func lockObjectKey(uuid string) string { return uuid + ".lock" }
 
 // readLockRanges returns the current lock state at lockKey, or (nil,
@@ -87,41 +76,25 @@ func rangesOverlap(aStart, aEnd, bStart, bEnd int64) bool {
 	return aStart < bEnd && bStart < aEnd
 }
 
-// locksConflict reports whether a claim of type aShared and one of
-// type bShared, both covering an already-confirmed-overlapping range
-// from different holders, actually conflict — real POSIX fcntl/flock
-// semantics (not attempted in this codebase's earlier version; a
-// holder-type-insensitive "any overlap from a different holder
-// conflicts" rule is wrong for F_RDLCK/shared locks specifically):
-// two shared (read) claims never conflict with each other, no matter
-// how many different holders hold them; anything else (shared vs.
-// exclusive, exclusive vs. exclusive) does.
+// locksConflict reports whether two overlapping claims of different holders
+// conflict: two shared (read) claims never do; anything with an exclusive
+// claim does.
 func locksConflict(aShared, bShared bool) bool {
 	return !(aShared && bShared)
 }
 
-// mergeOwnRanges implements real fcntl(2) same-owner lock merge/split
-// semantics: acquiring [start, end)
-// doesn't just replace an *identical* existing entry this holder
-// already has, it adjusts every existing entry of theirs that
-// overlaps [start, end) at all, exactly the way a real kernel's
-// posix_lock_file merges/splits a process's own byte-range locks on a
-// repeated F_SETLK:
-//   - an overlapping entry of the SAME type (shared/exclusive) is
-//     absorbed into the new claim — the returned bounds widen to
-//     cover it, and it is not kept as a separate entry;
-//   - an overlapping entry of a DIFFERENT type is trimmed to its
-//     non-overlapping remainder(s) (0, 1, or 2 of them, depending on
-//     whether the new range covers one edge, both edges, or the whole
-//     thing), preserving that remainder's own original type/flags.
+// mergeOwnRanges applies fcntl(2)'s rule for one owner's own locks:
+// acquiring [start, end) adjusts every entry of the holder's that overlaps
+// it, as the kernel's posix_lock_file does on a repeated F_SETLK.
 //
-// Runs to a fixed point: absorbing a same-type entry can widen the
-// claim enough to newly overlap an entry that didn't overlap the
-// original [start, end), so this keeps sweeping owned until a full
-// pass changes nothing. owned must already be filtered to this one
-// holder's own, unexpired entries; entries belonging to other holders
-// are handled separately by the caller's ordinary conflict check and
-// never passed in here.
+//   - An overlapping entry of the same type (shared or exclusive) is
+//     absorbed: the new claim widens to cover it.
+//   - An overlapping entry of the other type is trimmed to what lies
+//     outside the new range (none, one or two pieces), keeping its type.
+//
+// It repeats until nothing changes, since widening can reach entries the
+// original range didn't. owned must hold only this holder's unexpired
+// entries; other holders' are the caller's conflict check.
 func mergeOwnRanges(owned []*pb.LockRange, start, end int64, shared bool) (remainder []*pb.LockRange, newStart, newEnd int64) {
 	newStart, newEnd = start, end
 	remaining := owned
@@ -157,29 +130,16 @@ func mergeOwnRanges(owned []*pb.LockRange, start, end int64, shared bool) (remai
 	}
 }
 
-// TryAcquireLockRange attempts to claim [start, end) of key for
-// holder, non-blocking: checked against every other holder's current,
-// unexpired range entries for overlap. If any conflicting range is
-// actually held and unexpired, it returns ErrLocked immediately rather
-// than waiting (AcquireLockRange is the blocking wrapper on top of
-// this). A missing lock object, an expired entry, or an entry
-// already held by the same holder (idempotent re-acquire/replace) are
-// all treated as non-conflicting. A holder may hold several disjoint
-// ranges simultaneously — acquiring a new range never conflicts with
-// that same holder's own existing entries. An existing entry of theirs
-// that overlaps the new range (not just an identical one) is merged or
-// split per real fcntl(2) same-owner semantics — see mergeOwnRanges.
+// TryAcquireLockRange claims [start, end) of key for holder, exclusively
+// (F_WRLCK), without waiting: if another holder's unexpired claim
+// conflicts, it returns ErrLocked. A missing lock object or an expired
+// entry is no conflict. A holder can hold several ranges; its own
+// overlapping entries are merged or split as fcntl(2) does (see
+// mergeOwnRanges).
 //
-// expires_at is anchored to the object store's clock (objstore.Store.
-// ServerTime, a real HTTP Date header, not a typed field — see its
-// doc comment), not this acquiring client's own local clock, per
-// docs/architecture.md's Locking section: a client's local clock could be
-// skewed relative to other clients, which the store's own clock isn't
-// relative to itself.
-//
-// This claims an exclusive (POSIX F_WRLCK-equivalent) range — see
-// TryAcquireSharedLockRange for the F_RDLCK-equivalent, which allows
-// multiple different holders to hold overlapping claims at once.
+// The claim's expiry is the store's clock (objstore.Store.ServerTime) plus
+// ttl, not this client's clock, which could be skewed against other
+// clients'.
 func (f *Filesystem) TryAcquireLockRange(ctx context.Context, key string, start, end int64, holder string, ttl time.Duration) error {
 	if !f.lockingEnabled {
 		return ErrLockingDisabled
@@ -187,13 +147,9 @@ func (f *Filesystem) TryAcquireLockRange(ctx context.Context, key string, start,
 	return f.tryAcquireLockRange(ctx, key, start, end, holder, ttl, false, false)
 }
 
-// TryAcquireSharedLockRange is TryAcquireLockRange's shared/read
-// (POSIX F_RDLCK-equivalent) counterpart: it conflicts with another
-// holder's exclusive claim on an overlapping range, but never with
-// another holder's own shared claim — real POSIX fcntl/flock
-// semantics, not the earlier, incorrect version of this codebase's
-// lock model, which treated every claim as exclusive regardless of
-// what the caller actually asked for.
+// TryAcquireSharedLockRange is TryAcquireLockRange for a shared (read,
+// F_RDLCK) claim: it conflicts with another holder's exclusive claim on an
+// overlapping range, never with a shared one.
 func (f *Filesystem) TryAcquireSharedLockRange(ctx context.Context, key string, start, end int64, holder string, ttl time.Duration) error {
 	if !f.lockingEnabled {
 		return ErrLockingDisabled
@@ -201,34 +157,21 @@ func (f *Filesystem) TryAcquireSharedLockRange(ctx context.Context, key string, 
 	return f.tryAcquireLockRange(ctx, key, start, end, holder, ttl, false, true)
 }
 
-// tryAcquireLockRange is TryAcquireLockRange/TryAcquireSharedLockRange's
-// shared implementation.
+// tryAcquireLockRange is TryAcquireLockRange's and
+// TryAcquireSharedLockRange's implementation.
 //
-// escalationOnly tags the written claim as internal-escalation-only,
-// never a real application lock — see LockRange.EscalationOnly's
-// doc comment in lock.proto on why the write-conflict check must
-// be able to tell the difference. Acquiring (here) always conflict-
-// checks against every entry regardless of that flag: an internal
-// escalation attempt must still respect a genuine application lock,
-// and a genuine application lock attempt must still respect another
-// session's in-flight escalation claim — only CheckRangeLockConflict
-// treats them differently.
-//
-// shared tags the claim as a POSIX shared/read lock (see
-// locksConflict for the conflict rule this enables).
+// escalationOnly marks the claim as Flush's own escalation, not an
+// application lock (see LockRange.EscalationOnly in lock.proto). Acquiring
+// checks every entry either way: escalation respects application locks and
+// the other way round. Only CheckRangeLockConflict tells them apart.
 func (f *Filesystem) tryAcquireLockRange(ctx context.Context, key string, start, end int64, holder string, ttl time.Duration, escalationOnly, shared bool) error {
 	lockKey := lockObjectKey(key)
 
-	// Fetched once per call, not once per retry attempt below: a real
-	// round trip to the store, so retries (expected to be fast, all
-	// within this one call) reuse it rather than each paying for their
-	// own. This is the value the new claim's expires_at is anchored
-	// to; the expiry *check* against already-held entries a few lines
-	// down deliberately keeps using the local clock (checkNow) — see
-	// docs/architecture.md: clock skew there can only shift when a lease
-	// looks expired by a few seconds, never let two clients both
-	// successfully steal it, so it's accepted rather than also
-	// anchored to the store.
+	// The store's clock, fetched once per call, anchors the new claim's
+	// expiry. Checking whether existing entries have expired uses the local
+	// clock (checkNow): skew there only shifts when a lease looks expired,
+	// and stealing is a conditional write, so two clients can't both take a
+	// lock.
 	serverNow, err := f.store.ServerTime(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire lock %q: %w", key, err)
@@ -271,11 +214,8 @@ func (f *Filesystem) tryAcquireLockRange(ctx context.Context, key string, start,
 		}
 
 		if obj == nil {
-			// No lock object exists yet: a plain Put with an empty
-			// ifMatch would be unconditional and let two concurrent
-			// first-time claimants both "succeed" (the exact race
-			// found and fixed in master.go's bootstrapMaster) — use
-			// the true create-if-absent primitive instead.
+			// No lock object yet: create it with PutIfAbsent, since an
+			// unconditional Put would let two first claimants both succeed.
 			_, err = f.store.PutIfAbsent(ctx, lockKey, bytes.NewReader(data), nil)
 		} else {
 			_, err = f.store.Put(ctx, lockKey, bytes.NewReader(data), nil, obj.ETag)
@@ -288,13 +228,10 @@ func (f *Filesystem) tryAcquireLockRange(ctx context.Context, key string, start,
 	return fmt.Errorf("acquire lock %q [%d,%d): exceeded %d retries under contention", key, start, end, maxLockCASRetries)
 }
 
-// ReleaseLockRange releases the exact [start, end) claim holder holds
-// on key, but only if holder is still its current holder — a holder
-// whose lease already expired and was stolen by someone else must not
-// release the new holder's claim out from under them. Releasing a
-// range that's already free (never claimed, or already released) is a
-// no-op, not an error. Other ranges this or any other holder holds on
-// the same file are untouched.
+// ReleaseLockRange releases holder's exact [start, end) claim on key, only
+// if holder still holds it: a holder whose lease expired and was taken must
+// not release the new holder's claim. Releasing a free range is a no-op.
+// Other claims on the file are untouched.
 func (f *Filesystem) ReleaseLockRange(ctx context.Context, key string, start, end int64, holder string) error {
 	if !f.lockingEnabled {
 		return ErrLockingDisabled
@@ -346,10 +283,9 @@ func (f *Filesystem) ReleaseLockRange(ctx context.Context, key string, start, en
 	return fmt.Errorf("release lock %q [%d,%d): exceeded %d retries under contention", key, start, end, maxLockCASRetries)
 }
 
-// RenewLockRange extends holder's exact [start, end) claim on key, but
-// only succeeds if holder is still its current holder — renewing after
-// your lease already expired and was stolen must fail, not resurrect a
-// claim you no longer actually hold.
+// RenewLockRange extends holder's exact [start, end) claim on key, only if
+// holder still holds it: renewing after the lease was taken must fail, not
+// revive the claim.
 func (f *Filesystem) RenewLockRange(ctx context.Context, key string, start, end int64, holder string, ttl time.Duration) error {
 	if !f.lockingEnabled {
 		return ErrLockingDisabled
@@ -408,30 +344,19 @@ func (f *Filesystem) RenewLockRange(ctx context.Context, key string, start, end 
 	return fmt.Errorf("renew lock %q [%d,%d): exceeded %d retries under contention", key, start, end, maxLockCASRetries)
 }
 
-// lockPollMinInterval/lockPollMaxInterval bound AcquireLockRange's
-// polling backoff — per docs/architecture.md's Locking section, blocking
-// acquisition is client-side polling, not true wake-on-release (object
-// storage has no such primitive), so a waiter sleeps with exponential
-// backoff between non-blocking attempts rather than hammering the
-// store at a fixed tight interval.
+// lockPollMinInterval and lockPollMaxInterval bound the exponential backoff
+// of AcquireLockRange's polling: object storage has no wake-on-release.
 const (
 	lockPollMinInterval = 20 * time.Millisecond
 	lockPollMaxInterval = 1 * time.Second
 )
 
-// AcquireLockRange blocks until it acquires [start, end) of key for
-// holder, or ctx is done — the blocking (LOCK_NB-equivalent-absent)
-// counterpart to TryAcquireLockRange's non-blocking primitive. Callers
-// that want a bounded wait pass a ctx with a deadline/timeout
-// (context.WithTimeout); passing context.Background() waits
-// indefinitely.
+// AcquireLockRange waits until it acquires [start, end) of key for holder,
+// or ctx is done; give ctx a deadline for a bounded wait.
 //
-// This loops TryAcquireLockRange with exponential backoff between
-// attempts — see docs/architecture.md: object storage has no
-// wake-on-release primitive, so "wait for the lock" can only mean
-// "retry the CAS-acquire in a loop." With EnableChangeNotifications, a
-// signal on the lock's key cuts a wait short (waitBackoffOrSignal);
-// the loop stays correct on its own without one.
+// It retries TryAcquireLockRange with exponential backoff. With
+// EnableChangeNotifications, a signal on the lock's object cuts a wait
+// short (waitBackoffOrSignal); without one, polling alone is correct.
 func (f *Filesystem) AcquireLockRange(ctx context.Context, key string, start, end int64, holder string, ttl time.Duration) error {
 	if !f.lockingEnabled {
 		return ErrLockingDisabled
@@ -448,12 +373,8 @@ func (f *Filesystem) AcquireSharedLockRange(ctx context.Context, key string, sta
 	return f.acquireLockRange(ctx, key, start, end, holder, ttl, false, true)
 }
 
-// acquireEscalationLockRange is AcquireLockRange's logic for
-// OpenFile.Flush's own internal escalation — see
-// tryAcquireLockRange's escalationOnly parameter. Always exclusive
-// (never shared): escalation exists purely to guarantee a content
-// write succeeds, which is inherently an exclusive operation on the
-// range it touches.
+// acquireEscalationLockRange is AcquireLockRange for Flush's escalation:
+// always exclusive, and marked as escalation (see tryAcquireLockRange).
 func (f *Filesystem) acquireEscalationLockRange(ctx context.Context, key string, start, end int64, holder string, ttl time.Duration) error {
 	return f.acquireLockRange(ctx, key, start, end, holder, ttl, true, false)
 }
@@ -479,25 +400,10 @@ func (f *Filesystem) acquireLockRange(ctx context.Context, key string, start, en
 	}
 }
 
-// waitBackoffOrSignal waits for backoff to elapse, or for
-// a Change-notifications signal naming wantKey (the exact .lock
-// object this acquire is waiting on) to arrive first on f.lockNotify,
-// whichever comes first.
-//
-// If f.lockNotify is nil (EnableChangeNotifications was never called,
-// or Change notifications just isn't enabled for this mount at all),
-// this reduces to a plain, fixed backoff wait with no special-casing
-// needed: a nil channel's select case never becomes ready, so it
-// simply never fires.
-//
-// A non-matching signal (some other key changed) is not an error —
-// it's just ignored, and this keeps waiting for the timer or a real
-// match. This is why the accelerator is a pure latency improvement,
-// never a correctness dependency: even a backend (MinIO's adapter is
-// the only one actually this fast) that reliably delivers
-// matching signals still has this same plain-polling fallback sitting
-// underneath it for every case a signal is missed, delayed, or never
-// enabled at all.
+// waitBackoffOrSignal waits for backoff to pass, or for a signal naming
+// wantKey (the .lock object being waited on), whichever comes first.
+// Without notifications f.lockNotify is nil, and a nil channel never fires,
+// so this is a plain wait. Signals for other keys are ignored.
 func (f *Filesystem) waitBackoffOrSignal(ctx context.Context, backoff time.Duration, wantKey string) error {
 	timer := time.NewTimer(backoff)
 	defer timer.Stop()
@@ -509,11 +415,9 @@ func (f *Filesystem) waitBackoffOrSignal(ctx context.Context, backoff time.Durat
 			return nil
 		case sig, ok := <-f.lockNotify:
 			if !ok {
-				// The underlying signal stream ended (e.g. Close was
-				// called on the backend Source) — fall back to a
-				// plain wait for the rest of this backoff rather than
-				// re-entering a select where this case, now
-				// permanently ready on a closed channel, would spin.
+				// The signal stream ended (its Source was closed): wait out
+				// the rest of the backoff plainly, rather than spin on a
+				// closed channel.
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
@@ -528,39 +432,22 @@ func (f *Filesystem) waitBackoffOrSignal(ctx context.Context, backoff time.Durat
 	}
 }
 
-// CheckRangeLockConflict implements the stronger-than-advisory
-// enforcement: before issuing a content write, a caller checks its
-// touched range against current lock state and refuses the write if it
-// overlaps a currently-held, unexpired lock belonging to a different
-// holder. selfHolder is excluded the same way acquiring already
-// excludes a holder's own entries (so a session never blocks itself).
+// CheckRangeLockConflict is the write-time check: a caller about to write
+// refuses if its touched range overlaps another holder's unexpired claim.
+// selfHolder's own claims don't count.
 //
-// Entries tagged EscalationOnly are also excluded unconditionally,
-// regardless of holder: those are OpenFile.Flush's own internal
-// bookkeeping, not a real application lock placed via
-// fcntl/LockFileEx — the distinction between escalation ("this
-// driver's own write succeeding eventually under contention with
-// itself") and enforcement ("respecting a lock an external,
-// cooperating caller explicitly placed"). Treating another session's
-// in-flight escalation claim as an external lock here would spuriously
-// refuse writes that retry and escalation already guarantee converge
-// on their own shortly after.
+// Escalation claims don't count either, whoever holds them: they are
+// another Flush making progress, not a lock an application placed, and
+// treating them as one would refuse writes that are about to succeed
+// anyway.
 //
-// Deliberately type-insensitive (unlike acquiring, which uses
-// locksConflict's shared-vs-shared exception): a content write always
-// conflicts with *any* other holder's claim on the overlapping range,
-// shared or exclusive. A shared (read) lock holder expects a stable
-// view of the data for as long as they hold it — an uncoordinated
-// write landing underneath them while they believe they hold a read
-// lock would violate exactly that expectation, even though two
-// *readers* are perfectly compatible with each other.
+// Unlike acquiring, a write conflicts with shared claims too: a reader
+// holding a shared lock expects the data not to change under it, though
+// readers don't conflict with each other.
 func (f *Filesystem) CheckRangeLockConflict(ctx context.Context, key string, start, end int64, selfHolder string) error {
 	if !f.lockingEnabled {
-		// Locking's real costs (an extra round trip here, on
-		// every write) are opt-in — a mount that never opted in never
-		// writes a real application lock either, via
-		// TryAcquireLockRange's own gate above, so there is nothing
-		// for this mount to ever need to respect.
+		// Without locking no application lock can exist, so there is
+		// nothing to check, and no round trip.
 		return nil
 	}
 	cur, _, err := readLockRanges(ctx, f.store, lockObjectKey(key))
@@ -582,24 +469,19 @@ func (f *Filesystem) CheckRangeLockConflict(ctx context.Context, key string, sta
 	return nil
 }
 
-// LockRangeInfo describes one conflicting claim, returned by
-// FindConflictingLockRange — e.g. for FUSE's fcntl(F_GETLK), which
-// needs to report back *which* range/holder/type conflicts, not just
-// whether one does.
+// LockRangeInfo describes one claim, as FindConflictingLockRange returns
+// it, for fcntl(F_GETLK), which reports which range, holder and type
+// conflict.
 type LockRangeInfo struct {
 	Start, End int64
 	Holder     string
 	Shared     bool
 }
 
-// FindConflictingLockRange returns the first currently-held, unexpired
-// range entry on key that overlaps [start, end), doesn't belong to
-// selfHolder, and would actually conflict with a querying claim of
-// type querySharedType (same locksConflict rule TryAcquireLockRange/
-// TryAcquireSharedLockRange use — this simulates "would this request
-// succeed," matching real fcntl(F_GETLK) semantics: querying with a
-// shared/read type does not report another holder's shared claim as a
-// conflict, only an exclusive one). Returns ok=false if none conflicts.
+// FindConflictingLockRange returns the first unexpired claim on key that
+// overlaps [start, end), isn't selfHolder's, and would conflict with a
+// claim of type querySharedType (F_GETLK's question: would this request
+// succeed?). ok is false if none would.
 func (f *Filesystem) FindConflictingLockRange(ctx context.Context, key string, start, end int64, selfHolder string, querySharedType bool) (info LockRangeInfo, ok bool, err error) {
 	if !f.lockingEnabled {
 		return LockRangeInfo{}, false, nil
@@ -623,17 +505,10 @@ func (f *Filesystem) FindConflictingLockRange(ctx context.Context, key string, s
 	return LockRangeInfo{}, false, nil
 }
 
-// LockRangesHeldBy returns holder's current, unexpired, non-
-// escalation entries on key, in their *current* form — which, thanks
-// to mergeOwnRanges, may have different bounds than whatever any one
-// earlier acquire call originally requested (an overlapping re-lock
-// can widen or split a holder's own entries — see that function's doc
-// comment).
-//
-// This exists for background lease renewal: a caller that wants to keep a holder's locks alive for as long as it
-// stays alive doesn't need to separately track what it originally
-// asked for across possible merges/splits — it just asks "what do I
-// currently hold" each time and renews whatever comes back.
+// LockRangesHeldBy returns holder's unexpired application claims on key as
+// they are now, which after merges and splits (mergeOwnRanges) may not
+// match any one earlier request. Lease renewal uses it: renew whatever is
+// held now.
 func (f *Filesystem) LockRangesHeldBy(ctx context.Context, key, holder string) ([]LockRangeInfo, error) {
 	if !f.lockingEnabled {
 		return nil, nil

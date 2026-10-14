@@ -1,7 +1,6 @@
-// Package fuseserver is the FUSE access layer: it adapts icbfs's core
-// filesystem logic to go-fuse's node-tree API. Linux/POSIX only — the
-// Windows access layer (WinFsp) is a separate, parallel package per
-// docs/architecture.md.
+// Package fuseserver is the FUSE access layer: icbfs's filesystem on
+// go-fuse's node tree. Linux only; internal/winfspserver is the Windows
+// one.
 package fuseserver
 
 import (
@@ -23,14 +22,11 @@ import (
 	"github.com/resurgentech/icbfs/internal/notify"
 )
 
-// Node is one filesystem entry: either the root, or identified by its
-// blob's UUID (key). Its type (file/dir/symlink) is fixed for the inode's
-// lifetime, matching docs/architecture.md's model where identity never changes.
+// Node is one entry: the root, or the item at key. Its type is fixed for
+// the inode's lifetime, as an item's identity never changes.
 //
-// watches is nil when the Change notifications feature isn't enabled
-// for this mount, and nil here must make every operation behave
-// exactly as if this field didn't exist at all, so every access to it is a
-// plain nil check, never a required dependency.
+// watches is nil without change notifications, and every use of it is a nil
+// check.
 type Node struct {
 	fs.Inode
 	fsys    *icbfs.Filesystem
@@ -63,29 +59,17 @@ var (
 	_ fs.NodeStatfser   = (*Node)(nil)
 )
 
-// statfsBlockSize is the block size StatfsOut reports, matching this
-// filesystem's reality exactly as closely as "virtual blocks on top of
-// an object store" allows: it's an arbitrary but conventional unit for
-// df to report sizes in, not a real on-disk block size (there is no
-// disk) — see docs/architecture.md's master block section.
+// statfsBlockSize is the unit statfs reports sizes in. There are no real
+// blocks; this is the conventional unit.
 const statfsBlockSize = 4096
 
-// Root builds the node representing fsys's root directory, for use
-// with fs.Mount. signals is this mount's subscription to the Change
-// notifications backend — nil disables
-// the feature entirely for this mount, with every operation behaving
-// exactly as it did before this feature existed.
+// Root builds the root node of fsys, for fs.Mount. signals is this mount's
+// change-notification subscription, or nil for none.
 //
-// signals is a plain channel, not a notify.Source, deliberately: the
-// same underlying signal stream has to be independently
-// observed by both this dispatch and Locking's blocking-acquisition
-// accelerator, and notify.Source.Signals() is a single-consumption
-// channel — one value read by one consumer is gone for any other. The
-// caller is expected to fan one real Source out via
-// notify.NewBroadcaster and pass each consumer, including this one,
-// its own Subscribe() channel; this package has no need to know that
-// Broadcaster exists at all, since all it ever does with signals is
-// range over it.
+// It's a channel, not a notify.Source, because locking's acquire
+// accelerator reads the same stream, and a Source's channel can be read by
+// only one consumer. The caller fans the Source out with
+// notify.NewBroadcaster and gives each consumer its own Subscribe channel.
 func Root(fsys *icbfs.Filesystem, signals <-chan notify.Signal, opts ...Option) *Node {
 	var watches *watchRegistry
 	if signals != nil {
@@ -124,16 +108,8 @@ func setTime(sec *uint64, nsec *uint32, t time.Time) {
 }
 
 // fillAttr translates an icbfs.Attr into the fuse.Attr the kernel expects.
-//
-// ctime is icbfs's own status-change time (see icbfs.Attr), falling
-// back to mtime only if it's somehow unset.
-//
-// atime is real, not a copy of mtime: a
-// file/directory that's never actually been read reports the zero
-// value's own fallback (mtime, a sensible "as good as we've got"
-// default), but once a real read happens
-// (TouchAtime, called by this package's own Read/Readdir, never from
-// here) it reports that real, explicitly tracked timestamp instead.
+// ctime is icbfs's status-change time, or mtime if unset. atime is the
+// recorded access time, or mtime for an item never read.
 func fillAttr(out *fuse.Attr, key string, typ icbfs.EntryType, a icbfs.Attr) {
 	out.Ino = icbfs.Ino(key)
 	out.Mode = typeToFuseMode(typ) | (a.Mode & 0o7777)
@@ -195,12 +171,8 @@ func errnoFromErr(err error) syscall.Errno {
 	case errors.Is(err, icbfs.ErrLockingDisabled):
 		return syscall.ENOSYS
 	case errors.Is(err, icbfs.ErrInvalidName):
-		// Only reachable at all if a primary-Windows filesystem
-		// is mounted via this POSIX access layer and a
-		// caller names something Windows-reserved — the
-		// enforcement lives in icbfs.Filesystem itself, not just the
-		// WinFsp driver, since primary mode is a property of the
-		// filesystem, not of whichever access layer is mounting it.
+		// A Windows-reserved name on a primary-Windows filesystem: the core
+		// refuses it whichever access layer asks.
 		return syscall.EINVAL
 	case errors.Is(err, icbfs.ErrNameTooLong):
 		return syscall.ENAMETOOLONG
@@ -262,12 +234,8 @@ func (n *Node) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) 
 	return 0
 }
 
-// Statfs reports this filesystem's declared capacity and current usage
-// (docs/architecture.md's master block section) via icbfs.Filesystem.StatFS, scaled
-// into statfsBlockSize units since that's the unit StatfsOut's
-// Blocks/Bfree/Bavail fields are defined in terms of. Bavail is reported
-// equal to Bfree (no distinct "reserved for root" reservation exists
-// here, unlike a real block device).
+// Statfs reports declared capacity and usage (icbfs.Filesystem.StatFS) in
+// statfsBlockSize units. Bavail equals Bfree: nothing is reserved for root.
 func (n *Node) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
 	ctx = detach(ctx)
 	total, used, err := n.fsys.StatFS(ctx)
@@ -283,16 +251,10 @@ func (n *Node) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
 	}
 	out.Bfree = free
 	out.Bavail = free
-	// A real finding, not previously known: leaving this unset (its
-	// zero value) made pathconf(_PC_NAME_MAX) against a real mount
-	// report 0 — confirmed via pjdfstest's own `pathconf` helper —
-	// which sent one of its test helpers (dirgen_max, used by
-	// mknod/03.t and others) into an effectively-infinite loop
-	// building zero-length path components, hanging the whole test
-	// run. 255 is the limit icbfs enforces (see icbfs.Filesystem's
-	// checkName): bytes on a primary-POSIX filesystem, UTF-16 code
-	// units on a primary-Windows one — the same number Linux's own
-	// NTFS and exFAT drivers report for theirs.
+	// Unset, pathconf(_PC_NAME_MAX) reads 0, which sends tools that build
+	// long names (pjdfstest's dirgen_max) into an endless loop. 255 is the
+	// limit icbfs enforces (checkName): bytes on primary-POSIX, UTF-16 code
+	// units on primary-Windows, as Linux's NTFS and exFAT drivers report.
 	out.NameLen = 255
 	return 0
 }
@@ -316,10 +278,7 @@ func (n *Node) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn,
 		ss := int64(s)
 		sizeP = &ss
 	}
-	// utimensat(2)'s explicit atime set
-	// — go-fuse's own GetATime already resolves UTIME_NOW to the
-	// kernel's current time for us, so there's no "now" special case
-	// to handle here.
+	// utimensat(2)'s atime; go-fuse already resolves UTIME_NOW.
 	if a, ok := in.GetATime(); ok {
 		atimeP = &a
 	}
@@ -343,10 +302,8 @@ func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	if err != nil {
 		return nil, errnoFromErr(err)
 	}
-	// Best-effort, deliberately not checked: a real readdir(2) bumps a
-	// directory's atime, but a lost race on that bump must never fail the
-	// read itself — the directory listing the caller asked for already
-	// succeeded above.
+	// Best effort: a lost race recording the access must not fail a listing
+	// that has already succeeded.
 	_ = n.fsys.TouchAtime(ctx, n.key, icbfs.TypeDir)
 	n.logEvent(ctx, fslog.EventList, n.path(), 0)
 	list := make([]fuse.DirEntry, 0, len(entries))
@@ -371,15 +328,10 @@ func (n *Node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.En
 	return n.newChild(ctx, newUUID, icbfs.TypeDir), 0
 }
 
-// Mknod creates a FIFO, Unix domain socket, or char/block device entry.
-// One callback covers all four special-
-// file types — the kernel services their actual runtime I/O itself
-// once the right mode bit is reported (mknod(2) creates the special
-// file via this same syscall/callback for all of them, including
-// AF_UNIX sockets: bind(2) creates its own filesystem entry via the
-// kernel's own vfs_mknod(), the identical path), so there's nothing
-// type-specific for this driver to do beyond dispatching on mode's
-// S_IFMT bits and, for the two device types, carrying dev through.
+// Mknod creates a FIFO, a Unix socket (bind(2) makes its entry through
+// mknod too), or a character or block device. The kernel serves their I/O
+// once the type is reported, so this only dispatches on the S_IFMT bits and
+// carries dev through for devices.
 func (n *Node) Mknod(ctx context.Context, name string, mode, dev uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	ctx = detach(ctx)
 	var typ icbfs.EntryType
@@ -393,11 +345,8 @@ func (n *Node) Mknod(ctx context.Context, name string, mode, dev uint32, out *fu
 	case syscall.S_IFBLK:
 		typ = icbfs.TypeBlockDevice
 	default:
-		// mknod(2) can also be asked to make a plain regular file
-		// (S_IFREG) or, on some systems, a FIFO via mkfifo(3)'s own
-		// separate libc wrapper that still lands here — neither needs
-		// handling beyond what Create already does, and nothing else
-		// is a valid mknod(2) target at all.
+		// Anything else (a regular file is Create's) isn't a valid mknod
+		// target.
 		return nil, syscall.EINVAL
 	}
 	uid, gid := callerOwner(ctx)
@@ -489,24 +438,16 @@ func (n *Node) Link(ctx context.Context, target fs.InodeEmbedder, name string, o
 	return n.newChild(ctx, tn.key, tn.typ), 0
 }
 
-// renameExchange is RENAME_EXCHANGE (renameat2(2)/Linux's
-// NodeRenamer.flags): an atomic swap of two existing paths, not a
-// plain move/overwrite. Not implemented: a real atomic exchange would
-// need its own
-// dedicated core-icbfs operation (swapping two directory entries'
-// UUIDs under one CAS, not a remove-then-insert pair), and nothing in
-// this project's actual target workloads (rsync/git/sqlite
-// temp-file-rename-into-place) needs it — it's
-// primarily a container-overlayfs/union-filesystem pattern.
+// renameExchange is renameat2(2)'s RENAME_EXCHANGE, an atomic swap of two
+// paths. It isn't supported: it would need its own core operation swapping
+// two entries under one condition, and the temp-file-then-rename pattern
+// rsync, git and sqlite use doesn't need it.
 const renameExchange = 0x2
 
-// Rename implements fs.NodeRenamer: n is the *old* parent directory,
-// name is the entry's current name within it. flags carries Linux's
-// renameat2(2) bits (RENAME_NOREPLACE in bit 0, RENAME_EXCHANGE in bit
-// 1) through from the kernel; go-fuse's own exported constant only
-// names RENAME_EXCHANGE, so RENAME_NOREPLACE's bit is inlined here
-// (its real, documented value, confirmed against golang.org/x/sys/
-// unix.RENAME_NOREPLACE = 0x1, not guessed).
+// Rename implements fs.NodeRenamer: n is the old parent, name the entry's
+// name in it. flags carries renameat2(2)'s bits; go-fuse names only
+// RENAME_EXCHANGE, so RENAME_NOREPLACE's value (0x1, as in
+// golang.org/x/sys/unix) is written out here.
 func (n *Node) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
 	ctx = detach(ctx)
 	if flags&renameExchange != 0 {
@@ -522,14 +463,11 @@ func (n *Node) Rename(ctx context.Context, name string, newParent fs.InodeEmbedd
 	return errnoFromErr(n.fsys.Rename(ctx, n.key, name, np.key, newName, replace))
 }
 
-// FileHandle adapts icbfs.OpenFile (the shared buffering/CAS-retry
-// logic — see its doc comment) to go-fuse's FileHandle interfaces.
+// FileHandle is an icbfs.OpenFile as go-fuse's file handle.
 //
-// renewers tracks one background lease-renewal goroutine per FUSE
-// lock-owner token that currently holds at least one lock through
-// this handle (see ensureRenewal/runRenewal). nil
-// until the first successful lock acquire; newFileHandle is not
-// required to construct a usable FileHandle, only to pre-size it.
+// renewers holds one lease-renewal goroutine per lock owner that holds a
+// lock through this handle (ensureRenewal, runRenewal); nil until the first
+// lock.
 type FileHandle struct {
 	open *icbfs.OpenFile
 	node *Node // the file, for logging; nil in tests that build handles directly
@@ -592,60 +530,32 @@ func (h *FileHandle) Flush(ctx context.Context) syscall.Errno {
 	return 0
 }
 
-// fcntlLockEOF is the fuse.FileLock.End sentinel the kernel sends for
-// "to end of file" (len == 0 in the original flock_t) — go-fuse's own
-// FileLock.FromFlockT maps that case to (1<<63)-1 (math.MaxInt64, the
-// largest value an int64 lock offset can hold), confirmed by reading
-// that conversion directly rather than assumed.
+// fcntlLockEOF is the lock end the kernel sends for "to end of file":
+// go-fuse's FileLock.FromFlockT maps len 0 to math.MaxInt64.
 const fcntlLockEOF = math.MaxInt64
 
-// lockLeaseTTL is the lease every FUSE-sourced flock/fcntl claim gets,
-// kept alive for as long as the acquiring lock-owner stays
-// alive by ensureRenewal/runRenewal's background renewal, below: a
-// lease TTL with nothing ever renewing it can't actually distinguish
-// "holder crashed" from "holder has just been holding this a long
-// time," which a real NFS/SMB-style lease (short TTL, renewed
-// periodically while alive, reclaimed only after a holder goes dark
-// for one full lease period) can. 30 seconds is in that same
-// real-world lease-length range, not the old "practically
-// unreachable" 24h placeholder — short enough that a holder that
-// really did crash or get network-partitioned away loses its lock
-// within a bounded, human-noticeable time, not after a full day.
-//
-// A var, not a const, for the same reason contentWriteRetryBudget
-// (openfile.go) is one: this package's own tests shrink this (and
-// lockRenewInterval) to get fast, deterministic proof that renewal
-// and expiry actually work, rather than a real test having to wait
-// out 30 real seconds either way to find out.
+// lockLeaseTTL is the lease of every flock and fcntl claim made through
+// FUSE, renewed (ensureRenewal, runRenewal) for as long as the owner holds
+// the file open. A holder that crashes or is cut off loses its locks within
+// one lease. A var so tests can shrink it.
 var lockLeaseTTL = 30 * time.Second
 
-// lockRenewInterval is how often runRenewal re-renews a still-live
-// holder's locks — a fraction of lockLeaseTTL so a renewal has two
-// more chances to land before the lease it's extending would actually
-// expire, tolerating one or two missed/slow ticks (a slow store
-// round trip, a brief backend hiccup) without losing the lock.
-//
-// Also a var: computed fresh from lockLeaseTTL at the top of a test
-// that shrinks the latter, not baked in once at package init time.
+// lockRenewInterval is how often runRenewal renews: a third of the lease,
+// so one or two slow or failed renewals don't lose the lock. A var for
+// tests, as lockLeaseTTL is.
 var lockRenewInterval = lockLeaseTTL / 3
 
-// lockHolderFromOwner turns a FUSE lock owner token (kernel-assigned,
-// stable for the lifetime of one open-file-description's/process's
-// locking context, per fcntl(2)/flock(2)) into this codebase's opaque
-// holder string.
+// lockHolderFromOwner turns a FUSE lock owner token (the kernel's, stable
+// for one process's or open file's locks) into a lock holder string.
 func lockHolderFromOwner(owner uint64) string {
 	return fmt.Sprintf("fuse-owner-%d", owner)
 }
 
-// lockRangeFromFileLock translates a fuse.FileLock into this codebase's
-// [start, end) exclusive-end convention. For an flock(2)-style request
-// (the FUSE_LK_FLOCK flag), the range is always the whole file,
-// matching go-fuse's own reference LoopbackFile implementation, which
-// ignores lk.Start/End entirely in that case. For an fcntl(2)-style
-// request, lk.End is inclusive (confirmed via FileLock.ToFlockT/
-// FromFlockT) with fcntlLockEOF meaning "to EOF" — mapped directly to
-// lockWholeFileEnd-equivalent rather than lk.End+1, which would
-// overflow.
+// lockRangeFromFileLock turns a fuse.FileLock into a [start, end) range. An
+// flock(2) request (FUSE_LK_FLOCK) is always the whole file, as in
+// go-fuse's LoopbackFile. For fcntl(2), lk.End is inclusive, and
+// fcntlLockEOF ("to end of file") maps to the whole-file end rather than
+// overflowing as lk.End+1 would.
 func lockRangeFromFileLock(lk *fuse.FileLock, flags uint32) (start, end int64) {
 	if flags&fuse.FUSE_LK_FLOCK != 0 {
 		return 0, fcntlLockEOF
@@ -667,12 +577,8 @@ func (h *FileHandle) Getlk(ctx context.Context, owner uint64, lk *fuse.FileLock,
 		return 0
 	}
 	start, end := lockRangeFromFileLock(lk, flags)
-	// The query's own requested type matters here, real fcntl(F_GETLK)
-	// semantics: querying as F_RDLCK should not report another
-	// holder's shared claim as a conflict, only an exclusive one —
-	// FindConflictingLockRange's querySharedType applies the same
-	// locksConflict rule TryAcquireLockRange/TryAcquireSharedLockRange
-	// use when actually acquiring.
+	// F_GETLK asks whether a request of this type would succeed, so a read
+	// query doesn't report another holder's shared claim.
 	info, conflict, err := h.open.FindConflictingLockRange(ctx, start, end, lockHolderFromOwner(owner), lk.Typ == syscall.F_RDLCK)
 	if err != nil {
 		return errnoFromErr(err)
@@ -710,12 +616,8 @@ func (h *FileHandle) Setlkw(ctx context.Context, owner uint64, lk *fuse.FileLock
 	return h.setlk(ctx, owner, lk, flags, true)
 }
 
-// setlk is Setlk/Setlkw's shared implementation. F_RDLCK routes to the
-// shared (read) lock primitives, F_WRLCK to the exclusive (write)
-// ones — real POSIX fcntl/flock semantics: multiple different
-// holders can hold overlapping F_RDLCK claims at once, but any
-// F_WRLCK claim conflicts with every other holder's claim regardless
-// of its type.
+// setlk is Setlk's and Setlkw's implementation: F_RDLCK takes a shared
+// claim and F_WRLCK an exclusive one.
 func (h *FileHandle) setlk(ctx context.Context, owner uint64, lk *fuse.FileLock, flags uint32, blocking bool) syscall.Errno {
 	if !blocking {
 		ctx = detach(ctx) // only a blocking wait honors an interrupt
@@ -764,10 +666,8 @@ func (h *FileHandle) setlk(ctx context.Context, owner uint64, lk *fuse.FileLock,
 	}
 }
 
-// ensureRenewal starts runRenewal for owner if it isn't already
-// running on this handle — called after every successful lock
-// acquire, idempotent so a second (or Nth) lock taken by the same
-// owner doesn't start a second redundant renewal loop.
+// ensureRenewal starts runRenewal for owner unless it's already running on
+// this handle.
 func (h *FileHandle) ensureRenewal(owner uint64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -783,27 +683,14 @@ func (h *FileHandle) ensureRenewal(owner uint64) {
 	go h.runRenewal(ctx, owner)
 }
 
-// runRenewal periodically renews every lock owner currently holds on
-// this file, for as long as this FileHandle stays open (Release
-// cancels ctx) and owner still actually holds something (an empty
-// LockRangesHeldBy result means there's nothing left to renew, so
-// this just exits rather than polling forever).
+// runRenewal renews every lock owner holds on this file, until this handle
+// is released (ctx) or owner holds nothing more.
 //
-// Deliberately re-queries LockRangesHeldBy on every tick instead of
-// renewing whatever bounds the triggering setlk call originally
-// requested: mergeOwnRanges (lock.go) can widen or split a holder's
-// own entries on a later overlapping acquire, so "what I originally
-// asked for" can stop matching any real current entry — asking "what
-// do I currently hold" each time and renewing *that* is correct
-// regardless of any merging/splitting that happened in between.
-//
-// A holder that's still alive and still has this
-// file open now keeps its lock indefinitely via renewal; one that
-// crashes, gets network-partitioned away, or closes this handle
-// without releasing stops being renewed and loses it within one
-// lockLeaseTTL, same as if it had explicitly unlocked — "leaks die
-// eventually," not "everything dies on a fixed clock regardless of
-// whether anyone's still using it."
+// Each tick asks what owner holds now (LockRangesHeldBy) and renews that,
+// since a later overlapping lock can merge or split owner's entries
+// (mergeOwnRanges). So a live holder keeps its locks for as long as it has
+// the file open, and one that crashes, is cut off, or closes without
+// unlocking loses them within one lease.
 func (h *FileHandle) runRenewal(ctx context.Context, owner uint64) {
 	defer h.wg.Done()
 	holder := lockHolderFromOwner(owner)
@@ -823,11 +710,8 @@ func (h *FileHandle) runRenewal(ctx context.Context, owner uint64) {
 				return // nothing left of this owner's to renew
 			}
 			for _, r := range ranges {
-				// Best-effort: a failure here (e.g. ErrNotLockHolder,
-				// if somehow already lost) just means this specific
-				// range won't be renewed this tick; the next tick's
-				// fresh LockRangesHeldBy call is the source of truth,
-				// not this return value.
+				// Best effort: a range not renewed this tick is retried
+				// next tick, from a fresh LockRangesHeldBy.
 				_ = h.open.RenewLockRange(ctx, r.Start, r.End, holder, lockLeaseTTL)
 			}
 		}
@@ -840,27 +724,17 @@ func (h *FileHandle) stopRenewal(owner uint64) {
 	delete(h.renewers, owner)
 }
 
-// Release implements fs.FileReleaser: fires when the kernel closes
-// this FUSE file handle. Stops every background renewal goroutine
-// this handle started (the "tied to the FUSE file handle's lifetime"
-// backstop renewal needs — see runRenewal's doc comment), *and*
-// actively releases whatever locks each of those owners still held at
-// that point: a plain close(2)/process-exit without an explicit
-// F_UNLCK would otherwise leave the lock sitting in the remote .lock
-// object until its lease expired, not released immediately the way
-// real fcntl/flock close semantics require
-// (TestMountFcntlByteRangeLocksAcrossProcesses checks this).
+// Release implements fs.FileReleaser, when the kernel closes this handle.
+// It stops this handle's renewal goroutines and releases the locks their
+// owners still hold, so a close or exit without F_UNLCK frees them at once,
+// as fcntl and flock require (TestMountFcntlByteRangeLocksAcrossProcesses
+// checks this).
 //
-// Scoped to exactly what *this* FileHandle's own acquire calls
-// registered in h.renewers, not every lock its owner holds anywhere —
-// real fcntl(2) semantics are that closing *any* fd releases *all* of
-// that process's locks on the inode (locks are owned per-process, not
-// per-fd), which would need a process/owner-scoped registry shared
-// across every FileHandle on this Filesystem, not attempted here.
-// This covers the dominant real case (one fd per lock user, which is
-// how flock(2) always behaves, and how most real fcntl(2) usage does
-// too) but not a process that locks via one fd and closes a different
-// one first.
+// It releases only what this handle's own lock calls took. POSIX says
+// closing any descriptor releases all of a process's locks on the file,
+// which would need a registry of owners across handles; a process that
+// locks through one descriptor and closes another keeps its locks until the
+// lease runs out.
 func (h *FileHandle) Release(ctx context.Context) syscall.Errno {
 	ctx = detach(ctx)
 	h.mu.Lock()
@@ -870,14 +744,9 @@ func (h *FileHandle) Release(ctx context.Context) syscall.Errno {
 	for _, cancel := range renewers {
 		cancel()
 	}
-	// Waits for every runRenewal goroutine to actually observe
-	// ctx.Done() and return, not just signals it and moves on: without
-	// this, a goroutine's own in-flight renewal tick could race with
-	// releaseAllHeldBy below (renewing a range the very moment this is
-	// trying to release it) — and, found by the race detector, could
-	// also race against a test that mutates the package-level
-	// lockLeaseTTL var right after this handle closes, since cancel()
-	// alone doesn't guarantee the goroutine has stopped reading it yet.
+	// Wait for the renewal goroutines to stop, so none renews a range while
+	// releaseAllHeldBy releases it (and none still reads lockLeaseTTL when
+	// a test restores it).
 	h.wg.Wait()
 	for owner := range renewers {
 		h.releaseAllHeldBy(ctx, owner)
@@ -888,10 +757,7 @@ func (h *FileHandle) Release(ctx context.Context) syscall.Errno {
 	return 0
 }
 
-// releaseAllHeldBy releases every range owner currently holds on this
-// file — called from Release so a plain close(2)/process-exit without
-// an explicit F_UNLCK still frees the lock immediately, rather than
-// leaving it to expire at its next lease boundary.
+// releaseAllHeldBy releases every range owner holds on this file.
 func (h *FileHandle) releaseAllHeldBy(ctx context.Context, owner uint64) {
 	holder := lockHolderFromOwner(owner)
 	ranges, err := h.open.LockRangesHeldBy(ctx, holder)

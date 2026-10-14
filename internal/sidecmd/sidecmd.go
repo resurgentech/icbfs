@@ -1,5 +1,5 @@
-// Package sidecmd runs icbfs-cli's side commands — what isn't a
-// filesystem operation. Two kinds:
+// Package sidecmd runs icbfs-cli's side commands, what isn't a filesystem
+// operation. Two kinds:
 //
 //   - storage administration (fs create, list, describe, resize, archive,
 //     prune), on the filesystems of a bucket;
@@ -7,11 +7,11 @@
 //     restore), through the drive library, so a drive on a directory sees
 //     only its own names and trash.
 //
-// icbfs-cli runs them itself when it has the store's credentials (a
-// drive is then a filesystem, or a directory in one); on a machine
-// with the daemon it sends them through the daemon (icbfs-logd), and the server
-// runs them here, as the actor the daemon vouches for, on the drive its
-// registry names. Arguments are strings, results JSON.
+// icbfs-cli runs them itself when it has the store's credentials (a drive
+// is then a filesystem, or a directory in one); on a machine with the
+// daemon it sends them through it (icbfs-logd), and the server runs them
+// here, as the actor the daemon vouches for, on the drive its registry
+// names. Arguments are strings, results JSON.
 package sidecmd
 
 import (

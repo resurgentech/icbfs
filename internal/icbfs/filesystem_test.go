@@ -21,11 +21,9 @@ import (
 	"github.com/resurgentech/icbfs/internal/testutil"
 )
 
-// newTestStore spins up a real MinIO container and a versioned bucket,
-// and returns a Store backed by it, with no filesystem bootstrapped yet
-// — callers that need more than one named filesystem in the same
-// bucket (the master-block tests) start here instead of
-// newTestFilesystem. Requires Docker.
+// newTestStore starts a MinIO container with a versioned bucket and returns
+// a Store on it with no filesystem, for tests that need several filesystems
+// in one bucket. Requires Docker.
 func newTestStore(t *testing.T) objstore.Store {
 	t.Helper()
 	ctx := context.Background()
@@ -83,12 +81,11 @@ func newTestFilesystem(t *testing.T) (*Filesystem, objstore.Store) {
 	return fsys, store
 }
 
-// TestDirectorySplitsAndStaysConsistent creates enough entries to force
-// several leaf splits (maxEntriesPerBlock is 8), and checks that the
-// directory's own root block actually becomes an Internal node, that
-// every entry is still findable both via Lookup and via ReadDir's full
-// traversal, and that removal (including a root split's two separate
-// child subtrees) still works correctly afterward.
+// TestDirectorySplitsAndStaysConsistent creates enough entries to split
+// several leaves (maxEntriesPerBlock is 8), and checks that the directory's
+// top block becomes an internal node, that every entry is found by Lookup
+// and by ReadDir, and that removal works across both subtrees of a
+// top-level split.
 func TestDirectorySplitsAndStaysConsistent(t *testing.T) {
 	fsys, store := newTestFilesystem(t)
 	ctx := context.Background()
@@ -178,13 +175,9 @@ func TestDirectorySplitsAndStaysConsistent(t *testing.T) {
 	}
 }
 
-// TestConcurrentLinkRaceDoesNotLoseUpdates is the hardening proof for
-// nlink: without the CAS-protected side object (see adjustNlink's doc
-// comment), concurrent Link calls on the same target would race on a
-// plain read-increment-write of metadata and lose updates. Here N
-// goroutines link the same target concurrently; the authoritative side
-// object (not the best-effort metadata cache) must reflect every one of
-// them.
+// TestConcurrentLinkRaceDoesNotLoseUpdates: N concurrent Links to one
+// target all count. A plain read-increment-write of the link count would
+// lose some; .metadata's compare-and-swap (adjustNlink) mustn't.
 func TestConcurrentLinkRaceDoesNotLoseUpdates(t *testing.T) {
 	fsys, store := newTestFilesystem(t)
 	ctx := context.Background()
@@ -264,15 +257,10 @@ func mustReadNlinkSideObject(t *testing.T, ctx context.Context, store objstore.S
 	return int(attr.Nlink)
 }
 
-// TestXattrsRoundTripArbitraryBinaryValues proves directly against real MinIO: xattrs is a generic
-// map[string][]byte, and arbitrary binary content — not just printable
-// text — round-trips through the real Protobuf-encoded .metadata object
-// without corruption or truncation. There's no public Filesystem API for
-// setting xattrs yet (nothing consumes it — no FUSE getxattr/setxattr
-// wiring exists), so this writes directly to the real .metadata object
-// via the same encodeFileMetadata/decodeFileMetadata functions Create/
-// Stat/SetAttr already use internally, proving the wire format itself
-// is correct ahead of any caller needing it.
+// TestXattrsRoundTripArbitraryBinaryValues: arbitrary binary xattr values
+// round-trip through the Protobuf .metadata object unchanged, written and
+// read with the same encode and decode functions Create, Stat and SetAttr
+// use.
 func TestXattrsRoundTripArbitraryBinaryValues(t *testing.T) {
 	fsys, store := newTestFilesystem(t)
 	ctx := context.Background()
@@ -283,10 +271,7 @@ func TestXattrsRoundTripArbitraryBinaryValues(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	// Arbitrary binary content: not valid UTF-8, includes null bytes and
-	// high bytes — exactly the kind of thing base64-in-JSON would have
-	// needed encoding for, and Protobuf's native bytes type shouldn't
-	// care about at all.
+	// Not valid UTF-8, with zero and high bytes.
 	binaryValue := []byte{0x00, 0xFF, 0x01, 0xFE, 'h', 'i', 0x00, 0x80, 0x7F}
 
 	mk := metadataObjectKey(uuid)
@@ -330,12 +315,8 @@ func TestXattrsRoundTripArbitraryBinaryValues(t *testing.T) {
 	}
 }
 
-// TestXattrsPosixAndWindowsACLsCoexist proves the union-map design from
-// docs/architecture.md directly: a POSIX ACL entry (the real well-known key
-// Linux's own getfacl/setfacl use) and a Windows ACL entry (the reserved
-// key this project chose) live in the same xattrs map without
-// interfering with each other — no special-casing at the storage layer,
-// exactly as designed.
+// TestXattrsPosixAndWindowsACLsCoexist: a POSIX ACL entry (Linux's key) and
+// a Windows ACL entry share the xattr map without interfering.
 func TestXattrsPosixAndWindowsACLsCoexist(t *testing.T) {
 	fsys, store := newTestFilesystem(t)
 	ctx := context.Background()
@@ -394,15 +375,9 @@ func TestXattrsPosixAndWindowsACLsCoexist(t *testing.T) {
 	}
 }
 
-// TestSetAttrRejectsNegativeSizeInsteadOfCrashing is a real regression
-// test: a negative *size used to reach make([]byte, *size) directly
-// and panic the whole process with "makeslice: len out of range" —
-// found running pjdfstest's real conformance suite against a real
-// FUSE mount (its truncate/unlink/utimensat groups exercise exactly
-// this), which crashed the mount outright, failing every subsequent
-// test in the same run for an unrelated reason. ftruncate(2)/
-// truncate(2) themselves reject a negative length with EINVAL, so
-// this must too, as a real error, not a crash.
+// TestSetAttrRejectsNegativeSizeInsteadOfCrashing: a negative size is
+// EINVAL, as truncate(2) says, not a crash (pjdfstest's truncate tests pass
+// one).
 func TestSetAttrRejectsNegativeSizeInsteadOfCrashing(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	ctx := context.Background()
@@ -431,14 +406,9 @@ func TestSetAttrRejectsNegativeSizeInsteadOfCrashing(t *testing.T) {
 	}
 }
 
-// TestSetAttrRejectsHugeSizeInsteadOfCrashing is
-// TestSetAttrRejectsNegativeSizeInsteadOfCrashing's sibling: the exact
-// same "makeslice: len out of range" panic, found via the exact same
-// real pjdfstest run, for a different reason — pjdfstest's own
-// truncate/12.t and ftruncate/12.t specifically probe
-// `truncate(path, 999999999999999)` (~909TB) and accept either EFBIG
-// or EINVAL as correct. It's past the filesystem's max file size (see
-// DefaultMaxFileSize), so EFBIG.
+// TestSetAttrRejectsHugeSizeInsteadOfCrashing: pjdfstest's truncate/12.t
+// and ftruncate/12.t truncate to 999999999999999 bytes and accept EFBIG or
+// EINVAL; past the max file size, it's EFBIG.
 func TestSetAttrRejectsHugeSizeInsteadOfCrashing(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	ctx := context.Background()
@@ -466,13 +436,10 @@ func TestSetAttrRejectsHugeSizeInsteadOfCrashing(t *testing.T) {
 	}
 }
 
-// TestMknodCreatesSpecialFileEntries: a FIFO, a Unix socket, and a
-// char/block device entry can each be created, report the right type via ReadDir, and — devices only —
-// round-trip their device number exactly. None of these types have
-// any real content for this filesystem to materialize or serve (the
-// kernel services their actual I/O once the type bit is reported
-// correctly); this test only proves the metadata/type plumbing is
-// right, which is the entirety of this driver's own job for them.
+// TestMknodCreatesSpecialFileEntries: a FIFO, a Unix socket, and character
+// and block devices can be created, ReadDir reports their types, and
+// devices keep their device numbers. The kernel serves their I/O; the type
+// and metadata are all this filesystem handles.
 func TestMknodCreatesSpecialFileEntries(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	ctx := context.Background()
@@ -523,11 +490,8 @@ func TestMknodCreatesSpecialFileEntries(t *testing.T) {
 	}
 }
 
-// TestTouchAtimeBumpsFileAtime: a brand-new file reports zero Atime (never accessed), and a single
-// TouchAtime call (what a real read(2) triggers via FileHandle.Read/
-// winfspserver's Read) makes it report a real, current timestamp —
-// confirmed strictly later than the file's own creation, not just
-// "non-zero."
+// TestTouchAtimeBumpsFileAtime: a new file has no access time, and one
+// TouchAtime (what a read triggers) records a time after its creation.
 func TestTouchAtimeBumpsFileAtime(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	ctx := context.Background()
@@ -560,12 +524,8 @@ func TestTouchAtimeBumpsFileAtime(t *testing.T) {
 	}
 }
 
-// TestTouchAtimeBumpsDirAtime is TestTouchAtimeBumpsFileAtime's
-// sibling for directories, which store their attributes (including
-// atime) in native object metadata rather than a .metadata side
-// object — a real, separately-implemented path (Filesystem.TouchAtime
-// branches on type), so this needs its own discriminating test, not
-// just an inference from the file case passing.
+// TestTouchAtimeBumpsDirAtime is the same for a directory, whose .metadata
+// is written through a different path (updateDirMetadata).
 func TestTouchAtimeBumpsDirAtime(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	ctx := context.Background()
@@ -604,12 +564,9 @@ func TestTouchAtimeBumpsDirAtime(t *testing.T) {
 	}
 }
 
-// TestSetAttrSetsExplicitAtime covers utimensat(2)'s explicit-set
-// path for both a file and a
-// directory, each going through a genuinely different storage branch
-// in Filesystem.SetAttr — a caller-chosen timestamp (not "now") must
-// round-trip exactly, proving this is real explicit storage, not an
-// accidental alias of TouchAtime's own "now" behavior.
+// TestSetAttrSetsExplicitAtime: utimensat(2)'s explicit atime, a chosen
+// time rather than now, round-trips for a file and for a directory, each
+// through its own SetAttr branch.
 func TestSetAttrSetsExplicitAtime(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	ctx := context.Background()
@@ -712,16 +669,10 @@ func TestSetAttrExplicitMtimeBtimeOverrides(t *testing.T) {
 	}
 }
 
-// TestSetWindowsAttributesRoundTripsAndMasksUnrelatedBits covers the
-// storage half of Windows attribute bits: SetWindowsAttributes/WindowsAttributesFromXattrs,
-// the real public API (unlike the two tests above, which predate it
-// and poke .metadata directly). Confirms a round trip through real
-// storage, that unrelated Win32 bits (e.g. FILE_ATTRIBUTE_NORMAL,
-// FILE_ATTRIBUTE_DIRECTORY) passed in by a careless caller are masked
-// out rather than stored verbatim, and that mode/uid/gid/nlink are
-// left untouched by the call — same invariant
-// TestXattrsRoundTripArbitraryBinaryValues already established for
-// plain xattrs.
+// TestSetWindowsAttributesRoundTripsAndMasksUnrelatedBits:
+// SetWindowsAttributes stores the four attribute bits, drops others a
+// caller passes (FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_DIRECTORY), and
+// leaves mode, owner and link count alone.
 func TestSetWindowsAttributesRoundTripsAndMasksUnrelatedBits(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	ctx := context.Background()
@@ -753,10 +704,8 @@ func TestSetWindowsAttributesRoundTripsAndMasksUnrelatedBits(t *testing.T) {
 	if bits != want {
 		t.Fatalf("stored bits = %#x, want %#x (Directory/Normal should be masked out)", bits, want)
 	}
-	// Check the raw stored byte directly, bypassing
-	// WindowsAttributesFromXattrs's own read-side mask — proves
-	// SetWindowsAttributes itself masks at write time, not just that
-	// the reader happens to hide an unmasked value.
+	// The raw stored byte, bypassing the reader's mask: masking happens at
+	// write time.
 	if raw := attr.Xattrs[WindowsAttributesXattrKey]; len(raw) != 1 || raw[0] != byte(want) {
 		t.Fatalf("raw stored byte = %v, want [%#x] (Directory/Normal must not reach storage at all)", raw, byte(want))
 	}
@@ -793,12 +742,9 @@ func TestSetWindowsAttributesRoundTripsAndMasksUnrelatedBits(t *testing.T) {
 	}
 }
 
-// TestSetWindowsACLRoundTrips covers the storage half of Windows ACLs:
-// SetWindowsACL/WindowsACLFromXattrs. The value itself is treated as
-// an opaque SDDL string here — parsing/merging it into a real
-// *windows.SECURITY_DESCRIPTOR is winfspserver's job (Windows-only,
-// verified separately against a real mount) — this test only has to prove the storage round trip is
-// correct and that an untouched entry reports ok = false.
+// TestSetWindowsACLRoundTrips: SetWindowsACL stores an SDDL string as is
+// (parsing it is winfspserver's business, tested on a real mount), and an
+// item without one reports ok false.
 func TestSetWindowsACLRoundTrips(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	ctx := context.Background()

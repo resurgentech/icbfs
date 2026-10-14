@@ -20,10 +20,8 @@ func createLockTestFile(t *testing.T, fsys *Filesystem) string {
 	return key
 }
 
-// TestLockAcquireReleaseRoundTrip covers B2's "Done when": a basic
-// acquire-then-release round trip, confirmed by a second holder being
-// able to acquire immediately after release (well before the first
-// lease's TTL would have expired on its own).
+// TestLockAcquireReleaseRoundTrip: after a release, a second holder
+// acquires at once, well before the first lease would have expired.
 func TestLockAcquireReleaseRoundTrip(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	fsys.EnableLocking(true)
@@ -41,9 +39,8 @@ func TestLockAcquireReleaseRoundTrip(t *testing.T) {
 	}
 }
 
-// TestLockSecondAcquireWhileValidIsRejected covers B2's "Done when": a
-// second acquire attempt while the first holder's lease is still valid
-// is rejected.
+// TestLockSecondAcquireWhileValidIsRejected: while a lease is valid,
+// another holder's acquire is refused.
 func TestLockSecondAcquireWhileValidIsRejected(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	fsys.EnableLocking(true)
@@ -58,9 +55,8 @@ func TestLockSecondAcquireWhileValidIsRejected(t *testing.T) {
 	}
 }
 
-// TestLockAcquireAfterExpiryStealsSucceeds covers B2's "Done when": an
-// acquire attempt after the TTL has passed succeeds even without an
-// explicit release (expired-lease steal).
+// TestLockAcquireAfterExpiryStealsSucceeds: after the lease expires,
+// another holder acquires without a release.
 func TestLockAcquireAfterExpiryStealSucceeds(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	fsys.EnableLocking(true)
@@ -76,11 +72,9 @@ func TestLockAcquireAfterExpiryStealSucceeds(t *testing.T) {
 	}
 }
 
-// TestLockConcurrentAcquireOnFreeLockHasExactlyOneWinner covers B2's
-// "Done when": two (here, several) concurrent acquire attempts against
-// the same free lock result in exactly one winner — the real proof
-// that the first-ever claim (where there's no existing ETag to
-// condition on) is still race-free, not just the renew/steal paths.
+// TestLockConcurrentAcquireOnFreeLockHasExactlyOneWinner: several
+// concurrent acquires of a free lock have exactly one winner, so the first
+// claim, with no ETag to condition on, is race-free too.
 func TestLockConcurrentAcquireOnFreeLockHasExactlyOneWinner(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	fsys.EnableLocking(true)
@@ -124,15 +118,9 @@ func TestLockRenewOnlySucceedsForCurrentHolder(t *testing.T) {
 	ctx := context.Background()
 	key := createLockTestFile(t, fsys)
 
-	// expires_at is now anchored to objstore.Store.ServerTime, a real
-	// HTTP Date header with only whole-second resolution — not this
-	// acquire's own initial TTL alone, any value under roughly a
-	// couple of seconds risks already looking expired (by local-clock
-	// comparison) the instant it's written, since the server-observed
-	// "now" it was computed from can be truncated up to just under a
-	// second behind the true moment. 3s comfortably clears that,
-	// consistent with docs/architecture.md's real-world guidance that
-	// leases are "multiple seconds, not milliseconds" anyway.
+	// Expiry is anchored to the store's clock, which reads in whole
+	// seconds, so a lease under a couple of seconds can look expired as
+	// soon as it's written. 3 s is clear of that.
 	const initialTTL = 3 * time.Second
 	if err := fsys.TryAcquireLock(ctx, key, "holder-a", initialTTL); err != nil {
 		t.Fatalf("acquire: %v", err)
@@ -144,18 +132,16 @@ func TestLockRenewOnlySucceedsForCurrentHolder(t *testing.T) {
 		t.Fatalf("renew by non-holder = %v, want ErrNotLockHolder", err)
 	}
 
-	// The renew should have pushed the lease well past its original
-	// TTL — confirm a third party still can't steal it once that
-	// original TTL has definitely elapsed.
+	// The renewal pushed the lease past its original TTL: a third holder
+	// still can't take it after that TTL.
 	time.Sleep(initialTTL + 500*time.Millisecond)
 	if err := fsys.TryAcquireLock(ctx, key, "holder-c", 30*time.Second); err != ErrLocked {
 		t.Fatalf("acquire after renew = %v, want ErrLocked (renew should have extended the lease)", err)
 	}
 }
 
-// TestLockReleaseFailsForNonHolder confirms Release's holder check: a
-// caller that never held the lock (or lost it to an expired-lease
-// steal) cannot release someone else's active claim.
+// TestLockReleaseFailsForNonHolder: a caller that doesn't hold the lock (or
+// lost it to expiry) can't release someone else's claim.
 func TestLockReleaseFailsForNonHolder(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	fsys.EnableLocking(true)
@@ -174,9 +160,8 @@ func TestLockReleaseFailsForNonHolder(t *testing.T) {
 	}
 }
 
-// TestLockReleaseOfAlreadyFreeLockIsNoop confirms releasing a lock
-// nobody holds (never acquired, or already released) is a harmless
-// no-op rather than an error.
+// TestLockReleaseOfAlreadyFreeLockIsNoop: releasing a lock nobody holds is
+// a no-op, not an error.
 func TestLockReleaseOfAlreadyFreeLockIsNoop(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	fsys.EnableLocking(true)
@@ -188,9 +173,8 @@ func TestLockReleaseOfAlreadyFreeLockIsNoop(t *testing.T) {
 	}
 }
 
-// TestLockingDisabledByDefaultAndGatedByEnableLocking covers B7's
-// "Done when": lock acquisition fails cleanly when the mount wasn't
-// started with locking enabled, and succeeds once it was.
+// TestLockingDisabledByDefaultAndGatedByEnableLocking: acquiring fails
+// cleanly without EnableLocking, and works with it.
 func TestLockingDisabledByDefaultAndGatedByEnableLocking(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	ctx := context.Background()
@@ -217,12 +201,9 @@ func TestLockingDisabledByDefaultAndGatedByEnableLocking(t *testing.T) {
 	}
 }
 
-// TestBlockingAcquireCompletesPromptlyAfterRelease covers B3's "Done
-// when": a blocking acquire from a second holder, started while the
-// first holder's lease is still valid, completes promptly after the
-// first holder releases — not just eventually, and definitely before
-// the lease's own TTL would have expired on its own (proving it's
-// reacting to the release via polling, not just waiting out the lease).
+// TestBlockingAcquireCompletesPromptlyAfterRelease: a blocking acquire
+// started while another holder's lease is valid completes soon after the
+// release, well before the lease would have expired.
 func TestBlockingAcquireCompletesPromptlyAfterRelease(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	fsys.EnableLocking(true)
@@ -262,9 +243,8 @@ func TestBlockingAcquireCompletesPromptlyAfterRelease(t *testing.T) {
 	}
 }
 
-// TestByteRangeLocksNonOverlappingRangesCoexist covers B4's "Done
-// when": two non-overlapping ranges can be held concurrently by
-// different holders.
+// TestByteRangeLocksNonOverlappingRangesCoexist: different holders hold
+// non-overlapping ranges at once.
 func TestByteRangeLocksNonOverlappingRangesCoexist(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	fsys.EnableLocking(true)
@@ -279,20 +259,17 @@ func TestByteRangeLocksNonOverlappingRangesCoexist(t *testing.T) {
 	}
 }
 
-// TestByteRangeLocksOverlappingRangeRejectedThenSucceedsAfterExpiry
-// covers B4's "Done when": a request for an overlapping range is
-// rejected while the conflicting range is held, then succeeds once
-// that range's lease expires.
+// TestByteRangeLocksOverlappingRangeRejectedThenSucceedsAfterExpiry: an
+// overlapping range is refused while held, and granted once that lease
+// expires.
 func TestByteRangeLocksOverlappingRangeRejectedThenSucceedsAfterExpiry(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	fsys.EnableLocking(true)
 	ctx := context.Background()
 	key := createLockTestFile(t, fsys)
 
-	// See TestLockRenewOnlySucceedsForCurrentHolder's comment on why
-	// this needs to clear a couple of seconds, not sub-second: expires_at
-	// is anchored to objstore.Store.ServerTime's whole-second-resolution
-	// Date header now, not purely this TTL.
+	// Whole-second store clock; see
+	// TestLockRenewOnlySucceedsForCurrentHolder.
 	const initialTTL = 3 * time.Second
 	if err := fsys.TryAcquireLockRange(ctx, key, 0, 100, "holder-a", initialTTL); err != nil {
 		t.Fatalf("acquire [0,100): %v", err)
@@ -307,8 +284,8 @@ func TestByteRangeLocksOverlappingRangeRejectedThenSucceedsAfterExpiry(t *testin
 	}
 }
 
-// TestByteRangeLocksOverlappingRangeSucceedsAfterRelease covers the
-// same "Done when" requirement via explicit release instead of expiry.
+// TestByteRangeLocksOverlappingRangeSucceedsAfterRelease is the same,
+// with a release instead of expiry.
 func TestByteRangeLocksOverlappingRangeSucceedsAfterRelease(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	fsys.EnableLocking(true)
@@ -329,11 +306,8 @@ func TestByteRangeLocksOverlappingRangeSucceedsAfterRelease(t *testing.T) {
 	}
 }
 
-// TestByteRangeLocksSameHolderCanHoldMultipleDisjointRanges confirms
-// the byte-range generalization doesn't regress to "one claim per
-// holder per file": a holder can hold several disjoint ranges on the
-// same file simultaneously, each independently released, without
-// disturbing the others.
+// TestByteRangeLocksSameHolderCanHoldMultipleDisjointRanges: one holder
+// holds several disjoint ranges of a file, each released on its own.
 func TestByteRangeLocksSameHolderCanHoldMultipleDisjointRanges(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	fsys.EnableLocking(true)
@@ -365,19 +339,17 @@ func TestByteRangeLocksSameHolderCanHoldMultipleDisjointRanges(t *testing.T) {
 	}
 }
 
-// TestByteRangeLocksSameHolderOverlappingReacquireMergesAndSplits (see
-// mergeOwnRanges's doc comment): a holder re-locking an overlapping-but-not-identical range adjusts its
-// own existing claim(s) via real fcntl(2) merge/split, rather than
-// adding a second, independent entry that leaves the original intact.
+// TestByteRangeLocksSameHolderOverlappingReacquireMergesAndSplits: a holder
+// re-locking an overlapping range adjusts its own claims as fcntl(2) does
+// (see mergeOwnRanges), rather than adding a second entry.
 func TestByteRangeLocksSameHolderOverlappingReacquireMergesAndSplits(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	fsys.EnableLocking(true)
 	ctx := context.Background()
 	key := createLockTestFile(t, fsys)
 
-	// Same-type overlap: re-locking [5,15) exclusive while already
-	// holding [0,10) exclusive should absorb into one [0,15) claim —
-	// not leave [0,10) around as a second entry.
+	// Same type: locking [5,15) exclusive while holding [0,10) exclusive
+	// makes one [0,15) claim.
 	if err := fsys.TryAcquireLockRange(ctx, key, 0, 10, "holder-a", 30*time.Second); err != nil {
 		t.Fatalf("acquire [0,10): %v", err)
 	}
@@ -398,10 +370,8 @@ func TestByteRangeLocksSameHolderOverlappingReacquireMergesAndSplits(t *testing.
 		t.Fatalf("release merged [0,15): %v", err)
 	}
 
-	// Different-type overlap: holding exclusive [0,20), then
-	// re-locking [5,10) shared from the same holder, must split the
-	// exclusive claim into [0,5) and [10,20) remainders and leave a
-	// new shared [5,10) — not simply replace or ignore the original.
+	// Other type: locking [5,10) shared while holding [0,20) exclusive
+	// leaves exclusive [0,5) and [10,20), and shared [5,10).
 	if err := fsys.TryAcquireLockRange(ctx, key, 0, 20, "holder-a", 30*time.Second); err != nil {
 		t.Fatalf("acquire [0,20) exclusive: %v", err)
 	}
@@ -426,9 +396,8 @@ func TestByteRangeLocksSameHolderOverlappingReacquireMergesAndSplits(t *testing.
 	}
 }
 
-// TestBlockingAcquireRespectsContextDeadline confirms AcquireLock
-// actually stops waiting (rather than blocking forever) once its ctx
-// is done, when the lock is never released.
+// TestBlockingAcquireRespectsContextDeadline: a blocking acquire stops
+// waiting when its ctx is done.
 func TestBlockingAcquireRespectsContextDeadline(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	fsys.EnableLocking(true)
@@ -451,18 +420,10 @@ func TestBlockingAcquireRespectsContextDeadline(t *testing.T) {
 	}
 }
 
-// TestChangeNotificationsAcceleratesWaitBackoffOrSignal: a matching
-// change-notifications
-// signal makes a blocking acquire's wait return promptly, measurably
-// faster than the current backoff interval it would otherwise have
-// waited out. Tested directly against waitBackoffOrSignal (not a full
-// AcquireLockRange round trip against MinIO) specifically to get a
-// deterministic, non-flaky comparison: a real end-to-end test would
-// have to race against this project's already-fast 20ms-1s polling
-// baseline, where "measurably better" is hard to distinguish from
-// scheduler noise. Picking a deliberately large backoff here (5s) and
-// confirming the signal still returns in well under it is the
-// unambiguous version of the same proof.
+// TestChangeNotificationsAcceleratesWaitBackoffOrSignal: a matching signal
+// ends a wait well before its backoff. Tested on waitBackoffOrSignal
+// directly with a long (5 s) backoff, since against real polling (20 ms to
+// 1 s) the difference would be hard to tell from scheduler noise.
 func TestChangeNotificationsAcceleratesWaitBackoffOrSignal(t *testing.T) {
 	signals := make(chan notify.Signal, 1)
 	fsys := &Filesystem{}
@@ -493,10 +454,8 @@ func TestChangeNotificationsAcceleratesWaitBackoffOrSignal(t *testing.T) {
 	}
 }
 
-// TestChangeNotificationsIgnoresNonMatchingSignal confirms
-// waitBackoffOrSignal doesn't return early for a signal naming a
-// different key — only an exact match on the specific .lock object
-// this wait cares about should accelerate it.
+// TestChangeNotificationsIgnoresNonMatchingSignal: a signal for another key
+// doesn't end the wait.
 func TestChangeNotificationsIgnoresNonMatchingSignal(t *testing.T) {
 	signals := make(chan notify.Signal, 1)
 	fsys := &Filesystem{}
@@ -524,14 +483,8 @@ func TestChangeNotificationsIgnoresNonMatchingSignal(t *testing.T) {
 	}
 }
 
-// TestBlockingAcquireConvergesWithoutChangeNotifications: with change
-// notifications never enabled for this Filesystem at all (the default
-// — EnableChangeNotifications is never called), blocking acquisition
-// must still converge correctly via plain polling, proving the
-// notifications are genuinely optional rather than load-bearing. Same scenario as
-// TestBlockingAcquireCompletesPromptlyAfterRelease, named and framed
-// explicitly around this requirement rather than left as incidental
-// coverage.
+// TestBlockingAcquireConvergesWithoutChangeNotifications: without
+// notifications, blocking acquisition still works, by polling.
 func TestBlockingAcquireConvergesWithoutChangeNotifications(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	fsys.EnableLocking(true)
@@ -565,17 +518,10 @@ func TestBlockingAcquireConvergesWithoutChangeNotifications(t *testing.T) {
 	}
 }
 
-// TestBlockingAcquireWithChangeNotificationsEnabledAgainstRealFilesystem
-// is the end-to-end check against a real Filesystem (a real
-// MinIO-backed store) with EnableChangeNotifications
-// actually wired up: a waiter whose wait is accelerated by a matching
-// signal still converges to a successful acquire once the holder
-// releases, through the full real AcquireLockRange path (not the
-// waitBackoffOrSignal-only unit tests above, which are what actually
-// prove the latency improvement deterministically — see their own
-// doc comments for why this level isn't a good place to measure that
-// precisely, given this project's already-fast 20ms-1s polling
-// baseline).
+// TestBlockingAcquireWithChangeNotificationsEnabledAgainstRealFilesystem:
+// with notifications wired, through the whole AcquireLockRange path against
+// MinIO, a waiter still gets the lock once the holder releases. (The tests
+// above measure the speed-up.)
 func TestBlockingAcquireWithChangeNotificationsEnabledAgainstRealFilesystem(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	fsys.EnableLocking(true)
@@ -616,10 +562,8 @@ func TestBlockingAcquireWithChangeNotificationsEnabledAgainstRealFilesystem(t *t
 	}
 }
 
-// TestSharedLocksFromDifferentHoldersCoexist is the core POSIX
-// shared/read-lock guarantee: multiple different holders can hold a
-// shared (F_RDLCK-equivalent) claim on the same overlapping range at
-// once — unlike exclusive claims, which never coexist across holders.
+// TestSharedLocksFromDifferentHoldersCoexist: different holders hold shared
+// claims on overlapping ranges at once.
 func TestSharedLocksFromDifferentHoldersCoexist(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	fsys.EnableLocking(true)
@@ -638,11 +582,9 @@ func TestSharedLocksFromDifferentHoldersCoexist(t *testing.T) {
 	}
 }
 
-// TestExclusiveLockConflictsWithSharedFromOtherHolder covers both
-// orderings of the shared/exclusive conflict rule: an exclusive
-// request while a shared lock is held elsewhere is rejected, and a
-// shared request while an exclusive lock is held elsewhere is also
-// rejected — only shared-vs-shared is ever compatible.
+// TestExclusiveLockConflictsWithSharedFromOtherHolder: exclusive while
+// another's shared is held is refused, and shared while another's exclusive
+// is held is refused too.
 func TestExclusiveLockConflictsWithSharedFromOtherHolder(t *testing.T) {
 	ctx := context.Background()
 
@@ -683,19 +625,16 @@ func TestExclusiveLockConflictsWithSharedFromOtherHolder(t *testing.T) {
 	})
 }
 
-// TestRenewLockRangePreservesSharedType confirms a renewed shared
-// lock stays shared (a second, different holder can still coexist
-// after the renewal) rather than silently becoming exclusive.
+// TestRenewLockRangePreservesSharedType: a renewed shared lock stays
+// shared.
 func TestRenewLockRangePreservesSharedType(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	fsys.EnableLocking(true)
 	ctx := context.Background()
 	key := createLockTestFile(t, fsys)
 
-	// See TestLockRenewOnlySucceedsForCurrentHolder's comment on why
-	// this needs to clear a couple of seconds: expires_at is anchored
-	// to objstore.Store.ServerTime's whole-second-resolution Date
-	// header now, not purely this TTL.
+	// Whole-second store clock; see
+	// TestLockRenewOnlySucceedsForCurrentHolder.
 	if err := fsys.TryAcquireSharedLockRange(ctx, key, 0, 100, "reader-a", 3*time.Second); err != nil {
 		t.Fatalf("shared acquire: %v", err)
 	}
@@ -707,11 +646,9 @@ func TestRenewLockRangePreservesSharedType(t *testing.T) {
 	}
 }
 
-// TestFindConflictingLockRangeIsTypeAware covers fcntl(F_GETLK)'s real
-// semantics via FindConflictingLockRange directly: querying as shared
-// does not report another holder's shared claim as a conflict, but
-// querying as exclusive does; either query type reports a real
-// exclusive claim as a conflict.
+// TestFindConflictingLockRangeIsTypeAware: as F_GETLK does, a shared query
+// doesn't report another holder's shared claim, an exclusive query does,
+// and both report an exclusive claim.
 func TestFindConflictingLockRangeIsTypeAware(t *testing.T) {
 	ctx := context.Background()
 

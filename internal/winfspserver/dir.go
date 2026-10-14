@@ -10,11 +10,9 @@ import (
 	"github.com/resurgentech/icbfs/internal/icbfs"
 )
 
-// GetOrNewDirBuffer returns h's own directory buffer, not a fresh one
-// per call — WinFsp requires the buffer handed back here to persist
-// across calls for the same open directory (marker-based continuation
-// reads back out of it); returning a new zero buffer every time leaks
-// the native allocation and breaks continuation.
+// GetOrNewDirBuffer returns h's directory buffer, the same one on every
+// call: WinFsp reads continuation markers back out of it, and a new buffer
+// each time would leak and break continuation.
 func (d *driver) GetOrNewDirBuffer(fs *winfsp.FileSystemRef, file uintptr) (*winfsp.DirBuffer, error) {
 	h, ok := d.handle(file)
 	if !ok {
@@ -26,12 +24,9 @@ func (d *driver) GetOrNewDirBuffer(fs *winfsp.FileSystemRef, file uintptr) (*win
 	return &h.dirBuf, nil
 }
 
-// ReadDirectory fills every entry in the directory, ignoring pattern —
-// matching gofs's own (tested, reference) behavior: WinFsp's own
-// dispatcher re-filters fill's results against the query pattern
-// itself unless a filesystem opts into FspFSAttributePassQueryDirectoryPattern
-// (this one doesn't), so filtering here would be redundant, not
-// additionally correct.
+// ReadDirectory fills every entry, ignoring pattern, as gofs does: WinFsp
+// filters the results against the pattern itself unless a filesystem sets
+// FspFSAttributePassQueryDirectoryPattern, which this one doesn't.
 func (d *driver) ReadDirectory(fs *winfsp.FileSystemRef, file uintptr, pattern string, fill func(string, *winfsp.FSP_FSCTL_FILE_INFO) (bool, error)) error {
 	h, ok := d.handle(file)
 	if !ok {

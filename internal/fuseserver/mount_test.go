@@ -26,12 +26,9 @@ import (
 	"github.com/resurgentech/icbfs/internal/testutil"
 )
 
-// newMountTestStore spins up a real MinIO container and a versioned
-// bucket, returning a Store backed by it with no filesystem bootstrapped
-// yet — mountTestFS's single-filesystem callers go through mountTestFS
-// itself; callers that need to act on the store before mounting (e.g.
-// archiving a filesystem first, to prove mount-time enforcement) use
-// this directly.
+// newMountTestStore starts a MinIO container with a versioned bucket and
+// returns a Store on it, with no filesystem yet, for tests that act on the
+// store before mounting (archiving a filesystem first, say).
 func newMountTestStore(t *testing.T) objstore.Store {
 	t.Helper()
 	return newS3Store(newMinIO(t))
@@ -120,14 +117,10 @@ func mountFSWithLocking(t *testing.T, store objstore.Store, fsName string, locki
 		MountOptions: fuse.MountOptions{
 			FsName: "icbfs-test",
 			Name:   "icbfs-test",
-			// EnableLocks: without this, the kernel never forwards
-			// FUSE_GETLK/SETLK/SETLKW to our Node/FileHandle at all —
-			// it silently falls back to its own local, in-kernel
-			// advisory lock table (fs/locks.c), which happens to
-			// reproduce identical pass/fail behavior for a same-host
-			// test (both "processes" share one kernel), making every
-			// lock test pass without ever actually exercising this
-			// driver's remote .lock-object logic.
+			// EnableLocks: without it the kernel never sends lock requests
+			// to this driver and uses its own local lock table instead,
+			// which passes same-host tests without exercising the
+			// .lock-object logic at all.
 			EnableLocks: true,
 			Options:     []string{"default_permissions"},
 		},
@@ -162,13 +155,10 @@ func mountTestFSWithLocking(t *testing.T) string {
 	return mountFSWithLocking(t, newMountTestStore(t), "test", true)
 }
 
-// mountTestFSWithFsys is mountTestFS but also returns the underlying
-// *icbfs.Filesystem — for tests that need to create an
-// object directly through the Filesystem API with an owner uid/gid
-// that doesn't match the test process's own, something no real
-// application could do through the mounted path itself but is exactly
-// what's needed to exercise "other"/group-bit enforcement without
-// real privilege escalation (setuid/running as a second real user).
+// mountTestFSWithFsys is mountTestFS that also returns the
+// *icbfs.Filesystem, for tests that create an item through it with an owner
+// the test process isn't, which no application could do through the mount,
+// to exercise group and other mode bits without a second real user.
 func mountTestFSWithFsys(t *testing.T) (string, *icbfs.Filesystem) {
 	t.Helper()
 	ctx := context.Background()
@@ -245,10 +235,9 @@ func TestMountBasicFileLifecycle(t *testing.T) {
 	}
 }
 
-// TestMountChmodToZeroIsReportedAccurately is a regression test for a real
-// bug found by testing, not foreseen: go-fuse silently rewrites a
-// genuinely-stored "0000" mode back to 0644/0755 on every Getattr unless
-// fs.Options.NullPermissions is set.
+// TestMountChmodToZeroIsReportedAccurately: mode 0000 stats as 0000.
+// go-fuse reports it as 0644 or 0755 unless fs.Options.NullPermissions
+// is set.
 func TestMountChmodToZeroIsReportedAccurately(t *testing.T) {
 	mnt := mountTestFS(t)
 	path := filepath.Join(mnt, "locked.txt")
@@ -267,12 +256,11 @@ func TestMountChmodToZeroIsReportedAccurately(t *testing.T) {
 	}
 }
 
-// TestMountDefaultPermissionsEnforcesOwnerModeBits: a chmod 000 file cannot be read or written even
-// by its own owner, and a chmod 444 file can be read but a write
-// attempt fails with a permission error — real kernel-level
-// enforcement via default_permissions, not just mode bits being
-// correctly stored/reported (TestMountChmodToZeroIsReportedAccurately
-// already covers the reporting side; this covers actual enforcement).
+// TestMountDefaultPermissionsEnforcesOwnerModeBits: a chmod 000 file can't
+// be read or written even by its owner, and a chmod 444 file can be read
+// but not written: enforced by the kernel through default_permissions, not
+// just reported (TestMountChmodToZeroIsReportedAccurately covers
+// reporting).
 func TestMountDefaultPermissionsEnforcesOwnerModeBits(t *testing.T) {
 	mnt := mountTestFS(t)
 	path := filepath.Join(mnt, "perm-test.txt")
@@ -301,30 +289,14 @@ func TestMountDefaultPermissionsEnforcesOwnerModeBits(t *testing.T) {
 	}
 }
 
-// TestMountDefaultPermissionsEnforcesOtherBits, rather than skipping
-// the case: a
-// genuine differing-real-uid test would need actual privilege
-// escalation (running part of the test as a second real user, which
-// needs root or an equivalent privilege to setuid) — not available to
-// this automated suite, and not worth adding just for this. Instead,
-// this test creates a file directly through the Filesystem API
-// (fsys.Create) with an owner uid/gid that is deliberately *not* this
-// test process's own — something no real application could do through
-// the mounted path itself (a real create(2) always records the real
-// calling uid), but the kernel's default_permissions enforcement
-// doesn't care how an inode's reported uid/gid/mode got that way, only
-// what Getattr reports at access time. So accessing that file through
-// the real, kernel-enforced mount still genuinely exercises the
-// "other" bits code path (this test process is neither the owner nor
-// a member of the fabricated group), not just the owner-bits path
-// the test above covers.
+// TestMountDefaultPermissionsEnforcesOtherBits checks the "other" mode bits
+// without a second real user (that would need root): it creates a file
+// through the Filesystem API owned by a uid and gid that aren't the test
+// process's. default_permissions judges only what Getattr reports, so
+// accessing that file through the mount exercises the "other" bits.
 //
-// What this does NOT cover: the "group" bits specifically (vs.
-// "other"), and the nuance of the kernel checking a
-// caller's *full* supplementary group list, not just a primary gid —
-// confirming those still needs a genuine second real identity. Covered
-// here only to the extent that "other" bits are real kernel
-// enforcement, not something this codebase has to implement itself.
+// It doesn't cover the group bits, or the kernel's check of a caller's
+// supplementary groups; those need a second real identity.
 func TestMountDefaultPermissionsEnforcesOtherBits(t *testing.T) {
 	mnt, fsys := mountTestFSWithFsys(t)
 	ctx := context.Background()
@@ -522,15 +494,9 @@ func TestMountRenameBasic(t *testing.T) {
 	}
 }
 
-// TestMountRenameOfOpenFileKeepsHandleUsable covers rename's
-// open-file semantics directly: POSIX rename(2) only changes a
-// directory entry, never the underlying inode, so a file descriptor
-// opened under the old name must keep working — reading/writing
-// through it, and the data it writes must land on the content now
-// reachable only via the new name — exactly as a real local
-// filesystem behaves (and distinct from Windows's own, more
-// restrictive semantics, which FUSE on Linux does not need to
-// emulate).
+// TestMountRenameOfOpenFileKeepsHandleUsable: rename(2) changes only a
+// directory entry, so a descriptor opened under the old name keeps working,
+// and what it writes is what the new name reads.
 func TestMountRenameOfOpenFileKeepsHandleUsable(t *testing.T) {
 	mnt := mountTestFS(t)
 
@@ -678,15 +644,9 @@ func TestMountBirthtimeFromUUID(t *testing.T) {
 	}
 }
 
-// TestMountStatfsReflectsDeclaredSizeAndUsage covers D4's FUSE wiring
-// end to end through a real kernel mount (mountTestFS bootstraps with
-// a 1<<30 declared size — see newTestFilesystem's Bootstrap call): df
-// ("Total") should reflect the declared size, and writing a file should
-// move "Used" (via statfsBlockSize-rounded free space shrinking)
-// without the mount reporting bogus/zeroed values, which is what a
-// mis-wired NodeStatfser would actually look like (per that interface's
-// own doc comment: "If not defined, the `out` argument will [be]
-// zeroed with an OK result").
+// TestMountStatfsReflectsDeclaredSizeAndUsage: df's total is the declared
+// size (1 GiB here), and writing a file moves its usage. An unwired statfs
+// would report zeros.
 func TestMountStatfsReflectsDeclaredSizeAndUsage(t *testing.T) {
 	mnt := mountTestFS(t)
 
@@ -717,13 +677,9 @@ func TestMountStatfsReflectsDeclaredSizeAndUsage(t *testing.T) {
 	}
 }
 
-// TestMountArchivedFilesystemRejectsWritesButAllowsReads is D5's FUSE-
-// level counterpart to internal/icbfs's TestArchivedFilesystemRejects-
-// WritesButAllowsReads: proves errnoFromErr's ErrArchived->EROFS mapping
-// (added in node.go) is actually reachable through a real kernel mount,
-// and exercises the documented mount-time (not continuous) enforcement
-// point — the filesystem is archived, then mounted fresh, so this
-// mount's Bootstrap is the one that observes archived=true.
+// TestMountArchivedFilesystemRejectsWritesButAllowsReads: a filesystem
+// archived before mounting mounts read-only (EROFS on writes), because the
+// mount reads the archived flag when it starts.
 func TestMountArchivedFilesystemRejectsWritesButAllowsReads(t *testing.T) {
 	store := newMountTestStore(t)
 	ctx := context.Background()
@@ -798,18 +754,10 @@ func TestMountFlockWholeFileExclusive(t *testing.T) {
 	}
 }
 
-// TestMain intercepts the test binary's own invocation when re-exec'd
-// as a cross-process fcntl lock holder (see runFcntlLockHolderHelper)
-// — a real, separate OS process is required to exercise fcntl(2)'s
-// actual ownership semantics: fcntl byte-range locks are owned by
-// (process, inode), not by file descriptor, so two fds opened by the
-// *same* process (confirmed by testing directly: the naive two-fd,
-// one-process version of this test always "succeeded" without
-// conflict, because the kernel reports the same lock owner for both,
-// and this codebase's holder model correctly treats a holder's own
-// re-acquisition as a non-conflicting replace, exactly like real
-// fcntl semantics do) never actually conflict with each other,
-// regardless of what this driver does.
+// TestMain runs the test binary as a lock-holding helper process when asked
+// (runFcntlLockHolderHelper). fcntl locks belong to a process, not a
+// descriptor, so two descriptors in one process never conflict: testing
+// fcntl conflicts needs a second process.
 func TestMain(m *testing.M) {
 	if os.Getenv("ICBFS_FCNTL_HELPER") == "1" {
 		runFcntlLockHolderHelper()
@@ -818,16 +766,11 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// runFcntlLockHolderHelper opens ICBFS_FCNTL_HELPER_PATH (a path under
-// an already-mounted icbfs FUSE mount, inherited from the parent
-// process — no testcontainers/mount setup of its own needed, since it
-// operates on the mount the same way any other real process accessing
-// an already-mounted filesystem would), takes an F_SETLK on [0,10) of
-// the type named by ICBFS_FCNTL_HELPER_TYPE ("F_RDLCK" or "F_WRLCK",
-// default F_WRLCK), signals readiness by creating
-// ICBFS_FCNTL_HELPER_READY, then waits for ICBFS_FCNTL_HELPER_RELEASE
-// to appear before exiting (releasing the lock as a side effect of
-// process exit, same as a real application would).
+// runFcntlLockHolderHelper opens ICBFS_FCNTL_HELPER_PATH (on the parent's
+// mount), takes F_SETLK on [0,10) of type ICBFS_FCNTL_HELPER_TYPE
+// ("F_RDLCK" or "F_WRLCK", default F_WRLCK), creates
+// ICBFS_FCNTL_HELPER_READY, and waits for ICBFS_FCNTL_HELPER_RELEASE before
+// exiting, which releases the lock.
 func runFcntlLockHolderHelper() {
 	path := os.Getenv("ICBFS_FCNTL_HELPER_PATH")
 	readyPath := os.Getenv("ICBFS_FCNTL_HELPER_READY")
@@ -880,19 +823,10 @@ func waitForFileOrFail(t *testing.T, path string, timeout time.Duration) {
 	}
 }
 
-// retryFcntlSetlkUntilNotEagain retries a non-blocking F_SETLK that's
-// expected to succeed once another process's exit releases a lock it
-// held, tolerating a short window of EAGAIN rather than asserting
-// success the instant cmd.Wait() returns.
-//
-// Needed once real kernel lock forwarding is enabled (fuse.MountOptions.
-// EnableLocks — see mountFSWithLocking's doc comment): a FUSE
-// RELEASE is dispatched to this driver's own FileHandle.Release
-// asynchronously relative to the closing/exiting process's close(2)/
-// exit returning — unlike the kernel's own local, in-process advisory
-// lock table (what every FUSE lock op silently falls back to without
-// EnableLocks), which releases synchronously as part of the same
-// close/exit.
+// retryFcntlSetlkUntilNotEagain retries a non-blocking F_SETLK that should
+// succeed once another process's exit releases its lock, allowing a short
+// window of EAGAIN: the kernel sends FUSE's RELEASE asynchronously, after
+// close or exit returns.
 func retryFcntlSetlkUntilNotEagain(t *testing.T, fd uintptr, lk *syscall.Flock_t, timeout time.Duration) error {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -908,16 +842,10 @@ func retryFcntlSetlkUntilNotEagain(t *testing.T, fd uintptr, lk *syscall.Flock_t
 	}
 }
 
-// TestMountFcntlByteRangeLocksAcrossProcesses covers fcntl(2)
-// byte-range locks through real kernel
-// syscalls against a real mount, using a genuine second OS process
-// (see TestMain/runFcntlLockHolderHelper's doc comments on why that's
-// required, not optional, for fcntl specifically): an overlapping
-// F_SETLK from the other process is refused while held, a genuinely
-// non-overlapping range succeeds while that lock is still held, a
-// conflicting F_GETLK reports it back rather than L_UNLCK, and the
-// overlapping range succeeds once the holder process exits (releasing
-// it).
+// TestMountFcntlByteRangeLocksAcrossProcesses, with a second process (see
+// TestMain): while it holds a lock, an overlapping F_SETLK is refused, a
+// non-overlapping one succeeds, and F_GETLK reports the conflict; once it
+// exits, the overlapping range can be locked.
 func TestMountFcntlByteRangeLocksAcrossProcesses(t *testing.T) {
 	mnt := mountTestFSWithLocking(t)
 	path := filepath.Join(mnt, "fcntl-cross-process.bin")
@@ -983,44 +911,20 @@ func TestMountFcntlByteRangeLocksAcrossProcesses(t *testing.T) {
 	}
 }
 
-// TestMountFcntlLockSurvivesPastOriginalTTLViaRenewal covers lease
-// renewal (node.go's ensureRenewal/runRenewal): a lock held by a
-// still-alive, still-open process must keep being refreshed well past
-// one lockLeaseTTL window, not just silently expire on a fixed clock
-// regardless of whether anyone's still using it.
+// TestMountFcntlLockSurvivesPastOriginalTTLViaRenewal: a lock held by a
+// live process with the file open is still held after several lease
+// periods, because renewal (ensureRenewal, runRenewal) keeps it alive.
 //
-// lockLeaseTTL/lockRenewInterval are shrunk for the test (same reason
-// contentWriteRetryBudget is a var, not a const — see its own doc
-// comment), but not down to sub-second: expires_at is anchored to the
-// object store's clock via a raw HTTP Date header (objstore.Store.
-// ServerTime), which only has whole-second resolution and can itself
-// lag true time by up to ~1s (see lock_test.go's own TTL choices for
-// the same reason) — a TTL much
-// below 1s can already read as expired relative to this test's local
-// clock before even one renewal tick runs. 2s/500ms keeps comfortably
-// clear of that while still being fast enough to sleep past several
-// full lease windows deterministically, not 90+ real seconds — and,
-// together with the sleep below, stays under runFcntlLockHolderHelper's
-// own hardcoded 10s give-up deadline (it exits on its own, as if it
-// had crashed, if nobody signals release by then — found the hard
-// way: an earlier 3s-TTL/12s-sleep version of this test tripped
-// exactly that timeout, which looked identical to a real renewal
-// failure until the timestamps were compared).
+// The lease is shrunk to 2 s, renewed every 500 ms, but not below a second:
+// leases are anchored to the store's clock, which reads in whole seconds.
+// Three lease periods also stay inside the helper's own 10-second give-up
+// deadline.
 func TestMountFcntlLockSurvivesPastOriginalTTLViaRenewal(t *testing.T) {
 	origTTL, origInterval := lockLeaseTTL, lockRenewInterval
-	// Registered via t.Cleanup, not a plain defer, and *before*
-	// mountTestFSWithLocking (so its own Unmount cleanup — registered
-	// next — runs first, LIFO): FileHandle.Release waits for its own
-	// runRenewal goroutines to stop before returning, but closing an
-	// fd never blocks on that Release actually running (FUSE dispatches
-	// it asynchronously relative to close(2)/process-exit returning —
-	// see retryFcntlSetlkUntilNotEagain's doc comment). A plain defer
-	// here raced the var restore below against a renewal goroutine
-	// that hadn't been dispatched yet when this function returned
-	// (caught by -race); Server.Unmount retries the real unmount
-	// syscall until the kernel reports no files still open and then
-	// drains its own dispatch loop, which is the first point it's
-	// actually safe to mutate these shared package vars again.
+	// Restore the lease settings in t.Cleanup, registered before the mount
+	// so it runs after the unmount: Release runs asynchronously after
+	// close, and its renewal goroutines read these vars until the unmount
+	// has drained them (a plain defer raced, under -race).
 	t.Cleanup(func() { lockLeaseTTL, lockRenewInterval = origTTL, origInterval })
 	lockLeaseTTL = 2 * time.Second
 	lockRenewInterval = 500 * time.Millisecond
@@ -1053,14 +957,9 @@ func TestMountFcntlLockSurvivesPastOriginalTTLViaRenewal(t *testing.T) {
 
 	waitForFileOrFail(t, readyPath, 5*time.Second)
 
-	// The helper process never renews anything itself — it just holds
-	// one fd open with its F_SETLK outstanding. Sleeping past several
-	// lockLeaseTTL windows while it stays alive only still conflicts
-	// below if *this* test process's own FileHandle (the one serving
-	// the helper's open, in-process, via go-fuse) has been renewing
-	// that lock on the helper's behalf the whole time. *3, not more —
-	// runFcntlLockHolderHelper's own 10s give-up deadline is the real
-	// ceiling here, not just "however many lease windows looks good."
+	// The helper never renews; only this process's FileHandle serving its
+	// open can. So the lock still conflicting after three lease periods
+	// means renewal works.
 	time.Sleep(lockLeaseTTL * 3)
 
 	f2, err := os.OpenFile(path, os.O_RDWR, 0)
@@ -1075,15 +974,10 @@ func TestMountFcntlLockSurvivesPastOriginalTTLViaRenewal(t *testing.T) {
 	}
 }
 
-// TestMountWithNoNotificationBackendBehavesIdentically: mounting with
-// no change-notifications backend configured (Root's source argument
-// nil — what every other test in this file already passes, and what
-// cmd/icbfs produces without -notify) must work identically to a mount
-// that never had the feature. This isn't an assumption that "optional"
-// naturally holds; it's a named, permanent regression test, exercising the same create/read/
-// write/mkdir/rmdir/unlink operations the rest of this suite already
-// covers individually, as one explicit end-to-end sequence specifically
-// framed around this invariant.
+// TestMountWithNoNotificationBackendBehavesIdentically: a mount without a
+// notification source (Root's signals nil, as cmd/icbfs without -notify)
+// behaves as if the feature didn't exist, across create, read, write,
+// mkdir, rmdir and unlink.
 func TestMountWithNoNotificationBackendBehavesIdentically(t *testing.T) {
 	mnt := mountTestFS(t) // mountTestFS always passes a nil source
 
@@ -1116,40 +1010,16 @@ func TestMountWithNoNotificationBackendBehavesIdentically(t *testing.T) {
 	}
 }
 
-// TestMountNotifyDispatchesSignalToCorrectInode: a watch is established, a change is triggered
-// through a second, independent client against the same backend, and
-// the watching mount delivers a real notification — proving cross-
-// mount delivery, not just that the internal plumbing compiles.
+// TestMountNotifyDispatchesSignalToCorrectInode: a change made by a second,
+// independent client (another Filesystem on the same bucket) and signalled
+// through a FakeSource reaches this mount as a NotifyContent call on the
+// right inode, accepted by the kernel.
 //
-// "Second, independent client" here is a second *icbfs.Filesystem
-// handle writing directly to the same backend bucket, bypassing this
-// mount's FUSE layer entirely — exactly the scenario Change
-// notifications exists for (another mount or process changed
-// something this mount didn't write itself). The real backend-to-
-// notify.Source delivery mechanism (the MinIO adapter) isn't
-// exercised here — this test uses notify.FakeSource and manually
-// Emits the signal a real backend would have delivered, isolating
-// what this package owns: the registry + dispatch wiring that
-// turns a Source signal into a real go-fuse NotifyContent call against
-// the correct, kernel-validated Inode.
-//
-// This does NOT verify a userspace inotify_add_watch delivery, or a
-// page-cache staleness transition — both were tried first and found,
-// empirically, not to be reliable proof here: a successful (errno 0)
-// NotifyContent call was confirmed via direct FUSE debug tracing to
-// not produce any inotify event on this kernel/go-fuse version in this
-// environment (tried with both a zero and a non-zero size argument),
-// and this filesystem doesn't request FOPEN_KEEP_CACHE on Open, so
-// there's no kernel page cache staleness for NotifyContent to
-// meaningfully defeat either — attribute/entry timeouts are unset
-// (effectively zero), so every read already round-trips to this
-// driver regardless of any notification. What's verified instead, via
-// the test-only notifyContentHook seam, is what this package delivers: a Source signal
-// naming a tracked UUID results in a NotifyContent call against the
-// right Inode, accepted by the kernel without error — confirmed
-// against the exact bug this uncovered (a naive implementation
-// targeted a stale, kernel-unknown nodeId and got ENOENT back; see
-// watchRegistry.register's doc comment).
+// It checks the call through the notifyContentHook seam, not through
+// inotify or the page cache: NotifyContent produces no inotify event on
+// this kernel and go-fuse, and this mount keeps no page cache to go stale.
+// A naive registry once targeted an inode the kernel didn't know (ENOENT;
+// see watchRegistry.register).
 func TestMountNotifyDispatchesSignalToCorrectInode(t *testing.T) {
 	ctx := context.Background()
 	store := newMountTestStore(t)
@@ -1229,17 +1099,9 @@ func TestMountNotifyDispatchesSignalToCorrectInode(t *testing.T) {
 	}
 }
 
-// TestMountFcntlSharedLocksCoexistAcrossProcesses covers real POSIX
-// shared/exclusive fcntl semantics through actual kernel syscalls
-// against a real mount, using a genuine second OS process (fcntl
-// locks are owned per-(process, inode), not per-fd — see
-// TestMain/runFcntlLockHolderHelper's doc comments): a shared
-// (F_RDLCK) lock held by a helper process does not block this
-// process's own F_RDLCK on the same range (shared locks from
-// different holders coexist), but does block this process's F_WRLCK
-// on that range (an exclusive request conflicts with any other
-// holder's claim, shared or exclusive) — and that F_WRLCK succeeds
-// once the helper's shared lock is released.
+// TestMountFcntlSharedLocksCoexistAcrossProcesses, with a second process:
+// its F_RDLCK doesn't block this process's F_RDLCK on the same range, but
+// does block an F_WRLCK, which succeeds once the helper releases.
 func TestMountFcntlSharedLocksCoexistAcrossProcesses(t *testing.T) {
 	mnt := mountTestFSWithLocking(t)
 	path := filepath.Join(mnt, "fcntl-shared-cross-process.bin")
@@ -1299,13 +1161,9 @@ func TestMountFcntlSharedLocksCoexistAcrossProcesses(t *testing.T) {
 	}
 }
 
-// TestMountFcntlGetlkReportsSharedType covers F_GETLK's own
-// shared/exclusive awareness through a real mount: querying with
-// F_RDLCK against another process's F_RDLCK reports no conflict
-// (L_UNLCK), but querying with F_WRLCK against that same F_RDLCK
-// reports a real conflict and correctly identifies it as F_RDLCK, not
-// a generic "write lock" the way an earlier, type-insensitive version
-// of this lock model would have.
+// TestMountFcntlGetlkReportsSharedType: F_GETLK as F_RDLCK against another
+// process's F_RDLCK reports no conflict, and as F_WRLCK reports the
+// conflict, as F_RDLCK.
 func TestMountFcntlGetlkReportsSharedType(t *testing.T) {
 	mnt := mountTestFSWithLocking(t)
 	path := filepath.Join(mnt, "fcntl-getlk-shared.bin")

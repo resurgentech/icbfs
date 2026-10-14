@@ -130,11 +130,9 @@ func main() {
 		src := miniosrc.New(ctx, minioClient, conn.Bucket, fsys.Prefix())
 		defer src.Close()
 
-		// A Broadcaster, not src.Signals() directly: locking's
-		// blocking-acquisition accelerator has to observe the same
-		// signal stream the FUSE watch dispatch does, and Source.Signals() is a single-consumption
-		// channel — reading it from two places would steal signals
-		// from each other instead of each seeing every one.
+		// A Broadcaster, not src.Signals() directly: the FUSE watch
+		// dispatch and locking's acquire accelerator both need every
+		// signal, and a Source's channel has one reader.
 		broadcaster := notify.NewBroadcaster(src)
 		fuseSignals = broadcaster.Subscribe()
 		if *locking {
@@ -156,9 +154,8 @@ func main() {
 	root := fuseserver.Root(fsys, fuseSignals, rootOpts...)
 	server, err := fs.Mount(mountpoint, root, &fs.Options{
 		MountOptions: fuseMountOptions(*debug, *allowOther, view != nil || driveReadOnly),
-		// Without this, go-fuse silently rewrites a real, stored "0000"
-		// mode to 0644/0755 on every Getattr — found by testing chmod 000
-		// and seeing stat report 644 back.
+		// Without it, go-fuse reports a stored mode 0000 as 0644 or
+		// 0755.
 		NullPermissions: true,
 	})
 	if err != nil {
@@ -184,13 +181,9 @@ func main() {
 	server.Wait()
 }
 
-// newMinIOClient builds the separate minio-go client the MinIO
-// notification adapter needs — see internal/notify/miniosrc's package
-// doc comment on why this can't just reuse the aws-sdk-go-v2 client
-// already in use for every other S3-API call. endpoint carries a
-// "http://"/"https://" scheme the way --endpoint is otherwise used
-// (as aws-sdk-go-v2's BaseEndpoint); minio.New wants the bare host
-// plus a separate Secure bool instead, so that's split out here.
+// newMinIOClient builds the minio-go client the MinIO notification source
+// needs (see internal/notify/miniosrc). endpoint has a scheme, as -endpoint
+// does; minio.New wants the bare host and a Secure flag.
 func newMinIOClient(endpoint, accessKey, secretKey string) (*minio.Client, error) {
 	secure := strings.HasPrefix(endpoint, "https://")
 	host := strings.TrimPrefix(strings.TrimPrefix(endpoint, "https://"), "http://")
@@ -212,32 +205,17 @@ func fuseMountOptions(debug, allowOther, readOnly bool) fuse.MountOptions {
 		FsName: "icbfs",
 		Name:   "icbfs",
 		Debug:  debug,
-		// default_permissions defers permission enforcement (every open/read/write, not just the
-		// access(2)-triggered checks go-fuse's own default Access()
-		// fallback handles) to the kernel, which already correctly
-		// handles root bypass and full supplementary group
-		// membership — preferred over implementing NodeAccesser or
-		// manual checks ourselves.
+		// default_permissions has the kernel check permissions on every
+		// open, read and write, with root's bypass and supplementary
+		// groups, rather than this driver doing it.
 		//
-		// allow_other is a separate, orthogonal kernel restriction from
-		// default_permissions: without it, FUSE's fuse_allow_current_process
-		// check rejects every caller except the mounting user (and root)
-		// outright, before default_permissions's own mode-based check
-		// ever runs — found while running pjdfstest's -u/-g permission
-		// tests against a root-mounted filesystem, where it looked at
-		// first like a real EACCES bug in icbfs's own permission
-		// enforcement, until isolating it to this separate, well-known
-		// FUSE restriction (confirmed by reproducing the same EACCES
-		// with plain coreutils via sudo -u, independent of pjdfstest
-		// entirely, then confirming it disappeared once allow_other was
-		// added). --allow-other opts into exposing it.
+		// allow_other is a separate restriction: without it the kernel
+		// refuses every caller but the mounting user and root before any
+		// mode check. -allow-other turns it on.
 		Options: options,
-		// EnableLocks: without this, the kernel never
-		// forwards FUSE_GETLK/SETLK/SETLKW to this driver at all — it
-		// silently falls back to its own local, single-host advisory
-		// lock table, which defeats the entire point of this
-		// filesystem's remote, object-store-backed locking, and hides
-		// any bug in it from tests.
+		// EnableLocks: without it the kernel never sends lock requests to
+		// this driver, and uses its own local lock table instead, which
+		// other machines can't see.
 		EnableLocks: true,
 	}
 }

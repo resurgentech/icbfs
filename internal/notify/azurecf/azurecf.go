@@ -1,24 +1,10 @@
-// Package azurecf is the checkpoint/filter logic behind the Azure
-// Blob Storage Change Feed backend adapter for Change notifications
-// (docs/architecture.md's Change notifications section).
+// Package azurecf is the checkpoint and filter logic of an Azure Blob
+// Storage Change Feed source (docs/architecture.md's Change notifications
+// section): resuming the feed from a cursor, and filtering keys
+// client-side, since the Change Feed has no server-side filter.
 //
-// This package deliberately does NOT depend on the real Azure SDK for
-// Go or talk to a real Storage Account: there is no Storage Account to
-// test against, and there is no way to verify a real Azure SDK
-// integration's API shape against actual installed source the way
-// every other backend API assumption in this project has been
-// checked first (go-fuse's Notify* methods, MinIO's
-// ListenBucketNotification, both confirmed by reading the installed
-// package directly). Writing "real" Azure SDK integration code
-// without that verification would be exactly the kind of unverified
-// assumption this project has otherwise avoided throughout — so
-// instead, the part that *can* be built and genuinely tested here is:
-// the pull-and-resume checkpoint/cursor logic and the client-side
-// prefix filtering Azure's Change Feed needs (it has no server-side
-// filtering at all, unlike MinIO/S3 — docs/architecture.md). Reader is the
-// minimal seam a real Azure SDK-backed implementation would plug into;
-// providing that implementation is left for whoever has a real
-// Storage Account to build and verify it against.
+// It doesn't use the Azure SDK: with no Storage Account to test against,
+// there's no client. Reader is where one would plug in.
 package azurecf
 
 import (
@@ -29,20 +15,15 @@ import (
 	"github.com/resurgentech/icbfs/internal/notify"
 )
 
-// Event is one Change Feed entry — the minimal field this package's
-// filter logic needs. A real Reader implementation would translate
-// whatever the actual Azure SDK's change-feed record type looks like
-// into this.
+// Event is one Change Feed entry: the key, all the filter needs. A Reader
+// translates the SDK's record type into it.
 type Event struct {
 	Key string // the blob name (object key) this event is about
 }
 
-// Cursor is an opaque "I've read up to here" checkpoint. Change Feed
-// is a pull-and-resume append-only log (docs/architecture.md), so resuming
-// a poll after a restart needs to remember where the last one left
-// off — treated as opaque bytes here since the real shape depends on
-// whatever continuation-token representation the actual Azure SDK
-// uses, not verifiable in this environment (see package doc comment).
+// Cursor is an opaque checkpoint: how far the feed has been read, so a
+// restart resumes there. Its form would be whatever the SDK's continuation
+// token is.
 type Cursor []byte
 
 // Page is one page of events read from the feed, plus the cursor to
@@ -52,30 +33,20 @@ type Page struct {
 	Next   Cursor
 }
 
-// Reader reads one page of the Change Feed starting from cursor (nil
-// for "from the beginning of the feed"). A real Azure SDK-backed
-// implementation of this interface is not built — see the package doc
-// comment.
+// Reader reads one page of the Change Feed from cursor (nil for the
+// beginning). There's no implementation yet; see the package comment.
 type Reader interface {
 	ReadPage(ctx context.Context, cursor Cursor) (Page, error)
 }
 
-// pollInterval bounds how often Source re-polls once it has caught up
-// to the current end of the feed (ReadPage returning zero events).
-// docs/architecture.md gives Azure Change Feed's own latency as "within an
-// order of a few minutes" (Microsoft's own wording) — a tight poll
-// loop here would just be wasted API calls against a feed that can't
-// have changed meaningfully faster than that anyway.
+// pollInterval is how often Source polls once it has caught up. The Change
+// Feed's latency is minutes, so polling faster would only cost API calls.
 const pollInterval = 30 * time.Second
 
-// Source polls a Reader, filters each event's key against prefix
-// client-side (Azure's Change Feed has no server-side
-// filtering, unlike MinIO/S3 — every consumer account-wide reads every
-// other tenant's raw change events too before discarding what doesn't
-// match), and
-// persists its cursor via persist after every successfully-processed
-// page, so a later restart resumes from there instead of re-reading
-// the whole feed from scratch.
+// Source polls a Reader, forwards events whose keys start with prefix
+// (filtering client-side: every reader of an account's feed sees every
+// tenant's events), and saves its cursor with persist after each page, so a
+// restart resumes from there.
 type Source struct {
 	cancel context.CancelFunc
 	ch     chan notify.Signal
@@ -104,10 +75,8 @@ func (s *Source) run(ctx context.Context, reader Reader, prefix string, cursor C
 	for {
 		page, err := reader.ReadPage(ctx, cursor)
 		if err != nil {
-			// Per docs/architecture.md's governing principle, a failed
-			// poll is never a correctness problem for this feature —
-			// just a slower wake-up next time around. Retry after the
-			// same backoff a caught-up/empty page uses.
+			// A failed poll only delays the next wake-up: retry after the
+			// usual interval.
 			select {
 			case <-ctx.Done():
 				return
@@ -129,10 +98,8 @@ func (s *Source) run(ctx context.Context, reader Reader, prefix string, cursor C
 
 		cursor = page.Next
 		if persist != nil {
-			// Best-effort: a failed checkpoint save just risks
-			// re-delivering already-seen events after a restart,
-			// which this feature's "just a wake-up hint" governing
-			// principle already tolerates — not treated as fatal.
+			// Best effort: a lost checkpoint only means events seen again
+			// after a restart, which hints tolerate.
 			_ = persist(cursor)
 		}
 

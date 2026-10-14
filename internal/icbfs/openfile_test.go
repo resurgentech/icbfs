@@ -12,14 +12,10 @@ import (
 )
 
 // TestConcurrentNonOverlappingWritesBothSurvive: two concurrent writers
-// edit non-overlapping byte ranges of the same file, and both edits
-// survive in the final content. Without retry-and-reapply this is the
-// lost-update bug docs/architecture.md describes: whichever
-// OpenFile.Flush lands second would silently overwrite the first one's
-// byte range with its own stale copy of it. With it, the loser
-// re-fetches the winner's committed
-// content and replays only its own recorded edit onto it, so both
-// survive.
+// edit different byte ranges of one file, and both edits survive. Without
+// re-applying, the second Flush would overwrite the first's range with its
+// stale copy; with it, the loser rebases onto the winner's content and
+// applies only its own edit.
 func TestConcurrentNonOverlappingWritesBothSurvive(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	ctx := context.Background()
@@ -82,20 +78,11 @@ func TestConcurrentNonOverlappingWritesBothSurvive(t *testing.T) {
 	}
 }
 
-// TestFlushEscalatesWhenPlainRetryBudgetIsExhausted tests escalation
-// deterministically, rather than relying on timing
-// -sensitive luck to ever actually observe real exhaustion in a short
-// test run: contentWriteRetryBudget is forced to zero, and a
-// concurrent write is landed on the object *before* Flush ever gets a
-// chance to retry — guaranteeing its one and only plain CAS attempt
-// loses the race, with zero budget left to retry. Without
-// escalation, Flush would have no option left but to return
-// ErrWriteContention right there, every single time this happens —
-// exactly the "one writer thrashing against the other's retries"
-// failure mode docs/architecture.md describes. With escalation, Flush
-// instead blocks on a lock, rebases onto the concurrent writer's
-// content, and lands its own edit anyway: real forward progress
-// despite the exhausted plain-retry budget.
+// TestFlushEscalatesWhenPlainRetryBudgetIsExhausted, deterministically: the
+// retry budget is zero, and another write lands before Flush, so its one
+// conditional attempt loses with no retries left. Without escalation that's
+// ErrWriteContention; with it, Flush takes a lock, rebases onto the other
+// write, and lands its edit.
 func TestFlushEscalatesWhenPlainRetryBudgetIsExhausted(t *testing.T) {
 	orig := contentWriteRetryBudget
 	contentWriteRetryBudget = 0
@@ -116,10 +103,8 @@ func TestFlushEscalatesWhenPlainRetryBudgetIsExhausted(t *testing.T) {
 	}
 	open.WriteAt([]byte("hello"), 0)
 
-	// A concurrent writer (not going through this OpenFile at all)
-	// lands its own change on the object before Flush is called —
-	// open's pristine ETag is now stale, so its first (and, with a
-	// zero budget, only) plain CAS attempt is guaranteed to fail.
+	// Another writer changes the object first, so the session's ETag is
+	// stale and its only attempt fails.
 	concurrent := []byte("someone-else-wrote-this")
 	if _, _, err := fsys.WriteFile(ctx, key, concurrent, ""); err != nil {
 		t.Fatalf("simulate a concurrent writer: %v", err)
@@ -133,10 +118,8 @@ func TestFlushEscalatesWhenPlainRetryBudgetIsExhausted(t *testing.T) {
 		t.Fatalf("flushed size = %d, want %d", attr.Size, len(concurrent))
 	}
 
-	// The successful write should be the concurrent writer's content
-	// with this session's edit replayed onto it — proof Flush actually
-	// rebased before its final write, not that it just happened to
-	// land something.
+	// The other writer's content with this session's edit on it: Flush
+	// rebased before its final write.
 	final, _, _, err := fsys.ReadFile(ctx, key)
 	if err != nil {
 		t.Fatalf("read final: %v", err)
@@ -147,12 +130,9 @@ func TestFlushEscalatesWhenPlainRetryBudgetIsExhausted(t *testing.T) {
 	}
 }
 
-// TestFlushRefusedWhenTouchedRangeOverlapsExternalLock: an explicit
-// lock held by one
-// simulated client over a byte range causes a second simulated
-// client's overlapping write to be refused, while that second
-// client's write to a genuinely non-overlapping range still succeeds
-// normally while the first client's lock is still held.
+// TestFlushRefusedWhenTouchedRangeOverlapsExternalLock: while one client
+// holds a lock on a range, another client's write overlapping it is
+// refused, and its write elsewhere succeeds.
 func TestFlushRefusedWhenTouchedRangeOverlapsExternalLock(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	fsys.EnableLocking(true)
@@ -208,12 +188,9 @@ func TestFlushRefusedWhenTouchedRangeOverlapsExternalLock(t *testing.T) {
 	}
 }
 
-// TestCheckRangeLockConflictIgnoresEscalationOnlyEntries confirms the
-// specific reason LockRange.EscalationOnly exists: another session's
-// own in-flight escalation claim must never be mistaken for a real
-// external application lock by the write-conflict check — doing so
-// would spuriously refuse writes that retry and escalation already
-// guarantee converge on their own shortly after.
+// TestCheckRangeLockConflictIgnoresEscalationOnlyEntries: another session's
+// escalation claim isn't an application lock to the write check (see
+// LockRange.EscalationOnly).
 func TestCheckRangeLockConflictIgnoresEscalationOnlyEntries(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	fsys.EnableLocking(true)
@@ -234,15 +211,9 @@ func TestCheckRangeLockConflictIgnoresEscalationOnlyEntries(t *testing.T) {
 	}
 }
 
-// TestOpenFileTouchAtimeOnlyOncePerSession is a real regression test:
-// a single large read gets split by the kernel into many smaller
-// FUSE/WinFsp Read callback invocations, and an earlier version of
-// OpenFile.TouchAtime called Filesystem.TouchAtime — a real network
-// metadata PUT — on every single one of them, turning one 500 MB
-// read into thousands of synchronous round trips and hanging a real
-// mount in practice. Confirmed here as a plain call-count assertion,
-// not a timing-based test, since the real-world symptom (a hang) is
-// exactly what a slow CI run must never risk reproducing.
+// TestOpenFileTouchAtimeOnlyOncePerSession: the kernel splits a large read
+// into many Read calls, and recording the access on each would make one 500
+// MB read thousands of synchronous metadata writes. Counted, not timed.
 func TestOpenFileTouchAtimeOnlyOncePerSession(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	ctx := context.Background()
@@ -290,12 +261,8 @@ func TestOpenFileTouchAtimeOnlyOncePerSession(t *testing.T) {
 		t.Fatalf("Atime still zero after the first TouchAtime call — the real update never happened at all")
 	}
 
-	// A second, explicitly different-looking call must be a genuine
-	// no-op (not just "happens not to change anything observable") —
-	// confirmed by making it fail outright if it were to actually run:
-	// Filesystem.TouchAtime against a key that no longer exists would
-	// return a real error, so a nil here can only mean the guard
-	// skipped calling through at all.
+	// The second call must not reach Filesystem.TouchAtime at all: the file
+	// is gone, so reaching it would return an error.
 	if err := fsys.Unlink(ctx, root, "touch-once.txt"); err != nil {
 		t.Fatalf("unlink: %v", err)
 	}
@@ -306,12 +273,9 @@ func TestOpenFileTouchAtimeOnlyOncePerSession(t *testing.T) {
 	}
 }
 
-// TestWriteAtHugeOffsets: pjdfstest's open/25.t writes 1 byte at
-// 2^31+1. That once OOM-killed the whole mount (the gap was materialized
-// in memory) and was then refused outright; content is staged in a
-// sparse local scratch file now, so it's accepted, and only a write past
-// the filesystem's max file size is refused, before anything is
-// extended.
+// TestWriteAtHugeOffsets: pjdfstest's open/25.t writes 1 byte at 2^31+1.
+// The sparse scratch file accepts it; only a write past the max file size
+// is refused, before anything is extended.
 func TestWriteAtHugeOffsets(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	ctx := context.Background()
@@ -357,11 +321,9 @@ func TestWriteAtHugeOffsets(t *testing.T) {
 	}
 }
 
-// TestOpenFileCloseRemovesScratchFile: OpenFile's content lives in a
-// private local scratch file, not an in-memory []byte — this confirms
-// that file exists on disk while the session is open, and is removed
-// once Close releases it, since a leaked scratch file per
-// open-then-close cycle would be an unbounded local-disk leak.
+// TestOpenFileCloseRemovesScratchFile: the session's scratch file exists
+// while it's open and is removed by Close, so open-close cycles don't leak
+// local disk.
 func TestOpenFileCloseRemovesScratchFile(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	ctx := context.Background()
@@ -391,11 +353,9 @@ func TestOpenFileCloseRemovesScratchFile(t *testing.T) {
 	}
 }
 
-// TestDiskCacheAvoidsRedundantFetchOnValidatedHit: a second
-// seedScratch call for the
-// same key+etag must not call fetch again — it should be served from
-// the shared cache's own local copy. A fetch counter proves this
-// directly rather than inferring it from timing.
+// TestDiskCacheAvoidsRedundantFetchOnValidatedHit: a second seedScratch for
+// the same key and ETag is served from the cache, without calling fetch
+// (counted).
 func TestDiskCacheAvoidsRedundantFetchOnValidatedHit(t *testing.T) {
 	dir := t.TempDir()
 	cache := newDiskCache(dir, 1<<20)

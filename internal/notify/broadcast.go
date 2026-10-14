@@ -2,34 +2,23 @@ package notify
 
 import "sync"
 
-// Broadcaster fans out one Source's signals to any number of
-// independent subscribers, each receiving every signal — needed as
-// soon as more than one consumer needs to observe the same underlying
-// Source. Source.Signals() itself is a single-consumption channel (a
-// value read by one consumer is gone for any other), which the FUSE
-// watch dispatch treats as its own exclusive channel; locking's
-// blocking-acquisition accelerator needs to observe the exact same
-// signals independently, without stealing them from the FUSE watch's
-// dispatch or vice versa — this is what makes that possible.
+// Broadcaster gives every subscriber every signal of one Source. A Source's
+// channel can be read by only one consumer, and the FUSE watch dispatch and
+// locking's acquire accelerator each need all of them.
 type Broadcaster struct {
 	mu     sync.Mutex
 	subs   []chan Signal
 	closed bool
 }
 
-// bufferedSubscriberCapacity bounds how many unconsumed signals a
-// subscriber can fall behind by before this Broadcaster starts
-// dropping new ones for it. A dropped signal is never a correctness
-// problem for this feature (docs/architecture.md's governing principle: a
-// signal is always just a "go check current state" hint) — a slow or
-// stalled subscriber just gets fewer wake-ups, never corrupted ones.
+// bufferedSubscriberCapacity is how far a subscriber can fall behind before
+// new signals are dropped for it. A slow subscriber only gets fewer
+// wake-ups.
 const bufferedSubscriberCapacity = 32
 
-// NewBroadcaster starts forwarding every signal from source to every
-// current and future Subscribe caller. The underlying source is
-// consumed by exactly one internal goroutine, owned by the
-// Broadcaster — callers never read source.Signals() themselves once
-// it's handed to NewBroadcaster.
+// NewBroadcaster forwards every signal from source to every subscriber. Its
+// goroutine is source's only reader; callers don't read it themselves after
+// this.
 func NewBroadcaster(source Source) *Broadcaster {
 	b := &Broadcaster{}
 	go func() {
@@ -53,11 +42,8 @@ func NewBroadcaster(source Source) *Broadcaster {
 	return b
 }
 
-// Subscribe returns a channel that receives every signal broadcast
-// from here on. The returned channel is closed when the underlying
-// Source's own channel closes (e.g. Close was called on it). Each
-// subscription is independent — reading from one never consumes
-// signals meant for another.
+// Subscribe returns a channel that receives every signal from now on,
+// closed when the Source's channel closes. Subscriptions are independent.
 func (b *Broadcaster) Subscribe() <-chan Signal {
 	ch := make(chan Signal, bufferedSubscriberCapacity)
 	b.mu.Lock()

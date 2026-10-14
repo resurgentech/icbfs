@@ -153,9 +153,8 @@ func firstRealError(errs []error) error {
 	return cancelled
 }
 
-// PutIfAbsent implements Store.PutIfAbsent via PutObject's IfNoneMatch:
-// "*", confirmed against real MinIO to be honored (412 on conflict),
-// not assumed from the S3 API docs alone.
+// PutIfAbsent implements Store.PutIfAbsent with PutObject's
+// IfNoneMatch "*" (MinIO answers 412 when the key exists).
 func (s *S3Store) PutIfAbsent(ctx context.Context, key string, body io.Reader, metadata map[string]string) (*Object, error) {
 	out, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucket),
@@ -214,12 +213,10 @@ func (s *S3Store) headVersion(ctx context.Context, key string, versionID *string
 	}, nil
 }
 
-// UpdateMetadata replaces key's metadata via a copy-onto-self with the
-// REPLACE directive. This does not re-upload the body, and on a versioned
-// bucket it creates a new version exactly as a content write would. Since
-// source and destination are the same key, CopySourceIfMatch conditions
-// the update on the object's current ETag — the same CAS mechanism Put
-// uses, applied to a metadata-only write.
+// UpdateMetadata replaces key's metadata by copying the object onto itself
+// with the REPLACE directive: no re-upload, and a new version on a
+// versioned bucket. CopySourceIfMatch makes it conditional on the current
+// ETag, as Put's If-Match does.
 func (s *S3Store) UpdateMetadata(ctx context.Context, key string, metadata map[string]string, ifMatch string) (*Object, error) {
 	in := &s3.CopyObjectInput{
 		Bucket:            aws.String(s.bucket),
@@ -418,18 +415,10 @@ func (s *S3Store) ListByPrefix(ctx context.Context, prefix string) ([]Object, er
 	}
 }
 
-// ServerTime returns the object store's current clock, observed via
-// the raw HTTP "Date" response header of a real request — not a typed
-// SDK field like an Object's LastModified, which is "when this
-// specific object was last written," not "what time is it right now."
-// Confirmed against real MinIO (not assumed): the typed S3 API doesn't
-// expose this header anywhere, so it's captured directly via a
-// deserialize-step middleware on a single lightweight HeadBucket call.
-//
-// This exists so expires_at computations (docs/architecture.md's Locking
-// section) can be anchored to the object store's clock instead of the
-// calling client's, which could be skewed relative to other clients —
-// see internal/icbfs/lock.go's use of this.
+// ServerTime is the store's clock now, from the HTTP Date header of a
+// HeadBucket, captured by deserialize middleware: the typed S3 API doesn't
+// expose it. Lock leases are anchored to it (internal/icbfs's lock.go),
+// rather than to the caller's clock.
 func (s *S3Store) ServerTime(ctx context.Context) (time.Time, error) {
 	var serverTime time.Time
 	var found bool

@@ -17,10 +17,9 @@ import (
 // registers every filesystem in it — see docs/architecture.md's master block section.
 const masterBlockKey = "_master"
 
-// ErrArchived is returned by any mutating operation on a filesystem
-// whose master block entry has archived = true. Reads still succeed —
-// archiving exists specifically so a filesystem can be read/backed up
-// one last time before it's pruned, not to make it disappear outright.
+// ErrArchived is every mutating operation's answer on an archived
+// filesystem. Reads still work: archiving is so it can be backed up once
+// more before it's pruned.
 var ErrArchived = errors.New("filesystem is archived: read-only")
 
 // ErrReadOnly is returned by any mutating operation on a filesystem
@@ -28,20 +27,13 @@ var ErrArchived = errors.New("filesystem is archived: read-only")
 // objstore.AsOf view underneath returns for a write.
 var ErrReadOnly = objstore.ErrReadOnly
 
-// bootstrapMaster ensures the master block exists, creating an empty one
-// if this bucket has never been used for icbfs before.
+// bootstrapMaster creates the bucket's master block if it doesn't exist.
 //
-// This must use a true create-if-absent primitive (PutIfAbsent), not a
-// Head-then-unconditional-Put — found by testing concurrent first-time
-// registrations against real MinIO, not assumed: a Head-then-Put has a
-// window where two concurrent callers both observe "doesn't exist yet"
-// and both then write an unconditional empty master block, and whichever
-// one's unconditional write lands *after* the other's subsequent
-// registerFilesystem CAS write silently stomps it back to empty,
-// discarding that registration. PutIfAbsent closes that window: at most
-// one caller's create succeeds, every other caller's PutIfAbsent fails
-// with a precondition error (expected and harmless here — it just means
-// the block already exists, exactly what bootstrapping again is for).
+// It uses PutIfAbsent, not Head then Put: with Head then Put, two first
+// callers could both see nothing and both write an empty block, and the
+// later write could erase a filesystem the other had just registered. With
+// PutIfAbsent one create wins and the others' precondition failures just
+// mean the block exists.
 func bootstrapMaster(ctx context.Context, store objstore.Store) error {
 	empty, err := proto.Marshal(&pb.MasterBlock{})
 	if err != nil {
@@ -73,20 +65,14 @@ func readMaster(ctx context.Context, store objstore.Store) (*pb.MasterBlock, *ob
 	return &mb, obj, nil
 }
 
-// registerFilesystem resolves name to its filesystem ID, registering a
-// new entry (reusing the lowest-indexed free slot, or appending) if this
-// is the first time this name has been seen. Idempotent: calling it
-// again for an already-registered name just returns that name's existing
-// ID and stored entry; entry's size, primary mode and max file size are
-// only used the first time a filesystem name is created, per
-// Filesystem.Bootstrap's existing no-op-if-already-exists contract for
-// root blocks.
+// registerFilesystem resolves name to its filesystem ID, registering it in
+// the lowest free slot (or a new one at the end) the first time it's seen.
+// For a name already registered it returns the existing ID and entry;
+// entry's size, primary mode and max file size are used only at creation.
 //
-// The ID is the slot's position, zero-padded to 4 hex digits — not a
-// separately stored field. See docs/architecture.md for why: the master
-// block's list can only grow, never shrink or reorder, specifically so a
-// slot's position (and therefore the ID every object in that filesystem
-// is already permanently keyed with) never changes once assigned.
+// The ID is the slot's position as 4 hex digits, not a stored field. The
+// list only ever grows, never shrinks or reorders, so a slot's position,
+// and the prefix every object of that filesystem carries, never changes.
 func registerFilesystem(ctx context.Context, store objstore.Store, entry *pb.FilesystemEntry) (id string, stored *pb.FilesystemEntry, existed bool, err error) {
 	if err := bootstrapMaster(ctx, store); err != nil {
 		return "", nil, false, err
@@ -140,14 +126,9 @@ func fsID(index int) string {
 	return fmt.Sprintf("%04x", index)
 }
 
-// Archive marks fsName's master block entry as archived: the filesystem
-// (and all its data) still exists, but every mutating Filesystem
-// operation will refuse with ErrArchived from the next Bootstrap
-// onward — see ErrArchived's doc comment on why reads are unaffected,
-// and docs/architecture.md's master block section on why
-// this is checked at mount/session start rather than continuously: an
-// already-open Filesystem does not notice an Archive call made after it
-// bootstrapped, by design, not by oversight.
+// Archive marks fsName archived: its data stays, but mutating operations
+// refuse with ErrArchived from each Filesystem's next Bootstrap. One
+// already open doesn't notice.
 func Archive(ctx context.Context, store objstore.Store, fsName string) error {
 	return updateFilesystemEntry(ctx, store, fsName, func(e *pb.FilesystemEntry) {
 		e.Archived = true
@@ -184,25 +165,18 @@ func updateFilesystemEntry(ctx context.Context, store objstore.Store, fsName str
 	return fmt.Errorf("update filesystem entry %q: exceeded %d retries", fsName, maxTreeRetries)
 }
 
-// Resize changes fsName's declared capacity (StatFS's "Total", the
-// `size` originally fixed at Bootstrap/creation time) to newSize.
-// Unlike Locking's EnableLocking flag, declared size is a real,
-// shared property of the filesystem itself — docs/architecture.md's own
-// master-block `size` field, same category as archived — so this
-// takes effect for every mount of fsName immediately, not just the
-// caller's own.
+// Resize changes fsName's declared capacity (StatFS's "Total"). It's stored
+// in the master block, so every mount sees it at once.
 func Resize(ctx context.Context, store objstore.Store, fsName string, newSize uint64) error {
 	return updateFilesystemEntry(ctx, store, fsName, func(e *pb.FilesystemEntry) {
 		e.Size = newSize
 	})
 }
 
-// Prune physically deletes every object fsName owns, every version of
-// each (everything under its ID prefix: content, trash, names), and then blanks
-// its master block entry, freeing the slot for reuse by a later Create.
-// Does not require the filesystem to be archived first — callers are
-// expected to archive, let any in-flight backup finish, and then prune,
-// but Prune itself doesn't enforce that ordering.
+// Prune deletes every version of every object under fsName's prefix
+// (content, trash, names) and blanks its master block entry, freeing the
+// slot. It doesn't itself require the filesystem to be archived; callers
+// archive first (icbfs-cli and the API refuse otherwise).
 func Prune(ctx context.Context, store objstore.Store, fsName string) error {
 	mb, _, err := readMaster(ctx, store)
 	if err != nil {

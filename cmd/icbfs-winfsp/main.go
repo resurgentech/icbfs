@@ -24,14 +24,10 @@ import (
 	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
 )
 
-// winfspAttribution is the exact notice WinFsp's own FLOSS exception
-// requires any FLOSS project linking against it to display in its UI
-// and user-facing docs, plus a link to WinFsp's repo — verified
-// against WinFsp's real License.txt, not paraphrased: "include the attribution... in user interface
-// and documentation." This is the one binary an end user actually
-// runs to get a WinFsp-backed mount, so it's shown both in --help/
-// usage output and at every successful mount, not just documented in
-// a file a user might never open.
+// winfspAttribution is the notice WinFsp's FLOSS exception requires in a
+// program's user interface and documentation ("include the attribution...
+// in user interface and documentation"), with a link. It is printed in the
+// usage text and at every mount.
 const winfspAttribution = "WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos\nhttps://github.com/winfsp/winfsp"
 
 func main() {
@@ -94,31 +90,17 @@ func main() {
 		log.Fatalf("filesystem %q: %v", *fsName, err)
 	}
 
-	// winfsp.CaseSensitive and winfspserver.Root's own caseInsensitive
-	// parameter must agree — see Root's doc comment for why
-	// these are two separate, both load-bearing settings, not one flag
-	// under two names: WinFsp's CaseSensitive controls whether the
-	// *kernel* folds case before ever calling this driver at all
-	// (with it left off, the kernel can
-	// hand this driver a canonicalized, differently-cased name than
-	// what's actually stored, breaking a plain Remove-Item outright),
-	// while Root's parameter controls whether this driver's own
-	// resolver additionally tolerates a case mismatch against
-	// icbfs.Filesystem's always-case-sensitive storage.
+	// winfsp.CaseSensitive and winfspserver.Root's caseInsensitive must
+	// agree; see Root's doc comment.
 	server, err := winfsp.Mount(
 		winfspserver.Root(fsys, *caseInsensitive),
 		mountpoint,
 		winfsp.FileSystemName("icbfs"),
 		winfsp.CaseSensitive(!*caseInsensitive),
-		// icbfs's storage is always case-preserving (exactly what was
-		// typed at create time is what's stored), regardless of
-		// *caseInsensitive — that flag only loosens *lookup*, per
-		// winfspserver.Root's own doc comment. go-winfsp defaults this
-		// to false ("filesystem does not preserve cases"), which told
-		// the kernel to normalize reported names instead of returning
-		// the real on-disk case — confirmed via winfsp-tests'
-		// getfileinfo_test (--external) reporting "\FILE0" back for a
-		// file created as "\file0".
+		// Storage always keeps names as given; -case-insensitive only
+		// loosens lookup. go-winfsp's default (names not preserved) made
+		// the kernel report normalized names: "\FILE0" for a file created
+		// as "\file0" (winfsp-tests' getfileinfo_test).
 		winfsp.CasePreserveNames(true),
 		// A read-only volume for an as-of mount, so Windows itself
 		// refuses writes before they reach the driver.

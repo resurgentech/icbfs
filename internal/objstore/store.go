@@ -1,30 +1,8 @@
-// Package objstore wraps the three backends icbfs targets (AWS S3, Azure
-// Blob Storage, and MinIO's S3 API) behind one interface, exposing only
-// the primitives the rest of icbfs is built on: whole-object put/get,
-// metadata-only updates, conditional writes, version listing, and
-// prefix-scoped listing.
-//
-// Store (below) is already that wrapper layer — S3Store (shared by both
-// real AWS S3 and MinIO, which speaks the same API) is the only
-// implementation that exists today, but nothing outside this package's
-// own S3Store knows that: every call site throughout icbfs (master.go,
-// lock.go, filesystem.go, ...) is already written against Store, never
-// against s3.Client or any AWS-specific type directly. Adding a real
-// AzureStore means writing one new file that implements this same
-// interface — it does not mean inventing a new abstraction layer at
-// that point, because this one is it.
-//
-// Each method below carries a comment sketching the Azure Blob Storage
-// SDK for Go (`github.com/Azure/azure-sdk-for-go/sdk/storage/azblob`)
-// call a real AzureStore would make, for whoever picks that up — but
-// unlike every S3-side primitive in this package (each verified against
-// real MinIO before being trusted), this
-// is NOT verified against a real Azure SDK or Storage Account: no
-// Azure SDK is installed in this environment and no account exists to
-// test against, the same gap internal/notify/azurecf has, for the same
-// reason. Treat these as a starting sketch from training knowledge, to
-// be confirmed against the actual installed package source before
-// trusting any of it, not as verified fact.
+// Package objstore is the object store as icbfs uses it: whole-object put
+// and get, conditional writes, version listing, and prefix listing.
+// Everything else in icbfs is written against Store; S3Store (AWS S3 and
+// MinIO) is the one implementation, and AsOf is a read-only view of a Store
+// at a past time.
 package objstore
 
 import (
@@ -68,56 +46,26 @@ const (
 
 // Store is the object-store primitive set icbfs's core is built on.
 type Store interface {
-	// Put writes body as the object body under key, replacing any existing
-	// content and metadata. If ifMatch is non-empty, the write is
-	// conditioned on the current object's ETag matching it (compare-and-swap);
-	// an empty ifMatch means an unconditional write.
-	//
-	// Sketch for Azure: (*blob.Client).Upload(ctx, body, &blob.UploadOptions{
-	// Metadata: metadata, AccessConditions: &blob.AccessConditions{
-	// ModifiedAccessConditions: &blob.ModifiedAccessConditions{IfMatch: ...}}}),
-	// taking the ETag from the returned UploadResponse.
+	// Put writes body as the object under key, replacing its content and
+	// metadata. A non-empty ifMatch makes the write conditional on the
+	// current ETag (compare-and-swap); empty means unconditional.
 	Put(ctx context.Context, key string, body io.Reader, metadata map[string]string, ifMatch string) (*Object, error)
 
-	// Get returns the current body and metadata for key.
-	//
-	// Sketch for Azure: (*blob.Client).DownloadStream(ctx, nil), reading
-	// Body and taking Object fields from the response's ETag/
-	// LastModified/Metadata/ContentLength.
+	// Get returns key's current body and metadata.
 	Get(ctx context.Context, key string) (io.ReadCloser, *Object, error)
 
-	// Head returns metadata for key without fetching the body.
-	//
-	// Sketch for Azure: (*blob.Client).GetProperties(ctx, nil) — Azure's
-	// direct equivalent of S3's HeadObject.
+	// Head returns key's metadata without its body.
 	Head(ctx context.Context, key string) (*Object, error)
 
 	// UpdateMetadata replaces an object's metadata without rewriting its
-	// body. On a versioned bucket this creates a new version, same as a
-	// content write would. If ifMatch is non-empty, the update is
-	// conditioned on the current object's ETag matching it, same as Put.
-	//
-	// Sketch for Azure: (*blob.Client).SetMetadata(ctx, metadata, &blob.
-	// SetMetadataOptions{AccessConditions: ...}) — notably a *real*,
-	// direct metadata-only operation, unlike S3Store's own
-	// implementation of this method (S3 has no such primitive and goes
-	// through CopyObject with a REPLACE metadata directive instead; check
-	// S3Store.UpdateMetadata's own doc comment for that detail before
-	// assuming Azure needs the same workaround — it shouldn't).
+	// body (a new version on a versioned bucket), conditional on ifMatch as
+	// Put is.
 	UpdateMetadata(ctx context.Context, key string, metadata map[string]string, ifMatch string) (*Object, error)
 
 	// ListVersions returns every version of key, newest first, delete
-	// markers included (DeleteMarker set). Newest first is the store's
-	// own order, not a re-sort by LastModified, which would scramble
-	// versions written within the same timestamp.
-	//
-	// Sketch for Azure: (*container.Client).NewListBlobsFlatPager(&container.
-	// ListBlobsFlatOptions{Prefix: &key, Include: container.ListBlobsInclude{
-	// Versions: true}}), filtered to exact-name matches (a prefix listing
-	// scoped to one blob name), each page's Segment.BlobItems giving
-	// VersionID/Properties.Etag/LastModified per entry, newest-first
-	// ordering unconfirmed (would need checking against this behavior for
-	// real, not assumed from the S3 side's already-confirmed ordering).
+	// markers included (DeleteMarker set). Newest first is the store's own
+	// order, not a re-sort by LastModified, which would scramble versions
+	// written within the same timestamp.
 	ListVersions(ctx context.Context, key string) ([]Object, error)
 
 	// ListAllVersions is ListVersions for every key starting with prefix:
@@ -130,21 +78,9 @@ type Store interface {
 	GetVersion(ctx context.Context, key, versionID string) (io.ReadCloser, *Object, error)
 	HeadVersion(ctx context.Context, key, versionID string) (*Object, error)
 
-	// Delete removes key (creating a delete marker on a versioned bucket).
-	// If ifMatch is non-empty, the delete is conditioned on the current
-	// object's ETag matching it.
-	//
-	// Sketch for Azure: (*blob.Client).Delete(ctx, &blob.DeleteOptions{
-	// AccessConditions: ...}). Flagged specifically, not just sketched:
-	// Azure Blob versioning's delete semantics are not confirmed to work
-	// the same way as S3's delete-marker model this method's own doc
-	// comment describes — Azure may simply demote the current version
-	// without leaving an explicit "delete marker" entry the way S3 does.
-	// Anything in icbfs that depends on ListVersions/Get being able to
-	// tell "deleted" apart from "never existed" after a Delete would need
-	// this checked against a real account before trusting it, not
-	// inferred from the S3 behavior already verified elsewhere in this
-	// package.
+	// Delete removes key, leaving a delete marker on a versioned bucket. A
+	// non-empty ifMatch makes it conditional, but MinIO doesn't enforce
+	// If-Match on deletes, so nothing relies on that.
 	Delete(ctx context.Context, key string, ifMatch string) error
 
 	// DeleteVersion permanently removes one version of key — the only
@@ -154,73 +90,32 @@ type Store interface {
 	// the version before it is current again).
 	DeleteVersion(ctx context.Context, key, versionID string) error
 
-	// PutIfAbsent writes body as the object body under key only if no
-	// object currently exists there — a true create-if-absent CAS
-	// primitive (unlike Put's ifMatch, which has no way to express
-	// "must not exist" when there is no prior ETag to condition on).
-	// If an object already exists at key, it returns the error Put
-	// returns for a failed If-Match (satisfies IsPreconditionFailed),
-	// and body is not written. Confirmed against real MinIO, not
-	// assumed: PutObject's IfNoneMatch: "*" is honored and reports 412.
-	//
-	// Sketch for Azure: same Upload call as Put, with AccessConditions.
-	// ModifiedAccessConditions.IfNoneMatch set to azcore.ETagAny (Azure's
-	// "*" wildcard) — structurally the same mechanism S3 uses, but this
-	// specific combination is unverified here the way PutIfAbsent's own
-	// 412-on-conflict behavior was confirmed against real MinIO.
+	// PutIfAbsent writes body under key only if nothing is there (If-None-
+	// Match: *). If something is, it returns the error a failed If-Match
+	// does (IsPreconditionFailed), and writes nothing.
 	PutIfAbsent(ctx context.Context, key string, body io.Reader, metadata map[string]string) (*Object, error)
 
-	// PutParts writes key as one object assembled from parts, in order —
-	// a multipart upload, for objects too big for one Put, or to rewrite
-	// a big object without resending what didn't change: a part can be
-	// uploaded from its Body or copied server-side from a byte range of
-	// an earlier version of key itself. Conditioned on ifMatch exactly
-	// like Put (checked when the parts are assembled, so a lost race
-	// satisfies IsPreconditionFailed), and all or nothing: on any error
-	// the upload is aborted and key is unchanged. Every part but the last
-	// must be at least MinPartSize, and at most MaxPartSize; there can be
-	// at most MaxParts.
+	// PutParts writes key as one object assembled from parts, in order: a
+	// multipart upload, for objects too big for one Put, or to rewrite a
+	// big object without resending what didn't change, since a part can be
+	// copied on the server from a byte range of an earlier version of key
+	// itself.
 	//
-	// Confirmed against real MinIO, not assumed: CompleteMultipartUpload
-	// honors If-Match and If-None-Match (412 when stale), and a copied
-	// range comes from the pinned version even after key has moved on.
-	//
-	// Sketch for Azure: Put Block / Put Block From URL per part, then Put
-	// Block List with an If-Match access condition — the same shape,
-	// unverified here.
+	// It is conditional on ifMatch as Put is, checked when the parts are
+	// assembled, and all or nothing: on any error the upload is aborted and
+	// key is unchanged. Every part but the last is MinPartSize to
+	// MaxPartSize bytes, and there are at most MaxParts. A copied range
+	// comes from the pinned version even if key has moved on since.
 	PutParts(ctx context.Context, key string, parts []Part, metadata map[string]string, ifMatch string) (*Object, error)
 
 	// ListByPrefix returns every current object whose key starts with
-	// prefix, paginating internally. Only Key and Size are populated —
-	// this is the lightweight listing operation docs/architecture.md's
-	// master block section describes for du/df's
-	// "Used" and for Prune: no object bodies are fetched, just listing
-	// metadata, but it's still O(number of matching objects/pages), not
-	// O(1) — there is no faster primitive on any of the three target
-	// backends (see that section for why).
-	//
-	// Sketch for Azure: (*container.Client).NewListBlobsFlatPager(&container.
-	// ListBlobsFlatOptions{Prefix: &prefix}), draining every page via
-	// .NextPage(ctx)/.More() and taking Key/Size from each BlobItem's
-	// Name/Properties.ContentLength.
+	// prefix, with only Key and Size filled in: what df's "Used" and Prune
+	// need. It costs one listing page per thousand objects; no supported
+	// store has anything faster.
 	ListByPrefix(ctx context.Context, prefix string) ([]Object, error)
 
-	// ServerTime returns the object store's current clock, observed
-	// via a real request's raw HTTP response — not a typed field like
-	// an Object's LastModified (which only ever says when some
-	// specific object was last written, never "what time is it right
-	// now"). Used to anchor lease expiry (docs/architecture.md's Locking
-	// section) to the store's clock instead of the calling client's,
-	// which could be skewed relative to other clients.
-	//
-	// Sketch for Azure: every Azure Storage REST response also carries a
-	// standard HTTP Date header, so the same raw-header-capture approach
-	// S3Store.ServerTime uses (smithy-go's deserialize middleware) has an
-	// Azure SDK equivalent: azcore's runtime.WithCaptureResponse(ctx,
-	// &resp) stashes the raw *http.Response for whatever call wraps it
-	// (e.g. a GetProperties against the container), letting this read
-	// resp.Header.Get("Date") the same way. Unverified here the way
-	// S3Store.ServerTime's approach was confirmed against real MinIO
-	// before being trusted.
+	// ServerTime is the store's clock now, from a response's HTTP Date
+	// header (whole seconds). Lock leases are anchored to it rather than to
+	// the caller's clock, which could be skewed against other clients'.
 	ServerTime(ctx context.Context) (time.Time, error)
 }

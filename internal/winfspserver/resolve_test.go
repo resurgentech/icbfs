@@ -17,10 +17,8 @@ import (
 	"github.com/resurgentech/icbfs/internal/testutil"
 )
 
-// newTestFilesystem spins up a real MinIO container and a versioned
-// bucket, and returns an already-bootstrapped Filesystem backed by it
-// — same pattern as every other package's own copy of this helper
-// (internal/icbfs, internal/fuseserver, ...). Requires Docker.
+// newTestFilesystem starts a MinIO container with a versioned bucket and
+// returns a Filesystem on it. Requires Docker.
 func newTestFilesystem(t *testing.T) *icbfs.Filesystem {
 	t.Helper()
 	ctx := context.Background()
@@ -92,10 +90,8 @@ func TestResolvePathRoot(t *testing.T) {
 	}
 }
 
-// TestResolvePathNestedDirectories covers F2's "Done when" nested-
-// directory case: a file several directories deep resolves to the
-// right key, and every intermediate directory along the way also
-// resolves correctly on its own.
+// TestResolvePathNestedDirectories: a file several directories deep
+// resolves to the right key, and so does each directory on the way.
 func TestResolvePathNestedDirectories(t *testing.T) {
 	fsys := newTestFilesystem(t)
 	ctx := context.Background()
@@ -136,12 +132,8 @@ func TestResolvePathNestedDirectories(t *testing.T) {
 	}
 }
 
-// TestResolvePathHardlinkedNamesShareUUID covers F2's other explicit
-// "Done when" case: two different paths linked to the same file (via
-// icbfs.Filesystem.Link, the real hardlink primitive the FUSE driver
-// already uses) resolve to the identical UUID — proving this layer
-// doesn't accidentally treat a hardlink's second name as a distinct
-// entity.
+// TestResolvePathHardlinkedNamesShareUUID: two paths linked to one file
+// resolve to the same key.
 func TestResolvePathHardlinkedNamesShareUUID(t *testing.T) {
 	fsys := newTestFilesystem(t)
 	ctx := context.Background()
@@ -174,13 +166,8 @@ func TestResolvePathHardlinkedNamesShareUUID(t *testing.T) {
 	}
 }
 
-// TestResolvePathCaseInsensitiveMatchesDifferentCase:
-// with caseInsensitive=true, a path using different case than what
-// was actually stored still resolves to the same entry — the
-// WinFsp-mount-flag-driven behavior docs/architecture.md's Windows
-// compatibility section calls for (storage itself stays case-
-// sensitive/preserving; only lookup folds case, and only when this
-// flag is set).
+// TestResolvePathCaseInsensitiveMatchesDifferentCase: with caseInsensitive,
+// a path in different case resolves to the stored entry.
 func TestResolvePathCaseInsensitiveMatchesDifferentCase(t *testing.T) {
 	fsys := newTestFilesystem(t)
 	ctx := context.Background()
@@ -216,10 +203,8 @@ func TestResolvePathCaseInsensitiveMatchesDifferentCase(t *testing.T) {
 	}
 }
 
-// TestResolvePathNotFound confirms a genuinely missing path surfaces
-// icbfs.ErrNotFound, not some other generic error — callers (F3's real
-// WinFsp callback wiring) need to distinguish this to report the right
-// NTSTATUS back to the kernel.
+// TestResolvePathNotFound: a missing path is icbfs.ErrNotFound, which
+// callers map to the right NTSTATUS.
 func TestResolvePathNotFound(t *testing.T) {
 	fsys := newTestFilesystem(t)
 	ctx := context.Background()
@@ -232,11 +217,8 @@ func TestResolvePathNotFound(t *testing.T) {
 	}
 }
 
-// TestResolvePathThroughNonDirectoryFails confirms treating a plain
-// file as an intermediate path component (e.g. `\file.txt\sub`, what
-// a real client sends if it mistakenly assumes a file is a directory)
-// fails with icbfs.ErrNotDir, not a confusing not-found or a silent
-// wrong answer.
+// TestResolvePathThroughNonDirectoryFails: a file used as a directory
+// (`\file.txt\sub`) is icbfs.ErrNotDir.
 func TestResolvePathThroughNonDirectoryFails(t *testing.T) {
 	fsys := newTestFilesystem(t)
 	ctx := context.Background()

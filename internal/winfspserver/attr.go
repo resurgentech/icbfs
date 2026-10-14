@@ -15,34 +15,22 @@ import (
 	"github.com/resurgentech/icbfs/internal/icbfs"
 )
 
-// fillFileInfo translates an icbfs.Attr into the FSP_FSCTL_FILE_INFO
-// WinFsp expects back from Open/Create/GetFileInfo/Overwrite.
+// fillFileInfo translates an icbfs.Attr into the FSP_FSCTL_FILE_INFO WinFsp
+// expects from Open, Create, GetFileInfo and Overwrite.
 //
-// LastWriteTime and ChangeTime both report Mtime (falling back to Btime,
-// then now, if Mtime is zero), although icbfs tracks a real status-change
-// time (Attr.Ctime) that FUSE reports. CreationTime reports Btime.
-//
-// LastAccessTime is real, not a copy of
-// Mtime: reports a.Atime when it's been explicitly tracked (by a real
-// read — this package's own Read/ReadDirectory call TouchAtime, never
-// this function), falling back to the same Mtime/Btime/now chain
-// otherwise, same honest "as good as we've got" default as before.
-//
-// A method on *driver (not a free function) so it can consult
-// d.fsys.PrimaryWindows() when deciding which attribute representation
-// is authoritative — see attributesFromAttr.
+// LastWriteTime and ChangeTime report Mtime (or Btime, or now, if it's
+// zero); CreationTime reports Btime; LastAccessTime reports the recorded
+// access time, with the same fallbacks. Which attribute bits it reports
+// depends on the primary mode (attributesFromAttr).
 func (d *driver) fillFileInfo(info *winfsp.FSP_FSCTL_FILE_INFO, key string, typ icbfs.EntryType, a icbfs.Attr) {
 	info.FileAttributes = d.attributesFromAttr(typ, a)
 	switch {
 	case typ == icbfs.TypeSymlink:
 		info.ReparseTag = windows.IO_REPARSE_TAG_SYMLINK
 	default:
-		// A generic (non-symlink) reparse point — the tag is the raw stored buffer's own leading
-		// 4 bytes, same layout every FSCTL_SET_REPARSE_POINT caller
-		// already sends. FILE_ATTRIBUTE_REPARSE_POINT must be ORed
-		// in alongside whatever attributesFromAttr already reported
-		// (ReadOnly, Hidden, ...) — real NTFS reparse points combine
-		// freely with other attribute bits, this isn't an either/or.
+		// A non-symlink reparse point: its tag is the stored buffer's first
+		// 4 bytes. FILE_ATTRIBUTE_REPARSE_POINT is added to the other
+		// attribute bits, as on NTFS.
 		if raw, ok := icbfs.GenericReparseFromXattrs(a.Xattrs); ok && len(raw) >= 4 {
 			info.ReparseTag = binary.LittleEndian.Uint32(raw[0:4])
 			info.FileAttributes |= windows.FILE_ATTRIBUTE_REPARSE_POINT
@@ -77,18 +65,11 @@ func (d *driver) fillFileInfo(info *winfsp.FSP_FSCTL_FILE_INFO, key string, typ 
 	}
 	info.LastAccessTime = filetimeFromTime(atime)
 
-	// A real, stable, distinct-per-object file ID. It matters a great
-	// deal: with every object reporting IndexNumber 0, a real WinFsp
-	// conformance run
-	// (winfsp-tests --external's own verification tooling)
-	// found that a path deleted and immediately recreated under the
-	// same name could be confused with its predecessor by the
-	// kernel's own FCB/attribute caching, which (like NTFS) uses the
-	// file ID as part of its identity/cache-coherency logic — a brand
-	// new UUID (and thus a different icbfs.Ino hash) per Create call
-	// is exactly what breaks that false "same file" identification.
-	// Same reuse of icbfs.Ino the FUSE driver already relies on for
-	// its own inode numbers.
+	// A stable file ID per object. With every object reporting 0, the
+	// kernel's caching confused a file deleted and recreated under the same
+	// name with its predecessor (winfsp-tests); a new item has a new key
+	// and so a new ID. The FUSE driver uses the same icbfs.Ino for inode
+	// numbers.
 	info.IndexNumber = icbfs.Ino(key)
 	info.HardLinks = 0 // unimplemented, per FSP_FSCTL_FILE_INFO's own doc comment
 	info.EaSize = 0
@@ -98,12 +79,10 @@ func (d *driver) fillFileInfo(info *winfsp.FSP_FSCTL_FILE_INFO, key string, typ 
 // since 1601-01-01).
 const unixEpochAsFiletime = 116444736000000000
 
-// filetimeFromTime converts a Go time.Time into a Windows FILETIME
-// (100ns intervals since 1601-01-01), the representation
-// FSP_FSCTL_FILE_INFO's time fields use. Computed from whole seconds,
-// not UnixNano, which overflows for dates before 1678 — and SetFileTime
-// accepts any FILETIME (winfsp-tests' stream_setfileinfo_test sets one
-// in 1601). Times before 1601 clamp to 0.
+// filetimeFromTime converts a time.Time into a FILETIME (100 ns intervals
+// since 1601-01-01). It computes from whole seconds, since UnixNano
+// overflows before 1678 and SetFileTime accepts any FILETIME (winfsp-tests'
+// stream_setfileinfo_test sets one in 1601). Times before 1601 become 0.
 func filetimeFromTime(t time.Time) uint64 {
 	ticks := t.Unix()*10_000_000 + int64(t.Nanosecond()/100) + unixEpochAsFiletime
 	if ticks < 0 {
@@ -124,18 +103,11 @@ func timeFromFiletime(v uint64) time.Time {
 	return time.Unix(sec, rem*100).UTC()
 }
 
-// attributesFromAttr computes the Windows FILE_ATTRIBUTE_* bits to
-// report for an entry.
-//
-// The primary-mode rule (docs/architecture.md's "Windows compatibility:
-// primary mode"): on a primary-Windows filesystem, natively-stored
-// Hidden/System/ReadOnly/Archive bits (icbfs.WindowsAttributesFromXattrs)
-// are authoritative and reported with full fidelity, including
-// Hidden/System/Archive, which have no POSIX analog at all. On a
-// primary-POSIX filesystem (or a primary-Windows file nothing has ever
-// called SetWindowsAttributes on), fall back to the original
-// approximation: ReadOnly derived from the POSIX owner-write bit,
-// Hidden/System/Archive always clear.
+// attributesFromAttr computes the FILE_ATTRIBUTE_* bits to report. On a
+// primary-Windows filesystem the stored ReadOnly, Hidden, System and
+// Archive bits are reported as stored. Otherwise (or for a file that has
+// none stored) ReadOnly comes from the owner-write mode bit, and the others
+// are clear.
 func (d *driver) attributesFromAttr(typ icbfs.EntryType, a icbfs.Attr) uint32 {
 	switch typ {
 	case icbfs.TypeDir:
@@ -147,11 +119,8 @@ func (d *driver) attributesFromAttr(typ icbfs.EntryType, a icbfs.Attr) uint32 {
 		}
 		return attrs
 	case icbfs.TypeSymlink:
-		// Windows has no native concept of a symlink's own
-		// "read-only"-ness distinct from being a reparse point at
-		// all — this attribute is what tells the kernel/clients to
-		// resolve it via GetReparsePoint instead of treating it as
-		// regular file content.
+		// A directory symlink: the reparse point attribute tells clients to
+		// resolve it through GetReparsePoint.
 		if _, ok := a.Xattrs[icbfs.WindowsDirSymlinkXattrKey]; ok {
 			return windows.FILE_ATTRIBUTE_REPARSE_POINT | windows.FILE_ATTRIBUTE_DIRECTORY
 		}
@@ -172,10 +141,9 @@ func (d *driver) attributesFromAttr(typ icbfs.EntryType, a icbfs.Attr) uint32 {
 	}
 }
 
-// modeFromAttributes is Create's inverse: approximates a POSIX mode
-// for a new file from the Windows FILE_ATTRIBUTE_READONLY bit a
-// CreateFile call supplied. Directories created through Create always
-// get a fixed 0755, handled by the caller — this is files only.
+// modeFromAttributes is the POSIX mode for a new file, from the
+// FILE_ATTRIBUTE_READONLY bit its create asked for. Directories get 0755
+// from the caller.
 func modeFromAttributes(fileAttributes uint32) uint32 {
 	if fileAttributes&windows.FILE_ATTRIBUTE_READONLY != 0 {
 		return 0o444
@@ -196,18 +164,13 @@ func (d *driver) GetFileInfo(fs *winfsp.FileSystemRef, file uintptr, info *winfs
 	return nil
 }
 
-// SetBasicInfo updates mode/attribute-adjacent fields WinFsp's
-// SetFileTime/SetFileAttributes callers end up driving.
+// SetBasicInfo applies SetFileAttributes and SetFileTime.
 //
-// Always persists the real Hidden/System/ReadOnly/Archive byte via
-// SetWindowsAttributes (native-fidelity storage, regardless of
-// primary mode) *and*
-// always derives/stores the approximated POSIX read-only mode bit the
-// same way this driver always has, so a primary-POSIX filesystem's
-// FUSE side keeps seeing a sensible (if partial) reflection of a
-// Windows client's ReadOnly toggle. Which of the two representations
-// GetFileInfo/attributesFromAttr later treats as authoritative is a
-// read-time decision based on primary mode, not this method's.
+// It stores the ReadOnly, Hidden, System and Archive bits as given,
+// whatever the primary mode, and also sets the POSIX owner-write bit from
+// ReadOnly, so a Linux mount of a primary-POSIX filesystem sees a Windows
+// client's ReadOnly. Which one is authoritative is decided when read, by
+// primary mode.
 func (d *driver) SetBasicInfo(fs *winfsp.FileSystemRef, file uintptr, flags winfsp.SetBasicInfoFlags, fileAttributes uint32, creationTime, lastAccessTime, lastWriteTime, changeTime uint64, info *winfsp.FSP_FSCTL_FILE_INFO) error {
 	h, ok := d.handle(file)
 	if !ok {
@@ -225,11 +188,7 @@ func (d *driver) SetBasicInfo(fs *winfsp.FileSystemRef, file uintptr, flags winf
 		b := timeFromFiletime(creationTime)
 		btimeP = &b
 	}
-	// SetFileTime's explicit LastAccessTime/LastWriteTime set
-	// — a real,
-	// previously entirely-ignored call: this function used to accept
-	// creationTime/lastAccessTime/lastWriteTime/changeTime as
-	// parameters and silently do nothing with any of them.
+	// SetFileTime's explicit times.
 	if flags&winfsp.SetBasicInfoLastAccessTime != 0 {
 		a := timeFromFiletime(lastAccessTime)
 		atimeP = &a
@@ -261,10 +220,10 @@ func (d *driver) SetFileSize(fs *winfsp.FileSystemRef, file uintptr, newSize uin
 		return os.ErrNotExist
 	}
 	if setAllocationSize {
-		// Allocation has no storage analog here (no preallocation in an
-		// object store); it's tracked in memory while the file is open
-		// and reported back, as NTFS does. Shrinking allocation below
-		// the data size truncates the data, also as on NTFS.
+		// Allocation has no counterpart in an object store, so it's kept in
+		// memory while the file is open and reported, as NTFS does.
+		// Shrinking it below the data size truncates the data, also as on
+		// NTFS.
 		attr, err := d.stat(h)
 		if err != nil {
 			return toWinError(err)
@@ -311,41 +270,22 @@ func (d *driver) stat(h *fileHandle) (icbfs.Attr, error) {
 	return attr, nil
 }
 
-// fallbackSD is what GetSecurity/GetSecurityByName report for an entry
-// with no natively-stored windows.acl xattr (every directory, always —
-// see securityDescriptorFor — and any file/symlink SetSecurity has
-// never touched): the mounting process's own identity, via go-winfsp's
-// own procsd package — the same default gofs itself falls back to.
-// (Mapping POSIX uid/gid to a SID would need a mapping there is no
-// source for.)
-//
-// Every SD returned from here must carry an Owner and Group, not just
-// a DACL (WinFsp rejects one without, STATUS_INVALID_SECURITY_DESCR) —
-// procsd.Load() always does, since it's sourced from a live process
-// token via GetSecurityInfo.
+// fallbackSD is the security descriptor for an item on a primary-Windows
+// filesystem with none stored: the mounting process's identity, from
+// go-winfsp's procsd, as gofs does. (There's no uid-to-SID mapping to
+// derive one from.) It has an Owner and a Group, as WinFsp requires
+// (STATUS_INVALID_SECURITY_DESCR otherwise).
 func fallbackSD() (*windows.SECURITY_DESCRIPTOR, error) {
 	return procsd.Load()
 }
 
-// securityDescriptorFor resolves the SD to report for typ/attr: a
-// file's, symlink's or directory's own stored windows.acl xattr if one
-// was set at create time or by SetSecurity (full native fidelity, as
-// for attribute bits), falling back to fallbackSD
-// otherwise; a corrupt or
-// unparseable stored SDDL string (which SetSecurity itself should
-// never produce, but a direct store-level edit could) is treated the
-// same as "nothing stored" rather than failing the whole call.
+// securityDescriptorFor resolves the descriptor to report for an item. A
+// stored descriptor that doesn't parse is treated as none.
 func (d *driver) securityDescriptorFor(typ icbfs.EntryType, attr icbfs.Attr) (*windows.SECURITY_DESCRIPTOR, error) {
-	// Stored ACL is only authoritative on a primary-Windows filesystem
-	// — "primary mode determines which [format] is authoritative at
-	// write time; the other is derived on access" (docs/architecture.md's
-	// "Windows compatibility: primary mode" section), the same gating
-	// native attribute bits get vs. the mode-derived approximation. A primary-POSIX filesystem always derives
-	// from mode instead (below), even if SetSecurity was once called
-	// on it: that write is preserved (never discarded — ACLs are
-	// explicitly "not a lossy one-way approximation" per the same
-	// docs/architecture.md section) but isn't read back as
-	// authoritative.
+	// On a primary-Windows filesystem the stored descriptor is
+	// authoritative, else fallbackSD. On a primary-POSIX one the descriptor
+	// is always derived from the mode; a descriptor set there is kept but
+	// not read back.
 	if d.fsys.PrimaryWindows() {
 		if raw, ok := icbfs.WindowsACLFromXattrs(attr.Xattrs); ok {
 			if sd, err := windows.SecurityDescriptorFromString(string(raw)); err == nil {
@@ -359,26 +299,14 @@ func (d *driver) securityDescriptorFor(typ icbfs.EntryType, attr icbfs.Attr) (*w
 	return fallbackSD()
 }
 
-// approximateDACLFromMode is the mode-bit check for a primary-POSIX
-// filesystem mounted on Windows: a primary-POSIX filesystem has
-// no real per-file Windows ACL, and there is no POSIX uid/gid-to-SID
-// mapping in this project to build a real owner/group-differentiated
-// one from (no RFC2307/Services-for-NFS-style mapping exists or is
-// planned) — so this can only approximate "is this file
-// readable/writable at all," using "Everyone" (the WD well-known SID)
-// as the universal stand-in principal, the same ownership-agnostic
-// style as the ReadOnly-from-owner-write-bit approximation for
-// attribute bits.
+// approximateDACLFromMode derives a DACL from a primary-POSIX item's mode.
+// There's no uid-to-SID mapping, so it can only say whether the item can be
+// read and written at all, granted to Everyone (WD).
 //
-// A mode of 0 (e.g. chmod 000) produces an empty (present, protected,
-// zero-ACE) DACL — not an absent one, which Windows treats as "no
-// protection at all" and would grant everyone full access, the exact
-// opposite of what's needed. WinFsp's own real access-check mechanism
-// (automatic for Create/Open/Rename: the dispatcher does this, not
-// this driver) then denies access to every caller
-// against that empty DACL, including whoever mounted the filesystem —
-// matching the FUSE side: a chmod 000 file cannot be read or written
-// even by its own owner.
+// Mode 0 gives an empty DACL, not an absent one: Windows reads an absent
+// DACL as "no protection" and would grant everyone everything. WinFsp's
+// access check then refuses every caller, the mounting one included, as a
+// mode-0 file is unreadable to its owner on Linux.
 func approximateDACLFromMode(mode uint32) (*windows.SECURITY_DESCRIPTOR, error) {
 	const (
 		anyRead  = 0o444
@@ -403,13 +331,11 @@ func (d *driver) GetSecurityByName(fs *winfsp.FileSystemRef, name string, flags 
 	}
 	r, err := resolvePath(ctx(), d.fsys, path, d.caseInsensitive)
 	if err != nil {
-		// A symlink mid-path: hand the whole path to WinFsp's own
-		// reparse resolver (see hasIntermediateSymlink). go-winfsp
-		// doesn't pass back the reparse point index on an error return,
-		// so WinFsp gets 0 and starts its walk at the beginning of the
-		// path — it skips non-reparse components via
-		// GetReparsePointByName's STATUS_NOT_A_REPARSE_POINT, so the
-		// result is the same, just one extra lookup per component.
+		// A symlink partway along the path: let WinFsp's reparse resolver
+		// walk it (see hasIntermediateSymlink). go-winfsp passes no reparse
+		// index back on an error, so WinFsp starts from the beginning; it
+		// skips plain components (STATUS_NOT_A_REPARSE_POINT), at one extra
+		// lookup each.
 		if hasIntermediateSymlink(ctx(), d.fsys, path, d.caseInsensitive) {
 			return 0, nil, windows.STATUS_REPARSE
 		}
@@ -446,13 +372,10 @@ func (d *driver) GetSecurity(fs *winfsp.FileSystemRef, file uintptr) (*windows.S
 	return d.securityDescriptorFor(typ, attr)
 }
 
-// mergeSecurityDescriptor applies only the components SetSecurity's
-// info bitmask actually asks to change onto base, leaving the rest
-// untouched — matching the real NtSetSecurityObject contract: a
-// Windows caller that just changed DACL permissions via the Security
-// tab passes a desc carrying only a DACL, and info with only
-// DACL_SECURITY_INFORMATION set; blindly overwriting Owner/Group with
-// desc's (likely zero-value/absent) fields would silently corrupt them.
+// mergeSecurityDescriptor applies to base only the parts SetSecurity's info
+// asks to change, as NtSetSecurityObject does: changing permissions in
+// Explorer sends only a DACL, and overwriting Owner and Group with its
+// absent ones would erase them.
 func mergeSecurityDescriptor(base *windows.SECURITY_DESCRIPTOR, info windows.SECURITY_INFORMATION, desc *windows.SECURITY_DESCRIPTOR) (*windows.SECURITY_DESCRIPTOR, error) {
 	abs, err := base.ToAbsolute()
 	if err != nil {
@@ -522,11 +445,11 @@ const (
 	fileAllAccess      = 0x001F01FF
 )
 
-// mapGenericFileRights rewrites generic rights (GA/GR/GW/GX) in sd's
-// DACL to their file-specific equivalents, in place, as NTFS does when
-// security is set — so a DACL set with GA reads back as FA
-// (winfsp-tests' setsecurity_test). sd must be memory this driver owns
-// (e.g. a fresh ToSelfRelative copy), never the caller's buffer.
+// mapGenericFileRights rewrites generic rights (GA, GR, GW, GX) in sd's
+// DACL to their file equivalents, in place, as NTFS does when security is
+// set, so a DACL set with GA reads back as FA (winfsp-tests'
+// setsecurity_test). sd must be this driver's own memory (a fresh
+// ToSelfRelative copy), never the caller's buffer.
 func mapGenericFileRights(sd *windows.SECURITY_DESCRIPTOR) error {
 	dacl, _, err := sd.DACL()
 	if errors.Is(err, windows.ERROR_OBJECT_NOT_FOUND) || dacl == nil {
@@ -560,11 +483,8 @@ func mapGenericFileRights(sd *windows.SECURITY_DESCRIPTOR) error {
 	return nil
 }
 
-// SetSecurity persists a merged security descriptor as the real
-// windows.acl xattr. Directories are a documented no-op
-// (success, nothing written) — see securityDescriptorFor and
-// SetWindowsACL's own doc comment for why: there's no .metadata object
-// for a directory to store one in at all.
+// SetSecurity stores the merged security descriptor as the item's
+// windows.acl, for files and directories alike.
 func (d *driver) SetSecurity(fs *winfsp.FileSystemRef, file uintptr, info windows.SECURITY_INFORMATION, desc *windows.SECURITY_DESCRIPTOR) error {
 	h, ok := d.handle(file)
 	if !ok {

@@ -1,9 +1,8 @@
 //go:build windows
 
-// Package winfspserver's Windows-only files wire github.com/winfsp/
-// go-winfsp's native Behaviour* interfaces directly to icbfs.Filesystem
-// (via resolve.go's portable resolvePath), not through the higher-level
-// gofs wrapper.
+// Package winfspserver's Windows-only files implement go-winfsp's native
+// Behaviour interfaces directly on icbfs.Filesystem (through resolve.go's
+// portable resolvePath), not through the gofs wrapper.
 package winfspserver
 
 import (
@@ -42,14 +41,12 @@ type driver struct {
 	allocs   map[string]uint64
 }
 
-// sharedOpen is the one icbfs.OpenFile every handle on the same file
-// within this mount reads and writes through, reference-counted by
-// handle. Windows keeps one cache/FCB per file, so all handles on it
-// must see each other's writes immediately — with a private OpenFile
-// per handle, a non-cached read through one handle missed data a
-// cached handle had just written (winfsp-tests' rdwr_mixed_test).
-// icbfs.OpenFile's per-session isolation still applies across mounts
-// and clients, which is what its CAS-retry logic is about.
+// sharedOpen is the one icbfs.OpenFile every handle on a file in this mount
+// reads and writes through, counted by handle. Windows keeps one cache per
+// file, so every handle must see the others' writes at once; a private
+// OpenFile per handle made a non-cached read miss what a cached handle had
+// just written (winfsp-tests' rdwr_mixed_test). OpenFile's isolation still
+// applies between mounts and machines.
 type sharedOpen struct {
 	key  string
 	refs int // guarded by driver.openMu
@@ -58,16 +55,11 @@ type sharedOpen struct {
 	open *icbfs.OpenFile // nil until first real I/O, or after invalidate
 }
 
-// fileHandle is the file context WinFsp's Open/Create hand back a
-// uintptr for and every later call (Read, Write, Close, GetFileInfo,
-// ...) receives verbatim — this driver's own bookkeeping, opaque to
-// WinFsp itself, exactly like internal/fuseserver's FileHandle plays
-// the same role for go-fuse.
+// fileHandle is this driver's state for one handle: what Open and Create
+// return as a uintptr, and every later call receives.
 //
-// shared is non-nil only once this handle has actually been read from
-// or written to (lazily attached via openFile) — most handles
-// (directory listings, a plain GetFileInfo-only open) never need
-// icbfs.OpenFile's buffering/CAS-retry machinery at all.
+// shared is attached on first read or write (openFile). Most handles
+// (directory listings, attribute queries) never need it.
 type fileHandle struct {
 	key  string
 	typ  icbfs.EntryType
@@ -89,23 +81,16 @@ type fileHandle struct {
 	dirBuf winfsp.DirBuffer // directories only; zero value until first use
 }
 
-// Root builds the winfsp.BehaviourBase for fsys, ready to pass to
-// winfsp.Mount. fsys must already be bootstrapped (see icbfs.Filesystem.
-// Bootstrap) — this driver does no bootstrapping of its own, same
-// division of responsibility as internal/fuseserver.Root.
+// Root builds the winfsp.BehaviourBase for fsys, for winfsp.Mount. fsys
+// must already be attached.
 //
-// caseInsensitive must match whatever the caller also passes
-// to winfsp.Mount's own winfsp.CaseSensitive option — the two are
-// separate, both load-bearing settings, not one flag with two names:
-// WinFsp's own CaseSensitive controls whether the *kernel* folds case
-// before ever calling this driver (with it off, the kernel can hand this driver a canonicalized, differently-cased
-// name than what's actually stored), while this field controls whether
-// resolvePath's own lookupCaseAware fallback additionally tolerates a
-// case mismatch against icbfs.Filesystem's always-case-sensitive
-// storage. Mismatching the two (e.g. kernel case-sensitive, driver
-// case-insensitive) leaves this fallback dead code; the other way
-// around leaves names the kernel already case-folded unable to match
-// at all.
+// caseInsensitive must match the winfsp.CaseSensitive option passed to
+// winfsp.Mount. They are two different settings: WinFsp's decides whether
+// the kernel folds case before calling this driver (it may then pass a name
+// in different case from the stored one), and this one decides whether
+// resolvePath tolerates a case mismatch against icbfs's case-sensitive
+// storage. Mismatched, either the fallback never runs or the kernel's
+// folded names never match.
 func Root(fsys *icbfs.Filesystem, caseInsensitive bool) winfsp.BehaviourBase {
 	return &driver{fsys: fsys, caseInsensitive: caseInsensitive, handles: make(map[uintptr]*fileHandle), opens: make(map[string]*sharedOpen),
 		keyOpens: make(map[string]int), allocs: make(map[string]uint64)}
@@ -134,19 +119,13 @@ var (
 	_ winfsp.BehaviourSetReparsePoint       = (*driver)(nil)
 )
 
-// ctx is a placeholder for every icbfs.Filesystem call this driver
-// makes: go-winfsp's native interface, unlike go-fuse's, passes no
-// per-request context.Context at all (a synchronous, C-callback-driven
-// dispatch model) — there is nothing to derive a real one from. Same
-// choice gofs itself makes internally.
+// ctx is the context for every icbfs.Filesystem call this driver makes:
+// go-winfsp's callbacks carry none.
 func ctx() context.Context { return context.Background() }
 
-// toWinError maps icbfs's own error sentinels onto syscall.Errno/
-// os.Err* values go-winfsp's convertNTStatus already knows how to turn
-// into the right NTSTATUS (confirmed by reading it directly, not
-// guessed) — anything unrecognized passes through unchanged and
-// becomes a generic STATUS_INTERNAL_ERROR, the same fallback every
-// other unmapped error gets.
+// toWinError maps icbfs's errors onto the syscall.Errno and os.Err values
+// go-winfsp's convertNTStatus turns into NTSTATUS codes; anything else
+// becomes STATUS_INTERNAL_ERROR.
 func toWinError(err error) error {
 	switch {
 	case err == nil:
@@ -165,11 +144,8 @@ func toWinError(err error) error {
 		// A read-only volume (an as-of view of the past).
 		return windows.STATUS_MEDIA_WRITE_PROTECTED
 	case errors.Is(err, icbfs.ErrArchived):
-		// No exact NTSTATUS for "this whole volume is read-only" is
-		// wired through convertNTStatus's map; STATUS_ACCESS_DENIED
-		// (via os.ErrPermission) is the closest real fit, same as
-		// internal/fuseserver's errnoFromErr maps it to EROFS on the
-		// POSIX side — a different errno, same underlying intent.
+		// There's no read-only-volume NTSTATUS in convertNTStatus's map;
+		// access denied is the closest.
 		return os.ErrPermission
 	case errors.Is(err, icbfs.ErrInvalidName):
 		// convertNTStatus has no sentinel for this; return the real
@@ -190,10 +166,7 @@ func toWinError(err error) error {
 		// condition; STATUS_INVALID_PARAMETER is the closest real fit.
 		return windows.STATUS_INVALID_PARAMETER
 	case errors.Is(err, icbfs.ErrInvalidArgument):
-		// A negative SetFileSize request — found as a real crash
-		// (make([]byte, negative) panics) via pjdfstest on the FUSE
-		// side; mapped here too since icbfs.Filesystem.SetAttr is
-		// shared by both access layers.
+		// A negative file size.
 		return windows.STATUS_INVALID_PARAMETER
 	default:
 		return err
@@ -258,26 +231,17 @@ func setNormalizedName(info *winfsp.FSP_FSCTL_FILE_INFO, name string) {
 	winfsp.GetOpenFileInfo(info).SetNormalizedName(name)
 }
 
-// fileOpenReparsePoint is NTCreateFile's FILE_OPEN_REPARSE_POINT
-// CreateOptions bit: when set, a caller wants the reparse point itself
-// (e.g. to delete it, or to read its raw target), not whatever it
-// points to.
+// fileOpenReparsePoint is NtCreateFile's FILE_OPEN_REPARSE_POINT option:
+// the caller wants the reparse point itself, not what it points to.
 const fileOpenReparsePoint = 0x00200000
 
-// Open resolves name (a WinFsp path) and hands back a fresh handle —
-// no icbfs.OpenFile is created yet (see fileHandle's doc comment);
-// that happens lazily on first real Read/Write.
+// Open resolves name and returns a new handle; its OpenFile is made on
+// first read or write (see fileHandle).
 //
-// Follows a symlink at the end of the path (resolvePathFollow, not
-// plain resolvePath) unless the caller explicitly asked for the
-// reparse point itself. Needed for real symlink read-through, not
-// just create/list: confirmed empirically that the kernel transparently
-// re-resolves an *absolute* symlink target on its own, without ever
-// calling this Open again for the target, but does not do the
-// equivalent relative-to-the-link's-own-directory resolution for a
-// *relative* target — this follow call is what makes that second case
-// actually work, not just the first. See resolvePathFollow's own doc
-// comment.
+// It follows a symlink at the end of the path unless the caller asked for
+// the reparse point itself. The kernel follows an absolute symlink target
+// on its own, but not a relative one, so this is what makes relative
+// symlinks work (see resolvePathFollow).
 func (d *driver) Open(fs *winfsp.FileSystemRef, name string, createOptions, grantedAccess uint32, info *winfsp.FSP_FSCTL_FILE_INFO) (uintptr, error) {
 	path, stream, ok := splitStream(name)
 	if !ok {
@@ -294,16 +258,10 @@ func (d *driver) Open(fs *winfsp.FileSystemRef, name string, createOptions, gran
 	if stream != "" {
 		return d.openStream(r, path, stream, info)
 	}
-	// A generic (non-symlink) reparse point carries opaque
-	// data this driver never interprets — real NTFS, and winfsp-tests'
-	// own reparse_guid_test/reparse_nfs_test (confirmed against this
-	// exact driver), both require that a normal open of such a file,
-	// without FILE_FLAG_OPEN_REPARSE_POINT, be refused outright rather
-	// than silently handed back as if the reparse data weren't there:
-	// a caller with no way to interpret an opaque tag has no business
-	// reading or writing "through" it. Symlinks are exempt — they're a
-	// first-class type this driver does interpret, and resolve has
-	// already followed them above when appropriate.
+	// A non-symlink reparse point carries data this driver doesn't
+	// interpret. As on NTFS (winfsp-tests' reparse_guid_test and
+	// reparse_nfs_test), opening one without FILE_FLAG_OPEN_REPARSE_POINT
+	// is refused. Symlinks were already followed above.
 	if createOptions&fileOpenReparsePoint == 0 && r.Type != icbfs.TypeSymlink {
 		if _, ok := icbfs.GenericReparseFromXattrs(r.Attr.Xattrs); ok {
 			return 0, windows.STATUS_IO_REPARSE_TAG_NOT_HANDLED
@@ -324,14 +282,10 @@ func (d *driver) Close(fs *winfsp.FileSystemRef, file uintptr) {
 	d.releaseShared(h)
 }
 
-// Create makes a new file or directory. WinFsp's own dispatcher
-// (fsop.c's FspFileSystemOpCreate) refuses every create/open outright
-// with STATUS_INVALID_DEVICE_REQUEST unless Create (or CreateEx),
-// Open, and Overwrite (or OverwriteEx) are ALL wired, regardless of
-// what a given request actually needs (confirmed against WinFsp's own
-// C source). Create itself
-// distinguishes a directory request via createOptions' FILE_DIRECTORY_
-// FILE bit.
+// Create makes a new file or directory (FILE_DIRECTORY_FILE in
+// createOptions). WinFsp refuses every create and open
+// (STATUS_INVALID_DEVICE_REQUEST) unless Create, Open and Overwrite are all
+// implemented.
 func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, grantedAccess, fileAttributes uint32, securityDescriptor *windows.SECURITY_DESCRIPTOR, allocationSize uint64, info *winfsp.FSP_FSCTL_FILE_INFO) (uintptr, error) {
 	path, stream, ok := splitStream(name)
 	if !ok {
@@ -348,34 +302,20 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 	uid, gid := callerOwner()
 
 	const fileDirectoryFile = 0x00000001 // FILE_DIRECTORY_FILE, low byte of NtCreateFile's CreateOptions
-	// A *directory* symlink (CreateSymbolicLinkW with
-	// SYMBOLIC_LINK_FLAG_DIRECTORY)
-	// sets FILE_DIRECTORY_FILE too, identically to a real mkdir — there
-	// is no reliable createOptions/fileAttributes signal at this point
-	// to tell the two apart. Confirmed empirically, not assumed: a real
-	// debug trace of this exact test (winfsp-tests' own
-	// reparse_symlink_relative_test, --external) showed its own plain
-	// CreateDirectoryW("\1") and its CreateSymbolicLinkW("\ld", ...,
-	// SYMBOLIC_LINK_FLAG_DIRECTORY) placeholder create produce the
-	// *identical* createOptions value (0x02200021) — FILE_DIRECTORY_FILE
-	// and FILE_OPEN_REPARSE_POINT both set in both cases,
-	// FILE_OPEN_FOR_BACKUP_INTENT absent from both. (A separate manual
-	// probe via PowerShell's New-Item/raw CreateDirectoryW did set
-	// FILE_OPEN_FOR_BACKUP_INTENT — a caller-dependent detail, not a
-	// stable protocol signal, and chasing it broke plain mkdir outright
-	// before this was caught.) So: always make a real directory here;
-	// SetReparsePoint (reparse.go) is what
-	// actually resolves the ambiguity, by converting *that* directory
-	// into a symlink if a symlink reparse buffer arrives for it next.
+	// A directory symlink (SYMBOLIC_LINK_FLAG_DIRECTORY) is created with
+	// exactly the createOptions of a mkdir: winfsp-tests'
+	// reparse_symlink_relative_test sends 0x02200021 for both. So this
+	// always makes a directory, and SetReparsePoint turns it into a symlink
+	// if a symlink reparse buffer follows.
 	if createOptions&fileDirectoryFile != 0 {
 		newUUID, attr, err := d.fsys.Mkdir(ctx(), parent.Key, base, 0755, uid, gid)
 		if err != nil {
 			return 0, toWinError(err)
 		}
-		// A directory's security descriptor and attribute bits are
-		// stored like a file's (no Archive bit, as on NTFS) — so a
-		// directory created with a restrictive ACL actually enforces it
-		// (winfsp-tests' create_notraverse/create_restore/getfileattr).
+		// A directory's security descriptor and attribute bits are stored
+		// as a file's are (without Archive, as on NTFS), so a restrictive
+		// ACL given at creation is enforced (winfsp-tests'
+		// create_notraverse, create_restore, getfileattr).
 		if securityDescriptor != nil || fileAttributes&^windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
 			var sddl []byte
 			if securityDescriptor != nil {
@@ -395,28 +335,13 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 	if err != nil {
 		return 0, toWinError(err)
 	}
-	// Persist the real Hidden/System/ReadOnly/Archive byte from
-	// creation time too, not just from a later SetBasicInfo
-	// — a file created with e.g. FILE_ATTRIBUTE_HIDDEN set should
-	// report it back immediately, not only after an explicit
-	// SetFileAttributes call.
+	// Store the attribute bits and the security descriptor from the create
+	// itself, in one metadata write, so a file created hidden reports it at
+	// once, and one created with a restrictive descriptor enforces it
+	// (winfsp-tests' getfileattr_test).
 	//
-	// FILE_ATTRIBUTE_ARCHIVE is always set on a newly created file by
-	// a real Windows filesystem, regardless of what the caller
-	// requested — confirmed a real, previously-missing requirement by
-	// winfsp-tests' own create_fileattr_test (--external, against this
-	// driver), not assumed: it asserts FILE_ATTRIBUTE_ARCHIVE ==
-	// GetFileAttributes() after a plain CreateFileW(...,
-	// FILE_ATTRIBUTE_NORMAL, 0), which this driver failed before this
-	// fix (it only ever stored exactly what the caller passed, masked
-	// to the four real bits — a NORMAL-only create stored and reported
-	// back nothing set at all).
-	//
-	// The security descriptor WinFsp passes for the new file is stored
-	// too, in the same metadata write — previously it was ignored and
-	// every new file got the default full-access descriptor, so e.g. a
-	// file created with DELETE-only access could still be opened for
-	// reading (winfsp-tests' getfileattr_test).
+	// Windows sets Archive on every new file whatever the caller asked for
+	// (winfsp-tests' create_fileattr_test).
 	var sddl []byte
 	if securityDescriptor != nil {
 		sddl = []byte(securityDescriptor.String())
@@ -436,11 +361,8 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 	return id, nil
 }
 
-// Overwrite truncates an existing file back to empty, same as Windows'
-// CREATE_ALWAYS/TRUNCATE_EXISTING disposition against an existing
-// target. Wired purely because Create's doc comment's FspFileSystemOpCreate
-// requirement demands it exist at all; this driver has no separate
-// "replace attributes" behavior beyond what SetBasicInfo already does.
+// Overwrite truncates an existing file to empty (CREATE_ALWAYS,
+// TRUNCATE_EXISTING). WinFsp requires it (see Create).
 func (d *driver) Overwrite(fs *winfsp.FileSystemRef, file uintptr, attributes uint32, replaceAttributes bool, allocationSize uint64, info *winfsp.FSP_FSCTL_FILE_INFO) error {
 	h, ok := d.handle(file)
 	if !ok {
@@ -502,11 +424,9 @@ func (d *driver) Overwrite(fs *winfsp.FileSystemRef, file uintptr, attributes ui
 	return nil
 }
 
-// Cleanup performs the deferred delete a prior CanDelete allowed, per
-// WinFsp's own delete protocol (confirmed against gofs's own Cleanup,
-// the one tested reference implementation available — see F1's entry):
-// a real delete only happens here, when FspCleanupDelete is set on the
-// last handle's cleanup, not at CanDelete time itself.
+// Cleanup performs the delete CanDelete allowed, when the last handle is
+// cleaned up with FspCleanupDelete set: WinFsp's delete protocol, as gofs
+// implements it.
 func (d *driver) Cleanup(fs *winfsp.FileSystemRef, file uintptr, name string, cleanupFlags uint32) {
 	if cleanupFlags&winfsp.FspCleanupDelete == 0 {
 		return
@@ -524,11 +444,8 @@ func (d *driver) Cleanup(fs *winfsp.FileSystemRef, file uintptr, name string, cl
 	if err != nil {
 		return
 	}
-	// Same case-folding gotcha Rename has (see realStoredName's own doc
-	// comment): the kernel can hand this
-	// callback a differently-cased name than what's actually stored
-	// when CaseSensitive(false) is in effect, which Rmdir/Unlink's
-	// exact-match lookup would otherwise silently fail to find.
+	// The kernel can pass a name in different case from the stored one (see
+	// realStoredName).
 	base = realStoredName(ctx(), d.fsys, parent.Key, base, d.caseInsensitive)
 	dctx := icbfs.WithDeleteInfo(ctx(), icbfs.DeleteInfo{Path: strings.ReplaceAll(name, `\`, "/")})
 	if h.typ == icbfs.TypeDir {
@@ -538,10 +455,8 @@ func (d *driver) Cleanup(fs *winfsp.FileSystemRef, file uintptr, name string, cl
 	}
 }
 
-// CanDelete reports whether file could be deleted, checked by WinFsp
-// before it commits to a pending delete (the real delete happens later,
-// in Cleanup) — the one real check: a non-empty directory can't be
-// removed, matching rmdir(2)/icbfs.Filesystem.Rmdir's own rule.
+// CanDelete reports whether file may be deleted; WinFsp asks before marking
+// a delete pending (Cleanup does it). A non-empty directory can't be.
 func (d *driver) CanDelete(fs *winfsp.FileSystemRef, file uintptr, name string) error {
 	h, ok := d.handle(file)
 	if !ok {
@@ -560,28 +475,15 @@ func (d *driver) CanDelete(fs *winfsp.FileSystemRef, file uintptr, name string) 
 	return nil
 }
 
-// Rename resolves both source and target (full WinFsp paths) to their
-// own parent directory + base name, same splitParent/resolvePath
-// pattern Create/Cleanup already use, then delegates to
-// icbfs.Filesystem.Rename. file (the open handle
-// on source) isn't needed here: Rename resolves the entry by
-// (oldParent, oldBase) itself.
-// realStoredName resolves name to its actual stored (real-case)
-// spelling within dirKey, if an entry matching it (case-aware per
-// caseInsensitive) exists; otherwise returns name unchanged — the
-// caller (e.g. Rename, below, for a target that doesn't exist yet)
-// decides what that means.
+// realStoredName returns name as it's spelled in dirKey, if an entry
+// matches it (case-insensitively when caseInsensitive), and name unchanged
+// otherwise.
 //
-// Needed because icbfs.Filesystem's own operations always do an
-// *exact* (case-sensitive) lookup internally, but the kernel can hand
-// this driver a differently-cased name than what's actually stored
-// when CaseSensitive(false) is in effect — the exact F3-era gotcha
-// (see resolve.go's lookupCaseAware doc comment), confirmed recurring
-// here for Rename specifically: WinFsp/the kernel passed this driver
-// "OLD.TXT" for a file actually stored as "old.txt", which
-// icbfs.Filesystem.Rename's exact-match findInTree could never locate
-// on its own (unlike resolvePath's own directory-traversal, which
-// already runs every segment through lookupCaseAware).
+// icbfs.Filesystem's operations look names up exactly, but with
+// CaseSensitive(false) the kernel can pass "OLD.TXT" for a file stored as
+// "old.txt". resolvePath already handles this for directories
+// (lookupCaseAware); callers that pass a bare name to icbfs.Filesystem need
+// this.
 func realStoredName(ctx context.Context, fsys *icbfs.Filesystem, dirKey, name string, caseInsensitive bool) string {
 	entry, _, err := lookupCaseAware(ctx, fsys, dirKey, name, caseInsensitive)
 	if err != nil {
@@ -590,6 +492,8 @@ func realStoredName(ctx context.Context, fsys *icbfs.Filesystem, dirKey, name st
 	return entry.Name
 }
 
+// Rename splits source and target into parent and name, and has
+// icbfs.Filesystem.Rename move the entry; file isn't needed.
 func (d *driver) Rename(fs *winfsp.FileSystemRef, file uintptr, source, target string, replaceIfExist bool) error {
 	// A stream renames only to another stream of the same file or
 	// directory; a stream can't become a file or vice versa here.
@@ -710,10 +614,9 @@ func (d *driver) currentOpen(key string) *icbfs.OpenFile {
 	return s.open
 }
 
-// flushShared commits key's shared OpenFile's pending writes, if any.
-// Called before an operation that changes content behind OpenFile's
-// back (Overwrite, SetFileSize), so buffered writes are neither lost
-// nor later flushed on top of that change.
+// flushShared writes key's shared OpenFile's pending writes, if any, before
+// an operation that changes the content behind it (Overwrite, SetFileSize),
+// so they are neither lost nor flushed on top of that change.
 func (d *driver) flushShared(key string) error {
 	if open := d.currentOpen(key); open != nil {
 		if _, err := open.Flush(ctx()); err != nil {
@@ -724,12 +627,10 @@ func (d *driver) flushShared(key string) error {
 }
 
 // invalidateShared drops key's shared OpenFile after its content was
-// changed directly in the store; the next I/O on any handle reopens it.
-// Also discards any handle's unused Create seed for key: a seed is the
-// content as of creation, and using it after a resize made a freshly
-// extended file read as empty — page-in reads got EOF inside the file's
-// reported size, and memory-mapped writes were lost (winfsp-tests'
-// rdwr_mmap_test).
+// changed directly in the store; the next I/O on any handle reopens it. It
+// also drops any handle's unused Create seed for key: after a resize, a
+// seed made a newly extended file read as empty, and lost memory-mapped
+// writes (winfsp-tests' rdwr_mmap_test).
 func (d *driver) invalidateShared(key string) {
 	d.mu.Lock()
 	for _, h := range d.handles {

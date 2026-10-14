@@ -61,12 +61,9 @@ func s3EventBody(key string) string {
 	return fmt.Sprintf(`{"Records":[{"s3":{"object":{"key":%q}}}]}`, key)
 }
 
-// TestSourceFiltersByPrefixAndDeletesConsumedMessages tests the
-// consumption logic against a fake queue. A matching key is forwarded as a
-// Signal and its message deleted afterward; a non-matching key (the
-// client-side safety-net filter — see Source's doc comment) is never
-// forwarded, but its message is still deleted (it was consumed either
-// way, same as a real queue consumer would).
+// TestSourceFiltersByPrefixAndDeletesConsumedMessages, with a fake queue: a
+// matching key becomes a Signal and its message is deleted; a non-matching
+// one doesn't, but its message is deleted too.
 func TestSourceFiltersByPrefixAndDeletesConsumedMessages(t *testing.T) {
 	queue := &fakeQueue{}
 	queue.enqueueBody(s3EventBody("0000-match"))
@@ -105,11 +102,8 @@ func TestSourceFiltersByPrefixAndDeletesConsumedMessages(t *testing.T) {
 	}
 }
 
-// TestSourceIgnoresMalformedMessageBody confirms a message whose body
-// isn't valid S3 event JSON is dropped rather than panicking or
-// wedging the poll loop — a real, if unlikely, possibility for
-// anything consuming from a queue it doesn't fully control the
-// producer side of.
+// TestSourceIgnoresMalformedMessageBody: a message that isn't S3 event JSON
+// is dropped, without panicking or stalling the poll loop.
 func TestSourceIgnoresMalformedMessageBody(t *testing.T) {
 	queue := &fakeQueue{}
 	queue.enqueueBody("not valid json")

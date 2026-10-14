@@ -23,9 +23,8 @@ func registerName(ctx context.Context, store objstore.Store, name string, size u
 	return id, e.Archived, nil
 }
 
-// TestBootstrapMasterIsIdempotent covers D1's "Done when": a fresh
-// bucket's master block can be bootstrapped, and bootstrapping an
-// already-existing one is a no-op.
+// TestBootstrapMasterIsIdempotent: a fresh bucket's master block is
+// created, and creating it again is a no-op.
 func TestBootstrapMasterIsIdempotent(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -56,8 +55,8 @@ func TestBootstrapMasterIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestRegisterFilesystemAllocatesSequentialIDs covers part of D2's
-// "Done when": creating a filesystem allocates the expected ID.
+// TestRegisterFilesystemAllocatesSequentialIDs: filesystems get IDs in
+// slot order.
 func TestRegisterFilesystemAllocatesSequentialIDs(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -89,10 +88,9 @@ func TestRegisterFilesystemAllocatesSequentialIDs(t *testing.T) {
 	}
 }
 
-// TestRegisterFilesystemConcurrentCreatesGetDistinctIDs covers the rest
-// of D2's "Done when": two concurrent creation attempts both succeed
-// with distinct IDs (one retries after losing the CAS race, not both
-// landing on the same slot).
+// TestRegisterFilesystemConcurrentCreatesGetDistinctIDs: two concurrent
+// creations both succeed with different IDs (the loser of the race retries
+// rather than landing on the same slot).
 func TestRegisterFilesystemConcurrentCreatesGetDistinctIDs(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -127,10 +125,8 @@ func TestRegisterFilesystemConcurrentCreatesGetDistinctIDs(t *testing.T) {
 	}
 }
 
-// TestPruneFreesSlotForReuse covers D2's slot-reuse "Done when" and
-// D5's "frees the slot for reuse" requirement together: after a
-// filesystem is pruned, a new creation reuses that same freed slot
-// rather than only ever appending.
+// TestPruneFreesSlotForReuse: after a prune, the next creation reuses the
+// freed slot.
 func TestPruneFreesSlotForReuse(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -168,10 +164,8 @@ func TestPruneFreesSlotForReuse(t *testing.T) {
 	}
 }
 
-// TestIDPrefixingIsPresentOnDisk covers D3's "Done when": every key a
-// filesystem writes for a file, a directory, and the root itself
-// actually carries the expected "<id>-" prefix on disk — not just that
-// the filesystem still works end to end.
+// TestIDPrefixingIsPresentOnDisk: every key written for a file, a directory
+// and the root carries the "<id>-" prefix.
 func TestIDPrefixingIsPresentOnDisk(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -226,10 +220,9 @@ func TestIDPrefixingIsPresentOnDisk(t *testing.T) {
 	}
 }
 
-// TestArchivedFilesystemRejectsWritesButAllowsReads covers D5's "Done
-// when" for archive enforcement: writes against an archived filesystem
-// are rejected (checked at mount/session start, per
-// Filesystem.checkWritable's doc comment), while reads still succeed.
+// TestArchivedFilesystemRejectsWritesButAllowsReads: an archived filesystem
+// refuses writes and allows reads, from its next Bootstrap (see
+// Filesystem.checkWritable).
 func TestArchivedFilesystemRejectsWritesButAllowsReads(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -250,9 +243,8 @@ func TestArchivedFilesystemRejectsWritesButAllowsReads(t *testing.T) {
 		t.Fatalf("archive: %v", err)
 	}
 
-	// This Filesystem handle was opened before the archive and, per the
-	// documented mount/session-start enforcement model, does not notice
-	// it until the next Bootstrap.
+	// This Filesystem was opened before the archive, so it doesn't notice
+	// until its next Bootstrap.
 	if _, _, _, err := fsys.ReadFile(ctx, fileUUID); err != nil {
 		t.Fatalf("read on already-open handle after archive should still succeed: %v", err)
 	}
@@ -279,13 +271,9 @@ func TestArchivedFilesystemRejectsWritesButAllowsReads(t *testing.T) {
 	}
 }
 
-// TestPrimaryWindowsSetAtCreationAndImmutableAfterward: a filesystem's
-// primary mode is
-// specified at creation and correctly retrievable afterward — and,
-// matching size/mode/uid/gid's existing precedent for "only used the
-// first time a filesystem name is created," a later Bootstrap call
-// passing a *different* value for an already-registered name does not
-// change the stored one.
+// TestPrimaryWindowsSetAtCreationAndImmutableAfterward: the primary mode
+// given at creation is kept, and a later Bootstrap with the other value
+// doesn't change it.
 func TestPrimaryWindowsSetAtCreationAndImmutableAfterward(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -306,9 +294,8 @@ func TestPrimaryWindowsSetAtCreationAndImmutableAfterward(t *testing.T) {
 		t.Fatalf("PrimaryWindows() = true, want false")
 	}
 
-	// Re-bootstrapping the same (already-registered) name with the
-	// opposite value must not change what's stored — same idempotency
-	// rule size already follows.
+	// Re-bootstrapping the existing name with the opposite value changes
+	// nothing.
 	reopened := New(store, "win-primary")
 	if err := reopened.Bootstrap(ctx, 1<<30, 0755, 0, 0, false); err != nil {
 		t.Fatalf("re-bootstrap primary-Windows filesystem: %v", err)
@@ -318,10 +305,9 @@ func TestPrimaryWindowsSetAtCreationAndImmutableAfterward(t *testing.T) {
 	}
 }
 
-// TestReservedNameRejectedOnlyOnPrimaryWindows: a reserved name like "CON" must be rejected by
-// Create/Mkdir/Symlink/Link on a primary-Windows filesystem, but
-// accepted by an otherwise-identical primary-POSIX filesystem — not
-// just the Windows-primary rejection case on its own.
+// TestReservedNameRejectedOnlyOnPrimaryWindows: "CON" is refused by Create,
+// Mkdir, Symlink and Link on a primary-Windows filesystem, and accepted on
+// an otherwise identical primary-POSIX one.
 func TestReservedNameRejectedOnlyOnPrimaryWindows(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -377,12 +363,9 @@ func TestReservedNameRejectedOnlyOnPrimaryWindows(t *testing.T) {
 	}
 }
 
-// TestResizeChangesDeclaredSizeForEveryMount covers Resize: unlike
-// EnableLocking's per-mount, in-memory flag, Resize changes a real,
-// shared master-block property — a *different*, already-open handle
-// on the same filesystem name must see the new size on its very next
-// StatFS, with no re-Bootstrap required (StatFS always re-reads the
-// master block fresh, per its own implementation).
+// TestResizeChangesDeclaredSizeForEveryMount: Resize changes the stored
+// size, so another Filesystem already open on the same name sees it at its
+// next StatFS (which reads the master block each time).
 func TestResizeChangesDeclaredSizeForEveryMount(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -435,10 +418,8 @@ func TestResizeOfUnknownFilesystemReturnsNotFound(t *testing.T) {
 	}
 }
 
-// TestPruneRemovesEveryObjectUnderPrefix covers D5's "Done when" for
-// prune: pruning actually removes every object under the prefix,
-// confirmed by listing after, not just trusting the delete calls
-// didn't error.
+// TestPruneRemovesEveryObjectUnderPrefix: after a prune, listing the prefix
+// finds nothing.
 func TestPruneRemovesEveryObjectUnderPrefix(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -491,11 +472,8 @@ func TestPruneRemovesEveryObjectUnderPrefix(t *testing.T) {
 	}
 }
 
-// TestStatFSIsScopedPerFilesystem covers D4's "Done when": two
-// filesystems in the same bucket, with differently-sized content, each
-// get a "Used" figure reflecting only their own content, not the
-// other's — the test that actually proves the multi-tenant scoping
-// problem is solved, not just that a number comes back.
+// TestStatFSIsScopedPerFilesystem: two filesystems in one bucket each
+// report only their own usage.
 func TestStatFSIsScopedPerFilesystem(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

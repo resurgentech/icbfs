@@ -1,19 +1,12 @@
 //go:build windows
 
-// Symlinks on this driver: Windows has no native "symlink" concept
-// separate from a reparse point — creating one is Create (which this
-// driver's Create callback already handles, making an ordinary icbfs
-// file) immediately followed by a FSCTL_SET_REPARSE_POINT call, which
-// WinFsp delivers as SetReparsePoint below; reading one is
-// GetReparsePoint (by open handle) or GetReparsePointByName (by path,
-// used by WinFsp's own transparent-reparse-point-resolution machinery
-// — wiring this is what lets `cd`/`CreateFile` et al. follow a symlink
-// automatically, without this driver doing anything extra in Open).
+// Symlinks on Windows are reparse points. Creating one is a Create (an
+// ordinary file or directory) followed by FSCTL_SET_REPARSE_POINT, which
+// WinFsp delivers as SetReparsePoint below. Reading one is GetReparsePoint
+// (by handle) or GetReparsePointByName (by path, used by WinFsp's own
+// resolver, which is what makes a plain open follow a symlink).
 //
-// Hardlinks have no equivalent at all: WinFsp's native
-// FSP_FILE_SYSTEM_INTERFACE has no hardlink-creation callback, unlike
-// cgofuse's FUSE-shaped Link(). There is nothing to wire here: this
-// operation does not exist on this access layer at all.
+// There are no hard links here: WinFsp has no callback to create one.
 package winfspserver
 
 import (
@@ -28,29 +21,21 @@ import (
 	"github.com/resurgentech/icbfs/internal/icbfs"
 )
 
-// reparseHeaderSize is REPARSE_DATA_BUFFER_SYMBOLIC_LINK's fixed
-// portion: ReparseTag(4) + ReparseDataLength(2) + Reserved(2) +
-// SubstituteNameOffset(2) + SubstituteNameLength(2) + PrintNameOffset(2)
-// + PrintNameLength(2) + Flags(4) = 20 bytes, before the variable-
-// length PathBuffer.
+// reparseHeaderSize is REPARSE_DATA_BUFFER_SYMBOLIC_LINK's fixed part:
+// ReparseTag(4), ReparseDataLength(2), Reserved(2),
+// SubstituteNameOffset(2), SubstituteNameLength(2), PrintNameOffset(2),
+// PrintNameLength(2) and Flags(4), 20 bytes, before the PathBuffer.
 const reparseHeaderSize = 20
 
 // buildSymlinkReparseBuffer encodes target as a
-// REPARSE_DATA_BUFFER_SYMBOLIC_LINK — the same structure Windows'
-// own CreateSymbolicLinkW produces, confirmed against
-// golang.org/x/sys/windows's own Readlink (which parses exactly this
-// layout) rather than guessed.
+// REPARSE_DATA_BUFFER_SYMBOLIC_LINK, the layout CreateSymbolicLinkW makes
+// (and golang.org/x/sys/windows's Readlink parses).
 //
-// Found the hard way, not assumed: SYMLINK_FLAG_RELATIVE must actually
-// reflect whether target is relative — unconditionally setting it
-// (this function's first version) made the kernel try to resolve an
-// *absolute* target as if it were relative to the link's own
-// directory, landing on the literal string "\??" as a bogus first
-// path component of a lookup against this volume (confirmed via a
-// GetReparsePointByName(name="\??") call this driver's own trace
-// caught). Print name strips the NT prefix for an absolute target
-// (what a real `dir`/Explorer displays); substitute name keeps it —
-// the standard real-NTFS-symlink convention.
+// SYMLINK_FLAG_RELATIVE is set only for a relative target: set for an
+// absolute one, the kernel resolves it against the link's directory and
+// looks up "\??" as a name. The print name drops the NT prefix of an
+// absolute target, as dir and Explorer show it; the substitute name keeps
+// it, as NTFS does.
 func buildSymlinkReparseBuffer(target string) ([]byte, error) {
 	flags := uint32(winfsp.SYMLINK_FLAG_RELATIVE)
 	printTarget := target
@@ -99,10 +84,8 @@ func utf16LEBytes(s string) ([]byte, error) {
 	return b, nil
 }
 
-// parseSymlinkReparseBuffer is buildSymlinkReparseBuffer's inverse,
-// used when a client calls CreateSymbolicLinkW (which sends us the
-// buffer via SetReparsePoint, below) rather than this driver having
-// produced it itself.
+// parseSymlinkReparseBuffer is buildSymlinkReparseBuffer's inverse, for a
+// buffer a client's CreateSymbolicLinkW sends (SetReparsePoint).
 func parseSymlinkReparseBuffer(buf []byte) (string, error) {
 	if len(buf) < reparseHeaderSize {
 		return "", os.ErrInvalid
@@ -124,10 +107,9 @@ func parseSymlinkReparseBuffer(buf []byte) (string, error) {
 	return windows.UTF16ToString(utf16), nil
 }
 
-// GetReparsePoint serves an already-open handle's reparse data back —
-// a symlink's target, encoded as a REPARSE_DATA_BUFFER_SYMBOLIC_LINK,
-// or a generic, non-symlink reparse
-// point's raw stored buffer, returned byte-exact.
+// GetReparsePoint returns an open handle's reparse data: a symlink's target
+// as a REPARSE_DATA_BUFFER_SYMBOLIC_LINK, or a non-symlink reparse point's
+// stored buffer as is.
 func (d *driver) GetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name string, buffer []byte) (int, error) {
 	h, ok := d.handle(file)
 	if !ok {
@@ -150,27 +132,15 @@ func (d *driver) GetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 	return 0, windows.STATUS_NOT_A_REPARSE_POINT
 }
 
-// GetReparsePointByName is the by-path counterpart, used by WinFsp's
-// own reparse-point resolution machinery (FspFileSystemResolveReparsePointsInternal,
-// in WinFsp's own fsop.c) while walking a path — this is what makes a
-// symlink transparently followed by default (e.g. a plain `cd`/
-// CreateFile without FILE_FLAG_OPEN_REPARSE_POINT).
+// GetReparsePointByName is GetReparsePoint by path, for WinFsp's resolver
+// (FspFileSystemResolveReparsePointsInternal) as it walks a path.
 //
-// Returning STATUS_NOT_A_REPARSE_POINT for "this component isn't a
-// reparse point this driver can resolve transparently" is load-
-// bearing, not a style choice: confirmed by reading WinFsp's own
-// resolver directly after a real failure traced straight to this
-// line — it specifically checks for that exact NTSTATUS to mean
-// "keep walking the path," and treats anything else non-success
-// (including the os.ErrInvalid this returned at first, which
-// convertNTStatus has no mapping for and falls back to a generic
-// internal error) as "abort the whole resolution," surfacing as
-// Windows' own "Could not find a part of the path" to the caller. A
-// generic (non-symlink) reparse point is deliberately treated the
-// same way here — this driver has no transparent-follow behavior for
-// an opaque, unknown tag, only explicit FSCTL_GET_REPARSE_POINT
-// access (via GetReparsePoint above, through a handle opened with
-// FILE_FLAG_OPEN_REPARSE_POINT).
+// For a component that isn't a symlink it must answer
+// STATUS_NOT_A_REPARSE_POINT: that's what tells WinFsp to keep walking. Any
+// other error aborts the resolution, and the caller sees "Could not find a
+// part of the path". A non-symlink reparse point answers the same: its
+// opaque data is reachable only through GetReparsePoint, on a handle opened
+// with FILE_FLAG_OPEN_REPARSE_POINT.
 func (d *driver) GetReparsePointByName(fs *winfsp.FileSystemRef, name string, isDirectory bool, buffer []byte) (int, error) {
 	r, err := resolvePath(ctx(), d.fsys, name, d.caseInsensitive)
 	if err != nil {
@@ -186,9 +156,9 @@ func (d *driver) GetReparsePointByName(fs *winfsp.FileSystemRef, name string, is
 	return fillReparseBuffer(buffer, target)
 }
 
-// copyReparseBuffer copies a generic reparse point's raw stored bytes
-// back to the caller's buffer, same insufficient-buffer handling as
-// fillReparseBuffer's symlink-specific path.
+// copyReparseBuffer copies a non-symlink reparse point's stored bytes to
+// the caller's buffer, failing as fillReparseBuffer does when it's too
+// small.
 func copyReparseBuffer(buffer, raw []byte) (int, error) {
 	if len(raw) > len(buffer) {
 		return 0, syscall.ERROR_INSUFFICIENT_BUFFER
@@ -207,20 +177,14 @@ func fillReparseBuffer(buffer []byte, target string) (int, error) {
 	return copy(buffer, buf), nil
 }
 
-// SetReparsePoint handles two genuinely different cases, dispatched
-// on the buffer's own leading ReparseTag:
+// SetReparsePoint handles two cases, by the buffer's ReparseTag:
 //
-//   - IO_REPARSE_TAG_SYMLINK: CreateSymbolicLinkW's second half. By
-//     the time this fires, Create already made an ordinary icbfs file
-//     under this same name (it has no other way to know a symlink was
-//     intended — Windows' own CreateFile call that preceded this
-//     carries no such signal). Replace that placeholder with a real
-//     icbfs symlink entry pointing at the parsed target, and repoint
-//     this handle at it.
-//   - Any other tag: a generic reparse
-//     point — store the raw buffer byte-exact against the existing
-//     file, no type change at all (unlike the symlink case, this
-//     stays an ordinary icbfs file with extra stored data).
+//   - IO_REPARSE_TAG_SYMLINK: the second half of CreateSymbolicLinkW.
+//     Create has already made an ordinary entry under the name (nothing
+//     in the create says a symlink is coming); replace it with an icbfs
+//     symlink to the parsed target, and point this handle at it.
+//   - Any other tag: a generic reparse point. Store the buffer as is on
+//     the file, which stays an ordinary file.
 func (d *driver) SetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name string, buffer []byte) error {
 	h, ok := d.handle(file)
 	if !ok {
@@ -240,30 +204,15 @@ func (d *driver) SetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 	if err != nil {
 		return toWinError(err)
 	}
-	// The kernel hands this callback an uppercased name under the
-	// -case-insensitive=true default — the same case-folding gotcha
-	// Rename/Cleanup handle.
-	//
-	// icbfs.Filesystem's own lookups are exact-match only, so an
-	// uppercased base here made Unlink fail with ErrNotFound on every
-	// single symlink creation — which BestEffortCreateSymbolicLinkW's
-	// own fallback-on-ERROR_INVALID_PARAMETER logic doesn't catch,
-	// surfacing as a plain, unconditional failure regardless of
-	// SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE.
+	// The kernel passes the name uppercased under -case-insensitive (see
+	// realStoredName); with the exact-match Unlink, every symlink creation
+	// failed.
 	base = realStoredName(ctx(), d.fsys, parent.Key, base, d.caseInsensitive)
 
-	// A *directory* symlink (SYMBOLIC_LINK_FLAG_DIRECTORY) arrives here
-	// as a real icbfs directory, not a file — Create (driver.go) has no
-	// reliable way to tell a directory-symlink placeholder apart from
-	// an ordinary mkdir at create time (confirmed empirically: both
-	// produce identical createOptions for this exact call), so it
-	// always makes a real directory, and resolving the ambiguity is
-	// this call's job instead: Rmdir, not Unlink, for that case —
-	// Unlink on a directory fails outright (icbfs.ErrIsDir), which is
-	// exactly what broke this before (surfaced to the caller as
-	// STATUS_FILE_IS_A_DIRECTORY). The placeholder is always freshly
-	// created and still empty, so Rmdir's "non-empty" rejection never
-	// applies here.
+	// A directory symlink (SYMBOLIC_LINK_FLAG_DIRECTORY) arrives as a
+	// directory, because Create can't tell it from a mkdir (see Create). So
+	// remove the placeholder with Rmdir, not Unlink (which fails on a
+	// directory with ErrIsDir); it's new and empty.
 	wasDir := h.typ == icbfs.TypeDir
 	// Replacing a placeholder isn't a delete anyone made: no trash entry.
 	pctx := icbfs.WithDeleteInfo(ctx(), icbfs.DeleteInfo{NoTrash: true})
@@ -281,8 +230,8 @@ func (d *driver) SetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 		return toWinError(err)
 	}
 	if wasDir {
-		// Windows treats a directory symlink as a directory from here
-		// on (e.g. RemoveDirectory removes it — winfsp-tests'
+		// Windows treats a directory symlink as a directory from now on
+		// (RemoveDirectory removes it: winfsp-tests'
 		// reparse_symlink_relative_test); see attributesFromAttr.
 		if _, err := d.fsys.MarkWindowsDirSymlink(ctx(), newUUID); err != nil {
 			return toWinError(err)
@@ -293,13 +242,9 @@ func (d *driver) SetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 	return nil
 }
 
-// DeleteReparsePoint handles FSCTL_DELETE_REPARSE_POINT — go-winfsp's
-// own separate BehaviourDeleteReparsePoint hook. Only the
-// generic reparse case is meaningfully reachable here in practice:
-// winfsp-tests' own symlink tests never call this, and this driver
-// has no "revert a symlink back to an ordinary file" operation to
-// call even if a client did — deleting a generic reparse point's
-// stored data is the real, tested behavior.
+// DeleteReparsePoint handles FSCTL_DELETE_REPARSE_POINT for a generic
+// reparse point, removing its stored data. A symlink can't be turned back
+// into a file.
 func (d *driver) DeleteReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name string, buffer []byte) error {
 	h, ok := d.handle(file)
 	if !ok {

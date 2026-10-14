@@ -2,13 +2,9 @@ package icbfs
 
 import "strings"
 
-// windowsReservedChars are the characters Win32 forbids in a single
-// path component, per Microsoft's own documented naming rules —
-// docs/architecture.md's "Windows compatibility: primary mode" section.
-// `/` and `\` are included for
-// completeness even though neither can reach this check in practice
-// (every caller here operates on a single already-split path
-// component, never a multi-segment string).
+// windowsReservedChars are the characters Win32 forbids in a name. `/` and
+// `\` can't reach this check (callers pass one component), but are listed
+// for completeness.
 const windowsReservedChars = `<>:"/\|?*`
 
 // windowsReservedBaseNames are reserved regardless of extension — a
@@ -22,14 +18,10 @@ var windowsReservedBaseNames = map[string]bool{
 	"LPT6": true, "LPT7": true, "LPT8": true, "LPT9": true,
 }
 
-// isWindowsReservedName reports whether name would be refused outright
-// by a real Windows filesystem: a reserved character, a control
-// character, a trailing space or period, or a reserved base name
-// (with or without an extension). Pure string logic, no Windows
-// dependency at all — deliberately portable and testable without a
-// VM, same reasoning internal/winfspserver/resolve.go's own doc
-// comment gives for keeping path-resolution logic off the Windows-only
-// build tag.
+// isWindowsReservedName reports whether Windows would refuse name: a
+// reserved or control character, a trailing space or period, or a reserved
+// base name, with or without an extension. Plain string logic, testable
+// anywhere.
 func isWindowsReservedName(name string) bool {
 	if name == "" {
 		return true
@@ -49,14 +41,10 @@ func isWindowsReservedName(name string) bool {
 	return windowsReservedBaseNames[strings.ToUpper(base)]
 }
 
-// checkName refuses a reserved name outright on a primary-Windows
-// filesystem — docs/architecture.md's "Reserved names/characters" rule,
-// enforced here at the core Filesystem layer (not just the WinFsp
-// driver) so it applies regardless of which access layer is writing:
-// primary mode is a property of the filesystem itself, not of
-// whichever driver happens to be mounting it right now. A
-// primary-POSIX filesystem never rejects anything here: any
-// POSIX-legal name is allowed, Windows-reserved or not.
+// checkName refuses a Windows-reserved name on a primary-Windows
+// filesystem, in the core so every access layer gets it: the primary mode
+// belongs to the filesystem, not to whichever driver mounted it. A
+// primary-POSIX filesystem allows any POSIX-legal name.
 //
 // It also enforces the name length limit; see checkNameLength.
 func (f *Filesystem) checkName(name string) error {
