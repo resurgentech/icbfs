@@ -48,7 +48,10 @@ type Pair struct {
 	// RequirePresent: paths that must be in the folder for a pass to go
 	// ahead (a file that shows a network drive is really there).
 	RequirePresent []string `json:"requirePresent,omitempty"`
-	// Ignore: name patterns added to the defaults.
+	// Ignore: name patterns added to the defaults ("*.url", "Scratch"),
+	// matched against each part of a path, case-insensitively; a matching
+	// directory is skipped with everything in it. A RequirePresent marker
+	// can be ignored too: it's checked before names are ignored.
 	Ignore []string `json:"ignore,omitempty"`
 	// IDs and ACLs: "auto" (ask the volume), "on", "off".
 	IDs  string `json:"ids,omitempty"`
@@ -161,6 +164,7 @@ func template() *Config {
 		Pairs: []Pair{{
 			Name: "documents", Folder: `Z:\`, Filesystem: "documents", Root: "/", Mode: "one-way",
 			Interval: "5m", RemoteEvery: "1h", MaxRemovals: 200, IDs: "auto", ACLs: "auto",
+			Ignore: []string{"*.url"},
 		}},
 	}
 }

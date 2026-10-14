@@ -233,12 +233,15 @@ func (e *Engine) Pass(ctx context.Context) (rep Report) {
 	if err != nil {
 		return fail(fmt.Errorf("list the folder: %w", err))
 	}
-	local = e.filter(local)
+	// The folder is checked as listed, before names are ignored: a
+	// marker file can be ignored (not copied) and still show the folder
+	// is there.
 	if why := e.present(local, base); why != "" {
 		rep.Refused = why
 		e.log(Event{Note: "refused: " + why})
 		return rep
 	}
+	local = e.filter(local)
 
 	var remote []Entry
 	e.mu.Lock()

@@ -400,3 +400,22 @@ func TestSQLStateRoundTripsAndSurvivesARestart(t *testing.T) {
 		t.Fatalf("base after a removal %+v", base)
 	}
 }
+
+// TestIgnoredMarker: a marker file can be ignored (not copied) and still
+// hold the pass when it's missing.
+func TestIgnoredMarker(t *testing.T) {
+	p := newPair(t, syncer.OneWay, func(c *syncer.Config) {
+		c.RequirePresent = []string{"marker.url"}
+		c.Ignore = append(append([]string(nil), syncer.DefaultIgnore...), "*.url")
+	})
+	p.local.Put("marker.url", "[InternetShortcut]", t0)
+	p.local.Put("a.pdf", "a", t0)
+	p.pass(t)
+	if tree := p.remote.Tree(); tree != "a.pdf=a" {
+		t.Fatalf("drive %s: the .url was copied", tree)
+	}
+	p.local.Delete("marker.url")
+	if rep := p.engine.Pass(context.Background()); rep.Refused == "" {
+		t.Fatal("a missing ignored marker didn't hold the pass")
+	}
+}
