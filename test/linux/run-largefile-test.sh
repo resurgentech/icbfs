@@ -28,8 +28,9 @@ FS_NAME="largefile-$(date +%Y%m%d%H%M%S)"
 MNT=/mnt/icbfs-largefile
 
 deploy_icbfs "$IP"
-trap 'ssh_vm "$IP" "sudo umount -l $MNT 2>/dev/null; sudo pkill -x icbfs-cli; true" || true' EXIT
-mount_icbfs "$IP" "$MNT" "$FS_NAME" -max-file-size $((8 << 30))
+trap 'ssh_vm "$IP" "sudo umount -l $MNT 2>/dev/null; sudo pkill -x icbfs; true" || true' EXIT
+create_fs "$FS_NAME" -max-file-size $((8 << 30))
+mount_icbfs "$IP" "$MNT" "$FS_NAME"
 
 echo "Running the large-file check (about ten minutes)..." >&2
 ssh_vm "$IP" "bash -s" <<EOF

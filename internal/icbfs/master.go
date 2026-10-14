@@ -88,20 +88,20 @@ func readMaster(ctx context.Context, store objstore.Store) (*pb.MasterBlock, *ob
 // block's list can only grow, never shrink or reorder, specifically so a
 // slot's position (and therefore the ID every object in that filesystem
 // is already permanently keyed with) never changes once assigned.
-func registerFilesystem(ctx context.Context, store objstore.Store, entry *pb.FilesystemEntry) (id string, stored *pb.FilesystemEntry, err error) {
+func registerFilesystem(ctx context.Context, store objstore.Store, entry *pb.FilesystemEntry) (id string, stored *pb.FilesystemEntry, existed bool, err error) {
 	if err := bootstrapMaster(ctx, store); err != nil {
-		return "", nil, err
+		return "", nil, false, err
 	}
 	name := entry.Name
 	for attempt := 0; attempt < maxTreeRetries; attempt++ {
 		mb, obj, err := readMaster(ctx, store)
 		if err != nil {
-			return "", nil, err
+			return "", nil, false, err
 		}
 
 		for i, e := range mb.Filesystems {
 			if e.Name == name {
-				return fsID(i), e, nil
+				return fsID(i), e, true, nil
 			}
 		}
 
@@ -116,23 +116,23 @@ func registerFilesystem(ctx context.Context, store objstore.Store, entry *pb.Fil
 			idx = len(mb.Filesystems)
 			mb.Filesystems = append(mb.Filesystems, &pb.FilesystemEntry{})
 		}
-		created := &pb.FilesystemEntry{Name: name, Size: entry.Size, PrimaryWindows: entry.PrimaryWindows, MaxFileSize: entry.MaxFileSize}
+		created := &pb.FilesystemEntry{Name: name, Size: entry.Size, PrimaryWindows: entry.PrimaryWindows, MaxFileSize: entry.MaxFileSize, Created: entry.Created}
 		mb.Filesystems[idx] = created
 
 		data, err := proto.Marshal(mb)
 		if err != nil {
-			return "", nil, err
+			return "", nil, false, err
 		}
 		_, err = store.Put(ctx, masterBlockKey, bytes.NewReader(data), nil, obj.ETag)
 		if objstore.IsPreconditionFailed(err) {
 			continue
 		}
 		if err != nil {
-			return "", nil, err
+			return "", nil, false, err
 		}
-		return fsID(idx), created, nil
+		return fsID(idx), created, false, nil
 	}
-	return "", nil, fmt.Errorf("register filesystem %q: exceeded %d retries", name, maxTreeRetries)
+	return "", nil, false, fmt.Errorf("register filesystem %q: exceeded %d retries", name, maxTreeRetries)
 }
 
 // fsID zero-pads a slot index to the 4-hex-digit filesystem ID format

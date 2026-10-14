@@ -46,7 +46,7 @@ docker run -d --rm --name "$SERVER_CONTAINER" --user "$(id -u):$(id -g)" \
   -access-key "$ICBFS_MINIO_ACCESS_KEY" -secret-key "$ICBFS_MINIO_SECRET_KEY" >/dev/null
 PORT=$(docker port "$SERVER_CONTAINER" 8090/tcp | awk -F: '/0.0.0.0/{print $NF; exit}')
 cleanup() {
-  ssh_vm "$IP" "sudo umount -l $MNT 2>/dev/null; sudo pkill -x icbfs-cli; sudo pkill -x icbfs-logd; true" >/dev/null 2>&1 || true
+  ssh_vm "$IP" "sudo umount -l $MNT 2>/dev/null; sudo pkill -x icbfs; sudo pkill -x icbfs-logd; true" >/dev/null 2>&1 || true
   docker logs "$SERVER_CONTAINER" >>"$WORK_DIR/mockserver.log" 2>&1 || true
   docker rm -f "$SERVER_CONTAINER" >/dev/null 2>&1 || true
 }
@@ -63,7 +63,7 @@ run_mode() {
   ssh_vm "$IP" "bash -s" <<EOF
 set -e
 sudo mkdir -p $MNT
-sudo $VM_SRC/icbfs-cli mount -log-socket $SOCK $* -fs $fs -uid 0 -gid 0 -allow-other $MNT > /tmp/icbfs-log-mount.log 2>&1 &
+sudo $VM_SRC/icbfs mount -log-socket $SOCK $* -fs $fs -allow-other $MNT > /tmp/icbfs-log-mount.log 2>&1 &
 for i in \$(seq 1 120); do findmnt -n -o FSTYPE $MNT | grep -q fuse && break; sleep 0.25; done
 findmnt -n $MNT >/dev/null || { echo "mount failed:"; cat /tmp/icbfs-log-mount.log; cat /tmp/icbfs-logd.log; exit 1; }
 sudo bash -c '
@@ -78,10 +78,12 @@ sudo bash -c '
   ls $MNT > /dev/null
 '
 sudo umount $MNT
-for i in \$(seq 1 60); do pgrep -x icbfs-cli >/dev/null || break; sleep 0.25; done
+for i in \$(seq 1 60); do pgrep -x icbfs >/dev/null || break; sleep 0.25; done
 EOF
 }
 
+create_fs logged-sync
+create_fs logged-async
 echo "Mounting with synchronous logging..." >&2
 run_mode logged-sync
 echo "Mounting with -log-async..." >&2
@@ -105,7 +107,7 @@ for fs in ("logged-sync", "logged-async"):
 sys.exit(0 if ok else 1)
 PY
 
-out=$(ssh_vm "$IP" "sudo timeout 60 $VM_SRC/icbfs-cli mount -log-socket $SOCK -fs not-allowed $MNT 2>&1; echo exit=\$?" 2>/dev/null | tail -2)
+out=$(ssh_vm "$IP" "sudo timeout 60 $VM_SRC/icbfs mount -log-socket $SOCK -fs not-allowed $MNT 2>&1; echo exit=\$?" 2>/dev/null | tail -2)
 if echo "$out" | grep -q "not allowed" && ! echo "$out" | grep -q "exit=0"; then
   echo "PASS  a filesystem the server doesn't allow can't mount"
 else

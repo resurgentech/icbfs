@@ -40,8 +40,9 @@ deploy_icbfs "$IP"
 
 echo "Mounting ${FS_NAME} at ${MNT}..." >&2
 # Unmount before the MinIO underneath goes away, even on failure.
-trap 'ssh_vm "$IP" "sudo umount -l $MNT 2>/dev/null; sudo pkill -x icbfs-cli; true" || true' EXIT
-mount_icbfs "$IP" "$MNT" "$FS_NAME" -max-file-size "$MAX_FILE_SIZE"
+trap 'ssh_vm "$IP" "sudo umount -l $MNT 2>/dev/null; sudo pkill -x icbfs; true" || true' EXIT
+create_fs "$FS_NAME" -max-file-size "$MAX_FILE_SIZE"
+mount_icbfs "$IP" "$MNT" "$FS_NAME"
 
 echo "Running pjdfstest (needs root; this can take several minutes against real network storage)..." >&2
 set +e

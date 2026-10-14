@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"io"
 	"os"
 	"path/filepath"
@@ -236,6 +237,10 @@ func (f *Filesystem) checkWritable() error {
 	return nil
 }
 
+// Bootstrap is create-or-attach in one call, for tests and tools that
+// want a filesystem whatever state the bucket is in. Mounts never use it:
+// they Attach, and filesystems are created explicitly (CreateFilesystem).
+//
 // Bootstrap resolves this filesystem's ID and archived status against
 // the master block (registering a new entry with the given declared
 // size if this name has never been seen in this bucket before — size is
@@ -247,34 +252,17 @@ func (f *Filesystem) checkWritable() error {
 // immutable afterward; see PrimaryWindows and ROADMAP.md's Part F,
 // task F5.
 func (f *Filesystem) Bootstrap(ctx context.Context, size uint64, mode, uid, gid uint32, primaryWindows bool) error {
-	id, entry, err := registerFilesystem(ctx, f.store, &pb.FilesystemEntry{
-		Name: f.fsName, Size: size, PrimaryWindows: primaryWindows, MaxFileSize: f.newMaxFileSize})
+	id, entry, _, err := registerFilesystem(ctx, f.store, &pb.FilesystemEntry{
+		Name: f.fsName, Size: size, PrimaryWindows: primaryWindows, MaxFileSize: f.newMaxFileSize,
+		Created: timestamppb.Now()})
 	if err != nil {
 		return err
 	}
 	f.applyEntry(id, entry)
-
-	rootKey := f.RootKey()
-	if _, err := f.store.Head(ctx, rootKey); err == nil {
+	if _, err := f.store.Head(ctx, f.RootKey()); err == nil {
 		return nil
 	}
-	empty, err := (&block.Block{Kind: block.Leaf}).Encode()
-	if err != nil {
-		return err
-	}
-	// .metadata first: if this is interrupted before the block lands,
-	// the next Bootstrap sees no root block and simply redoes both.
-	now := time.Now()
-	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1, Mtime: now, Ctime: now}
-	metaData, err := encodeFileMetadata(attr)
-	if err != nil {
-		return err
-	}
-	if _, err := f.store.Put(ctx, metadataObjectKey(rootKey), bytes.NewReader(metaData), nil, ""); err != nil {
-		return err
-	}
-	_, err = f.store.Put(ctx, rootKey, bytes.NewReader(empty), nil, "")
-	return err
+	return f.createRoot(ctx, Attr{Mode: mode, Uid: uid, Gid: gid})
 }
 
 // applyEntry takes this filesystem's identity and fixed settings from

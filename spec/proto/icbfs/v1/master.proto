@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package icbfs.v1;
 
+import "google/protobuf/timestamp.proto";
+
 option go_package = "github.com/resurgentech/icbfs/internal/pb";
 
 // FilesystemEntry is one slot in the MasterBlock's list. An empty Name
@@ -22,6 +24,9 @@ message FilesystemEntry {
   // once at creation, immutable afterward. 0 (filesystems created before
   // this field) means the default, 1 TiB.
   uint64 max_file_size = 5;
+  // created: when the filesystem was created (unset for filesystems
+  // created before this field).
+  google.protobuf.Timestamp created = 6;
 }
 
 // MasterBlock is the body of the one, fixed, well-known master-block

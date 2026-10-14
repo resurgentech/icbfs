@@ -39,7 +39,7 @@ if [ "$deploy" = 1 ]; then
   tarball="$WORK_DIR/icbfs-src.tar"
   (cd "$REPO" && git ls-files -co --exclude-standard -z | tar --null -T - -cf "$tarball") || exit 1
   scp_vm "$tarball" "Administrator@${IP}:C:/Windows/Temp/icbfs-src.tar" || { echo "deploy failed" >&2; exit 1; }
-  out=$(ssh_vm "$IP" "if (Test-Path C:\\icbfs-test) { Remove-Item C:\\icbfs-test -Recurse -Force }; New-Item -ItemType Directory C:\\icbfs-test | Out-Null; tar -xf C:\\Windows\\Temp\\icbfs-src.tar -C C:\\icbfs-test; cd C:\\icbfs-test; go build -o icbfs-winfsp.exe ./cmd/icbfs-winfsp; echo BUILD_EXIT=\$LASTEXITCODE" 2>&1 | grep -v -i "$FILTER")
+  out=$(ssh_vm "$IP" "if (Test-Path C:\\icbfs-test) { Remove-Item C:\\icbfs-test -Recurse -Force }; New-Item -ItemType Directory C:\\icbfs-test | Out-Null; tar -xf C:\\Windows\\Temp\\icbfs-src.tar -C C:\\icbfs-test; cd C:\\icbfs-test; go build -o icbfs-winfsp.exe ./cmd/icbfs-winfsp; if (\$LASTEXITCODE -eq 0) { go build -o icbfs-cli.exe ./cmd/icbfs-cli }; echo BUILD_EXIT=\$LASTEXITCODE" 2>&1 | grep -v -i "$FILTER")
   echo "$out" >&2
   echo "$out" | grep -q "BUILD_EXIT=0" || { echo "VM build failed — not running tests" >&2; exit 1; }
 fi
@@ -55,7 +55,11 @@ echo "=== winfsp-tests $TARGET (full result: $result) ===" >&2
 # winfsp-tests pads names with dots to a fixed column, so a long name
 # gets just one.
 ok=$(grep -cE '^[a-z0-9_]+\.+ OK ' "$result")
-bad=$(grep -E '^[a-z0-9_]+\.+ (KO|TIMEOUT|MOUNT-FAILED)' "$result")
+# The runner's own lines ("name ... MOUNT-FAILED") have a space before the dots.
+bad=$(grep -E '^[a-z0-9_]+ ?\.+ (KO|TIMEOUT|MOUNT-FAILED)' "$result")
+if [ "$ok" -eq 0 ] && [ -z "$bad" ]; then
+  bad="no test passed (no results?)"
+fi
 echo "OK: $ok" >&2
 if [ -n "$bad" ]; then
   echo "$bad"

@@ -32,7 +32,7 @@ generic multi-cloud abstraction is being built.
   smallest power-of-two MiB, at least 8 MiB, that fits it in S3's
   10,000 parts): 8 MiB for an 8 GiB limit, 128 MiB for 1 TiB.
 - **Max file size** is a per-filesystem setting, fixed at creation in the
-  master block (`-max-file-size`): 1 TiB by default. Writes and truncates
+  master block (`icbfs-cli fs create -max-file-size`): 1 TiB by default. Writes and truncates
   past it fail with `EFBIG` / `STATUS_FILE_TOO_LARGE`. An open file's
   content is staged in a local scratch file, not memory, so the limit
   bounds local disk per open file and the size of one upload. The test
@@ -130,6 +130,14 @@ design (reconstructing a snapshot, `du` itself). Changing a filesystem's
 declared `size` after creation is expected to need a separate
 administrative tool, not a normal mount-time operation — acknowledged,
 not yet designed.
+
+**Creating is explicit.** A filesystem is created only by
+`icbfs-cli fs create` (or, to come, the drive API), with every setting
+given then: primary mode, max file size and declared size, and the root
+folder's owner and permissions (on a primary-Windows filesystem, its
+security descriptor). A mount only attaches to an existing filesystem, and
+fails if there's none of that name — so a mistyped name can't silently
+make a new, empty one.
 
 **Lifecycle: active → archived → pruned.** `archived = true` means the
 filesystem and all its data still physically exist — nothing has been

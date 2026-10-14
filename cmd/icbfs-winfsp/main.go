@@ -53,11 +53,8 @@ func main() {
 	accessKey := fset.String("access-key", "minioadmin", "access key")
 	secretKey := fset.String("secret-key", "minioadmin", "secret key")
 	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
-	size := fset.Uint64("size", 100<<30, "declared filesystem size in bytes (only used the first time a filesystem name is created)")
 	asOf := fset.String("as-of", "", "mount read-only as the filesystem was at this time: a date (2006-01-02, meaning the end of that day), a date-time (2006-01-02T15:04:05) in local time, or RFC 3339 with a zone. Fails if the filesystem didn't exist yet then")
-	maxFileSize := fset.Uint64("max-file-size", icbfs.DefaultMaxFileSize, "largest file the filesystem holds, in bytes (only used the first time a filesystem name is created, immutable afterward)")
 	caseInsensitive := fset.Bool("case-insensitive", true, "case-insensitive name lookup, following the standard NTFS/Samba/WSL2 pattern (ARCHITECTURE.md's Windows compatibility section) — storage itself always stays case-sensitive/case-preserving regardless of this flag")
-	primaryWindows := fset.Bool("primary-windows", true, "mark this filesystem primary-Windows rather than primary-POSIX (ARCHITECTURE.md's \"Windows compatibility: primary mode\" section) — only used the first time a filesystem name is created, immutable afterward, same as --size")
 	cacheDir := fset.String("cache-dir", "", "local disk directory for the file-content cache (ROADMAP.md's Part G, task G3); empty (the default) uses a fresh os.TempDir() subdirectory")
 	cacheSize := fset.Uint64("cache-size", 512<<20, "maximum total bytes the local disk cache (-cache-dir) may hold before evicting the least-recently-used cached file")
 	if err := fset.Parse(os.Args[1:]); err != nil {
@@ -103,11 +100,10 @@ func main() {
 			log.Fatalf("filesystem %q as of %s: %v", *fsName, view.At().Format(time.RFC3339), err)
 		}
 		attrs = winfsp.FspFSAttributeReadOnlyVolume
-	} else {
-		fsys.SetCreationMaxFileSize(*maxFileSize)
-		if err := fsys.Bootstrap(ctx, *size, 0755, 0, 0, *primaryWindows); err != nil {
-			log.Fatalf("bootstrap filesystem %q: %v", *fsName, err)
-		}
+	} else if err := fsys.Attach(ctx); err != nil {
+		// Mounts never create a filesystem: icbfs-cli fs create, or the
+		// drive API, does.
+		log.Fatalf("filesystem %q: %v", *fsName, err)
 	}
 
 	// winfsp.CaseSensitive and winfspserver.Root's own caseInsensitive

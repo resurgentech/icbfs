@@ -50,6 +50,24 @@ fully in step yet. See:
 All three require object versioning enabled on the bucket/container —
 that's the mechanism snapshotting is built on.
 
+## Creating a filesystem
+
+Mounts don't create filesystems; `icbfs-cli` does, in a bucket with
+versioning on:
+
+```
+icbfs-cli fs create -fs docs                                  # primary-POSIX, root owned by you
+icbfs-cli fs create -fs share -primary-windows -root-owner S-1-5-21-…-1001
+icbfs-cli fs list | describe -fs NAME | resize | archive | prune
+```
+
+Primary mode and max file size are fixed at creation; the declared size
+can change (`resize`). On Windows, a primary-Windows filesystem's root
+defaults to the creating account's permissions; elsewhere give
+`-root-owner` (full control for that SID, SYSTEM and Administrators) or
+`-root-sddl`. Store connection: `-endpoint`, `-bucket`, `-access-key`,
+`-secret-key`, or `$ICBFS_ENDPOINT` and friends.
+
 ## Mounting the past
 
 Either mount command can show a filesystem read-only as it was at an

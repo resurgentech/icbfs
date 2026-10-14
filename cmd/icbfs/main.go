@@ -45,13 +45,9 @@ func main() {
 	accessKey := fset.String("access-key", "minioadmin", "access key")
 	secretKey := fset.String("secret-key", "minioadmin", "secret key")
 	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
-	size := fset.Uint64("size", 100<<30, "declared filesystem size in bytes, for df (only used the first time a filesystem name is created)")
 	logSocket := fset.String("log-socket", "", "log reads, writes, deletes and directory listings through the icbfs-logd daemon on this Unix socket — which also supplies the store's endpoint, bucket and keys (-endpoint, -bucket, -region, -access-key and -secret-key are then ignored); the mount fails without them")
 	logAsync := fset.Bool("log-async", false, "with -log-socket: queue events instead of waiting for the server to log each one; never slows an operation, but drops (and counts) events while the daemon is unreachable")
 	asOf := fset.String("as-of", "", "mount read-only as the filesystem was at this time: a date (2006-01-02, meaning the end of that day), a date-time (2006-01-02T15:04:05) in local time, or RFC 3339 with a zone. Fails if the filesystem didn't exist yet then")
-	maxFileSize := fset.Uint64("max-file-size", icbfs.DefaultMaxFileSize, "largest file the filesystem holds, in bytes (only used the first time a filesystem name is created, immutable afterward)")
-	uidOverride := fset.Int("uid", -1, "owner uid for the filesystem root (only used the first time a filesystem name is created); defaults to the uid of the user running this command, same as every other FUSE filesystem's -o uid= override (sshfs, NFS, etc.)")
-	gidOverride := fset.Int("gid", -1, "owner gid for the filesystem root (only used the first time a filesystem name is created); defaults to the gid of the user running this command, same as every other FUSE filesystem's -o gid= override (sshfs, NFS, etc.)")
 	locking := fset.Bool("locking", false, "enable the Locking feature (flock/fcntl); off by default, per ARCHITECTURE.md's Locking section")
 	enableNotify := fset.Bool("notify", false, "enable the Change notifications feature (ROADMAP.md Part E) via MinIO's ListenBucketNotification; off by default, same opt-in reasoning as --locking. Only the MinIO backend (task E4) is wired up here — Azure/AWS S3 adapters (tasks E5/E6) aren't reachable from this flag.")
 	debug := fset.Bool("debug", false, "log every FUSE operation")
@@ -114,36 +110,15 @@ func main() {
 	if *cacheDir != "" {
 		fsys.SetCacheOptions(*cacheDir, int64(*cacheSize))
 	}
-	// The root is owned by whoever runs this mount command by default
-	// — necessary now that fuseMountOptions enables default_permissions
-	// (task C1): the kernel enforces this ownership for real, so a
-	// hardcoded root uid 0 would lock a non-root mounting user out of
-	// their own filesystem's root. --uid/--gid override that default,
-	// same as every other FUSE filesystem exposes (sshfs, NFS, etc.) —
-	// a real, well-known need (e.g. mounting on behalf of a different
-	// user than the one running the mount command), not a hypothetical.
-	rootUID, rootGID := uint32(os.Getuid()), uint32(os.Getgid())
-	if *uidOverride >= 0 {
-		rootUID = uint32(*uidOverride)
-	}
-	if *gidOverride >= 0 {
-		rootGID = uint32(*gidOverride)
-	}
-	// primaryWindows=false: this is the POSIX/FUSE mount command, not
-	// ROADMAP.md's Part F Windows tool (cmd/icbfs-winfsp, which exposes
-	// --primary-windows, default true) — no flag exposed here yet,
-	// since nothing on this access layer reads the stored value today
-	// either way (task F5's own consumers, F6/F8, are Windows-only).
 	if view != nil {
 		if err := fsys.BootstrapReadOnly(ctx); err != nil {
 			view.Close()
 			log.Fatalf("filesystem %q as of %s: %v", *fsName, view.At().Format(time.RFC3339), err)
 		}
-	} else {
-		fsys.SetCreationMaxFileSize(*maxFileSize)
-		if err := fsys.Bootstrap(ctx, *size, 0755, rootUID, rootGID, false); err != nil {
-			log.Fatalf("bootstrap filesystem %q: %v", *fsName, err)
-		}
+	} else if err := fsys.Attach(ctx); err != nil {
+		// Mounts never create a filesystem: icbfs-cli fs create, or the
+		// drive API, does.
+		log.Fatalf("filesystem %q: %v", *fsName, err)
 	}
 	fsys.EnableLocking(*locking)
 

@@ -9,6 +9,7 @@ package pb
 import (
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
+	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	reflect "reflect"
 	sync "sync"
 	unsafe "unsafe"
@@ -39,7 +40,10 @@ type FilesystemEntry struct {
 	// max_file_size: the largest file this filesystem holds, in bytes; set
 	// once at creation, immutable afterward. 0 (filesystems created before
 	// this field) means the default, 1 TiB.
-	MaxFileSize   uint64 `protobuf:"varint,5,opt,name=max_file_size,json=maxFileSize,proto3" json:"max_file_size,omitempty"`
+	MaxFileSize uint64 `protobuf:"varint,5,opt,name=max_file_size,json=maxFileSize,proto3" json:"max_file_size,omitempty"`
+	// created: when the filesystem was created (unset for filesystems
+	// created before this field).
+	Created       *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=created,proto3" json:"created,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -109,6 +113,13 @@ func (x *FilesystemEntry) GetMaxFileSize() uint64 {
 	return 0
 }
 
+func (x *FilesystemEntry) GetCreated() *timestamppb.Timestamp {
+	if x != nil {
+		return x.Created
+	}
+	return nil
+}
+
 // MasterBlock is the body of the one, fixed, well-known master-block
 // object per bucket. The list can only ever grow in length, never
 // shrink or reorder — a deleted filesystem's entry is blanked in place
@@ -163,13 +174,14 @@ var File_spec_proto_icbfs_v1_master_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_master_proto_rawDesc = "" +
 	"\n" +
-	" spec/proto/icbfs/v1/master.proto\x12\bicbfs.v1\"\xa2\x01\n" +
+	" spec/proto/icbfs/v1/master.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd8\x01\n" +
 	"\x0fFilesystemEntry\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x1a\n" +
 	"\barchived\x18\x03 \x01(\bR\barchived\x12'\n" +
 	"\x0fprimary_windows\x18\x04 \x01(\bR\x0eprimaryWindows\x12\"\n" +
-	"\rmax_file_size\x18\x05 \x01(\x04R\vmaxFileSize\"J\n" +
+	"\rmax_file_size\x18\x05 \x01(\x04R\vmaxFileSize\x124\n" +
+	"\acreated\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\acreated\"J\n" +
 	"\vMasterBlock\x12;\n" +
 	"\vfilesystems\x18\x01 \x03(\v2\x19.icbfs.v1.FilesystemEntryR\vfilesystemsB+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
 
@@ -187,16 +199,18 @@ func file_spec_proto_icbfs_v1_master_proto_rawDescGZIP() []byte {
 
 var file_spec_proto_icbfs_v1_master_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
 var file_spec_proto_icbfs_v1_master_proto_goTypes = []any{
-	(*FilesystemEntry)(nil), // 0: icbfs.v1.FilesystemEntry
-	(*MasterBlock)(nil),     // 1: icbfs.v1.MasterBlock
+	(*FilesystemEntry)(nil),       // 0: icbfs.v1.FilesystemEntry
+	(*MasterBlock)(nil),           // 1: icbfs.v1.MasterBlock
+	(*timestamppb.Timestamp)(nil), // 2: google.protobuf.Timestamp
 }
 var file_spec_proto_icbfs_v1_master_proto_depIdxs = []int32{
-	0, // 0: icbfs.v1.MasterBlock.filesystems:type_name -> icbfs.v1.FilesystemEntry
-	1, // [1:1] is the sub-list for method output_type
-	1, // [1:1] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	2, // 0: icbfs.v1.FilesystemEntry.created:type_name -> google.protobuf.Timestamp
+	0, // 1: icbfs.v1.MasterBlock.filesystems:type_name -> icbfs.v1.FilesystemEntry
+	2, // [2:2] is the sub-list for method output_type
+	2, // [2:2] is the sub-list for method input_type
+	2, // [2:2] is the sub-list for extension type_name
+	2, // [2:2] is the sub-list for extension extendee
+	0, // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_spec_proto_icbfs_v1_master_proto_init() }

@@ -16,7 +16,7 @@ import (
 // registerName registers name with a declared size and every other
 // creation setting at its default.
 func registerName(ctx context.Context, store objstore.Store, name string, size uint64) (id string, archived bool, err error) {
-	id, e, err := registerFilesystem(ctx, store, &pb.FilesystemEntry{Name: name, Size: size})
+	id, e, _, err := registerFilesystem(ctx, store, &pb.FilesystemEntry{Name: name, Size: size})
 	if err != nil {
 		return "", false, err
 	}
