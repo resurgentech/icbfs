@@ -1,7 +1,7 @@
 // Command icbfs-cli does what isn't a filesystem operation: creating and
 // managing icbfs filesystems in a bucket (fs), naming versions (names),
-// and the trash (trash). Mounts
-// never create a filesystem; this does, or the drive API.
+// and the trash (trash). Mounts never create a filesystem; this does, or
+// the drive API.
 //
 //	icbfs-cli fs create   -fs NAME [-primary-windows] [-size N] [-max-file-size N] [root options]
 //	icbfs-cli fs list
@@ -15,9 +15,12 @@
 //	icbfs-cli trash list    -fs NAME [-path PATH] [-limit N]
 //	icbfs-cli trash restore -fs NAME -id ENTRY [-as NAME] [-replace]
 //
-// Every command takes the store's connection (-endpoint, -bucket,
+// Two ways to run. With the store's connection (-endpoint, -bucket,
 // -region, -access-key, -secret-key; or $ICBFS_ENDPOINT, $ICBFS_BUCKET,
-// $ICBFS_ACCESS_KEY, $ICBFS_SECRET_KEY).
+// $ICBFS_ACCESS_KEY, $ICBFS_SECRET_KEY), it does the work itself. On a
+// machine with the daemon, -daemon SOCKET (or $ICBFS_DAEMON) sends the
+// command through it to the server instead, which checks it and runs it
+// as this machine's account — no store credentials on the machine.
 package main
 
 import (
@@ -27,6 +30,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -35,8 +39,10 @@ import (
 	awscreds "github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 
+	"github.com/resurgentech/icbfs/internal/fslog"
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore"
+	"github.com/resurgentech/icbfs/internal/sidecmd"
 )
 
 const usage = `usage: icbfs-cli fs create|list|describe|resize|archive|prune [flags]
@@ -44,53 +50,37 @@ const usage = `usage: icbfs-cli fs create|list|describe|resize|archive|prune [fl
        icbfs-cli trash list|restore [flags]
 run "icbfs-cli <group> <command> -h" for a command's flags`
 
+var commands = map[string]func([]string) error{
+	"fs create": fsCreate, "fs list": fsList, "fs describe": fsDescribe, "fs resize": fsResize,
+	"fs archive": fsArchive, "fs prune": fsPrune,
+	"names create": namesCreate, "names list": namesList, "names delete": namesDelete,
+	"trash list": trashList, "trash restore": trashRestore,
+}
+
 func main() {
 	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
-	cmd, args := os.Args[1]+" "+os.Args[2], os.Args[3:]
-	c, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-	opCtx = c
-	var err error
-	switch cmd {
-	case "fs create":
-		err = fsCreate(args)
-	case "fs list":
-		err = fsList(args)
-	case "fs describe":
-		err = fsDescribe(args)
-	case "fs resize":
-		err = fsResize(args)
-	case "fs archive":
-		err = fsArchive(args)
-	case "fs prune":
-		err = fsPrune(args)
-	case "names create":
-		err = namesCreate(args)
-	case "names list":
-		err = namesList(args)
-	case "names delete":
-		err = namesDelete(args)
-	case "trash list":
-		err = trashList(args)
-	case "trash restore":
-		err = trashRestore(args)
-	default:
+	cmd, ok := commands[os.Args[1]+" "+os.Args[2]]
+	if !ok {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
-	if err != nil {
+	c, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	opCtx = c
+	if err := cmd(os.Args[3:]); err != nil {
 		cancel()
 		fmt.Fprintln(os.Stderr, "icbfs-cli:", err)
 		os.Exit(1)
 	}
 }
 
-// storeFlags are every command's connection to the store.
+// storeFlags are every command's way to the store: directly, or through
+// the daemon.
 type storeFlags struct {
-	endpoint, bucket, region, accessKey, secretKey *string
+	endpoint, bucket, region, accessKey, secretKey, daemon *string
 }
 
 func addStoreFlags(fset *flag.FlagSet) storeFlags {
@@ -106,6 +96,7 @@ func addStoreFlags(fset *flag.FlagSet) storeFlags {
 		region:    fset.String("region", env("ICBFS_REGION", "us-east-1"), "region ($ICBFS_REGION)"),
 		accessKey: fset.String("access-key", env("ICBFS_ACCESS_KEY", ""), "access key ($ICBFS_ACCESS_KEY)"),
 		secretKey: fset.String("secret-key", env("ICBFS_SECRET_KEY", ""), "secret key ($ICBFS_SECRET_KEY)"),
+		daemon:    fset.String("daemon", env("ICBFS_DAEMON", ""), "send the command through the daemon's socket instead, to run on the server ($ICBFS_DAEMON)"),
 	}
 }
 
@@ -117,6 +108,26 @@ func (s storeFlags) store() objstore.Store {
 		Credentials:  awscreds.NewStaticCredentialsProvider(*s.accessKey, *s.secretKey, ""),
 	})
 	return objstore.NewS3Store(client, *s.bucket)
+}
+
+// run runs a side command — here, or on the server through the daemon —
+// and decodes its result into out (if not nil).
+func (s storeFlags) run(name string, args map[string]string, out any) error {
+	var result json.RawMessage
+	var err error
+	if *s.daemon != "" {
+		c := fslog.NewClient(*s.daemon, "", false)
+		result, err = c.Command(ctx(), name, args)
+	} else {
+		result, err = sidecmd.Run(ctx(), s.store(), sidecmd.Request{Name: name, Args: args, Actor: actor()})
+	}
+	if err != nil {
+		return err
+	}
+	if out == nil {
+		return nil
+	}
+	return json.Unmarshal(result, out)
 }
 
 func parse(fset *flag.FlagSet, args []string) error {
@@ -164,11 +175,13 @@ func fsCreate(args []string) error {
 	} else if *rootSDDL != "" || *rootOwner != "" {
 		return errors.New("-root-sddl and -root-owner are for -primary-windows filesystems")
 	}
-	info, err := icbfs.CreateFilesystem(ctx(), sf.store(), icbfs.Settings{
-		Name: *name, Size: *size, PrimaryWindows: *primaryWindows, MaxFileSize: *maxFileSize,
-		RootMode: uint32(*rootMode), RootUid: uint32(*rootUid), RootGid: uint32(*rootGid), RootSDDL: sddl,
-	})
-	if err != nil {
+	var info icbfs.Info
+	if err := sf.run("fs create", map[string]string{
+		"fs": *name, "primary-windows": strconv.FormatBool(*primaryWindows),
+		"size": strconv.FormatUint(*size, 10), "max-file-size": strconv.FormatUint(*maxFileSize, 10),
+		"root-mode": "0" + strconv.FormatUint(uint64(*rootMode), 8), "root-uid": strconv.Itoa(*rootUid), "root-gid": strconv.Itoa(*rootGid),
+		"root-sddl": sddl,
+	}, &info); err != nil {
 		return err
 	}
 	printInfos([]icbfs.Info{info}, false)
@@ -202,8 +215,8 @@ func fsList(args []string) error {
 	if err := parse(fset, args); err != nil {
 		return err
 	}
-	all, err := icbfs.ListFilesystems(ctx(), sf.store())
-	if err != nil {
+	var all []icbfs.Info
+	if err := sf.run("fs list", nil, &all); err != nil {
 		return err
 	}
 	printInfos(all, *asJSON)
@@ -218,27 +231,15 @@ func fsDescribe(args []string) error {
 	if err := parse(fset, args); err != nil {
 		return err
 	}
-	store := sf.store()
-	info, err := icbfs.DescribeFilesystem(ctx(), store, *name)
-	if err != nil {
-		return err
-	}
-	f := icbfs.New(store, *name)
-	if err := f.Attach(ctx()); err != nil {
-		return err
-	}
-	_, used, err := f.StatFS(ctx())
-	if err != nil {
+	var d sidecmd.Described
+	if err := sf.run("fs describe", map[string]string{"fs": *name}, &d); err != nil {
 		return err
 	}
 	if *asJSON {
-		return json.NewEncoder(os.Stdout).Encode(struct {
-			icbfs.Info
-			Used uint64
-		}{info, used})
+		return json.NewEncoder(os.Stdout).Encode(d)
 	}
-	printInfos([]icbfs.Info{info}, false)
-	fmt.Printf("used: %d bytes\n", used)
+	printInfos([]icbfs.Info{d.Info}, false)
+	fmt.Printf("used: %d bytes\n", d.Used)
 	return nil
 }
 
@@ -253,7 +254,7 @@ func fsResize(args []string) error {
 	if *size == 0 {
 		return errors.New("-size is required")
 	}
-	return icbfs.Resize(ctx(), sf.store(), *name, *size)
+	return sf.run("fs resize", map[string]string{"fs": *name, "size": strconv.FormatUint(*size, 10)}, nil)
 }
 
 func fsArchive(args []string) error {
@@ -263,7 +264,7 @@ func fsArchive(args []string) error {
 	if err := parse(fset, args); err != nil {
 		return err
 	}
-	return icbfs.Archive(ctx(), sf.store(), *name)
+	return sf.run("fs archive", map[string]string{"fs": *name}, nil)
 }
 
 func fsPrune(args []string) error {
@@ -274,22 +275,24 @@ func fsPrune(args []string) error {
 	if err := parse(fset, args); err != nil {
 		return err
 	}
-	store := sf.store()
-	info, err := icbfs.DescribeFilesystem(ctx(), store, *name)
-	if err != nil {
+	var d sidecmd.Described
+	if err := sf.run("fs describe", map[string]string{"fs": *name}, &d); err != nil {
 		return err
 	}
-	if !info.Archived {
+	if !d.Archived {
 		return fmt.Errorf("filesystem %q isn't archived: archive it first (fs archive), then prune", *name)
 	}
 	if !*yes {
 		return errors.New("prune deletes every object of the filesystem irreversibly; add -yes")
 	}
-	return icbfs.Prune(ctx(), store, *name)
+	return sf.run("fs prune", map[string]string{"fs": *name}, nil)
 }
 
 func printInfos(all []icbfs.Info, asJSON bool) {
 	if asJSON {
+		if all == nil {
+			all = []icbfs.Info{}
+		}
 		_ = json.NewEncoder(os.Stdout).Encode(all)
 		return
 	}

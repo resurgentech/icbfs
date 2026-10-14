@@ -529,10 +529,18 @@ benefits any tooling that persists and compares inode numbers over time.
   depth; implements the core object model directly.
 - **WinFsp driver** (Windows) — confirmed as the model for Windows support,
   buildable in parallel with the FUSE driver, not sequentially after it.
-- **Views** (browsable/mountable point-in-time snapshots) and a **REST
-  API** (S3-shaped, but with real hierarchical directories and without
-  S3's filename constraints) are both **deferred** — acknowledged as needed
-  eventually, not designed yet.
+- **Views**: read-only point-in-time mounts (`-as-of`, a time or a named
+  version) — see Snapshots.
+- **The drive API** (`pkg/drive`, `apiproposal.md`): host's document
+  API, an HTTP layer over a `Drive` interface whose icbfs backend works on
+  `internal/icbfs` directly. With no operating system in between, it makes
+  the file-level permission check itself (`internal/acl`): a Windows
+  access check against the SDDL a primary-Windows filesystem stores — the
+  first entry naming a right decides it, the owner keeps READ_CONTROL and
+  WRITE_DAC, generic rights mapped, and an item with no descriptor of its
+  own takes its nearest ancestor's — and POSIX modes on a primary-POSIX one.
+  Items it creates inherit as Windows would give them (OI/CI/NP/IO,
+  CREATOR OWNER).
 
 Locking is addressed below, not out of scope — superseding the earlier
 decision to defer it entirely.

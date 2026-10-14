@@ -61,7 +61,7 @@ deploy_icbfs() {
   echo "Deploying working tree to ${VM_SRC} and building icbfs and icbfs-logd..." >&2
   (cd "$repo" && git ls-files -co --exclude-standard -z | tar --null -T - -cf "$tarball") || return 1
   scp_to_vm "$ip" "$tarball" /tmp/icbfs-src.tar >/dev/null || return 1
-  ssh_vm "$ip" "rm -rf $VM_SRC && mkdir -p $VM_SRC && tar -xf /tmp/icbfs-src.tar -C $VM_SRC && cd $VM_SRC && go build -o icbfs ./cmd/icbfs && go build -o icbfs-logd ./cmd/icbfs-logd"
+  ssh_vm "$ip" "rm -rf $VM_SRC && mkdir -p $VM_SRC && tar -xf /tmp/icbfs-src.tar -C $VM_SRC && cd $VM_SRC && go build -o icbfs ./cmd/icbfs && go build -o icbfs-logd ./cmd/icbfs-logd && go build -o icbfs-cli ./cmd/icbfs-cli"
 }
 
 # mount_icbfs <ip> <mountpoint> <fs name> [mount flags...] mounts that

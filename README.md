@@ -121,6 +121,12 @@ icbfs-logd -socket /run/icbfs-logd.sock -server ws://server:8090/ws/daemon -secr
 icbfs mount -log-socket /run/icbfs-logd.sock -fs name /mnt/name      # add -log-async to never wait
 ```
 
+`icbfs-cli` can go through the daemon too: with `-daemon SOCKET` (or
+`$ICBFS_DAEMON`) instead of store credentials, each command goes to the
+server, which checks it and runs it as the machine's account — the one
+the daemon sees on its socket, whatever the client claims — and logs it
+(`icbfs-mockserver -allow-commands` limits which).
+
 With `-log-socket` the mount takes its store endpoint, bucket and keys
 from the server (and can't mount without them), and logs a `read` when a
 file is opened for reading, a `write` (with the size) when a file that
@@ -130,6 +136,26 @@ default every logged operation waits until the server has written the
 event; with `-log-async` events are queued instead, and dropped (and
 counted) while the daemon is unreachable. `icbfs-mockserver` is a mock:
 one shared secret, one set of credentials, a JSON-lines log.
+
+## The drive API
+
+Host's document API, as a Go library host-server mounts
+(`apiproposal.md` is the design, `spec/openapi/drive.yaml` the contract):
+
+- `pkg/drive` — the `Drive` interface (with per-backend capabilities),
+  copying between drives, diffs, drafts in a side store;
+- `pkg/drive/icbfsdrive` — the icbfs backend: a drive on a filesystem or a
+  directory in one, checking each item's own permissions as the actor's
+  profile (Windows ACLs on primary-Windows filesystems, evaluated in Go,
+  with inheritance; POSIX modes on primary-POSIX ones);
+- `pkg/drive/driveapi` — Fiber v3 handlers (`Mount`), plus the generated
+  models and Go client (`go generate ./pkg/drive/driveapi`);
+- `pkg/icbfs` — opening a bucket and administering its filesystems.
+
+`drive-api -config drive-api.json` serves it standalone for testing: a
+static token, drives, profiles and permissions from the file
+(`driveapi.Standalone`); requests carry `Authorization: Bearer TOKEN` and
+`X-Drive-Actor: NAME`.
 
 ## Windows mount: install WinFsp first
 

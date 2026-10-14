@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -70,6 +71,19 @@ func (c *Client) Credentials(ctx context.Context) (Creds, error) {
 		return Creds{}, fmt.Errorf("server refused credentials for %q: %s", c.fs, reply.Error)
 	}
 	return *reply.Creds, nil
+}
+
+// Command runs a side command on the server, through the daemon, and
+// returns its result.
+func (c *Client) Command(ctx context.Context, name string, args map[string]string) (json.RawMessage, error) {
+	reply, err := c.request(ctx, Frame{Op: OpCommand, Host: c.host, Command: &Command{Name: name, Args: args}})
+	if err != nil {
+		return nil, err
+	}
+	if !reply.OK {
+		return nil, errors.New(reply.Error)
+	}
+	return reply.Result, nil
 }
 
 // Log records op on path (bytes for a write), by the caller uid/gid/pid.

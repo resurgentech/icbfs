@@ -37,8 +37,9 @@ type Config struct {
 
 // Daemon relays between local mounts and the server.
 type Daemon struct {
-	cfg Config
-	ln  net.Listener
+	cfg  Config
+	ln   net.Listener
+	host string
 
 	mu      sync.Mutex // guards everything below
 	clients map[*client]bool
@@ -57,9 +58,10 @@ type relay struct {
 
 // client is one mount's connection.
 type client struct {
-	conn net.Conn
-	mu   sync.Mutex
-	enc  *json.Encoder
+	conn  net.Conn
+	mu    sync.Mutex
+	enc   *json.Encoder
+	actor string // the local account connected (uid:N), for commands
 }
 
 func (c *client) reply(f fslog.Frame) {
@@ -77,7 +79,8 @@ func New(cfg Config) (*Daemon, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Daemon{cfg: cfg, ln: ln, pending: map[uint64]*relay{}, clients: map[*client]bool{}}, nil
+	host, _ := os.Hostname()
+	return &Daemon{cfg: cfg, ln: ln, host: host, pending: map[uint64]*relay{}, clients: map[*client]bool{}}, nil
 }
 
 // Run serves mounts and keeps the server connection up until ctx ends.
@@ -112,7 +115,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 
 // serveClient reads one mount's requests and queues them upstream.
 func (d *Daemon) serveClient(conn net.Conn) {
-	c := &client{conn: conn, enc: json.NewEncoder(conn)}
+	c := &client{conn: conn, enc: json.NewEncoder(conn), actor: peerActor(conn)}
 	d.mu.Lock()
 	d.clients[c] = true
 	d.mu.Unlock()
@@ -129,9 +132,19 @@ func (d *Daemon) serveClient(conn net.Conn) {
 		if json.Unmarshal(sc.Bytes(), &f) != nil {
 			continue
 		}
-		if f.Op != fslog.OpCreds && f.Op != fslog.OpEvent {
+		if f.Op != fslog.OpCreds && f.Op != fslog.OpEvent && f.Op != fslog.OpCommand {
 			c.reply(fslog.Frame{Op: fslog.OpReply, ID: f.ID, Error: "unknown op " + f.Op})
 			continue
+		}
+		if f.Op == fslog.OpCommand {
+			if f.Command == nil {
+				c.reply(fslog.Frame{Op: fslog.OpReply, ID: f.ID, Error: "a command frame without a command"})
+				continue
+			}
+			// Who's asking is the daemon's to say: the local account on
+			// the other end of the socket, on this machine.
+			f.Command.Actor = d.host + "/" + c.actor
+			f.Host = d.host
 		}
 		d.mu.Lock()
 		d.nextID++

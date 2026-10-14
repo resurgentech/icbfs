@@ -1,9 +1,8 @@
 # Drive API — proposal
 
-Status: **draft, decisions recorded**. Nothing here is built. A call nobody
-has confirmed yet is marked **(proposed)**. The consumable spec will be an
-OpenAPI file (`spec/openapi/drive.yaml`), written spec-first as the first
-implementation step, from this document.
+Status: **built** — see "As built" at the end for where it lives and where
+it departs from this text. A call nobody has confirmed yet is marked
+**(proposed)**. The consumable spec is `spec/openapi/drive.yaml`.
 
 ## Purpose
 
@@ -71,12 +70,12 @@ icbfs-logd ── the machine's daemon: mounts and icbfs-cli reach host through 
 icbfs mount, icbfs-winfsp ── mounts; icbfs-cli ── side commands and storage admin
 ```
 
-- **Library**: `pkg/drive` (**proposed**), public so host's module can
-  import it; the icbfs core exposes what it needs through `pkg/icbfs`
-  (**proposed**), with the access layers staying in `internal/`.
-- host-server calls `drive.Mount(app, cfg)` with its Fiber app, its
+- **Library**: `pkg/drive`, public so host's module can
+  import it; the icbfs core exposes what it needs through `pkg/icbfs`,
+  with the access layers staying in `internal/`.
+- host-server calls `driveapi.Mount(app, cfg)` with its Fiber app, its
   authentication, its permission check and its drive registry.
-- **Standalone**: `cmd/drive-api` (**proposed**) serves the same handlers
+- **Standalone**: `cmd/drive-api` serves the same handlers
   with a static token, a drive list and a profile map from configuration,
   for testing and the VM runs.
 
@@ -254,7 +253,7 @@ up to about a second ahead is waited for).
 - A file version carries a name in `versions` when it was the file's current
   version at the name's time.
 
-Mounts read them too: `icbfs mount -as-of q3-signoff` (**proposed**). Later,
+Mounts read them too: `icbfs mount -as-of q3-signoff`. Later,
 a hidden, read-only `.versions/<name>/` directory at a mount's root, like ZFS's
 `.zfs/snapshot`, to reach named versions from a live mount (not in v1).
 
@@ -307,7 +306,7 @@ actor's profile and permissions. (Listing drives is host's.)
 A delete — from the API or any mount — records a trash entry when a file's
 last name goes or a directory is removed: the id, the name, the original
 parent and path, when, by whom, the last version and size. Kept forever, in a
-hidden per-filesystem index (the directory B-tree format, outside the visible
+hidden per-filesystem index (one object per entry, listed newest first, outside the visible
 tree). Restoring works because icbfs keeps a file under its id: its versions
 stayed put, so restoring makes the last one current and gives it a name again,
 and its history simply continues.
@@ -437,3 +436,30 @@ item in neither or both.
 2. **Permission names**: the `drive.*` and `storage.*` set above is a
    proposal for host's registry; does it match how host names and
    groups permissions?
+
+## As built
+
+- `pkg/drive` (the interface, capabilities, `Copy`, `Diff`, `Drafts`),
+  `pkg/drive/icbfsdrive` (the backend, and the side store on an icbfs
+  filesystem of its own), `pkg/drive/driveapi` (`Mount(router, Config)`:
+  the Fiber v3 handlers; the generated models and client; `Standalone`),
+  `pkg/icbfs` (buckets and filesystem administration), `cmd/drive-api`.
+  The Windows access check is `internal/acl`.
+- `Config` is what host supplies: `Drive` (its registry), `Authorize`
+  and `AuthorizeStorage` (its role check, answering the actor and the
+  actor's profile), `Bucket`, `Drafts`, and `Audit`, told of every
+  operation (actor, profile, route, item, status) for the logging chain.
+- `version=` is a named version when the drive has a name by that value,
+  else a version id.
+- A trashed item has no directory left to ask, so the drive's root is
+  checked instead: read there to see its versions, write to purge it.
+- Events carry the API's own changes. `icbfsdrive.Drive.Notify` takes
+  change signals (icbfs change notifications, for mounts' writes) for
+  host to wire to its notification source; nothing feeds it yet.
+- A copy across drives reads as the actor's profile on the source and
+  writes as its profile on the target, checked for `drive.write` there.
+- A file the API creates starts with one version, its content (the empty
+  version that creating it leaves is removed).
+- `icbfs-cli` runs every command through `internal/sidecmd`: itself, with
+  store credentials, or on the server through the daemon (`-daemon`), as
+  the account the daemon sees on its socket.

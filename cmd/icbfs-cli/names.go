@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"text/tabwriter"
 	"time"
 
@@ -21,15 +22,16 @@ func namesCreate(args []string) error {
 	if err := parse(fset, args); err != nil {
 		return err
 	}
-	var t time.Time
+	a := map[string]string{"fs": *fsName, "name": *name, "scope": *scope}
 	if *at != "" {
-		var err error
-		if t, err = icbfs.ParseAsOf(*at, time.Local); err != nil {
+		t, err := icbfs.ParseAsOf(*at, time.Local)
+		if err != nil {
 			return err
 		}
+		a["at"] = t.Format(time.RFC3339Nano)
 	}
-	nv, err := icbfs.CreateName(ctx(), sf.store(), *fsName, icbfs.NamedVersion{Name: *name, Scope: *scope, CreatedBy: actor()}, t)
-	if err != nil {
+	var nv icbfs.NamedVersion
+	if err := sf.run("names create", a, &nv); err != nil {
 		return err
 	}
 	fmt.Printf("%s: %s\n", nv.Name, nv.Time.Local().Format(time.RFC3339Nano))
@@ -44,14 +46,11 @@ func namesList(args []string) error {
 	if err := parse(fset, args); err != nil {
 		return err
 	}
-	names, err := icbfs.ListNames(ctx(), sf.store(), *fsName)
-	if err != nil {
+	names := []icbfs.NamedVersion{}
+	if err := sf.run("names list", map[string]string{"fs": *fsName}, &names); err != nil {
 		return err
 	}
 	if *asJSON {
-		if names == nil {
-			names = []icbfs.NamedVersion{}
-		}
 		return json.NewEncoder(os.Stdout).Encode(names)
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
@@ -74,7 +73,7 @@ func namesDelete(args []string) error {
 	if err := parse(fset, args); err != nil {
 		return err
 	}
-	return icbfs.DeleteName(ctx(), sf.store(), *fsName, *name)
+	return sf.run("names delete", map[string]string{"fs": *fsName, "name": *name}, nil)
 }
 
 func trashList(args []string) error {
@@ -87,18 +86,11 @@ func trashList(args []string) error {
 	if err := parse(fset, args); err != nil {
 		return err
 	}
-	f := icbfs.New(sf.store(), *fsName)
-	if err := f.Attach(ctx()); err != nil {
-		return err
-	}
-	entries, err := f.ListTrash(ctx(), icbfs.TrashOptions{PathPrefix: *path, Limit: *limit})
-	if err != nil {
+	entries := []icbfs.TrashEntry{}
+	if err := sf.run("trash list", map[string]string{"fs": *fsName, "path": *path, "limit": strconv.Itoa(*limit)}, &entries); err != nil {
 		return err
 	}
 	if *asJSON {
-		if entries == nil {
-			entries = []icbfs.TrashEntry{}
-		}
 		return json.NewEncoder(os.Stdout).Encode(entries)
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
@@ -126,19 +118,16 @@ func trashRestore(args []string) error {
 	if err := parse(fset, args); err != nil {
 		return err
 	}
-	f := icbfs.New(sf.store(), *fsName)
-	if err := f.Attach(ctx()); err != nil {
-		return err
-	}
-	e, err := f.Restore(ctx(), *id, icbfs.RestoreOptions{ToName: *as, Replace: *replace})
-	if err != nil {
+	var e icbfs.TrashEntry
+	if err := sf.run("trash restore", map[string]string{"fs": *fsName, "id": *id, "as": *as, "replace": strconv.FormatBool(*replace)}, &e); err != nil {
 		return err
 	}
 	fmt.Printf("restored %s\n", e.Name)
 	return nil
 }
 
-// actor is who this command acts as, for the records it leaves.
+// actor is who this command acts as, for the records it leaves, when it
+// runs here (through the daemon, the daemon says who).
 func actor() string {
 	if u := os.Getenv("USER"); u != "" {
 		return "cli:" + u

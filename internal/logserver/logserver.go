@@ -1,7 +1,8 @@
 // Package logserver is a mock of the server end of icbfs's logging
 // (cmd/icbfs-mockserver): daemons connect over a websocket with a shared
 // secret; it answers credential requests for the filesystems it allows,
-// and appends every event to a JSON-lines log, one event per line,
+// runs side commands (icbfs-cli through the daemon; internal/sidecmd) on
+// the configured store, and appends every event to a JSON-lines log, one event per line,
 // before acknowledging it — so a mount logging synchronously knows its
 // event is on disk. An event ID already logged (a resend after a
 // reconnect) is acknowledged without being written again.
@@ -9,6 +10,7 @@ package logserver
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -16,10 +18,15 @@ import (
 	"os"
 	"slices"
 	"sync"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
 	"github.com/resurgentech/icbfs/internal/fslog"
+	"github.com/resurgentech/icbfs/internal/objstore"
+	"github.com/resurgentech/icbfs/internal/sidecmd"
+	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
 )
 
 // Config is what the server hands out and where it logs.
@@ -28,6 +35,12 @@ type Config struct {
 	Log    string      // the JSON-lines event log, appended to
 	Creds  fslog.Creds // the store credentials every allowed filesystem gets
 	Allow  []string    // filesystem names allowed to mount; empty allows any
+	// AllowCommands are the side commands daemons may run ("names
+	// create", ...); empty allows every one.
+	AllowCommands []string
+	// StoreEndpoint, if set, is the store's endpoint as the server itself
+	// reaches it, for side commands (Creds.Endpoint is as mounts do).
+	StoreEndpoint string
 }
 
 // Server is the mock server.
@@ -39,6 +52,7 @@ type Server struct {
 	f     *os.File
 	seen  map[string]bool
 	conns map[*websocket.Conn]bool
+	store objstore.Store // the store side commands run on
 }
 
 // New opens cfg.Log for appending, remembering the IDs it already holds
@@ -60,7 +74,13 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{cfg: cfg, f: f, seen: seen, conns: map[*websocket.Conn]bool{}}, nil
+	endpoint := cfg.Creds.Endpoint
+	if cfg.StoreEndpoint != "" {
+		endpoint = cfg.StoreEndpoint
+	}
+	store := pkgicbfs.OpenS3(pkgicbfs.S3{Endpoint: endpoint, Region: cfg.Creds.Region, Bucket: cfg.Creds.Bucket,
+		AccessKey: cfg.Creds.AccessKey, SecretKey: cfg.Creds.SecretKey})
+	return &Server{cfg: cfg, f: f, seen: seen, conns: map[*websocket.Conn]bool{}, store: store}, nil
 }
 
 // Close drops every daemon connection and closes the log.
@@ -99,12 +119,27 @@ func (s *Server) serveDaemon(w http.ResponseWriter, r *http.Request) {
 		ws.Close()
 	}()
 	log.Printf("logserver: daemon connected from %s", r.RemoteAddr)
+	var wmu sync.Mutex
+	write := func(f fslog.Frame) error {
+		wmu.Lock()
+		defer wmu.Unlock()
+		return ws.WriteJSON(f)
+	}
 	for {
 		var f fslog.Frame
 		if err := ws.ReadJSON(&f); err != nil {
 			return
 		}
 		reply := fslog.Frame{Op: fslog.OpReply, ID: f.ID}
+		if f.Op == fslog.OpCommand {
+			// Commands can take a while; events don't wait for them.
+			go func(f fslog.Frame) {
+				reply.Result, reply.Error = s.command(f)
+				reply.OK = reply.Error == ""
+				_ = write(reply)
+			}(f)
+			continue
+		}
 		switch f.Op {
 		case fslog.OpCreds:
 			if len(s.cfg.Allow) == 0 || slices.Contains(s.cfg.Allow, f.FS) {
@@ -124,10 +159,36 @@ func (s *Server) serveDaemon(w http.ResponseWriter, r *http.Request) {
 		default:
 			reply.Error = "unknown op " + f.Op
 		}
-		if err := ws.WriteJSON(reply); err != nil {
+		if err := write(reply); err != nil {
 			return
 		}
 	}
+}
+
+// command runs a side command, if it's allowed, and logs it.
+func (s *Server) command(f fslog.Frame) (json.RawMessage, string) {
+	c := f.Command
+	if c == nil {
+		return nil, "a command frame without a command"
+	}
+	if len(s.cfg.AllowCommands) > 0 && !slices.Contains(s.cfg.AllowCommands, c.Name) {
+		log.Printf("logserver: refused %q for %s", c.Name, c.Actor)
+		return nil, fmt.Sprintf("%s may not %s", c.Actor, c.Name)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	result, err := sidecmd.Run(ctx, s.store, sidecmd.Request{Name: c.Name, Args: c.Args, Actor: c.Actor})
+	ev := &fslog.Event{ID: uuid.NewString(), Time: time.Now().UTC(), Host: f.Host, FS: c.Args["fs"], Op: fslog.EventCommand, Path: c.Name, Actor: c.Actor}
+	if err != nil {
+		ev.Error = err.Error()
+	}
+	if lerr := s.record(ev); lerr != nil {
+		log.Printf("logserver: logging %q: %v", c.Name, lerr)
+	}
+	if err != nil {
+		return nil, err.Error()
+	}
+	return result, ""
 }
 
 // record appends ev to the log and syncs it, once per event ID.

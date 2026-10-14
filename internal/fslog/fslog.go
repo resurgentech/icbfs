@@ -9,27 +9,45 @@
 // reply echoes it.
 package fslog
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Frame ops.
 const (
 	OpCreds = "creds" // driver → server: the store credentials to mount FS with
 	OpEvent = "event" // driver → server: log Event
-	OpReply = "reply" // server → driver: the answer to request ID
+	// OpCommand: icbfs-cli → server: run a side command (Command); the
+	// daemon sets who is asking (Command.Actor), from the socket's peer.
+	OpCommand = "command"
+	OpReply   = "reply" // server → driver: the answer to request ID
 )
 
 // Frame is one message on either hop.
 type Frame struct {
-	Op    string `json:"op"`
-	ID    uint64 `json:"id"`
-	FS    string `json:"fs,omitempty"`    // OpCreds: the filesystem being mounted
-	Host  string `json:"host,omitempty"`  // OpCreds: the machine asking
-	Event *Event `json:"event,omitempty"` // OpEvent
+	Op      string   `json:"op"`
+	ID      uint64   `json:"id"`
+	FS      string   `json:"fs,omitempty"`      // OpCreds: the filesystem being mounted
+	Host    string   `json:"host,omitempty"`    // OpCreds: the machine asking
+	Event   *Event   `json:"event,omitempty"`   // OpEvent
+	Command *Command `json:"command,omitempty"` // OpCommand
 
-	// OpReply: OK, or Error saying why not; Creds for an OpCreds.
-	OK    bool   `json:"ok,omitempty"`
-	Error string `json:"error,omitempty"`
-	Creds *Creds `json:"creds,omitempty"`
+	// OpReply: OK, or Error saying why not; Creds for an OpCreds, Result
+	// for an OpCommand.
+	OK     bool            `json:"ok,omitempty"`
+	Error  string          `json:"error,omitempty"`
+	Creds  *Creds          `json:"creds,omitempty"`
+	Result json.RawMessage `json:"result,omitempty"`
+}
+
+// Command is a side command (see internal/sidecmd): a name like
+// "names create", string arguments, and — set by the daemon, whatever
+// the client sent — the actor.
+type Command struct {
+	Name  string            `json:"name"`
+	Args  map[string]string `json:"args,omitempty"`
+	Actor string            `json:"actor,omitempty"`
 }
 
 // Event kinds.
@@ -39,6 +57,8 @@ const (
 	EventDelete  = "delete"  // a file or directory removed
 	EventList    = "ls"      // a directory listed
 	EventDropped = "dropped" // async logging dropped Bytes events while the daemon was unreachable
+	EventCommand = "command" // a side command was run; Path is its name, Actor who
+
 )
 
 // Event is one logged filesystem action.
@@ -53,6 +73,8 @@ type Event struct {
 	Uid   uint32    `json:"uid"`
 	Gid   uint32    `json:"gid"`
 	Pid   uint32    `json:"pid"`
+	Actor string    `json:"actor,omitempty"` // EventCommand
+	Error string    `json:"error,omitempty"` // EventCommand: it failed
 }
 
 // Creds is how to reach a filesystem's object store.

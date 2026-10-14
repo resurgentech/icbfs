@@ -11,6 +11,8 @@
 # server's log must record exactly those actions. Run twice: logging
 # synchronously (each operation waits for the server) and with
 # -log-async. A mount of a filesystem the server doesn't allow must fail.
+# Then icbfs-cli, with no credentials either, names a version through the
+# daemon: the server runs it, as the VM account the daemon saw, and logs it.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -z "${ICBFS_MINIO_VM_ENDPOINT:-}" ]; then
@@ -39,11 +41,16 @@ echo "Building icbfs-mockserver..." >&2
 # runs in the MinIO image already on hand, as this user, so the log it
 # writes into the work directory stays ours.
 SERVER_CONTAINER="icbfs-test-mockserver-$$"
+# The server runs side commands itself, reaching MinIO container to
+# container on Docker's bridge (the VM-facing address goes through the
+# host firewall, which drops it from a container).
+MINIO_BRIDGE_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$ICBFS_MINIO_CONTAINER")
 docker run -d --rm --name "$SERVER_CONTAINER" --user "$(id -u):$(id -g)" \
   -v "$WORK_DIR:/work" -p 0.0.0.0::8090 --entrypoint /work/icbfs-mockserver "${ICBFS_MINIO_IMAGE:-minio/minio:latest}" \
   -addr :8090 -secret "$SECRET" -log "/work/$LOG_NAME" -allow "logged-sync,logged-async" \
   -endpoint "$ICBFS_MINIO_VM_ENDPOINT" -bucket "$ICBFS_MINIO_BUCKET" \
-  -access-key "$ICBFS_MINIO_ACCESS_KEY" -secret-key "$ICBFS_MINIO_SECRET_KEY" >/dev/null
+  -access-key "$ICBFS_MINIO_ACCESS_KEY" -secret-key "$ICBFS_MINIO_SECRET_KEY" \
+  -store-endpoint "http://$MINIO_BRIDGE_IP:9000" >/dev/null
 PORT=$(docker port "$SERVER_CONTAINER" 8090/tcp | awk -F: '/0.0.0.0/{print $NF; exit}')
 cleanup() {
   ssh_vm "$IP" "sudo umount -l $MNT 2>/dev/null; sudo pkill -x icbfs; sudo pkill -x icbfs-logd; true" >/dev/null 2>&1 || true
@@ -96,6 +103,8 @@ want = ["write /d/a 6", "read /d/a 0", "ls /d 0", "write /d/a 12",
 got = {}
 for line in open(sys.argv[1]):
     e = json.loads(line)
+    if e["op"] == "command":
+        continue
     got.setdefault(e["fs"], []).append(f'{e["op"]} {e["path"]} {e.get("bytes", 0)}')
 ok = True
 for fs in ("logged-sync", "logged-async"):
@@ -112,6 +121,17 @@ if echo "$out" | grep -q "not allowed" && ! echo "$out" | grep -q "exit=0"; then
   echo "PASS  a filesystem the server doesn't allow can't mount"
 else
   echo "FAIL  mount of a disallowed filesystem: $out"; fail=1
+fi
+out=$(ssh_vm "$IP" "sleep 1.2; sudo $VM_SRC/icbfs-cli names create -daemon $SOCK -fs logged-sync -name vm-check >/dev/null && sudo $VM_SRC/icbfs-cli names list -daemon $SOCK -fs logged-sync -json" 2>&1 | tail -1 || true)
+if echo "$out" | python3 -c '
+import json, sys
+names = json.load(sys.stdin)
+assert [n["name"] for n in names] == ["vm-check"], names
+assert names[0]["createdBy"].endswith("/uid:0"), names[0]["createdBy"]
+' 2>/dev/null && grep -q '"op":"command","path":"names create"' "$SERVER_LOG"; then
+  echo "PASS  icbfs-cli named a version through the daemon, as the VM's account"
+else
+  echo "FAIL  icbfs-cli through the daemon: $out"; fail=1
 fi
 echo "server log: $SERVER_LOG" >&2
 exit $fail
