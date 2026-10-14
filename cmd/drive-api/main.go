@@ -1,5 +1,5 @@
 // Command drive-api serves the drive API on its own, for testing and the
-// VM runs, with what host would supply — authentication, the drive
+// VM runs, with what a host application would supply — authentication, the drive
 // registry, actors' profiles and permissions — from a JSON configuration
 // file (driveapi.Standalone):
 //

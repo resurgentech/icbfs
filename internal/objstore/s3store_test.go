@@ -53,7 +53,7 @@ func newTestStore(t *testing.T) *S3Store {
 		return err
 	})
 	// Snapshotting depends entirely on bucket versioning being enabled;
-	// this is the architectural precondition from ARCHITECTURE.md.
+	// this is the architectural precondition from docs/architecture.md.
 	if _, err := client.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
 		Bucket: aws.String(bucket),
 		VersioningConfiguration: &types.VersioningConfiguration{
@@ -122,7 +122,7 @@ func TestHeadReturnsMetadataAndSize(t *testing.T) {
 }
 
 // TestMetadataUpdateCreatesNewVersion is the core assumption behind
-// ARCHITECTURE.md's metadata model: a metadata-only update (chmod/chown)
+// docs/architecture.md's Metadata section: a metadata-only update (chmod/chown)
 // must not rewrite the body, and must still create a new version on a
 // versioned bucket — the same mechanism a content write uses.
 func TestMetadataUpdateCreatesNewVersion(t *testing.T) {
@@ -173,7 +173,7 @@ func TestMetadataUpdateCreatesNewVersion(t *testing.T) {
 }
 
 // TestListVersionsIsNewestFirstWithTimestamps validates the other load-
-// bearing assumption: ARCHITECTURE.md's point-in-time tree walk depends on
+// bearing assumption: docs/architecture.md's point-in-time tree walk depends on
 // being able to list a key's versions with usable timestamps and pick the
 // one current as of some time T.
 func TestListVersionsIsNewestFirstWithTimestamps(t *testing.T) {
@@ -201,7 +201,7 @@ func TestListVersionsIsNewestFirstWithTimestamps(t *testing.T) {
 		t.Fatalf("expected newest-first ordering, got %+v", versions)
 	}
 
-	// Walk logic from ARCHITECTURE.md: the version current as of tBetween
+	// Walk logic from docs/architecture.md: the version current as of tBetween
 	// is the one with the latest LastModified <= tBetween.
 	var asOfBetween *Object
 	for i := range versions {
@@ -240,7 +240,7 @@ func mustGetVersion(t *testing.T, store *S3Store, key, versionID string) []byte 
 }
 
 // TestConditionalPutRejectsStaleETag validates the concurrency mechanism
-// ARCHITECTURE.md commits to: a write conditioned on a stale ETag must be
+// docs/architecture.md commits to: a write conditioned on a stale ETag must be
 // rejected, not silently overwrite a concurrent change.
 func TestConditionalPutRejectsStaleETag(t *testing.T) {
 	store := newTestStore(t)
@@ -356,7 +356,7 @@ func TestConditionalDeleteIgnoresIfMatch(t *testing.T) {
 // TestServerTimeReturnsRealClockFromDateHeader covers the fix for a
 // real misstep: lock expiry was anchored to the acquiring client's own
 // local clock instead of the object store's, exactly the thing
-// ARCHITECTURE.md's Locking section says to avoid. ServerTime closes
+// docs/architecture.md's Locking section says to avoid. ServerTime closes
 // that gap by capturing the raw HTTP "Date" response header via SDK
 // middleware — confirmed here, not assumed, that real MinIO actually
 // returns one and that it parses to a value close to wall-clock time

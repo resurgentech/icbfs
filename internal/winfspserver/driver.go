@@ -2,9 +2,8 @@
 
 // Package winfspserver's Windows-only files wire github.com/winfsp/
 // go-winfsp's native Behaviour* interfaces directly to icbfs.Filesystem
-// (via resolve.go's portable resolvePath) — see ROADMAP.md's Part F,
-// task F3, and F1's entry for why the native interfaces, not the
-// higher-level gofs wrapper, are the right layer for this driver.
+// (via resolve.go's portable resolvePath), not through the higher-level
+// gofs wrapper.
 package winfspserver
 
 import (
@@ -22,7 +21,7 @@ import (
 )
 
 // driver implements winfsp.BehaviourBase plus every optional Behaviour*
-// interface this task wires. One driver backs one mounted
+// interface it wires. One driver backs one mounted
 // icbfs.Filesystem; Root builds it.
 type driver struct {
 	fsys            *icbfs.Filesystem
@@ -95,12 +94,11 @@ type fileHandle struct {
 // Bootstrap) — this driver does no bootstrapping of its own, same
 // division of responsibility as internal/fuseserver.Root.
 //
-// caseInsensitive (task F4) must match whatever the caller also passes
+// caseInsensitive must match whatever the caller also passes
 // to winfsp.Mount's own winfsp.CaseSensitive option — the two are
 // separate, both load-bearing settings, not one flag with two names:
 // WinFsp's own CaseSensitive controls whether the *kernel* folds case
-// before ever calling this driver (confirmed in task F3: with it off,
-// the kernel can hand this driver a canonicalized, differently-cased
+// before ever calling this driver (with it off, the kernel can hand this driver a canonicalized, differently-cased
 // name than what's actually stored), while this field controls whether
 // resolvePath's own lookupCaseAware fallback additionally tolerates a
 // case mismatch against icbfs.Filesystem's always-case-sensitive
@@ -176,7 +174,7 @@ func toWinError(err error) error {
 	case errors.Is(err, icbfs.ErrInvalidName):
 		// convertNTStatus has no sentinel for this; return the real
 		// NTSTATUS directly rather than stretching an os.Err*/
-		// syscall.Errno value to fit (task F6).
+		// syscall.Errno value to fit.
 		return windows.STATUS_OBJECT_NAME_INVALID
 	case errors.Is(err, icbfs.ErrFileTooLarge):
 		// What Windows reports for a file too big for its volume
@@ -188,8 +186,7 @@ func toWinError(err error) error {
 		// MaxComponentLength, 255 by default); this covers anything else.
 		return windows.STATUS_OBJECT_NAME_INVALID
 	case errors.Is(err, icbfs.ErrInvalidRename):
-		// Moving a directory into one of its own descendants (task
-		// F9) — no more specific NTSTATUS confirmed for this exact
+		// Moving a directory into one of its own descendants — no more specific NTSTATUS confirmed for this exact
 		// condition; STATUS_INVALID_PARAMETER is the closest real fit.
 		return windows.STATUS_INVALID_PARAMETER
 	case errors.Is(err, icbfs.ErrInvalidArgument):
@@ -280,7 +277,7 @@ const fileOpenReparsePoint = 0x00200000
 // equivalent relative-to-the-link's-own-directory resolution for a
 // *relative* target — this follow call is what makes that second case
 // actually work, not just the first. See resolvePathFollow's own doc
-// comment and ROADMAP.md's F3 entry.
+// comment.
 func (d *driver) Open(fs *winfsp.FileSystemRef, name string, createOptions, grantedAccess uint32, info *winfsp.FSP_FSCTL_FILE_INFO) (uintptr, error) {
 	path, stream, ok := splitStream(name)
 	if !ok {
@@ -297,7 +294,7 @@ func (d *driver) Open(fs *winfsp.FileSystemRef, name string, createOptions, gran
 	if stream != "" {
 		return d.openStream(r, path, stream, info)
 	}
-	// A generic (non-symlink) reparse point (task G4) carries opaque
+	// A generic (non-symlink) reparse point carries opaque
 	// data this driver never interprets — real NTFS, and winfsp-tests'
 	// own reparse_guid_test/reparse_nfs_test (confirmed against this
 	// exact driver), both require that a normal open of such a file,
@@ -331,9 +328,8 @@ func (d *driver) Close(fs *winfsp.FileSystemRef, file uintptr) {
 // (fsop.c's FspFileSystemOpCreate) refuses every create/open outright
 // with STATUS_INVALID_DEVICE_REQUEST unless Create (or CreateEx),
 // Open, and Overwrite (or OverwriteEx) are ALL wired, regardless of
-// what a given request actually needs — confirmed directly against
-// WinFsp's own C source after this exact failure mode cost real time
-// in task F1 (see ASSUMPTIONS.md/ROADMAP.md's F1 entry). Create itself
+// what a given request actually needs (confirmed against WinFsp's own
+// C source). Create itself
 // distinguishes a directory request via createOptions' FILE_DIRECTORY_
 // FILE bit.
 func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, grantedAccess, fileAttributes uint32, securityDescriptor *windows.SECURITY_DESCRIPTOR, allocationSize uint64, info *winfsp.FSP_FSCTL_FILE_INFO) (uintptr, error) {
@@ -353,7 +349,7 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 
 	const fileDirectoryFile = 0x00000001 // FILE_DIRECTORY_FILE, low byte of NtCreateFile's CreateOptions
 	// A *directory* symlink (CreateSymbolicLinkW with
-	// SYMBOLIC_LINK_FLAG_DIRECTORY, ROADMAP.md's Part G, task G4/G5)
+	// SYMBOLIC_LINK_FLAG_DIRECTORY)
 	// sets FILE_DIRECTORY_FILE too, identically to a real mkdir — there
 	// is no reliable createOptions/fileAttributes signal at this point
 	// to tell the two apart. Confirmed empirically, not assumed: a real
@@ -367,8 +363,8 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 	// probe via PowerShell's New-Item/raw CreateDirectoryW did set
 	// FILE_OPEN_FOR_BACKUP_INTENT — a caller-dependent detail, not a
 	// stable protocol signal, and chasing it broke plain mkdir outright
-	// before this was caught.) So: always make a real directory here,
-	// same as before this task; SetReparsePoint (reparse.go) is what
+	// before this was caught.) So: always make a real directory here;
+	// SetReparsePoint (reparse.go) is what
 	// actually resolves the ambiguity, by converting *that* directory
 	// into a symlink if a symlink reparse buffer arrives for it next.
 	if createOptions&fileDirectoryFile != 0 {
@@ -400,7 +396,7 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 		return 0, toWinError(err)
 	}
 	// Persist the real Hidden/System/ReadOnly/Archive byte from
-	// creation time too, not just from a later SetBasicInfo (task F7)
+	// creation time too, not just from a later SetBasicInfo
 	// — a file created with e.g. FILE_ATTRIBUTE_HIDDEN set should
 	// report it back immediately, not only after an explicit
 	// SetFileAttributes call.
@@ -528,8 +524,8 @@ func (d *driver) Cleanup(fs *winfsp.FileSystemRef, file uintptr, name string, cl
 	if err != nil {
 		return
 	}
-	// Same case-folding gotcha Rename hit (task F9, see
-	// realStoredName's own doc comment): the kernel can hand this
+	// Same case-folding gotcha Rename has (see realStoredName's own doc
+	// comment): the kernel can hand this
 	// callback a differently-cased name than what's actually stored
 	// when CaseSensitive(false) is in effect, which Rmdir/Unlink's
 	// exact-match lookup would otherwise silently fail to find.
@@ -567,8 +563,7 @@ func (d *driver) CanDelete(fs *winfsp.FileSystemRef, file uintptr, name string) 
 // Rename resolves both source and target (full WinFsp paths) to their
 // own parent directory + base name, same splitParent/resolvePath
 // pattern Create/Cleanup already use, then delegates to
-// icbfs.Filesystem.Rename (task F9 — see its own doc comment for why
-// this didn't already exist at the core layer). file (the open handle
+// icbfs.Filesystem.Rename. file (the open handle
 // on source) isn't needed here: Rename resolves the entry by
 // (oldParent, oldBase) itself.
 // realStoredName resolves name to its actual stored (real-case)
@@ -788,8 +783,7 @@ func (d *driver) releaseShared(h *fileHandle) {
 	if last {
 		s.mu.Lock()
 		if s.open != nil {
-			// Releases the private local scratch file (ROADMAP.md's
-			// Part G, task G3) — otherwise it leaks for the life of
+			// Releases the private local scratch file — otherwise it leaks for the life of
 			// the mount process.
 			_ = s.open.Close()
 			s.open = nil
@@ -799,8 +793,6 @@ func (d *driver) releaseShared(h *fileHandle) {
 }
 
 // callerOwner returns the uid/gid new entries this driver creates get.
-// Real per-caller identity mapping (SID -> uid/gid) is F8's job, same
-// as the rest of this driver's ACL story — placeholder root ownership
-// here is consistent with this task's own scope (F3 is core operation
-// wiring, not ACL design).
+// There is no SID -> uid/gid mapping, so it's root's: on Windows, who
+// owns an item is in its security descriptor.
 func callerOwner() (uid, gid uint32) { return 0, 0 }

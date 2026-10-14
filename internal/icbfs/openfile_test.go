@@ -11,15 +11,13 @@ import (
 	"time"
 )
 
-// TestConcurrentNonOverlappingWritesBothSurvive covers ROADMAP.md's
-// task B1 "Done when": two concurrent writers edit non-overlapping byte
-// ranges of the same file, and both edits survive in the final
-// content. Before task B1 (an unconditional Filesystem.WriteFile with
-// no retry-and-reapply), this is exactly the lost-update bug
-// ARCHITECTURE.md describes: whichever OpenFile.Flush lands second
-// would silently overwrite the first one's byte range with its own
-// stale copy of it. After B1 (OpenFile's CAS-protected
-// retry-and-reapply), the loser re-fetches the winner's committed
+// TestConcurrentNonOverlappingWritesBothSurvive: two concurrent writers
+// edit non-overlapping byte ranges of the same file, and both edits
+// survive in the final content. Without retry-and-reapply this is the
+// lost-update bug docs/architecture.md describes: whichever
+// OpenFile.Flush lands second would silently overwrite the first one's
+// byte range with its own stale copy of it. With it, the loser
+// re-fetches the winner's committed
 // content and replays only its own recorded edit onto it, so both
 // survive.
 func TestConcurrentNonOverlappingWritesBothSurvive(t *testing.T) {
@@ -84,17 +82,17 @@ func TestConcurrentNonOverlappingWritesBothSurvive(t *testing.T) {
 	}
 }
 
-// TestFlushEscalatesWhenPlainRetryBudgetIsExhausted covers ROADMAP.md's
-// task B5 "Done when" deterministically, rather than relying on timing
+// TestFlushEscalatesWhenPlainRetryBudgetIsExhausted tests escalation
+// deterministically, rather than relying on timing
 // -sensitive luck to ever actually observe real exhaustion in a short
 // test run: contentWriteRetryBudget is forced to zero, and a
 // concurrent write is landed on the object *before* Flush ever gets a
 // chance to retry — guaranteeing its one and only plain CAS attempt
-// loses the race, with zero budget left to retry. Without task B5's
+// loses the race, with zero budget left to retry. Without
 // escalation, Flush would have no option left but to return
 // ErrWriteContention right there, every single time this happens —
 // exactly the "one writer thrashing against the other's retries"
-// failure mode ARCHITECTURE.md describes. With escalation, Flush
+// failure mode docs/architecture.md describes. With escalation, Flush
 // instead blocks on a lock, rebases onto the concurrent writer's
 // content, and lands its own edit anyway: real forward progress
 // despite the exhausted plain-retry budget.
@@ -149,8 +147,8 @@ func TestFlushEscalatesWhenPlainRetryBudgetIsExhausted(t *testing.T) {
 	}
 }
 
-// TestFlushRefusedWhenTouchedRangeOverlapsExternalLock covers
-// ROADMAP.md's task B6 "Done when": an explicit lock held by one
+// TestFlushRefusedWhenTouchedRangeOverlapsExternalLock: an explicit
+// lock held by one
 // simulated client over a byte range causes a second simulated
 // client's overlapping write to be refused, while that second
 // client's write to a genuinely non-overlapping range still succeeds
@@ -169,7 +167,7 @@ func TestFlushRefusedWhenTouchedRangeOverlapsExternalLock(t *testing.T) {
 	}
 
 	// Simulated client 1 places a real, explicit application lock
-	// (e.g. via fcntl/LockFileEx, once task B8 wires that up) over
+	// (as fcntl would) over
 	// [0, 10).
 	if err := fsys.TryAcquireLockRange(ctx, key, 0, 10, "client-1", 30*time.Second); err != nil {
 		t.Fatalf("client-1 acquire [0,10): %v", err)
@@ -212,10 +210,10 @@ func TestFlushRefusedWhenTouchedRangeOverlapsExternalLock(t *testing.T) {
 
 // TestCheckRangeLockConflictIgnoresEscalationOnlyEntries confirms the
 // specific reason LockRange.EscalationOnly exists: another session's
-// own in-flight B5 escalation claim must never be mistaken for a real
-// external application lock by B6's check — doing so would spuriously
-// refuse writes that tasks B1/B5 already guarantee converge on their
-// own shortly after.
+// own in-flight escalation claim must never be mistaken for a real
+// external application lock by the write-conflict check — doing so
+// would spuriously refuse writes that retry and escalation already
+// guarantee converge on their own shortly after.
 func TestCheckRangeLockConflictIgnoresEscalationOnlyEntries(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	fsys.EnableLocking(true)
@@ -242,8 +240,7 @@ func TestCheckRangeLockConflictIgnoresEscalationOnlyEntries(t *testing.T) {
 // OpenFile.TouchAtime called Filesystem.TouchAtime — a real network
 // metadata PUT — on every single one of them, turning one 500 MB
 // read into thousands of synchronous round trips and hanging a real
-// mount in practice (found running task G3's own VM verification,
-// not hypothetical). Confirmed here as a plain call-count assertion,
+// mount in practice. Confirmed here as a plain call-count assertion,
 // not a timing-based test, since the real-world symptom (a hang) is
 // exactly what a slow CI run must never risk reproducing.
 func TestOpenFileTouchAtimeOnlyOncePerSession(t *testing.T) {
@@ -360,14 +357,11 @@ func TestWriteAtHugeOffsets(t *testing.T) {
 	}
 }
 
-// TestOpenFileCloseRemovesScratchFile covers ROADMAP.md's Part G, task
-// G3: OpenFile's content lives in a private local scratch file, not an
-// in-memory []byte — this confirms that file genuinely exists on disk
-// while the session is open, and is genuinely removed (not just
-// forgotten about) once Close releases it, since a leaked scratch
-// file per open-then-close cycle would defeat the whole point of this
-// task (a real, unbounded local-disk leak instead of an unbounded RAM
-// one).
+// TestOpenFileCloseRemovesScratchFile: OpenFile's content lives in a
+// private local scratch file, not an in-memory []byte — this confirms
+// that file exists on disk while the session is open, and is removed
+// once Close releases it, since a leaked scratch file per
+// open-then-close cycle would be an unbounded local-disk leak.
 func TestOpenFileCloseRemovesScratchFile(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	ctx := context.Background()
@@ -397,8 +391,8 @@ func TestOpenFileCloseRemovesScratchFile(t *testing.T) {
 	}
 }
 
-// TestDiskCacheAvoidsRedundantFetchOnValidatedHit covers ROADMAP.md's
-// Part G, task G3's actual point: a second seedScratch call for the
+// TestDiskCacheAvoidsRedundantFetchOnValidatedHit: a second
+// seedScratch call for the
 // same key+etag must not call fetch again — it should be served from
 // the shared cache's own local copy. A fetch counter proves this
 // directly rather than inferring it from timing.

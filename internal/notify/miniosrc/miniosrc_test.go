@@ -13,11 +13,11 @@ import (
 	"github.com/resurgentech/icbfs/internal/testutil"
 )
 
-// TestMinIOSourceReceivesRealNotification covers ROADMAP.md's task E4
-// "Done when": a real MinIO container test proves an actual change
+// TestMinIOSourceReceivesRealNotification: a real MinIO container test
+// proves an actual change
 // produces an actual received notification — the one backend that
 // can be tested the way everything else in this project is (unlike
-// Azure/AWS S3, tasks E5/E6, which have no real account available in
+// Azure/AWS S3, which have no real account available in
 // this environment).
 func TestMinIOSourceReceivesRealNotification(t *testing.T) {
 	ctx := context.Background()

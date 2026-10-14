@@ -312,7 +312,7 @@ func TestRenameOntoHardlinkedSameObjectIsNoop(t *testing.T) {
 
 // TestRenameRejectsReservedNameOnPrimaryWindows confirms Rename goes
 // through the same checkName gate Create/Mkdir/Symlink/Link already
-// do (task F6), and that a primary-POSIX filesystem allows it.
+// do, and that a primary-POSIX filesystem allows it.
 func TestRenameRejectsReservedNameOnPrimaryWindows(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

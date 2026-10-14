@@ -22,7 +22,7 @@
 // On a machine with the daemon, -daemon SOCKET (or $ICBFS_DAEMON) sends
 // the command through it to the server instead, which checks it and runs
 // it as this machine's account — no store credentials on the machine; a
-// DRIVE is then -drive ID, host's, and the server knows which
+// DRIVE is then -drive ID, the server's, and the server knows which
 // filesystem and directory that is. The fs commands name a filesystem
 // either way: they administer the bucket's filesystems, drives' storage.
 package main

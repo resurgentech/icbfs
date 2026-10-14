@@ -7,8 +7,8 @@
 ssh_authorized_keys:
   - REPLACED_BY_CREATE_VM_SH
 #
-# Unattended setup for the disposable Linux certification VM —
-# TESTING.md's "Stress and crash-consistency" / pjdfstest tier.
+# Unattended setup for the disposable Linux test VM (pjdfstest and the
+# other runs in docs/testing.md).
 # Mirrors test/windows/'s own unattended-setup philosophy: get to a
 # real SSH session with zero manual steps, with build deps + Go
 # already present so a snapshot can be taken once and reused.

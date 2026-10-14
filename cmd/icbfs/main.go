@@ -1,6 +1,5 @@
-// Command icbfs mounts an icbfs filesystem backed by an S3-API-compatible
-// store (MinIO today; Azure Blob is a separate backend behind the same
-// objstore.Store interface, not yet wired up here).
+// Command icbfs mounts an icbfs filesystem, on an S3-API store, with
+// FUSE. See docs/mount.md.
 package main
 
 import (
@@ -41,19 +40,19 @@ func main() {
 	fset := flag.NewFlagSet("mount", flag.ExitOnError)
 	endpoint := fset.String("endpoint", "http://127.0.0.1:9000", "S3-API endpoint (MinIO)")
 	bucket := fset.String("bucket", "icbfs", "bucket name (must have versioning enabled)")
-	fsName := fset.String("fs", "default", "filesystem name (root block key: root/<fs>)")
+	fsName := fset.String("fs", "default", "filesystem name")
 	accessKey := fset.String("access-key", "minioadmin", "access key")
 	secretKey := fset.String("secret-key", "minioadmin", "secret key")
 	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
 	logSocket := fset.String("log-socket", "", "mount a drive (-drive) through the icbfs-logd daemon on this Unix socket, logging reads, writes, deletes and directory listings: the server says how to reach the store and which filesystem and directory the drive is (-endpoint, -bucket, -region, -access-key, -secret-key and -fs are then not used), and whether this machine may only read it; the mount fails without the answer")
-	driveID := fset.String("drive", "", "with -log-socket: the drive to mount (host's id)")
+	driveID := fset.String("drive", "", "with -log-socket: the drive to mount (the server's id for it)")
 	logAsync := fset.Bool("log-async", false, "with -log-socket: queue events instead of waiting for the server to log each one; never slows an operation, but drops (and counts) events while the daemon is unreachable")
 	asOf := fset.String("as-of", "", "mount read-only as the filesystem was at this time: a date (2006-01-02, meaning the end of that day), a date-time (2006-01-02T15:04:05) in local time, or RFC 3339 with a zone; or a version name (icbfs-cli names). Fails if the filesystem didn't exist yet then")
-	locking := fset.Bool("locking", false, "enable the Locking feature (flock/fcntl); off by default, per ARCHITECTURE.md's Locking section")
-	enableNotify := fset.Bool("notify", false, "enable the Change notifications feature (ROADMAP.md Part E) via MinIO's ListenBucketNotification; off by default, same opt-in reasoning as --locking. Only the MinIO backend (task E4) is wired up here — Azure/AWS S3 adapters (tasks E5/E6) aren't reachable from this flag.")
+	locking := fset.Bool("locking", false, "flock/fcntl locks shared with every other mount of the filesystem (docs/architecture.md's Locking section)")
+	enableNotify := fset.Bool("notify", false, "MinIO change notifications (ListenBucketNotification): with -locking, a lock wait retries as soon as the lock changes")
 	debug := fset.Bool("debug", false, "log every FUSE operation")
-	allowOther := fset.Bool("allow-other", false, "allow users other than the one running this command (and root) to access the mount; off by default, same opt-in reasoning as --locking/--notify. Without it, FUSE's own kernel-side fuse_allow_current_process check rejects every other uid outright, independent of default_permissions or file modes — a real finding from running pjdfstest's -u/-g permission tests against a root-mounted filesystem, not a hypothetical. Passing this through typically also needs user_allow_other in /etc/fuse.conf, same as any other FUSE filesystem's -o allow_other.")
-	cacheDir := fset.String("cache-dir", "", "local disk directory for the file-content cache (ROADMAP.md's Part G, task G3); empty (the default) uses a fresh os.TempDir() subdirectory. Unlike --locking/--notify, this isn't optional functionality — every open file's content lives here, not in RAM, so there's always a real directory in use even when this flag is left at its default.")
+	allowOther := fset.Bool("allow-other", false, "allow users other than the one running this command (and root) to use the mount; without it the kernel refuses every other uid, whatever the file modes say. Needs user_allow_other in /etc/fuse.conf when not run as root")
+	cacheDir := fset.String("cache-dir", "", "local disk directory for open files and the read cache (default: a new directory under the system temp directory)")
 	cacheSize := fset.Uint64("cache-size", 512<<20, "maximum total bytes the local disk cache (-cache-dir) may hold before evicting the least-recently-used cached file")
 	if err := fset.Parse(os.Args[2:]); err != nil {
 		os.Exit(2)
@@ -140,10 +139,9 @@ func main() {
 		src := miniosrc.New(ctx, minioClient, *bucket, fsys.Prefix())
 		defer src.Close()
 
-		// A Broadcaster, not src.Signals() directly: task B10 needs
-		// Locking's blocking-acquisition accelerator to independently
-		// observe the exact same signal stream task E3's FUSE watch
-		// dispatch does, and Source.Signals() is a single-consumption
+		// A Broadcaster, not src.Signals() directly: locking's
+		// blocking-acquisition accelerator has to observe the same
+		// signal stream the FUSE watch dispatch does, and Source.Signals() is a single-consumption
 		// channel — reading it from two places would steal signals
 		// from each other instead of each seeing every one.
 		broadcaster := notify.NewBroadcaster(src)
@@ -195,7 +193,7 @@ func main() {
 	server.Wait()
 }
 
-// newMinIOClient builds the separate minio-go client task E4's
+// newMinIOClient builds the separate minio-go client the MinIO
 // notification adapter needs — see internal/notify/miniosrc's package
 // doc comment on why this can't just reuse the aws-sdk-go-v2 client
 // already in use for every other S3-API call. endpoint carries a
@@ -223,8 +221,7 @@ func fuseMountOptions(debug, allowOther, readOnly bool) fuse.MountOptions {
 		FsName: "icbfs",
 		Name:   "icbfs",
 		Debug:  debug,
-		// Task C1 (ROADMAP.md's Permission enforcement part): defers
-		// permission enforcement (every open/read/write, not just the
+		// default_permissions defers permission enforcement (every open/read/write, not just the
 		// access(2)-triggered checks go-fuse's own default Access()
 		// fallback handles) to the kernel, which already correctly
 		// handles root bypass and full supplementary group
@@ -244,14 +241,12 @@ func fuseMountOptions(debug, allowOther, readOnly bool) fuse.MountOptions {
 		// entirely, then confirming it disappeared once allow_other was
 		// added). --allow-other opts into exposing it.
 		Options: options,
-		// EnableLocks (task B8): without this, the kernel never
+		// EnableLocks: without this, the kernel never
 		// forwards FUSE_GETLK/SETLK/SETLKW to this driver at all — it
 		// silently falls back to its own local, single-host advisory
 		// lock table, which defeats the entire point of this
-		// filesystem's remote, object-store-backed locking (and was
-		// found, at Jared's direction, to have been masking a real
-		// bug in this exact way throughout testing — see
-		// ASSUMPTIONS.md's B8 entry).
+		// filesystem's remote, object-store-backed locking, and hides
+		// any bug in it from tests.
 		EnableLocks: true,
 	}
 }

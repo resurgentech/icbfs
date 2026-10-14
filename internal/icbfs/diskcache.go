@@ -9,7 +9,7 @@ import (
 )
 
 // defaultCacheMaxBytes is the default total local disk budget for the
-// shared read cache (ROADMAP.md's Part G, task G3) — a sensible
+// shared read cache — a sensible
 // default is required, not optional, since caching here isn't an
 // opt-in feature the way Locking/Change-notifications are: every
 // OpenFile session goes through it. 512 MiB is comfortably enough to
@@ -20,10 +20,8 @@ import (
 const defaultCacheMaxBytes = 512 << 20
 
 // diskCache is a shared, LRU-bounded cache of validated byte
-// snapshots, one per content key, on local disk — the replacement for
-// materializing a file's entire content as one in-memory []byte on
-// every single Open (the root cause of three real crash/OOM bugs this
-// project already found and fixed the hard way; see
+// snapshots, one per content key, on local disk, so a file's content
+// is never materialized as one in-memory []byte (see
 // DefaultMaxFileSize's doc comment). Deliberately NOT the thing an
 // OpenFile session reads/writes against directly: each session gets
 // its own private scratch file (seedScratch), copied from this
@@ -33,7 +31,7 @@ const defaultCacheMaxBytes = 512 << 20
 // under concurrent opens without the far harder problem of letting
 // multiple sessions' in-progress, uncommitted edits share one
 // physical file — this project's existing CAS-retry-and-reapply
-// correctness (task B1) depends on each session's edits staying
+// correctness depends on each session's edits staying
 // invisible to every other session until Flush, exactly the isolation
 // a shared mutable file would break.
 type diskCache struct {

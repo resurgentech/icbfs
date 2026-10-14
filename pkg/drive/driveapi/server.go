@@ -1,5 +1,5 @@
 // Package driveapi is the drive API's HTTP layer: Fiber v3 handlers over
-// package drive, mounted by host-server (Mount) or served standalone
+// package drive, mounted by a host application (Mount) or served standalone
 // (cmd/drive-api). spec/openapi/drive.yaml is the contract; its models
 // and a Go client are generated into api.gen.go.
 package driveapi
@@ -25,7 +25,7 @@ import (
 	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
 )
 
-// DriveEntry is what host's registry knows of a drive.
+// DriveEntry is what the host's registry knows of a drive.
 // Whether anyone may write to it isn't here: that's a permission
 // (drive.write), held through a role like every other.
 type DriveEntry struct {
@@ -38,7 +38,7 @@ type Config struct {
 	// Drive finds a drive by its registry id (drive.ErrNotFound if
 	// there's none, or the actor may not know of it).
 	Drive func(ctx context.Context, id string) (drive.Drive, DriveEntry, error)
-	// Authorize is host's check: may this request's actor do
+	// Authorize is the host's check: may this request's actor do
 	// permission (drive.read, drive.write, ...) on the drive? It answers
 	// the actor and its profile on the drive (drive.ErrNoAccess when it
 	// has none), or drive.ErrNotFound / drive.ErrForbidden.
@@ -57,7 +57,7 @@ type Config struct {
 	// down, which otherwise waits for them).
 	Stop <-chan struct{}
 	// Audit, if set, is told of every drive operation once it's answered
-	// — for host's audit log (the logging chain).
+	// — for the host's audit log.
 	Audit func(AuditEvent)
 }
 

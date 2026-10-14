@@ -23,7 +23,7 @@ const (
 )
 
 // Metadata is the body of a file/symlink's dedicated <uuid>.metadata
-// object — see ARCHITECTURE.md's Metadata model section. mode/uid/gid/
+// object — see docs/architecture.md's Metadata section. mode/uid/gid/
 // nlink live here, as does xattrs, a generic name -> bytes map covering
 // POSIX ACLs (under the well-known key "system.posix_acl_access",
 // exactly mirroring Linux's own xattr-based ACL representation), future
@@ -39,15 +39,13 @@ type Metadata struct {
 	Gid    uint32                 `protobuf:"varint,3,opt,name=gid,proto3" json:"gid,omitempty"`
 	Nlink  uint32                 `protobuf:"varint,4,opt,name=nlink,proto3" json:"nlink,omitempty"`
 	Xattrs map[string][]byte      `protobuf:"bytes,5,rep,name=xattrs,proto3" json:"xattrs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	// Legacy last-access time, nanoseconds since the Unix epoch (ROADMAP.md's
-	// Part G, task G1). Superseded by atime (field 13), which also covers
+	// Legacy last-access time, nanoseconds since the Unix epoch. Superseded by atime (field 13), which also covers
 	// dates int64 nanoseconds can't (before 1678); still read when atime is
 	// unset, never written.
 	AtimeUnixNano int64 `protobuf:"varint,6,opt,name=atime_unix_nano,json=atimeUnixNano,proto3" json:"atime_unix_nano,omitempty"`
 	// The device number (encoded major/minor, same packing mknod(2)/
-	// stat(2)'s st_rdev uses) for a char/block device entry (ROADMAP.md's
-	// Part G, task G2) — meaningless and always 0 for every other entry
-	// type, including the FIFO/socket special files task G2 also adds
+	// stat(2)'s st_rdev uses) for a char/block device entry — meaningless
+	// and always 0 for every other entry type, including FIFOs and sockets
 	// (neither has a device number at all).
 	Rdev uint32 `protobuf:"varint,7,opt,name=rdev,proto3" json:"rdev,omitempty"`
 	// The content object's ETag when mtime_override was set.

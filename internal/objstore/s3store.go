@@ -426,7 +426,7 @@ func (s *S3Store) ListByPrefix(ctx context.Context, prefix string) ([]Object, er
 // expose this header anywhere, so it's captured directly via a
 // deserialize-step middleware on a single lightweight HeadBucket call.
 //
-// This exists so expires_at computations (ARCHITECTURE.md's Locking
+// This exists so expires_at computations (docs/architecture.md's Locking
 // section) can be anchored to the object store's clock instead of the
 // calling client's, which could be skewed relative to other clients —
 // see internal/icbfs/lock.go's use of this.

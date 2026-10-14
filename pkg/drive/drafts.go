@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// SideStore is where host keeps its own data about documents, on any
+// SideStore is where the host application keeps its own data about documents, on any
 // drive: drafts now, review information later. Keys are '/'-separated;
 // each object is versioned, with string metadata.
 type SideStore interface {

@@ -1,7 +1,7 @@
 // Package fuseserver is the FUSE access layer: it adapts icbfs's core
 // filesystem logic to go-fuse's node-tree API. Linux/POSIX only — the
 // Windows access layer (WinFsp) is a separate, parallel package per
-// ARCHITECTURE.md.
+// docs/architecture.md.
 package fuseserver
 
 import (
@@ -25,12 +25,11 @@ import (
 
 // Node is one filesystem entry: either the root, or identified by its
 // blob's UUID (key). Its type (file/dir/symlink) is fixed for the inode's
-// lifetime, matching ARCHITECTURE.md's model where identity never changes.
+// lifetime, matching docs/architecture.md's model where identity never changes.
 //
-// watches is nil when the Change notifications feature (ROADMAP.md
-// Part E) isn't enabled for this mount — task E2's explicit
-// requirement is that nil here makes every operation behave exactly
-// as if this field didn't exist at all, so every access to it is a
+// watches is nil when the Change notifications feature isn't enabled
+// for this mount, and nil here must make every operation behave
+// exactly as if this field didn't exist at all, so every access to it is a
 // plain nil check, never a required dependency.
 type Node struct {
 	fs.Inode
@@ -68,17 +67,17 @@ var (
 // filesystem's reality exactly as closely as "virtual blocks on top of
 // an object store" allows: it's an arbitrary but conventional unit for
 // df to report sizes in, not a real on-disk block size (there is no
-// disk) — see ARCHITECTURE.md's du/df design.
+// disk) — see docs/architecture.md's master block section.
 const statfsBlockSize = 4096
 
 // Root builds the node representing fsys's root directory, for use
 // with fs.Mount. signals is this mount's subscription to the Change
-// notifications backend (ROADMAP.md Part E, task E2) — nil disables
+// notifications backend — nil disables
 // the feature entirely for this mount, with every operation behaving
 // exactly as it did before this feature existed.
 //
-// signals is a plain channel, not a notify.Source, deliberately: task
-// B10 needs the exact same underlying signal stream independently
+// signals is a plain channel, not a notify.Source, deliberately: the
+// same underlying signal stream has to be independently
 // observed by both this dispatch and Locking's blocking-acquisition
 // accelerator, and notify.Source.Signals() is a single-consumption
 // channel — one value read by one consumer is gone for any other. The
@@ -106,7 +105,7 @@ func typeToFuseMode(t icbfs.EntryType) uint32 {
 		return syscall.S_IFDIR
 	case icbfs.TypeSymlink:
 		return syscall.S_IFLNK
-	case icbfs.TypeFifo: // ROADMAP.md's Part G, task G2
+	case icbfs.TypeFifo:
 		return syscall.S_IFIFO
 	case icbfs.TypeCharDevice:
 		return syscall.S_IFCHR
@@ -129,10 +128,10 @@ func setTime(sec *uint64, nsec *uint32, t time.Time) {
 // ctime is icbfs's own status-change time (see icbfs.Attr), falling
 // back to mtime only if it's somehow unset.
 //
-// atime (ROADMAP.md's Part G, task G1) is real, not a copy of mtime: a
+// atime is real, not a copy of mtime: a
 // file/directory that's never actually been read reports the zero
-// value's own fallback (mtime, same as before this task — a sensible
-// "as good as we've got" default), but once a real read happens
+// value's own fallback (mtime, a sensible "as good as we've got"
+// default), but once a real read happens
 // (TouchAtime, called by this package's own Read/Readdir, never from
 // here) it reports that real, explicitly tracked timestamp instead.
 func fillAttr(out *fuse.Attr, key string, typ icbfs.EntryType, a icbfs.Attr) {
@@ -144,7 +143,7 @@ func fillAttr(out *fuse.Attr, key string, typ icbfs.EntryType, a icbfs.Attr) {
 		out.Nlink = 1 // a directory from before nlink was stored; a file at 0 is unlinked but still open
 	}
 	out.Owner = fuse.Owner{Uid: a.Uid, Gid: a.Gid}
-	out.Rdev = a.Rdev // meaningful (and only ever non-zero) for TypeCharDevice/TypeBlockDevice — ROADMAP.md's Part G, task G2
+	out.Rdev = a.Rdev // meaningful (and only ever non-zero) for TypeCharDevice/TypeBlockDevice
 
 	mtime := a.Mtime
 	if mtime.IsZero() {
@@ -197,8 +196,8 @@ func errnoFromErr(err error) syscall.Errno {
 		return syscall.ENOSYS
 	case errors.Is(err, icbfs.ErrInvalidName):
 		// Only reachable at all if a primary-Windows filesystem
-		// (task F5) is mounted via this POSIX access layer and a
-		// caller names something Windows-reserved (task F6) — the
+		// is mounted via this POSIX access layer and a
+		// caller names something Windows-reserved — the
 		// enforcement lives in icbfs.Filesystem itself, not just the
 		// WinFsp driver, since primary mode is a property of the
 		// filesystem, not of whichever access layer is mounting it.
@@ -209,7 +208,7 @@ func errnoFromErr(err error) syscall.Errno {
 		return syscall.EFBIG
 	case errors.Is(err, icbfs.ErrInvalidRename):
 		// POSIX rename(2)'s EINVAL: "newpath contains a path prefix
-		// of oldpath" (task F9).
+		// of oldpath".
 		return syscall.EINVAL
 	case errors.Is(err, icbfs.ErrInvalidArgument):
 		// truncate(2)/ftruncate(2)'s own EINVAL for a negative length
@@ -235,9 +234,8 @@ func (n *Node) newChild(ctx context.Context, key string, typ icbfs.EntryType) *f
 	// one Inode across multiple directory entries.
 	inode := n.NewInode(ctx, child, stable)
 	if n.watches != nil {
-		// Task E3: "a FUSE watch gets established via a path lookup,
-		// which already resolves to a UUID at that moment" — this is
-		// that moment, for every path that produces a node (Lookup,
+		// A FUSE watch is established by a path lookup, which
+		// resolves to a UUID at that moment — this is that moment, for every path that produces a node (Lookup,
 		// Create, Mkdir, Symlink all call newChild).
 		n.watches.register(key, inode)
 	}
@@ -265,7 +263,7 @@ func (n *Node) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) 
 }
 
 // Statfs reports this filesystem's declared capacity and current usage
-// (ARCHITECTURE.md's du/df design) via icbfs.Filesystem.StatFS, scaled
+// (docs/architecture.md's master block section) via icbfs.Filesystem.StatFS, scaled
 // into statfsBlockSize units since that's the unit StatfsOut's
 // Blocks/Bfree/Bavail fields are defined in terms of. Bavail is reported
 // equal to Bfree (no distinct "reserved for root" reservation exists
@@ -318,7 +316,7 @@ func (n *Node) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn,
 		ss := int64(s)
 		sizeP = &ss
 	}
-	// utimensat(2)'s explicit atime set (ROADMAP.md's Part G, task G1)
+	// utimensat(2)'s explicit atime set
 	// — go-fuse's own GetATime already resolves UTIME_NOW to the
 	// kernel's current time for us, so there's no "now" special case
 	// to handle here.
@@ -346,8 +344,7 @@ func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 		return nil, errnoFromErr(err)
 	}
 	// Best-effort, deliberately not checked: a real readdir(2) bumps a
-	// directory's atime (ROADMAP.md's Part G, task G1's strict
-	// semantics), but a lost race on that bump must never fail the
+	// directory's atime, but a lost race on that bump must never fail the
 	// read itself — the directory listing the caller asked for already
 	// succeeded above.
 	_ = n.fsys.TouchAtime(ctx, n.key, icbfs.TypeDir)
@@ -374,8 +371,8 @@ func (n *Node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.En
 	return n.newChild(ctx, newUUID, icbfs.TypeDir), 0
 }
 
-// Mknod creates a FIFO, Unix domain socket, or char/block device entry
-// (ROADMAP.md's Part G, task G2). One callback covers all four special-
+// Mknod creates a FIFO, Unix domain socket, or char/block device entry.
+// One callback covers all four special-
 // file types — the kernel services their actual runtime I/O itself
 // once the right mode bit is reported (mknod(2) creates the special
 // file via this same syscall/callback for all of them, including
@@ -494,12 +491,12 @@ func (n *Node) Link(ctx context.Context, target fs.InodeEmbedder, name string, o
 
 // renameExchange is RENAME_EXCHANGE (renameat2(2)/Linux's
 // NodeRenamer.flags): an atomic swap of two existing paths, not a
-// plain move/overwrite. Not implemented here — task F9's own scope
-// decision (see ROADMAP.md): a real atomic exchange would need its own
+// plain move/overwrite. Not implemented: a real atomic exchange would
+// need its own
 // dedicated core-icbfs operation (swapping two directory entries'
 // UUIDs under one CAS, not a remove-then-insert pair), and nothing in
 // this project's actual target workloads (rsync/git/sqlite
-// temp-file-rename-into-place, per TESTING.md) needs it — it's
+// temp-file-rename-into-place) needs it — it's
 // primarily a container-overlayfs/union-filesystem pattern.
 const renameExchange = 0x2
 
@@ -530,8 +527,7 @@ func (n *Node) Rename(ctx context.Context, name string, newParent fs.InodeEmbedd
 //
 // renewers tracks one background lease-renewal goroutine per FUSE
 // lock-owner token that currently holds at least one lock through
-// this handle (task B8's lease-renewal fix, at Jared's direction —
-// see ensureRenewal/runRenewal and ASSUMPTIONS.md's B8 entry). nil
+// this handle (see ensureRenewal/runRenewal). nil
 // until the first successful lock acquire; newFileHandle is not
 // required to construct a usable FileHandle, only to pre-size it.
 type FileHandle struct {
@@ -603,11 +599,9 @@ func (h *FileHandle) Flush(ctx context.Context) syscall.Errno {
 // that conversion directly rather than assumed.
 const fcntlLockEOF = math.MaxInt64
 
-// lockLeaseTTL is the lease every FUSE-sourced flock/fcntl claim gets
-// (task B8), kept alive for as long as the acquiring lock-owner stays
-// alive by ensureRenewal/runRenewal's background renewal, below —
-// fixed at Jared's direction after this project's original version
-// shipped with no renewal at all (see ASSUMPTIONS.md's B8 entry): a
+// lockLeaseTTL is the lease every FUSE-sourced flock/fcntl claim gets,
+// kept alive for as long as the acquiring lock-owner stays
+// alive by ensureRenewal/runRenewal's background renewal, below: a
 // lease TTL with nothing ever renewing it can't actually distinguish
 // "holder crashed" from "holder has just been holding this a long
 // time," which a real NFS/SMB-style lease (short TTL, renewed
@@ -803,8 +797,7 @@ func (h *FileHandle) ensureRenewal(owner uint64) {
 // do I currently hold" each time and renewing *that* is correct
 // regardless of any merging/splitting that happened in between.
 //
-// This is the actual fix for task B8's original gap (see
-// ASSUMPTIONS.md): a holder that's still alive and still has this
+// A holder that's still alive and still has this
 // file open now keeps its lock indefinitely via renewal; one that
 // crashes, gets network-partitioned away, or closes this handle
 // without releasing stops being renewed and loses it within one
@@ -850,23 +843,13 @@ func (h *FileHandle) stopRenewal(owner uint64) {
 // Release implements fs.FileReleaser: fires when the kernel closes
 // this FUSE file handle. Stops every background renewal goroutine
 // this handle started (the "tied to the FUSE file handle's lifetime"
-// backstop task B8's renewal fix needed — see runRenewal's doc
-// comment), *and* actively releases whatever locks each of those
-// owners still held at that point — a second, real gap this renewal
-// work exposed, not just the first: with real kernel lock forwarding
-// never previously enabled (see EnableLocks's doc comment in
-// mount_test.go/cmd/icbfs's fuseMountOptions, fixed alongside this),
-// the kernel's own local advisory-lock table was silently doing
-// "release on close" for every B8 test, for free, making it look like
-// this driver already handled it — once real dispatch was turned on,
-// a plain close(2)/process-exit without an explicit F_UNLCK left the
-// lock sitting in the remote .lock object, held until its lease
-// naturally expired, not released immediately the way real fcntl/
-// flock close semantics require. Confirmed as a real, previously
-// latent bug, not a hypothetical: TestMountFcntlByteRangeLocksAcrossProcesses
-// started failing the moment EnableLocks was turned on, specifically
-// at the "succeeds once the holder process exits" assertion, until
-// this fix was added.
+// backstop renewal needs — see runRenewal's doc comment), *and*
+// actively releases whatever locks each of those owners still held at
+// that point: a plain close(2)/process-exit without an explicit
+// F_UNLCK would otherwise leave the lock sitting in the remote .lock
+// object until its lease expired, not released immediately the way
+// real fcntl/flock close semantics require
+// (TestMountFcntlByteRangeLocksAcrossProcesses checks this).
 //
 // Scoped to exactly what *this* FileHandle's own acquire calls
 // registered in h.renewers, not every lock its owner holds anywhere —
@@ -877,7 +860,7 @@ func (h *FileHandle) stopRenewal(owner uint64) {
 // This covers the dominant real case (one fd per lock user, which is
 // how flock(2) always behaves, and how most real fcntl(2) usage does
 // too) but not a process that locks via one fd and closes a different
-// one first — see ASSUMPTIONS.md's B8 entry.
+// one first.
 func (h *FileHandle) Release(ctx context.Context) syscall.Errno {
 	ctx = detach(ctx)
 	h.mu.Lock()
@@ -899,8 +882,7 @@ func (h *FileHandle) Release(ctx context.Context) syscall.Errno {
 	for owner := range renewers {
 		h.releaseAllHeldBy(ctx, owner)
 	}
-	// Releases this session's private local scratch file (ROADMAP.md's
-	// Part G, task G3) — without this, every real close(2) would leak
+	// Releases this session's private local scratch file — without this, every real close(2) would leak
 	// a file on local disk for the life of the mount process.
 	_ = h.open.Close()
 	return 0

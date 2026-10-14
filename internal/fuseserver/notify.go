@@ -12,7 +12,7 @@ import (
 
 // watchRegistry maps a UUID key this mount has looked up to the live
 // go-fuse Inode representing it, so an incoming notify.Signal naming
-// that key can be turned into a real kernel notification (task E3).
+// that key can be turned into a real kernel notification.
 //
 // register is first-writer-wins (never overwrites an existing entry)
 // for a real, verified-not-assumed reason: (*fs.Inode).NewInode does
@@ -33,17 +33,12 @@ import (
 // the one go-fuse's own dedup lets win (nothing else was registered
 // yet to lose to).
 //
-// Per ROADMAP.md's task E3 scope, this intentionally does not solve
-// everything else: entries are never removed, which means (a) the map
+// This intentionally does not solve everything else: entries are never removed, which means (a) the map
 // grows for as long as the mount runs, bounded only by how many
 // distinct objects get accessed, and (b) holding a reference here
 // prevents go-fuse from ever fully releasing that Inode. Both are
-// accepted, documented gaps for a first cut — proving delivery works
-// (this task's actual "Done when") doesn't require solving inode
-// lifecycle/pruning, and doing so properly would need hooking into
-// go-fuse's FORGET handling, not attempted here. Flagged for whoever
-// revisits this, same treatment ROADMAP.md itself gives the separate,
-// still-open rename wrinkle.
+// accepted gaps: doing this properly would need hooking into go-fuse's
+// FORGET handling, not attempted here.
 type watchRegistry struct {
 	mu    sync.Mutex
 	byKey map[string]*fs.Inode
@@ -74,7 +69,7 @@ func (w *watchRegistry) lookup(key string) (*fs.Inode, bool) {
 // signal into a real go-fuse/kernel notification for whichever
 // currently-tracked UUID it names. A signal naming a key nobody has
 // looked up yet (so there's no live Inode to notify) is simply
-// dropped — consistent with ARCHITECTURE.md's governing principle
+// dropped — consistent with docs/architecture.md's governing principle
 // that a signal is just a "go check current state" hint, never
 // something a consumer is required to act on.
 //
@@ -92,7 +87,7 @@ func (w *watchRegistry) lookup(key string) (*fs.Inode, bool) {
 // reliably produce a raw inotify event through this exact kernel/
 // go-fuse version in this environment, and this filesystem doesn't
 // opt into FOPEN_KEEP_CACHE, so there's no page-cache staleness to
-// observe either — see ASSUMPTIONS.md's E3 entry. This hook lets a
+// observe either. This hook lets a
 // test confirm the actual deliverable (the signal correctly reached
 // the kernel against the right, live Inode, accepted without error)
 // without depending on either of those unreliable, environment-

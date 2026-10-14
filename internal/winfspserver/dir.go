@@ -14,8 +14,7 @@ import (
 // per call — WinFsp requires the buffer handed back here to persist
 // across calls for the same open directory (marker-based continuation
 // reads back out of it); returning a new zero buffer every time leaks
-// the native allocation and breaks continuation (found the hard way in
-// task F1's smoke test — see ASSUMPTIONS.md/ROADMAP.md).
+// the native allocation and breaks continuation.
 func (d *driver) GetOrNewDirBuffer(fs *winfsp.FileSystemRef, file uintptr) (*winfsp.DirBuffer, error) {
 	h, ok := d.handle(file)
 	if !ok {
@@ -43,7 +42,7 @@ func (d *driver) ReadDirectory(fs *winfsp.FileSystemRef, file uintptr, pattern s
 		return toWinError(err)
 	}
 	// Best-effort, deliberately not checked — same reasoning as
-	// Read's own TouchAtime call (ROADMAP.md's Part G, task G1).
+	// Read's own TouchAtime call.
 	_ = d.fsys.TouchAtime(ctx(), h.key, icbfs.TypeDir)
 
 	// Every non-root directory lists "." and ".." first, as on NTFS

@@ -22,8 +22,8 @@ const (
 )
 
 // LockRange is one held (or recently held) byte-range claim within a
-// file's lock object — see ARCHITECTURE.md's Locking section and
-// ROADMAP.md's tasks B2/B4. A whole-file lock is represented as the
+// file's lock object — see docs/architecture.md's Locking section. A
+// whole-file lock is represented as the
 // range [0, lockWholeFileEnd) (internal/icbfs/lock.go) — not a
 // separate case.
 type LockRange struct {
@@ -33,12 +33,12 @@ type LockRange struct {
 	Holder          string                 `protobuf:"bytes,3,opt,name=holder,proto3" json:"holder,omitempty"`
 	ExpiresAtUnixMs int64                  `protobuf:"varint,4,opt,name=expires_at_unix_ms,json=expiresAtUnixMs,proto3" json:"expires_at_unix_ms,omitempty"`
 	// escalation_only marks a claim made internally by OpenFile.Flush's
-	// own retry-escalation (ROADMAP.md task B5), not a real application
-	// lock placed via fcntl/LockFileEx. Task B6's stronger-than-advisory
+	// own retry-escalation, not a real application
+	// lock placed via fcntl/LockFileEx. The stronger-than-advisory
 	// write check must skip these: a different OpenFile's own internal
 	// escalation claim is not "someone else's lock" a write needs to
 	// respect — it's this driver's own bookkeeping, already guaranteed
-	// to converge on its own via tasks B1/B5's retry mechanism, and
+	// to converge on its own via the retry mechanism, and
 	// treating it as an external lock would spuriously refuse writes
 	// that would otherwise just succeed shortly after.
 	EscalationOnly bool `protobuf:"varint,5,opt,name=escalation_only,json=escalationOnly,proto3" json:"escalation_only,omitempty"`

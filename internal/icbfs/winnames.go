@@ -4,8 +4,8 @@ import "strings"
 
 // windowsReservedChars are the characters Win32 forbids in a single
 // path component, per Microsoft's own documented naming rules —
-// ARCHITECTURE.md's "Windows compatibility: primary mode" section,
-// ROADMAP.md's Part F, task F6. `/` and `\` are included for
+// docs/architecture.md's "Windows compatibility: primary mode" section.
+// `/` and `\` are included for
 // completeness even though neither can reach this check in practice
 // (every caller here operates on a single already-split path
 // component, never a multi-segment string).
@@ -50,14 +50,13 @@ func isWindowsReservedName(name string) bool {
 }
 
 // checkName refuses a reserved name outright on a primary-Windows
-// filesystem — ARCHITECTURE.md's "Reserved names/characters" rule,
+// filesystem — docs/architecture.md's "Reserved names/characters" rule,
 // enforced here at the core Filesystem layer (not just the WinFsp
 // driver) so it applies regardless of which access layer is writing:
 // primary mode is a property of the filesystem itself, not of
 // whichever driver happens to be mounting it right now. A
-// primary-POSIX filesystem never rejects anything here — confirmed at
-// Jared's direction (ROADMAP.md's F6 entry): any POSIX-legal name is
-// allowed, Windows-reserved or not.
+// primary-POSIX filesystem never rejects anything here: any
+// POSIX-legal name is allowed, Windows-reserved or not.
 //
 // It also enforces the name length limit; see checkNameLength.
 func (f *Filesystem) checkName(name string) error {

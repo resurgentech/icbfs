@@ -23,7 +23,7 @@ const (
 
 // EntryType mirrors internal/block.EntryType.
 //
-// FIFO/CHAR_DEVICE/BLOCK_DEVICE/SOCKET (ROADMAP.md's Part G, task G2)
+// FIFO/CHAR_DEVICE/BLOCK_DEVICE/SOCKET
 // are POSIX/FUSE-only — Windows/NTFS has no equivalent concept, so
 // internal/winfspserver never produces or expects these.
 type EntryType int32

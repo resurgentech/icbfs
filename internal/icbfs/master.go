@@ -14,8 +14,7 @@ import (
 )
 
 // masterBlockKey is the one, fixed, well-known object per bucket that
-// registers every filesystem in it — see ARCHITECTURE.md's Multiple
-// filesystems per bucket section.
+// registers every filesystem in it — see docs/architecture.md's master block section.
 const masterBlockKey = "_master"
 
 // ErrArchived is returned by any mutating operation on a filesystem
@@ -84,7 +83,7 @@ func readMaster(ctx context.Context, store objstore.Store) (*pb.MasterBlock, *ob
 // root blocks.
 //
 // The ID is the slot's position, zero-padded to 4 hex digits — not a
-// separately stored field. See ARCHITECTURE.md for why: the master
+// separately stored field. See docs/architecture.md for why: the master
 // block's list can only grow, never shrink or reorder, specifically so a
 // slot's position (and therefore the ID every object in that filesystem
 // is already permanently keyed with) never changes once assigned.
@@ -145,7 +144,7 @@ func fsID(index int) string {
 // (and all its data) still exists, but every mutating Filesystem
 // operation will refuse with ErrArchived from the next Bootstrap
 // onward — see ErrArchived's doc comment on why reads are unaffected,
-// and ARCHITECTURE.md's Multiple filesystems per bucket section on why
+// and docs/architecture.md's master block section on why
 // this is checked at mount/session start rather than continuously: an
 // already-open Filesystem does not notice an Archive call made after it
 // bootstrapped, by design, not by oversight.
@@ -188,12 +187,10 @@ func updateFilesystemEntry(ctx context.Context, store objstore.Store, fsName str
 // Resize changes fsName's declared capacity (StatFS's "Total", the
 // `size` originally fixed at Bootstrap/creation time) to newSize.
 // Unlike Locking's EnableLocking flag, declared size is a real,
-// shared property of the filesystem itself — ARCHITECTURE.md's own
+// shared property of the filesystem itself — docs/architecture.md's own
 // master-block `size` field, same category as archived — so this
 // takes effect for every mount of fsName immediately, not just the
-// caller's own. See ASSUMPTIONS.md's D-cleanup entry: this closes the
-// "no way to change it after the fact" gap that entry originally
-// flagged.
+// caller's own.
 func Resize(ctx context.Context, store objstore.Store, fsName string, newSize uint64) error {
 	return updateFilesystemEntry(ctx, store, fsName, func(e *pb.FilesystemEntry) {
 		e.Size = newSize

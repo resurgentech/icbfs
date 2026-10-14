@@ -131,7 +131,7 @@ func TestLockRenewOnlySucceedsForCurrentHolder(t *testing.T) {
 	// comparison) the instant it's written, since the server-observed
 	// "now" it was computed from can be truncated up to just under a
 	// second behind the true moment. 3s comfortably clears that,
-	// consistent with ARCHITECTURE.md's real-world guidance that
+	// consistent with docs/architecture.md's real-world guidance that
 	// leases are "multiple seconds, not milliseconds" anyway.
 	const initialTTL = 3 * time.Second
 	if err := fsys.TryAcquireLock(ctx, key, "holder-a", initialTTL); err != nil {
@@ -365,10 +365,8 @@ func TestByteRangeLocksSameHolderCanHoldMultipleDisjointRanges(t *testing.T) {
 	}
 }
 
-// TestByteRangeLocksSameHolderOverlappingReacquireMergesAndSplits covers
-// task B4's originally-deferred nuance (fixed at Jared's direction —
-// see ASSUMPTIONS.md's B4 entry and mergeOwnRanges's doc comment): a
-// holder re-locking an overlapping-but-not-identical range adjusts its
+// TestByteRangeLocksSameHolderOverlappingReacquireMergesAndSplits (see
+// mergeOwnRanges's doc comment): a holder re-locking an overlapping-but-not-identical range adjusts its
 // own existing claim(s) via real fcntl(2) merge/split, rather than
 // adding a second, independent entry that leaves the original intact.
 func TestByteRangeLocksSameHolderOverlappingReacquireMergesAndSplits(t *testing.T) {
@@ -453,8 +451,8 @@ func TestBlockingAcquireRespectsContextDeadline(t *testing.T) {
 	}
 }
 
-// TestChangeNotificationsAcceleratesWaitBackoffOrSignal covers half of
-// ROADMAP.md's task B10 "Done when": a matching Change-notifications
+// TestChangeNotificationsAcceleratesWaitBackoffOrSignal: a matching
+// change-notifications
 // signal makes a blocking acquire's wait return promptly, measurably
 // faster than the current backoff interval it would otherwise have
 // waited out. Tested directly against waitBackoffOrSignal (not a full
@@ -526,13 +524,11 @@ func TestChangeNotificationsIgnoresNonMatchingSignal(t *testing.T) {
 	}
 }
 
-// TestBlockingAcquireConvergesWithoutChangeNotifications covers the
-// other half of ROADMAP.md's task B10 "Done when": with Change
+// TestBlockingAcquireConvergesWithoutChangeNotifications: with change
 // notifications never enabled for this Filesystem at all (the default
 // — EnableChangeNotifications is never called), blocking acquisition
-// must still converge correctly via task B3's plain-polling fallback,
-// proving the B10 dependency is genuinely optional rather than
-// load-bearing. Same scenario as
+// must still converge correctly via plain polling, proving the
+// notifications are genuinely optional rather than load-bearing. Same scenario as
 // TestBlockingAcquireCompletesPromptlyAfterRelease, named and framed
 // explicitly around this requirement rather than left as incidental
 // coverage.
@@ -570,9 +566,8 @@ func TestBlockingAcquireConvergesWithoutChangeNotifications(t *testing.T) {
 }
 
 // TestBlockingAcquireWithChangeNotificationsEnabledAgainstRealFilesystem
-// is task B10's end-to-end sanity check against a real Filesystem (a
-// real MinIO-backed store, per ROADMAP.md's literal "against MinIO"
-// wording for this task's "Done when") with EnableChangeNotifications
+// is the end-to-end check against a real Filesystem (a real
+// MinIO-backed store) with EnableChangeNotifications
 // actually wired up: a waiter whose wait is accelerated by a matching
 // signal still converges to a successful acquire once the holder
 // releases, through the full real AcquireLockRange path (not the
@@ -607,7 +602,7 @@ func TestBlockingAcquireWithChangeNotificationsEnabledAgainstRealFilesystem(t *t
 	if err := fsys.ReleaseLock(ctx, key, "holder-a"); err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	// Simulate the real backend adapter (task E4) having observed the
+	// Simulate the real backend adapter having observed the
 	// release and delivered a signal for this exact .lock key.
 	src.Emit(notify.Signal{Key: key + ".lock"})
 

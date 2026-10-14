@@ -12,8 +12,8 @@ import (
 )
 
 // contentWriteRetryBudget bounds how long OpenFile.Flush spends
-// retrying a lost CAS race before escalating to locking (task B5). A
-// time budget, not an attempt count, per ROADMAP.md's task B1: a large
+// retrying a lost CAS race before escalating to locking. A
+// time budget, not an attempt count: a large
 // file's retry means resending its whole body, so a fixed attempt
 // count would give large and small files very different real retry
 // windows — a time budget gives them comparable ones.
@@ -24,20 +24,20 @@ import (
 var contentWriteRetryBudget = 5 * time.Second
 
 // lockEscalationLeaseTTL is the lease length Flush's escalation path
-// (task B5) requests when it grabs a lock to guarantee its final write
+// requests when it grabs a lock to guarantee its final write
 // attempt. Long enough to comfortably cover one read-modify-write round
-// trip even under load; per ARCHITECTURE.md's Locking section ("30+
+// trip even under load; per docs/architecture.md's Locking section ("30+
 // seconds"), not tuned down just because this usage is normally brief —
 // Flush always releases promptly on its own once done, so a generous
 // TTL only matters if a holder crashes mid-escalation.
 const lockEscalationLeaseTTL = 30 * time.Second
 
-// ErrWriteContention is returned by OpenFile.Flush when even task B5's
+// ErrWriteContention is returned by OpenFile.Flush when even the
 // lock-escalation attempt fails to land a final write (e.g. the ctx
 // passed to Flush is done before the escalation lock could be
-// acquired). Plain CAS-retry-budget exhaustion alone no longer
-// surfaces this directly — it now triggers escalation instead, per
-// ARCHITECTURE.md's Locking section and ROADMAP.md's task B5.
+// acquired), or when the retry budget runs out on a mount without
+// locking. With locking on, retry-budget exhaustion triggers
+// escalation instead (docs/architecture.md's Concurrency section).
 var ErrWriteContention = errors.New("content write: exceeded retry budget and lock escalation under contention")
 
 // noTouch marks touchedStart as "nothing written yet this session" —
@@ -47,29 +47,21 @@ const noTouch = -1
 
 // OpenFile buffers one open file's in-progress edits and flushes them
 // back as a single whole-object CAS write, retried-and-reapplied
-// against the store's current content on a lost race (ARCHITECTURE.md's
-// Locking section, ROADMAP.md's task B1).
+// against the store's current content on a lost race
+// (docs/architecture.md's Concurrency section).
 //
-// This type lives in internal/icbfs rather than in the FUSE access
-// layer deliberately: ROADMAP.md's task B5 requires the eventual
-// content-write-retry-then-lock-escalation logic to be implemented once
-// and shared by every access layer (FUSE today, WinFsp eventually), not
-// copy-pasted per driver. Putting the buffering/retry machinery itself
-// here, not just the future escalation step, means a WinFsp driver gets
-// both for free just by using OpenFile the same way FUSE's FileHandle
-// does.
+// This type lives in internal/icbfs rather than in an access layer
+// deliberately: the content-write-retry-then-lock-escalation logic is
+// implemented once and shared by every access layer (FUSE and WinFsp),
+// not copy-pasted per driver.
 //
-// Content lives on local disk (a private scratch file, ROADMAP.md's
-// Part G, task G3), not as an in-memory []byte — the prior design's
-// Open() always materialized a file's entire content as one Go slice,
-// which was the root cause of three real crash/OOM bugs this project
-// found and fixed the hard way running pjdfstest against a real,
-// memory-constrained mount (see DefaultMaxFileSize's doc comment).
+// Content lives on local disk (a private scratch file), not as an
+// in-memory []byte, so a file's size is bounded by local disk, not RAM.
 // This scratch file is private to this one OpenFile session, never
 // shared with any other concurrent session of the same key — sharing
 // one physical file across sessions would let one session's
 // uncommitted edits leak into another's before Flush, breaking the
-// isolation task B1's CAS-retry-and-reapply correctness depends on.
+// isolation CAS-retry-and-reapply's correctness depends on.
 // A shared, LRU-bounded cache of validated snapshots (diskCache) sits
 // below this, purely to avoid redundant network fetches across
 // separate opens of the same unchanged content — never mutated by an
@@ -78,7 +70,7 @@ const noTouch = -1
 type OpenFile struct {
 	fsys   *Filesystem
 	key    string
-	holder string // this session's unique identity for escalation locks (task B5)
+	holder string // this session's unique identity for escalation locks
 
 	mu    sync.Mutex
 	file  *os.File // private local scratch file — see type doc comment
@@ -98,13 +90,7 @@ type OpenFile struct {
 
 	// touchedStart/touchedEnd track the single contiguous span this
 	// session's writes have touched, in O(1) space — not a log of
-	// every individual write's own bytes (ROADMAP.md's Part G, task
-	// G3's own real finding: an earlier version of this kept every
-	// write's data in a separate in-memory slice "for replay on a
-	// rebase," which defeated this entire task's point for exactly
-	// the case it was built for — one large sequential write ended up
-	// holding the whole thing in RAM a second time, in the log,
-	// even though the scratch file itself never did). applyLocked
+	// every individual write's own bytes. applyLocked
 	// already writes every edit directly onto the one shared scratch
 	// file, in call order, so a later overlapping write already wins
 	// over an earlier one there, exactly as a replayed log would
@@ -129,7 +115,7 @@ type OpenFile struct {
 }
 
 // newOpenFileHolder mints a unique per-session identity for Flush's
-// lock-escalation path (task B5) — distinct from the UUIDs newKey
+// lock-escalation path — distinct from the UUIDs newKey
 // mints for store objects, but drawing from the same generator since
 // both just need a unique opaque string.
 func newOpenFileHolder() (string, error) {
@@ -138,8 +124,8 @@ func newOpenFileHolder() (string, error) {
 
 // Open returns an OpenFile seeded with key's current content and ETag,
 // for a caller about to Read/Write/Flush it (a FUSE Open, for
-// instance). The scratch file is seeded via the shared disk cache
-// (ROADMAP.md's Part G, task G3): a cheap Head call learns the
+// instance). The scratch file is seeded via the shared disk cache:
+// a cheap Head call learns the
 // current ETag, and only a cache miss against it costs a real content
 // fetch.
 func (f *Filesystem) Open(ctx context.Context, key string) (*OpenFile, error) {
@@ -251,19 +237,18 @@ func (o *OpenFile) Size() int64 {
 }
 
 // TouchAtime bumps this file's recorded last-access time to now
-// (ROADMAP.md's Part G, task G1) — a thin forward to Filesystem's own
+// — a thin forward to Filesystem's own
 // TouchAtime, keeping o.fsys/o.key unexported from access-layer
 // callers (fuseserver, winfspserver) the same way every other
 // OpenFile method already does.
 //
 // At most once per session, not once per call: the kernel's own
 // max_read-style chunking splits one logical application read(2) into
-// many smaller FUSE Read callback invocations (confirmed via a real
-// hang found testing task G3 — a single 500 MB read turned into
-// thousands of synchronous atime-metadata network PUTs, one per ~128
-// KB chunk, each blocking the read that triggered it). "Strict, not
-// relatime" (task G1's own explicit decision) means every real access
-// updates atime immediately rather than deferring/approximating it —
+// many smaller FUSE Read callback invocations (a single 500 MB read
+// would otherwise be thousands of synchronous atime-metadata network
+// PUTs, one per ~128 KB chunk, each blocking the read that triggered
+// it). "Strict, not relatime" means every real access updates atime
+// immediately rather than deferring/approximating it —
 // it was never meant to mean every individual kernel-level chunk of
 // the *same* ongoing read re-updates it again, which is a real
 // performance bug, not a semantics requirement: a real filesystem's
@@ -400,8 +385,8 @@ func (o *OpenFile) applyLocked(data []byte, off int64) error {
 
 // touchedRangeLocked returns the single contiguous span this
 // session's writes have touched — over-approximating disjoint edits
-// into one span is accepted here, same reasoning ARCHITECTURE.md
-// gives for task B6's diff-based enforcement: a wider lock-escalation
+// into one span is accepted here, same reasoning docs/architecture.md
+// gives for diff-based lock enforcement: a wider lock-escalation
 // range can only make a conflict check more likely to serialize
 // against something real, never silently miss one. Only ever called
 // with dirty == true (Flush's own guard), which WriteAt never sets
@@ -492,14 +477,14 @@ func (o *OpenFile) rebaseLocked(ctx context.Context) error {
 // edit in that range correctly merged) onto it, and tries again.
 // Reapplying "these bytes at this range" onto a new base preserves
 // both writers' edits when they touch different byte ranges, exactly
-// the scenario ARCHITECTURE.md describes as today's lost-update bug —
+// the lost-update case docs/architecture.md describes —
 // the same property an explicit per-write edit log would have given,
 // without that log's own unbounded-RAM cost for a large sequential
 // write (see the OpenFile type doc comment).
 //
 // Bounded by contentWriteRetryBudget, not an attempt count (see its doc
-// comment). Once that budget is exhausted, Flush escalates (task B5,
-// connecting task B1 to tasks B2-B4): it blocks (task B3) on a lock
+// comment). Once that budget is exhausted, Flush escalates: it blocks
+// on a lock
 // covering the byte range this session actually touched, then makes
 // one final, guaranteed-uncontested-among-escalating-writers CAS write
 // attempt while holding it, then releases. This is what guarantees
@@ -526,12 +511,12 @@ func (o *OpenFile) Flush(ctx context.Context) (Attr, error) {
 		return o.fsys.statFile(ctx, o.key)
 	}
 
-	// Task B6: checked before every write, not just on retry
+	// Checked before every write, not just on retry
 	// exhaustion — refuse outright if the touched range overlaps a
 	// real, external application lock (fcntl/LockFileEx), rather than
 	// attempting the write and only finding out indirectly via a CAS
 	// conflict (which wouldn't distinguish "someone else's cooperating
-	// lock" from ordinary same-codebase contention B1/B5 already
+	// lock" from ordinary contention that retry and escalation
 	// handle on their own).
 	start, end := o.touchedRangeLocked()
 	if err := o.fsys.CheckRangeLockConflict(ctx, o.key, start, end, o.holder); err != nil {
@@ -556,11 +541,10 @@ func (o *OpenFile) Flush(ctx context.Context) (Attr, error) {
 	}
 
 	if !o.fsys.lockingEnabled {
-		// Task B7: escalation itself uses the Locking feature (the
-		// same .lock object, task B5), so a mount that opted out of
-		// Locking's costs doesn't get it either — plain CAS-retry
-		// exhaustion is simply terminal, exactly as it was before
-		// task B5 existed.
+		// Escalation itself uses the Locking feature (the same .lock
+		// object), so a mount that opted out of Locking's costs
+		// doesn't get it either — plain CAS-retry exhaustion is
+		// simply terminal.
 		return Attr{}, ErrWriteContention
 	}
 	if err := o.fsys.acquireEscalationLockRange(ctx, o.key, start, end, o.holder, lockEscalationLeaseTTL); err != nil {
@@ -627,7 +611,7 @@ func (o *OpenFile) partsLocked(partSize int64) []objstore.Part {
 }
 
 // updateSharedCacheLocked keeps the shared disk cache representing
-// what was actually just written (ROADMAP.md's Part G, task G3), so
+// what was actually just written, so
 // the very next Open of this key — from this session or any other —
 // doesn't redundantly re-fetch content this process already has
 // locally. Best-effort: a failure here never fails the Flush that
@@ -643,8 +627,8 @@ func (o *OpenFile) updateSharedCacheLocked(newETag string) {
 // TryAcquireLockRange, TryAcquireSharedLockRange, AcquireLockRange,
 // AcquireSharedLockRange, ReleaseLockRange, and FindConflictingLockRange
 // are OpenFile-scoped convenience wrappers over the identically-named
-// Filesystem methods, fixed to this OpenFile's own key — task B8's
-// FUSE flock/fcntl wiring (and any future WinFsp equivalent) operates
+// Filesystem methods, fixed to this OpenFile's own key — FUSE's
+// flock/fcntl wiring operates
 // per open file, so it's more natural to call these on the OpenFile it
 // already has in hand than to separately track fsys/key itself.
 func (o *OpenFile) TryAcquireLockRange(ctx context.Context, start, end int64, holder string, ttl time.Duration) error {
@@ -677,7 +661,7 @@ func (o *OpenFile) FindConflictingLockRange(ctx context.Context, start, end int6
 
 // LockRangesHeldBy is OpenFile's wrapper over the identically-named
 // Filesystem method — see its doc comment. Used to drive background
-// lease renewal (task B8's fix) without separately tracking what an
+// lease renewal without separately tracking what an
 // earlier acquire call originally requested.
 func (o *OpenFile) LockRangesHeldBy(ctx context.Context, holder string) ([]LockRangeInfo, error) {
 	return o.fsys.LockRangesHeldBy(ctx, o.key, holder)

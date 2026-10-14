@@ -1,5 +1,5 @@
-// Command icbfs-mockserver is a mock of host's end of the daemon
-// chain: daemons (icbfs-logd) connect to it over a websocket; it tells
+// Command icbfs-mockserver is a mock of the server end of the
+// daemon chain: daemons (icbfs-logd) connect to it over a websocket; it tells
 // mounts how to mount the drives in its registry (store credentials,
 // filesystem, root, read-only), appends every logged filesystem event to
 // a JSON-lines file, and runs icbfs-cli's side commands sent through

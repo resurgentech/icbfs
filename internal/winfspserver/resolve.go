@@ -1,9 +1,9 @@
 // Package winfspserver is the WinFsp (Windows) access layer: it adapts
 // icbfs's core filesystem logic to the chosen WinFsp binding
 // (github.com/winfsp/go-winfsp, used directly against its native
-// Behaviour* interfaces — see ROADMAP.md's Part F, tasks F1/F3).
+// Behaviour* interfaces).
 // Windows only for the binding-specific files — internal/fuseserver is
-// the separate, parallel Linux/POSIX access layer per ARCHITECTURE.md.
+// the separate, parallel Linux/POSIX access layer per docs/architecture.md.
 //
 // This file (resolve.go) is deliberately portable, not Windows-only:
 // path resolution is pure icbfs.Filesystem logic with no dependency on
@@ -41,14 +41,12 @@ type resolved struct {
 // conventionally starting with `\` — from fsys's root down to the
 // named entry, via repeated calls to icbfs.Filesystem.Lookup.
 //
-// This exists because neither WinFsp binding under consideration (nor
-// any WinFsp binding at all — ROADMAP.md's F1/F2 entries) gives this
+// This exists because no WinFsp binding gives this
 // driver what go-fuse's node tree gives internal/fuseserver: a cached
 // *Inode a path lookup can hand back on a later call. WinFsp's native
 // interface is flatly path-string-addressed on every single callback,
 // so every call re-walks from the root here; there is no per-path
-// cache in this first cut (a driver-owned one is a possible future
-// optimization, not attempted now — see ROADMAP.md's F2 entry).
+// cache (a driver-owned one is a possible optimization).
 //
 // Intermediate path components that resolve to something other than a
 // directory fail with icbfs.ErrNotDir, matching the real filesystem's
@@ -60,11 +58,11 @@ type resolved struct {
 //
 // caseInsensitive controls whether a path segment is matched against
 // stored names exactly (false) or case-foldedly (true, via
-// lookupCaseAware) — ARCHITECTURE.md's Windows compatibility section
+// lookupCaseAware) — docs/architecture.md's Windows compatibility section
 // calls for exactly the standard NTFS/Samba/WSL2 pattern here: storage
 // itself always stays case-sensitive/case-preserving, and whether a
 // lookup matches case-insensitively is an access-layer choice, driven by
-// task F4's mount flag (see cmd/icbfs-winfsp's --case-insensitive).
+// a mount flag (see cmd/icbfs-winfsp's -case-insensitive).
 // What primary mode decides is only how fast that is: a primary-Windows
 // filesystem keeps its directories sorted case-insensitively, so
 // icbfs.Filesystem.LookupFold seeks instead of scanning.
@@ -132,7 +130,7 @@ func hasIntermediateSymlink(ctx context.Context, fsys *icbfs.Filesystem, path st
 // only in case can coexist — a case-sensitive mount or a POSIX mount of
 // the same filesystem can create them), otherwise a case-insensitive
 // one. Storage itself always stays case-preserving; see
-// ARCHITECTURE.md's Windows compatibility section.
+// docs/architecture.md's Windows compatibility section.
 func lookupCaseAware(ctx context.Context, fsys *icbfs.Filesystem, dirKey, name string, caseInsensitive bool) (block.Entry, icbfs.Attr, error) {
 	if caseInsensitive {
 		return fsys.LookupFold(ctx, dirKey, name)
@@ -148,8 +146,7 @@ const maxSymlinkHops = 20
 
 // ntPathPrefix is what Windows' own CreateSymbolicLinkW prepends to an
 // absolute symlink target before this driver ever sees it, confirmed
-// empirically against a real WinFsp mount, not assumed (see
-// ROADMAP.md's F3 entry) — the NT namespace's "DOS device path"
+// empirically against a real WinFsp mount, not assumed — the NT namespace's "DOS device path"
 // prefix. Recognizing it is how resolvePathFollow tells an absolute
 // stored target apart from a relative one, since icbfs.Filesystem.
 // Symlink's own target string carries no separate flag for this.

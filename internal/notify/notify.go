@@ -1,16 +1,16 @@
 // Package notify defines the internal event-source abstraction behind
-// icbfs's optional Change notifications feature (ARCHITECTURE.md's
-// Change notifications section, ROADMAP.md's Part E): a minimal,
+// icbfs's optional Change notifications feature (docs/architecture.md's
+// Change notifications section): a minimal,
 // backend-independent "something changed, go check current state"
 // wake-up signal, never an authoritative payload of what changed —
-// per ARCHITECTURE.md's governing design principle, this holds
+// per docs/architecture.md's governing design principle, this holds
 // regardless of which backend (MinIO, Azure, AWS S3) is in use, and
 // the interface is deliberately too thin to tempt a consumer into
 // trusting it as more than that.
 package notify
 
 // Signal is a single wake-up notification: the key or prefix that
-// changed. Consumers (task E3's FUSE wiring, task B10's lock-polling
+// changed. Consumers (the FUSE watch dispatch, locking's lock-polling
 // accelerator) treat this purely as a hint to re-check current state,
 // never as proof of what the change was — a signal can be coarser
 // than the actual writes that produced it (e.g. several rapid writes
@@ -23,7 +23,7 @@ type Signal struct {
 }
 
 // Source is the minimal interface every backend notification adapter
-// (tasks E4-E6) implements.
+// implements.
 type Source interface {
 	// Signals returns the channel wake-up signals arrive on. The
 	// channel is closed when the source is done — ctx (passed to

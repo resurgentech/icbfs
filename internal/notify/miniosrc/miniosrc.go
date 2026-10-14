@@ -1,6 +1,5 @@
 // Package miniosrc is the MinIO backend adapter for Change
-// notifications (ARCHITECTURE.md's Change notifications section,
-// ROADMAP.md's task E4).
+// notifications (docs/architecture.md's Change notifications section).
 //
 // New dependency: github.com/minio/minio-go/v7. Confirmed non-
 // standard, not an assumption — ListenBucketNotification/
@@ -27,9 +26,9 @@ import (
 
 // Source streams object-created/removed events for one bucket,
 // scoped server-side to prefix (the owning filesystem's ID prefix,
-// per ARCHITECTURE.md's Multiple filesystems per bucket section) —
-// MinIO supports this filtering directly, unlike Azure's Change Feed
-// (task E5), which has no server-side filtering at all.
+// per docs/architecture.md's master block section) —
+// MinIO supports this filtering directly, unlike Azure's Change Feed,
+// which has no server-side filtering at all.
 type Source struct {
 	cancel context.CancelFunc
 	ch     chan notify.Signal
@@ -44,16 +43,15 @@ var _ notify.Source = (*Source)(nil)
 // effect as calling Close.
 //
 // There is no separate sync/async delivery-mode parameter to set
-// here, despite ARCHITECTURE.md's Change notifications section
+// here, despite docs/architecture.md's Change notifications section
 // calling out MinIO's sync mode as worth preferring: confirmed by
 // reading ListenBucketNotification's implementation directly that it
 // is a direct, unqueued client HTTP long-poll with no such parameter
 // exposed at this API surface at all. If MinIO's sync/async delivery
 // distinction applies here, it would be a server-side deployment
 // setting (the MinIO server's own notification configuration), not
-// something this Go client call controls — flagged in ASSUMPTIONS.md
-// as worth clarifying against a real deployment, not silently
-// asserted as handled.
+// something this Go client call controls — worth checking against a
+// real deployment, not asserted as handled.
 func New(ctx context.Context, client *minio.Client, bucket, prefix string) *Source {
 	listenCtx, cancel := context.WithCancel(ctx)
 	infoCh := client.ListenBucketNotification(listenCtx, bucket, prefix, "", []string{
@@ -71,7 +69,7 @@ func New(ctx context.Context, client *minio.Client, bucket, prefix string) *Sour
 		defer close(s.done)
 		for info := range infoCh {
 			if info.Err != nil {
-				// Per ARCHITECTURE.md's governing principle, a missed
+				// Per docs/architecture.md's governing principle, a missed
 				// or errored poll is never a correctness problem for
 				// this feature — just a slower wake-up next time
 				// around. The underlying retry/backoff loop lives

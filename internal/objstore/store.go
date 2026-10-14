@@ -18,11 +18,10 @@
 // SDK for Go (`github.com/Azure/azure-sdk-for-go/sdk/storage/azblob`)
 // call a real AzureStore would make, for whoever picks that up — but
 // unlike every S3-side primitive in this package (each verified against
-// real MinIO before being trusted, see ASSUMPTIONS.md throughout), this
+// real MinIO before being trusted), this
 // is NOT verified against a real Azure SDK or Storage Account: no
 // Azure SDK is installed in this environment and no account exists to
-// test against, the same documented-gap treatment ASSUMPTIONS.md's E5
-// entry already gives internal/notify/azurecf for the exact same
+// test against, the same gap internal/notify/azurecf has, for the same
 // reason. Treat these as a starting sketch from training knowledge, to
 // be confirmed against the actual installed package source before
 // trusting any of it, not as verified fact.
@@ -193,8 +192,8 @@ type Store interface {
 
 	// ListByPrefix returns every current object whose key starts with
 	// prefix, paginating internally. Only Key and Size are populated —
-	// this is the lightweight listing operation ARCHITECTURE.md's
-	// Multiple filesystems per bucket section describes for du/df's
+	// this is the lightweight listing operation docs/architecture.md's
+	// master block section describes for du/df's
 	// "Used" and for Prune: no object bodies are fetched, just listing
 	// metadata, but it's still O(number of matching objects/pages), not
 	// O(1) — there is no faster primitive on any of the three target
@@ -210,7 +209,7 @@ type Store interface {
 	// via a real request's raw HTTP response — not a typed field like
 	// an Object's LastModified (which only ever says when some
 	// specific object was last written, never "what time is it right
-	// now"). Used to anchor lease expiry (ARCHITECTURE.md's Locking
+	// now"). Used to anchor lease expiry (docs/architecture.md's Locking
 	// section) to the store's clock instead of the calling client's,
 	// which could be skewed relative to other clients.
 	//
@@ -222,6 +221,6 @@ type Store interface {
 	// (e.g. a GetProperties against the container), letting this read
 	// resp.Header.Get("Date") the same way. Unverified here the way
 	// S3Store.ServerTime's approach was confirmed against real MinIO
-	// before being trusted (see ASSUMPTIONS.md's B2 entry).
+	// before being trusted.
 	ServerTime(ctx context.Context) (time.Time, error)
 }

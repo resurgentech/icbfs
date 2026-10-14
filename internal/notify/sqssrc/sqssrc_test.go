@@ -14,8 +14,7 @@ import (
 
 // fakeQueue implements receiver over an in-memory message list, for
 // exercising the consumption/delete logic without a real AWS account
-// — task E6's explicitly-chosen test strategy (ARCHITECTURE.md's
-// Testing reality note: no real account is provisionable here).
+// (there is none to test against).
 type fakeQueue struct {
 	mu       sync.Mutex
 	pending  []types.Message
@@ -62,9 +61,8 @@ func s3EventBody(key string) string {
 	return fmt.Sprintf(`{"Records":[{"s3":{"object":{"key":%q}}}]}`, key)
 }
 
-// TestSourceFiltersByPrefixAndDeletesConsumedMessages covers
-// ROADMAP.md's task E6 "Done when": the consumption logic has a
-// passing test against a fake queue. A matching key is forwarded as a
+// TestSourceFiltersByPrefixAndDeletesConsumedMessages tests the
+// consumption logic against a fake queue. A matching key is forwarded as a
 // Signal and its message deleted afterward; a non-matching key (the
 // client-side safety-net filter — see Source's doc comment) is never
 // forwarded, but its message is still deleted (it was consumed either

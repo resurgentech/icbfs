@@ -11,12 +11,9 @@
 // automatically, without this driver doing anything extra in Open).
 //
 // Hardlinks have no equivalent at all: WinFsp's native
-// FSP_FILE_SYSTEM_INTERFACE (confirmed directly, not assumed — see
-// ROADMAP.md's F1 entry) has no hardlink-creation callback, unlike
-// cgofuse's FUSE-shaped Link(). There is nothing to wire here —
-// ROADMAP.md's F3 task text calls for either a working implementation
-// or "a clear, intentional error," and the clear, intentional answer
-// is that this operation does not exist on this access layer at all.
+// FSP_FILE_SYSTEM_INTERFACE has no hardlink-creation callback, unlike
+// cgofuse's FUSE-shaped Link(). There is nothing to wire here: this
+// operation does not exist on this access layer at all.
 package winfspserver
 
 import (
@@ -129,7 +126,7 @@ func parseSymlinkReparseBuffer(buf []byte) (string, error) {
 
 // GetReparsePoint serves an already-open handle's reparse data back —
 // a symlink's target, encoded as a REPARSE_DATA_BUFFER_SYMBOLIC_LINK,
-// or (ROADMAP.md's Part G, task G4) a generic, non-symlink reparse
+// or a generic, non-symlink reparse
 // point's raw stored buffer, returned byte-exact.
 func (d *driver) GetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name string, buffer []byte) (int, error) {
 	h, ok := d.handle(file)
@@ -220,7 +217,7 @@ func fillReparseBuffer(buffer []byte, target string) (int, error) {
 //     carries no such signal). Replace that placeholder with a real
 //     icbfs symlink entry pointing at the parsed target, and repoint
 //     this handle at it.
-//   - Any other tag (ROADMAP.md's Part G, task G4): a generic reparse
+//   - Any other tag: a generic reparse
 //     point — store the raw buffer byte-exact against the existing
 //     file, no type change at all (unlike the symlink case, this
 //     stays an ordinary icbfs file with extra stored data).
@@ -243,15 +240,10 @@ func (d *driver) SetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 	if err != nil {
 		return toWinError(err)
 	}
-	// The kernel hands this callback an uppercased name under
-	// task F4's -case-insensitive=true default — the exact same
-	// case-folding gotcha task F9 already found and fixed for
-	// Rename/Cleanup, recurring here because this is a third,
-	// separately-written call site that was never updated to match
-	// (ROADMAP.md's Part G, task G5; confirmed via a real debug trace,
-	// not assumed: CreateSymbolicLinkW's placeholder Create arrives as
-	// "\\link1.txt", but this callback's own SetReparsePoint then
-	// arrives as "\\LINK1.TXT" for the identical operation).
+	// The kernel hands this callback an uppercased name under the
+	// -case-insensitive=true default — the same case-folding gotcha
+	// Rename/Cleanup handle.
+	//
 	// icbfs.Filesystem's own lookups are exact-match only, so an
 	// uppercased base here made Unlink fail with ErrNotFound on every
 	// single symlink creation — which BestEffortCreateSymbolicLinkW's
@@ -302,14 +294,12 @@ func (d *driver) SetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 }
 
 // DeleteReparsePoint handles FSCTL_DELETE_REPARSE_POINT — go-winfsp's
-// own separate BehaviourDeleteReparsePoint hook (ROADMAP.md's Part G,
-// task G4; confirmed not implemented at all before this task, for
-// symlinks or anything else, while scoping this work). Only the
+// own separate BehaviourDeleteReparsePoint hook. Only the
 // generic reparse case is meaningfully reachable here in practice:
 // winfsp-tests' own symlink tests never call this, and this driver
 // has no "revert a symlink back to an ordinary file" operation to
 // call even if a client did — deleting a generic reparse point's
-// stored data is the real, tested behavior this task needs.
+// stored data is the real, tested behavior.
 func (d *driver) DeleteReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name string, buffer []byte) error {
 	h, ok := d.handle(file)
 	if !ok {

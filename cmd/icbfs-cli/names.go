@@ -17,7 +17,7 @@ import (
 )
 
 // driveFlags say which drive a names or trash command acts on: through
-// the daemon, host's drive id; directly, a filesystem and optionally
+// the daemon, the server's drive id; directly, a filesystem and optionally
 // a directory in it.
 type driveFlags struct {
 	sf           storeFlags
@@ -27,7 +27,7 @@ type driveFlags struct {
 func addDriveFlags(fset *flag.FlagSet) driveFlags {
 	return driveFlags{
 		sf:   addStoreFlags(fset),
-		id:   fset.String("drive", "", "with -daemon: the drive (host's id)"),
+		id:   fset.String("drive", "", "with -daemon: the drive (the server's id for it)"),
 		fs:   fset.String("fs", "", "without -daemon: the filesystem"),
 		root: fset.String("root", "", "without -daemon: a directory in the filesystem that is the drive (default its root)"),
 	}

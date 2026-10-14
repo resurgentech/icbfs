@@ -1,8 +1,6 @@
 #!/bin/bash
-# Runs pjdfstest against a real icbfs FUSE mount on the certification
-# VM — the durable, re-runnable version of the manual steps used to
-# find the real bugs recorded in ROADMAP.md/TESTING.md. Takes the VM's
-# IP (from wait-for-ssh.sh) as $1.
+# Runs pjdfstest against a real icbfs FUSE mount on the test VM. Takes
+# the VM's IP (from wait-for-ssh.sh) as $1.
 #
 # Mounts a *fresh* filesystem name each run (date-based) so a prior
 # run's state, or a prior run's crash, never leaks into this one —

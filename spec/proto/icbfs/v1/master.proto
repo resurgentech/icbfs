@@ -8,7 +8,7 @@ option go_package = "github.com/resurgentech/icbfs/internal/pb";
 
 // FilesystemEntry is one slot in the MasterBlock's list. An empty Name
 // means this slot is free, available for reuse by a later Create — see
-// ARCHITECTURE.md's Multiple filesystems per bucket section. A
+// docs/architecture.md's master block section. A
 // filesystem's ID is its position (index) in MasterBlock.filesystems,
 // not a field stored here at all.
 message FilesystemEntry {
@@ -16,9 +16,8 @@ message FilesystemEntry {
   uint64 size = 2;
   bool archived = 3;
   // primary_windows: set once at creation, immutable afterward — see
-  // ARCHITECTURE.md's "Windows compatibility: primary mode" section
-  // and ROADMAP.md's Part F, task F5. false (the default) means
-  // primary-POSIX.
+  // docs/architecture.md's "Windows compatibility: primary mode"
+  // section. false (the default) means primary-POSIX.
   bool primary_windows = 4;
   // max_file_size: the largest file this filesystem holds, in bytes; set
   // once at creation, immutable afterward. 0 (filesystems created before

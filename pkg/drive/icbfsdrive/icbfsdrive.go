@@ -23,7 +23,7 @@ type Config struct {
 	Store      objstore.Store
 	Filesystem string
 	Root       string
-	// ID is the drive's id in host's registry, recorded in the
+	// ID is the drive's id in the host's registry, recorded in the
 	// origin of copies made from it.
 	ID string
 	// CacheDir holds as-of views' version caches ("" for the temp

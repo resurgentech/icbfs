@@ -2,8 +2,7 @@ package notify
 
 import "testing"
 
-// TestFakeSourceDeliversEmittedSignals covers ROADMAP.md's task E1
-// "Done when": a trivial fake implementation exists and is usable to
+// TestFakeSourceDeliversEmittedSignals: the fake source is usable to
 // test a consumer independent of any real backend.
 func TestFakeSourceDeliversEmittedSignals(t *testing.T) {
 	src := NewFakeSource(4)

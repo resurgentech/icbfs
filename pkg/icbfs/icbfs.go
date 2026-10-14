@@ -1,4 +1,4 @@
-// Package icbfs is what code outside this module — host's server —
+// Package icbfs is what code outside this module — a host application —
 // uses of the icbfs engine: opening a bucket, and administering the
 // filesystems in it (the storage endpoints and icbfs-cli fs). Drives on
 // them are package drive/icbfsdrive's.

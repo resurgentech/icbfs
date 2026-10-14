@@ -3,7 +3,7 @@ package notify
 import "sync"
 
 // FakeSource is a trivial Source for testing a consumer independent of
-// any real backend (task E1's own "Done when") — tests call Emit to
+// any real backend — tests call Emit to
 // push a signal as if a real backend had delivered one.
 type FakeSource struct {
 	ch chan Signal

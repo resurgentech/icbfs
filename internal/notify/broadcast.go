@@ -6,10 +6,10 @@ import "sync"
 // independent subscribers, each receiving every signal — needed as
 // soon as more than one consumer needs to observe the same underlying
 // Source. Source.Signals() itself is a single-consumption channel (a
-// value read by one consumer is gone for any other), which task E3's
-// FUSE watch dispatch already treats as its own exclusive channel; B10
-// (locking's blocking-acquisition accelerator) needs to observe the
-// exact same signals independently, without stealing them from E3's
+// value read by one consumer is gone for any other), which the FUSE
+// watch dispatch treats as its own exclusive channel; locking's
+// blocking-acquisition accelerator needs to observe the exact same
+// signals independently, without stealing them from the FUSE watch's
 // dispatch or vice versa — this is what makes that possible.
 type Broadcaster struct {
 	mu     sync.Mutex
@@ -20,7 +20,7 @@ type Broadcaster struct {
 // bufferedSubscriberCapacity bounds how many unconsumed signals a
 // subscriber can fall behind by before this Broadcaster starts
 // dropping new ones for it. A dropped signal is never a correctness
-// problem for this feature (ARCHITECTURE.md's governing principle: a
+// problem for this feature (docs/architecture.md's governing principle: a
 // signal is always just a "go check current state" hint) — a slow or
 // stalled subscriber just gets fewer wake-ups, never corrupted ones.
 const bufferedSubscriberCapacity = 32

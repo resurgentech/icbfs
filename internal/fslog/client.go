@@ -50,7 +50,7 @@ type Client struct {
 }
 
 // NewClient returns a client for the daemon listening on socket, for a
-// mount of drive (host's id; "" for a client that only runs
+// mount of drive (the server's id for it; "" for a client that only runs
 // commands). It connects lazily, on the first request.
 func NewClient(socket, drive string, async bool) *Client {
 	host, _ := os.Hostname()

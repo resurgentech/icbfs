@@ -24,7 +24,7 @@ const (
 
 // FilesystemEntry is one slot in the MasterBlock's list. An empty Name
 // means this slot is free, available for reuse by a later Create — see
-// ARCHITECTURE.md's Multiple filesystems per bucket section. A
+// docs/architecture.md's master block section. A
 // filesystem's ID is its position (index) in MasterBlock.filesystems,
 // not a field stored here at all.
 type FilesystemEntry struct {
@@ -33,9 +33,8 @@ type FilesystemEntry struct {
 	Size     uint64                 `protobuf:"varint,2,opt,name=size,proto3" json:"size,omitempty"`
 	Archived bool                   `protobuf:"varint,3,opt,name=archived,proto3" json:"archived,omitempty"`
 	// primary_windows: set once at creation, immutable afterward — see
-	// ARCHITECTURE.md's "Windows compatibility: primary mode" section
-	// and ROADMAP.md's Part F, task F5. false (the default) means
-	// primary-POSIX.
+	// docs/architecture.md's "Windows compatibility: primary mode"
+	// section. false (the default) means primary-POSIX.
 	PrimaryWindows bool `protobuf:"varint,4,opt,name=primary_windows,json=primaryWindows,proto3" json:"primary_windows,omitempty"`
 	// max_file_size: the largest file this filesystem holds, in bytes; set
 	// once at creation, immutable afterward. 0 (filesystems created before

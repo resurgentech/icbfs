@@ -10,8 +10,7 @@ import (
 
 // fakeReader implements Reader over a canned sequence of pages, for
 // exercising the checkpoint/filter logic without a real Azure Storage
-// Account — task E5's explicitly-chosen test strategy (ARCHITECTURE.md's
-// Testing reality note: no real account is provisionable here).
+// Account (there is none to test against).
 type fakeReader struct {
 	mu    sync.Mutex
 	pages map[string]Page // keyed by the cursor that reads it
@@ -43,13 +42,12 @@ func (r *fakeReader) callsSoFar() []Cursor {
 	return append([]Cursor(nil), r.calls...)
 }
 
-// TestSourceFiltersByPrefixAndResumesFromCheckpoint covers ROADMAP.md's
-// task E5 "Done when": the checkpoint/filter logic has a passing test
-// against a fake feed. Two pages, each mixing a matching and a
+// TestSourceFiltersByPrefixAndResumesFromCheckpoint tests the
+// checkpoint/filter logic against a fake feed. Two pages, each mixing a matching and a
 // non-matching key, confirm (a) only prefix-matching events are
 // forwarded as signals and (b) the reader is queried with each page's
 // own continuation cursor in turn, not re-read from the beginning —
-// the actual pull-and-resume behavior this task exists to implement.
+// the pull-and-resume behavior this package exists to implement.
 func TestSourceFiltersByPrefixAndResumesFromCheckpoint(t *testing.T) {
 	pages := map[string]Page{
 		"": {

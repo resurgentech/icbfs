@@ -126,16 +126,10 @@ func mountFSWithLocking(t *testing.T, store objstore.Store, fsName string, locki
 			// advisory lock table (fs/locks.c), which happens to
 			// reproduce identical pass/fail behavior for a same-host
 			// test (both "processes" share one kernel), making every
-			// task B8 test pass without ever actually exercising this
-			// driver's remote .lock-object logic. Found the hard way
-			// (at Jared's direction, while verifying the lease-renewal
-			// fix below actually did anything): added debug prints to
-			// tryAcquireLockRange and confirmed they never fired, even
-			// under TestMountFcntlByteRangeLocksAcrossProcesses, which
-			// specifically exists to prove cross-process conflicts
-			// work. See ASSUMPTIONS.md's B8 entry.
+			// lock test pass without ever actually exercising this
+			// driver's remote .lock-object logic.
 			EnableLocks: true,
-			Options:     []string{"default_permissions"}, // task C1
+			Options:     []string{"default_permissions"},
 		},
 		NullPermissions: true,
 	})
@@ -162,14 +156,14 @@ func mountTestFS(t *testing.T) string {
 }
 
 // mountTestFSWithLocking is mountTestFS with the Locking feature
-// (ROADMAP.md tasks B2-B8) turned on.
+// turned on.
 func mountTestFSWithLocking(t *testing.T) string {
 	t.Helper()
 	return mountFSWithLocking(t, newMountTestStore(t), "test", true)
 }
 
 // mountTestFSWithFsys is mountTestFS but also returns the underlying
-// *icbfs.Filesystem — for tests (task C2) that need to create an
+// *icbfs.Filesystem — for tests that need to create an
 // object directly through the Filesystem API with an owner uid/gid
 // that doesn't match the test process's own, something no real
 // application could do through the mounted path itself but is exactly
@@ -189,7 +183,7 @@ func mountTestFSWithFsys(t *testing.T) (string, *icbfs.Filesystem) {
 		MountOptions: fuse.MountOptions{
 			FsName:  "icbfs-test",
 			Name:    "icbfs-test",
-			Options: []string{"default_permissions"}, // task C1
+			Options: []string{"default_permissions"},
 		},
 		NullPermissions: true,
 	})
@@ -273,8 +267,7 @@ func TestMountChmodToZeroIsReportedAccurately(t *testing.T) {
 	}
 }
 
-// TestMountDefaultPermissionsEnforcesOwnerModeBits covers ROADMAP.md's
-// task C1 "Done when": a chmod 000 file cannot be read or written even
+// TestMountDefaultPermissionsEnforcesOwnerModeBits: a chmod 000 file cannot be read or written even
 // by its own owner, and a chmod 444 file can be read but a write
 // attempt fails with a permission error — real kernel-level
 // enforcement via default_permissions, not just mode bits being
@@ -308,8 +301,8 @@ func TestMountDefaultPermissionsEnforcesOwnerModeBits(t *testing.T) {
 	}
 }
 
-// TestMountDefaultPermissionsEnforcesOtherBits is ROADMAP.md's task
-// C2's decision, made and exercised rather than silently skipped: a
+// TestMountDefaultPermissionsEnforcesOtherBits, rather than skipping
+// the case: a
 // genuine differing-real-uid test would need actual privilege
 // escalation (running part of the test as a second real user, which
 // needs root or an equivalent privilege to setuid) — not available to
@@ -324,10 +317,10 @@ func TestMountDefaultPermissionsEnforcesOwnerModeBits(t *testing.T) {
 // the real, kernel-enforced mount still genuinely exercises the
 // "other" bits code path (this test process is neither the owner nor
 // a member of the fabricated group), not just the owner-bits path
-// task C1's test already covers.
+// the test above covers.
 //
 // What this does NOT cover: the "group" bits specifically (vs.
-// "other"), and the ROADMAP-called-out nuance of the kernel checking a
+// "other"), and the nuance of the kernel checking a
 // caller's *full* supplementary group list, not just a primary gid —
 // confirming those still needs a genuine second real identity. Covered
 // here only to the extent that "other" bits are real kernel
@@ -469,12 +462,10 @@ func TestMountHardlink(t *testing.T) {
 	}
 }
 
-// TestMountRenameBasic exercises task F9's core deliverable (Rename
-// didn't exist anywhere in this codebase before — see ROADMAP.md's F9
-// entry) against a real FUSE mount: plain rename within one
+// TestMountRenameBasic exercises Rename against a real FUSE mount: plain rename within one
 // directory, rename into a different directory, and rename replacing
 // an existing destination file (the "write a temp file, rename it
-// into place" pattern TESTING.md flagged rsync/git as depending on).
+// into place" pattern rsync and git depend on).
 func TestMountRenameBasic(t *testing.T) {
 	mnt := mountTestFS(t)
 
@@ -531,8 +522,8 @@ func TestMountRenameBasic(t *testing.T) {
 	}
 }
 
-// TestMountRenameOfOpenFileKeepsHandleUsable covers task F9's
-// open-file-semantics half directly: POSIX rename(2) only changes a
+// TestMountRenameOfOpenFileKeepsHandleUsable covers rename's
+// open-file semantics directly: POSIX rename(2) only changes a
 // directory entry, never the underlying inode, so a file descriptor
 // opened under the old name must keep working — reading/writing
 // through it, and the data it writes must land on the content now
@@ -768,8 +759,7 @@ func TestMountArchivedFilesystemRejectsWritesButAllowsReads(t *testing.T) {
 	}
 }
 
-// TestMountFlockWholeFileExclusive covers ROADMAP.md's task B8 "Done
-// when" for flock(2): real kernel flock syscalls against a real mount,
+// TestMountFlockWholeFileExclusive covers flock(2): real kernel flock syscalls against a real mount,
 // not the Filesystem-level API directly. flock is always whole-file —
 // a second fd's non-blocking exclusive attempt must fail while the
 // first fd holds it, and succeed once released.
@@ -896,16 +886,13 @@ func waitForFileOrFail(t *testing.T, path string, timeout time.Duration) {
 // success the instant cmd.Wait() returns.
 //
 // Needed once real kernel lock forwarding is enabled (fuse.MountOptions.
-// EnableLocks, task B8 — see mountFSWithLocking's doc comment): a FUSE
+// EnableLocks — see mountFSWithLocking's doc comment): a FUSE
 // RELEASE is dispatched to this driver's own FileHandle.Release
 // asynchronously relative to the closing/exiting process's close(2)/
 // exit returning — unlike the kernel's own local, in-process advisory
-// lock table (what every FUSE lock op silently fell back to before
-// EnableLocks was set, an earlier bug in this project's test
-// infrastructure — see ASSUMPTIONS.md's B8 entry), which releases
-// synchronously as part of the same close/exit. Found at Jared's
-// direction while verifying the lease-renewal fix actually exercised
-// real dispatch instead of that silent fallback.
+// lock table (what every FUSE lock op silently falls back to without
+// EnableLocks), which releases synchronously as part of the same
+// close/exit.
 func retryFcntlSetlkUntilNotEagain(t *testing.T, fd uintptr, lk *syscall.Flock_t, timeout time.Duration) error {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -921,8 +908,8 @@ func retryFcntlSetlkUntilNotEagain(t *testing.T, fd uintptr, lk *syscall.Flock_t
 	}
 }
 
-// TestMountFcntlByteRangeLocksAcrossProcesses covers ROADMAP.md's task
-// B8 "Done when" for fcntl(2) byte-range locks through real kernel
+// TestMountFcntlByteRangeLocksAcrossProcesses covers fcntl(2)
+// byte-range locks through real kernel
 // syscalls against a real mount, using a genuine second OS process
 // (see TestMain/runFcntlLockHolderHelper's doc comments on why that's
 // required, not optional, for fcntl specifically): an overlapping
@@ -996,9 +983,8 @@ func TestMountFcntlByteRangeLocksAcrossProcesses(t *testing.T) {
 	}
 }
 
-// TestMountFcntlLockSurvivesPastOriginalTTLViaRenewal covers task B8's
-// lease-renewal fix (added at Jared's direction — see ASSUMPTIONS.md's
-// B8 entry and node.go's ensureRenewal/runRenewal): a lock held by a
+// TestMountFcntlLockSurvivesPastOriginalTTLViaRenewal covers lease
+// renewal (node.go's ensureRenewal/runRenewal): a lock held by a
 // still-alive, still-open process must keep being refreshed well past
 // one lockLeaseTTL window, not just silently expire on a fixed clock
 // regardless of whether anyone's still using it.
@@ -1008,8 +994,8 @@ func TestMountFcntlByteRangeLocksAcrossProcesses(t *testing.T) {
 // comment), but not down to sub-second: expires_at is anchored to the
 // object store's clock via a raw HTTP Date header (objstore.Store.
 // ServerTime), which only has whole-second resolution and can itself
-// lag true time by up to ~1s (see ASSUMPTIONS.md's B2 entry, and
-// lock_test.go's own TTL choices for the same reason) — a TTL much
+// lag true time by up to ~1s (see lock_test.go's own TTL choices for
+// the same reason) — a TTL much
 // below 1s can already read as expired relative to this test's local
 // clock before even one renewal tick runs. 2s/500ms keeps comfortably
 // clear of that while still being fast enough to sleep past several
@@ -1089,15 +1075,12 @@ func TestMountFcntlLockSurvivesPastOriginalTTLViaRenewal(t *testing.T) {
 	}
 }
 
-// TestMountWithNoNotificationBackendBehavesIdentically covers
-// ROADMAP.md's task E2's explicitly-called-for requirement: mounting
-// with no Change notifications backend configured (Root's source
-// argument nil — what every other test in this file already passes,
-// and what cmd/icbfs's --notify flag still produces today, since no
-// backend is wired up to it yet) must work identically to a mount
-// that predates this feature entirely. This isn't an assumption that
-// "optional" naturally holds; it's a named, permanent regression test
-// per ROADMAP.md's own instruction, exercising the same create/read/
+// TestMountWithNoNotificationBackendBehavesIdentically: mounting with
+// no change-notifications backend configured (Root's source argument
+// nil — what every other test in this file already passes, and what
+// cmd/icbfs produces without -notify) must work identically to a mount
+// that never had the feature. This isn't an assumption that "optional"
+// naturally holds; it's a named, permanent regression test, exercising the same create/read/
 // write/mkdir/rmdir/unlink operations the rest of this suite already
 // covers individually, as one explicit end-to-end sequence specifically
 // framed around this invariant.
@@ -1133,8 +1116,7 @@ func TestMountWithNoNotificationBackendBehavesIdentically(t *testing.T) {
 	}
 }
 
-// TestMountNotifyDispatchesSignalToCorrectInode covers ROADMAP.md's
-// task E3 "Done when": a watch is established, a change is triggered
+// TestMountNotifyDispatchesSignalToCorrectInode: a watch is established, a change is triggered
 // through a second, independent client against the same backend, and
 // the watching mount delivers a real notification — proving cross-
 // mount delivery, not just that the internal plumbing compiles.
@@ -1144,10 +1126,10 @@ func TestMountWithNoNotificationBackendBehavesIdentically(t *testing.T) {
 // mount's FUSE layer entirely — exactly the scenario Change
 // notifications exists for (another mount or process changed
 // something this mount didn't write itself). The real backend-to-
-// notify.Source delivery mechanism (task E4's MinIO adapter) isn't
+// notify.Source delivery mechanism (the MinIO adapter) isn't
 // exercised here — this test uses notify.FakeSource and manually
 // Emits the signal a real backend would have delivered, isolating
-// what this task actually owns: the registry + dispatch wiring that
+// what this package owns: the registry + dispatch wiring that
 // turns a Source signal into a real go-fuse NotifyContent call against
 // the correct, kernel-validated Inode.
 //
@@ -1161,9 +1143,8 @@ func TestMountWithNoNotificationBackendBehavesIdentically(t *testing.T) {
 // there's no kernel page cache staleness for NotifyContent to
 // meaningfully defeat either — attribute/entry timeouts are unset
 // (effectively zero), so every read already round-trips to this
-// driver regardless of any notification. See ASSUMPTIONS.md's E3
-// entry. What's verified instead, via the test-only notifyContentHook
-// seam, is the actual software this task delivers: a Source signal
+// driver regardless of any notification. What's verified instead, via
+// the test-only notifyContentHook seam, is what this package delivers: a Source signal
 // naming a tracked UUID results in a NotifyContent call against the
 // right Inode, accepted by the kernel without error — confirmed
 // against the exact bug this uncovered (a naive implementation
@@ -1231,7 +1212,7 @@ func TestMountNotifyDispatchesSignalToCorrectInode(t *testing.T) {
 		t.Fatalf("second client write: %v", err)
 	}
 
-	// Simulate the real backend adapter (task E4) having observed that
+	// Simulate the real backend adapter having observed that
 	// write and delivered a signal.
 	source.Emit(notify.Signal{Key: entry.UUID})
 

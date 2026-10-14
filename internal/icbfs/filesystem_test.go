@@ -264,8 +264,7 @@ func mustReadNlinkSideObject(t *testing.T, ctx context.Context, store objstore.S
 	return int(attr.Nlink)
 }
 
-// TestXattrsRoundTripArbitraryBinaryValues proves the ROADMAP-called-for
-// property directly against real MinIO: xattrs is a generic
+// TestXattrsRoundTripArbitraryBinaryValues proves directly against real MinIO: xattrs is a generic
 // map[string][]byte, and arbitrary binary content — not just printable
 // text — round-trips through the real Protobuf-encoded .metadata object
 // without corruption or truncation. There's no public Filesystem API for
@@ -332,7 +331,7 @@ func TestXattrsRoundTripArbitraryBinaryValues(t *testing.T) {
 }
 
 // TestXattrsPosixAndWindowsACLsCoexist proves the union-map design from
-// ARCHITECTURE.md directly: a POSIX ACL entry (the real well-known key
+// docs/architecture.md directly: a POSIX ACL entry (the real well-known key
 // Linux's own getfacl/setfacl use) and a Windows ACL entry (the reserved
 // key this project chose) live in the same xattrs map without
 // interfering with each other — no special-casing at the storage layer,
@@ -467,9 +466,8 @@ func TestSetAttrRejectsHugeSizeInsteadOfCrashing(t *testing.T) {
 	}
 }
 
-// TestMknodCreatesSpecialFileEntries covers ROADMAP.md's Part G, task
-// G2: a FIFO, a Unix socket, and a char/block device entry can each be
-// created, report the right type via ReadDir, and — devices only —
+// TestMknodCreatesSpecialFileEntries: a FIFO, a Unix socket, and a
+// char/block device entry can each be created, report the right type via ReadDir, and — devices only —
 // round-trip their device number exactly. None of these types have
 // any real content for this filesystem to materialize or serve (the
 // kernel services their actual I/O once the type bit is reported
@@ -525,8 +523,7 @@ func TestMknodCreatesSpecialFileEntries(t *testing.T) {
 	}
 }
 
-// TestTouchAtimeBumpsFileAtime covers ROADMAP.md's Part G, task G1:
-// a brand-new file reports zero Atime (never accessed), and a single
+// TestTouchAtimeBumpsFileAtime: a brand-new file reports zero Atime (never accessed), and a single
 // TouchAtime call (what a real read(2) triggers via FileHandle.Read/
 // winfspserver's Read) makes it report a real, current timestamp —
 // confirmed strictly later than the file's own creation, not just
@@ -608,7 +605,7 @@ func TestTouchAtimeBumpsDirAtime(t *testing.T) {
 }
 
 // TestSetAttrSetsExplicitAtime covers utimensat(2)'s explicit-set
-// path (ROADMAP.md's Part G, task G1) for both a file and a
+// path for both a file and a
 // directory, each going through a genuinely different storage branch
 // in Filesystem.SetAttr — a caller-chosen timestamp (not "now") must
 // round-trip exactly, proving this is real explicit storage, not an
@@ -715,8 +712,8 @@ func TestSetAttrExplicitMtimeBtimeOverrides(t *testing.T) {
 	}
 }
 
-// TestSetWindowsAttributesRoundTripsAndMasksUnrelatedBits covers task
-// F7's storage half: SetWindowsAttributes/WindowsAttributesFromXattrs,
+// TestSetWindowsAttributesRoundTripsAndMasksUnrelatedBits covers the
+// storage half of Windows attribute bits: SetWindowsAttributes/WindowsAttributesFromXattrs,
 // the real public API (unlike the two tests above, which predate it
 // and poke .metadata directly). Confirms a round trip through real
 // storage, that unrelated Win32 bits (e.g. FILE_ATTRIBUTE_NORMAL,
@@ -796,12 +793,11 @@ func TestSetWindowsAttributesRoundTripsAndMasksUnrelatedBits(t *testing.T) {
 	}
 }
 
-// TestSetWindowsACLRoundTrips covers task F8's storage half:
+// TestSetWindowsACLRoundTrips covers the storage half of Windows ACLs:
 // SetWindowsACL/WindowsACLFromXattrs. The value itself is treated as
 // an opaque SDDL string here — parsing/merging it into a real
 // *windows.SECURITY_DESCRIPTOR is winfspserver's job (Windows-only,
-// verified separately against a real mount, per ROADMAP.md's F8
-// entry) — this test only has to prove the storage round trip is
+// verified separately against a real mount) — this test only has to prove the storage round trip is
 // correct and that an untouched entry reports ok = false.
 func TestSetWindowsACLRoundTrips(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)

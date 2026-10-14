@@ -279,8 +279,8 @@ func TestArchivedFilesystemRejectsWritesButAllowsReads(t *testing.T) {
 	}
 }
 
-// TestPrimaryWindowsSetAtCreationAndImmutableAfterward covers
-// ROADMAP.md's Part F, task F5: a filesystem's primary-mode is
+// TestPrimaryWindowsSetAtCreationAndImmutableAfterward: a filesystem's
+// primary mode is
 // specified at creation and correctly retrievable afterward — and,
 // matching size/mode/uid/gid's existing precedent for "only used the
 // first time a filesystem name is created," a later Bootstrap call
@@ -318,8 +318,7 @@ func TestPrimaryWindowsSetAtCreationAndImmutableAfterward(t *testing.T) {
 	}
 }
 
-// TestReservedNameRejectedOnlyOnPrimaryWindows covers task F6's exact
-// "Done when" bar: a reserved name like "CON" must be rejected by
+// TestReservedNameRejectedOnlyOnPrimaryWindows: a reserved name like "CON" must be rejected by
 // Create/Mkdir/Symlink/Link on a primary-Windows filesystem, but
 // accepted by an otherwise-identical primary-POSIX filesystem — not
 // just the Windows-primary rejection case on its own.
@@ -378,10 +377,7 @@ func TestReservedNameRejectedOnlyOnPrimaryWindows(t *testing.T) {
 	}
 }
 
-// TestResizeChangesDeclaredSizeForEveryMount covers the Resize
-// operation added at Jared's direction (see ASSUMPTIONS.md's
-// D-cleanup entry, which originally flagged there being no way to
-// change a filesystem's declared size after creation): unlike
+// TestResizeChangesDeclaredSizeForEveryMount covers Resize: unlike
 // EnableLocking's per-mount, in-memory flag, Resize changes a real,
 // shared master-block property — a *different*, already-open handle
 // on the same filesystem name must see the new size on its very next

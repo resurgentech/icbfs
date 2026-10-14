@@ -1,6 +1,5 @@
 // Package logd is the local daemon between icbfs mounts and the logging
-// server (cmd/icbfs-logd): the same shape as host's hostd, with
-// only what this needs. Mounts on the machine connect to its Unix
+// server (cmd/icbfs-logd). Mounts on the machine connect to its Unix
 // socket; it holds the machine's one websocket to the server,
 // authenticated with a shared secret, and relays fslog Frames both ways
 // — credential requests and log events up, replies down.

@@ -7,7 +7,7 @@ import "google/protobuf/timestamp.proto";
 option go_package = "github.com/resurgentech/icbfs/internal/pb";
 
 // Metadata is the body of a file/symlink's dedicated <uuid>.metadata
-// object — see ARCHITECTURE.md's Metadata model section. mode/uid/gid/
+// object — see docs/architecture.md's Metadata section. mode/uid/gid/
 // nlink live here, as does xattrs, a generic name -> bytes map covering
 // POSIX ACLs (under the well-known key "system.posix_acl_access",
 // exactly mirroring Linux's own xattr-based ACL representation), future
@@ -23,16 +23,14 @@ message Metadata {
   uint32 nlink = 4;
   map<string, bytes> xattrs = 5;
 
-  // Legacy last-access time, nanoseconds since the Unix epoch (ROADMAP.md's
-  // Part G, task G1). Superseded by atime (field 13), which also covers
+  // Legacy last-access time, nanoseconds since the Unix epoch. Superseded by atime (field 13), which also covers
   // dates int64 nanoseconds can't (before 1678); still read when atime is
   // unset, never written.
   int64 atime_unix_nano = 6;
 
   // The device number (encoded major/minor, same packing mknod(2)/
-  // stat(2)'s st_rdev uses) for a char/block device entry (ROADMAP.md's
-  // Part G, task G2) — meaningless and always 0 for every other entry
-  // type, including the FIFO/socket special files task G2 also adds
+  // stat(2)'s st_rdev uses) for a char/block device entry — meaningless
+  // and always 0 for every other entry type, including FIFOs and sockets
   // (neither has a device number at all).
   uint32 rdev = 7;
 

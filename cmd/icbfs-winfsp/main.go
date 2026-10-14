@@ -2,9 +2,7 @@
 
 // Command icbfs-winfsp mounts an icbfs filesystem on Windows via
 // WinFsp, backed by an S3-API-compatible store — the Windows
-// counterpart to cmd/icbfs's FUSE mount, per ROADMAP.md's Part F.
-// Functional/manual-testing entry point for tasks F3-F5; not yet wired
-// to F6-F11's mount flags.
+// counterpart to cmd/icbfs's FUSE mount.
 package main
 
 import (
@@ -31,8 +29,7 @@ import (
 // winfspAttribution is the exact notice WinFsp's own FLOSS exception
 // requires any FLOSS project linking against it to display in its UI
 // and user-facing docs, plus a link to WinFsp's repo — verified
-// against WinFsp's real License.txt, not paraphrased (ROADMAP.md's
-// Part F, task F10): "include the attribution... in user interface
+// against WinFsp's real License.txt, not paraphrased: "include the attribution... in user interface
 // and documentation." This is the one binary an end user actually
 // runs to get a WinFsp-backed mount, so it's shown both in --help/
 // usage output and at every successful mount, not just documented in
@@ -54,8 +51,8 @@ func main() {
 	secretKey := fset.String("secret-key", "minioadmin", "secret key")
 	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
 	asOf := fset.String("as-of", "", "mount read-only as the filesystem was at this time: a date (2006-01-02, meaning the end of that day), a date-time (2006-01-02T15:04:05) in local time, or RFC 3339 with a zone; or a version name (icbfs-cli names). Fails if the filesystem didn't exist yet then")
-	caseInsensitive := fset.Bool("case-insensitive", true, "case-insensitive name lookup, following the standard NTFS/Samba/WSL2 pattern (ARCHITECTURE.md's Windows compatibility section) — storage itself always stays case-sensitive/case-preserving regardless of this flag")
-	cacheDir := fset.String("cache-dir", "", "local disk directory for the file-content cache (ROADMAP.md's Part G, task G3); empty (the default) uses a fresh os.TempDir() subdirectory")
+	caseInsensitive := fset.Bool("case-insensitive", true, "look names up case-insensitively, as NTFS does; names are always stored as given")
+	cacheDir := fset.String("cache-dir", "", "local disk directory for open files and the read cache (default: a new directory under the system temp directory)")
 	cacheSize := fset.Uint64("cache-size", 512<<20, "maximum total bytes the local disk cache (-cache-dir) may hold before evicting the least-recently-used cached file")
 	if err := fset.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
@@ -107,11 +104,11 @@ func main() {
 	}
 
 	// winfsp.CaseSensitive and winfspserver.Root's own caseInsensitive
-	// parameter must agree (task F4) — see Root's doc comment for why
+	// parameter must agree — see Root's doc comment for why
 	// these are two separate, both load-bearing settings, not one flag
 	// under two names: WinFsp's CaseSensitive controls whether the
 	// *kernel* folds case before ever calling this driver at all
-	// (confirmed in task F3: with it left off/default, the kernel can
+	// (with it left off, the kernel can
 	// hand this driver a canonicalized, differently-cased name than
 	// what's actually stored, breaking a plain Remove-Item outright),
 	// while Root's parameter controls whether this driver's own

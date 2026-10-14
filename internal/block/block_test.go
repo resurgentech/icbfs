@@ -141,12 +141,10 @@ func TestDecodeEmptyIsLeaf(t *testing.T) {
 	}
 }
 
-// TestDecodeIgnoresUnknownField is the schema-evolution test ROADMAP.md's
-// Protobuf migration task called for: Protobuf's wire format has its own
-// correctness surface JSON didn't (unknown-field handling), so this
-// confirms a message carrying a field this version of the schema doesn't
-// know about still decodes correctly instead of erroring — the forward-
-// compatibility property the whole migration is partly justified by.
+// TestDecodeIgnoresUnknownField is the schema-evolution test: a message
+// carrying a field this version of the schema doesn't know about still
+// decodes correctly instead of erroring, so older binaries can read
+// blocks written by newer ones.
 func TestDecodeIgnoresUnknownField(t *testing.T) {
 	known, err := proto.Marshal(&pb.Block{
 		Kind: pb.BlockKind_BLOCK_KIND_LEAF,

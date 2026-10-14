@@ -4,7 +4,7 @@ import "context"
 
 // Profile is who an actor is on a drive's storage: on a primary-Windows
 // filesystem a SID and its groups' SIDs, on a primary-POSIX one a uid and
-// its gids. Host maps actors to profiles; a drive refuses an actor
+// its gids. The host application maps actors to profiles; a drive refuses an actor
 // without one (ErrNoAccess). System skips the file-level check entirely,
 // for the library's own housekeeping and for tests — never for a user.
 type Profile struct {
@@ -31,7 +31,7 @@ type (
 	profileKey struct{}
 )
 
-// WithActor attaches who is acting (host's user or agent id), for
+// WithActor attaches who is acting (the host's user or agent id), for
 // the records operations leave: trash entries, names, drafts, origins.
 func WithActor(ctx context.Context, actor string) context.Context {
 	return context.WithValue(ctx, actorKey{}, actor)

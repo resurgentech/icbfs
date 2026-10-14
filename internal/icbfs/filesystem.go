@@ -28,7 +28,7 @@ const maxTreeRetries = 20
 
 // maxEntriesPerBlock/maxChildrenPerBlock are deliberately small so tests
 // can exercise splitting without creating thousands of files. Real
-// tuning (per ARCHITECTURE.md: around mutation cost, not object size) is
+// tuning (per docs/architecture.md: around mutation cost, not object size) is
 // a separate, later concern.
 const (
 	maxEntriesPerBlock  = 8
@@ -53,8 +53,7 @@ var errRetry = errors.New("icbfs: lost a race, retry the whole operation")
 // lookup/mkdir/create/read/write/link/etc. operations.
 //
 // id and archived are only known after Bootstrap resolves them against
-// the master block (see ARCHITECTURE.md's Multiple filesystems per
-// bucket section) — until then, a Filesystem returned by New isn't
+// the master block (see docs/architecture.md's master block section) — until then, a Filesystem returned by New isn't
 // usable for anything that touches the store.
 type Filesystem struct {
 	store          objstore.Store
@@ -62,20 +61,19 @@ type Filesystem struct {
 	id             string // 4-hex-digit prefix, set by Bootstrap
 	archived       bool   // set by Bootstrap; see ErrArchived
 	readOnly       bool   // set by BootstrapReadOnly; see ErrReadOnly
-	primaryWindows bool   // set by Bootstrap from the stored master-block value; see PrimaryWindows, task F5
+	primaryWindows bool   // set by Bootstrap from the stored master-block value; see PrimaryWindows
 	maxFileSize    int64  // set by Bootstrap from the stored master-block value; see MaxFileSize
 	newMaxFileSize uint64 // the max file size a filesystem gets if Bootstrap creates it; see SetCreationMaxFileSize
-	lockingEnabled bool   // off by default; see EnableLocking, task B7
+	lockingEnabled bool   // off by default; see EnableLocking
 
-	// lockNotify is nil unless EnableChangeNotifications (task B10) was
+	// lockNotify is nil unless EnableChangeNotifications was
 	// called — read concurrently by every in-flight AcquireLockRange
 	// call (never written after setup), so it's set once, before
 	// concurrent use begins, same usage contract as lockingEnabled.
 	lockNotify <-chan notify.Signal
 
 	// cache is the shared, LRU-bounded local disk cache every OpenFile
-	// session seeds its own private scratch file from (ROADMAP.md's
-	// Part G, task G3) — set by New's own default, overridable via
+	// session seeds its own private scratch file from — set by New's own default, overridable via
 	// SetCacheOptions before Bootstrap.
 	cache *diskCache
 
@@ -93,7 +91,7 @@ type Filesystem struct {
 // before using it for anything else — New itself does no I/O and
 // doesn't know the filesystem's ID yet.
 func New(store objstore.Store, fsName string) *Filesystem {
-	// A real, non-optional default (ROADMAP.md's Part G, task G3) —
+	// A real, non-optional default —
 	// unlike Locking/Change-notifications, every OpenFile session goes
 	// through this, so there's no sensible "off" state to default to.
 	// os.TempDir() rather than a fixed path: multiple Filesystem
@@ -112,7 +110,7 @@ func New(store objstore.Store, fsName string) *Filesystem {
 }
 
 // SetCacheOptions overrides the local disk cache's directory and
-// total size budget (ROADMAP.md's Part G, task G3) — cmd/icbfs's
+// total size budget — cmd/icbfs's
 // -cache-dir/-cache-size flags call this before Bootstrap; tests and
 // other callers that don't call it at all get New's own default
 // (a fresh os.TempDir() subdirectory, 512 MiB). Safe to call again
@@ -123,10 +121,10 @@ func (f *Filesystem) SetCacheOptions(dir string, maxBytes int64) {
 	f.cache = newDiskCache(dir, maxBytes)
 }
 
-// EnableLocking turns on the Locking feature (tasks B2-B6) for this
+// EnableLocking turns on the Locking feature for this
 // Filesystem — off by default. Unlike archived/size, this is a
 // mount-time, local, in-memory choice, not a stored master-block
-// property: per ARCHITECTURE.md's Locking section, Locking has real
+// property: per docs/architecture.md's Locking section, Locking has real
 // costs (an extra .lock object, and B5's escalation using it) "most
 // mounts won't use," so it's opt-in per mount, not a shared,
 // persisted-per-filesystem setting every other mount of the same
@@ -138,21 +136,19 @@ func (f *Filesystem) EnableLocking(enabled bool) {
 }
 
 // EnableChangeNotifications wires this Filesystem's blocking lock
-// acquisition (AcquireLockRange, task B3) to accelerate via Change
-// notifications (task B10): a matching signal on signals makes a
+// acquisition (AcquireLockRange) to accelerate via Change
+// notifications: a matching signal on signals makes a
 // waiting acquire retry immediately instead of waiting out its
 // current backoff interval. nil (the default, if this is never
 // called) disables the accelerator entirely — AcquireLockRange falls
-// back to pure polling, exactly as it behaved before this task
-// existed; this is never a load-bearing dependency for Locking's own
+// back to pure polling; this is never a load-bearing dependency for Locking's own
 // correctness, only a latency improvement when available.
 //
 // signals should be this Filesystem's own subscription (e.g. from
 // notify.Broadcaster.Subscribe, if the mount also has Change
-// notifications enabled — ROADMAP.md explicitly calls this
-// cross-cutting and optional on top of two independently-optional
-// features) to the exact same backend stream task E3's FUSE watch
-// dispatch observes; it must be an independent subscription, not the
+// notifications enabled — this is optional on top of two
+// independently-optional features) to the same backend stream the FUSE
+// watch dispatch observes; it must be an independent subscription, not the
 // same single-consumption channel, or the two would steal signals
 // from each other.
 func (f *Filesystem) EnableChangeNotifications(signals <-chan notify.Signal) {
@@ -161,8 +157,8 @@ func (f *Filesystem) EnableChangeNotifications(signals <-chan notify.Signal) {
 
 // PrimaryWindows reports whether this filesystem was created as
 // primary-Windows (true) or primary-POSIX (false, the default) — see
-// ARCHITECTURE.md's "Windows compatibility: primary mode" section and
-// ROADMAP.md's Part F, task F5. Set once at creation, immutable
+// docs/architecture.md's "Windows compatibility: primary mode" section.
+// Set once at creation, immutable
 // afterward; only meaningful after Bootstrap.
 func (f *Filesystem) PrimaryWindows() bool { return f.primaryWindows }
 
@@ -193,7 +189,7 @@ func (f *Filesystem) MaxFileSize() int64 { return f.maxFileSize }
 
 // RootKey returns the block key identifying this filesystem's root:
 // "<id>-root-<name>", a derived key, not stored anywhere separately —
-// see ARCHITECTURE.md. Only meaningful after Bootstrap.
+// see docs/architecture.md. Only meaningful after Bootstrap.
 // Store is the object store the filesystem is on (an as-of view, for a
 // read-only past filesystem).
 func (f *Filesystem) Store() objstore.Store { return f.store }
@@ -205,7 +201,7 @@ func (f *Filesystem) RootKey() string { return f.id + "-root-" + f.fsName }
 // (files, directories, their .metadata, future .lock objects) gets a key
 // through this, never a bare NewUUIDv7() — that's what makes a single
 // prefix-scoped listing capture this filesystem's entire footprint (see
-// ARCHITECTURE.md).
+// docs/architecture.md).
 func (f *Filesystem) newKey() (string, error) {
 	raw, err := NewUUIDv7()
 	if err != nil {
@@ -221,12 +217,12 @@ func (f *Filesystem) prefix() string { return f.id + "-" }
 
 // Prefix is prefix, exported for callers outside this package that
 // need to scope their own operations to this filesystem's objects —
-// e.g. task E4's MinIO Change notifications adapter, which scopes its
+// e.g. the MinIO change-notifications adapter, which scopes its
 // server-side ListenBucketNotification subscription to exactly this.
 func (f *Filesystem) Prefix() string { return f.prefix() }
 
 // checkWritable is called at the top of every mutating operation. See
-// ErrArchived and ARCHITECTURE.md's Multiple filesystems per bucket
+// ErrArchived and docs/architecture.md's master block
 // section: this is checked once per operation on an already-open
 // Filesystem, not continuously against the master block — an Archive
 // call made after Bootstrap resolved archived=false has no effect on
@@ -253,8 +249,7 @@ func (f *Filesystem) checkWritable() error {
 // block exists, creating an empty one if this is a brand new filesystem.
 // primaryWindows is only consulted the first time f.fsName is created
 // — same idempotency rule size/mode/uid/gid already follow — and is
-// immutable afterward; see PrimaryWindows and ROADMAP.md's Part F,
-// task F5.
+// immutable afterward; see PrimaryWindows.
 func (f *Filesystem) Bootstrap(ctx context.Context, size uint64, mode, uid, gid uint32, primaryWindows bool) error {
 	id, entry, _, err := registerFilesystem(ctx, f.store, &pb.FilesystemEntry{
 		Name: f.fsName, Size: size, PrimaryWindows: primaryWindows, MaxFileSize: f.newMaxFileSize,
@@ -315,7 +310,7 @@ func (f *Filesystem) BootstrapReadOnly(ctx context.Context) error {
 func (f *Filesystem) ReadOnly() bool { return f.readOnly }
 
 // DiskUsage sums the size of every file under this filesystem's prefix —
-// the "du" half of ARCHITECTURE.md's du/df design. Already free in the
+// the "du" half of docs/architecture.md's master block section. Already free in the
 // sense that it's just a prefix-scoped listing, same mechanism df's
 // "Used" uses, not a tree walk fetching every file's content.
 //
@@ -351,7 +346,7 @@ func (f *Filesystem) diskUsage(ctx context.Context) (int64, error) {
 }
 
 // StatFS returns this filesystem's declared capacity ("Total") and
-// current usage ("Used"), per ARCHITECTURE.md's du/df design: Total is
+// current usage ("Used"), per docs/architecture.md's master block section: Total is
 // the master block entry's declared size field, Used is the same
 // prefix-scoped listing DiskUsage performs (so it includes every object
 // this filesystem owns, root and .metadata objects included, not just
@@ -580,7 +575,7 @@ func (f *Filesystem) statDir(ctx context.Context, key string) (Attr, error) {
 }
 
 // statFile fetches a file/symlink's two objects concurrently — per
-// ARCHITECTURE.md, this is two requests either way, so the latency cost
+// docs/architecture.md, this is two requests either way, so the latency cost
 // is max() of the two, not the sum.
 func (f *Filesystem) statFile(ctx context.Context, key string) (Attr, error) {
 	if isStreamKey(key) {
@@ -1081,7 +1076,7 @@ func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid,
 }
 
 // Mknod creates a FIFO, Unix domain socket, or char/block device entry
-// (ROADMAP.md's Part G, task G2) — typ must be TypeFifo, TypeSocket,
+// — typ must be TypeFifo, TypeSocket,
 // TypeCharDevice, or TypeBlockDevice; rdev is only meaningful (and only
 // stored) for the two device types.
 //
@@ -1091,9 +1086,8 @@ func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid,
 // node's is the real device, serviced by the kernel's own char/block
 // driver tables; a Unix socket's is the kernel's AF_UNIX
 // implementation) — the FUSE driver's only real job for any of them
-// is reporting the right type/mode bit via Lookup/Getattr, confirmed
-// before scoping this task at all (ROADMAP.md's Part G intro). So
-// this reuses exactly the same two-object shape Create already
+// is reporting the right type/mode bit via Lookup/Getattr. So this
+// reuses exactly the same two-object shape Create already
 // established (an empty, never-touched-again content object plus a
 // .metadata object) purely so Stat/SetAttr/TouchAtime keep working
 // unchanged for these types too, with no special-casing needed
@@ -1389,8 +1383,8 @@ func (f *Filesystem) touchCtime(ctx context.Context, key string, typ EntryType) 
 
 // SetWindowsAttributes persists a file/symlink's Hidden/System/
 // ReadOnly/Archive bits with full native fidelity, regardless of
-// primary mode — ARCHITECTURE.md's "the schema always carries the
-// field" rule (task F7). Which representation (these stored bits, vs.
+// primary mode — docs/architecture.md's "the schema always carries the
+// field" rule. Which representation (these stored bits, vs.
 // deriving ReadOnly from the POSIX mode bit) is authoritative at
 // *read* time is a decision for the caller, based on primary mode —
 // not this method's concern, same division SetAttr already has
@@ -1442,8 +1436,7 @@ func (f *Filesystem) SetWindowsCreateMetadata(ctx context.Context, uuid string, 
 
 // SetWindowsACL persists a file's, symlink's or directory's native
 // Windows security descriptor, given as its SDDL string representation
-// (task F8; WindowsACLXattrKey's own doc comment explains the SDDL
-// choice).
+// (WindowsACLXattrKey's own doc comment explains the SDDL choice).
 func (f *Filesystem) SetWindowsACL(ctx context.Context, uuid string, typ EntryType, sddl []byte) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
@@ -1475,7 +1468,7 @@ func (f *Filesystem) SetXattr(ctx context.Context, uuid string, typ EntryType, n
 }
 
 // SetGenericReparseData persists a file's raw, non-symlink reparse
-// point buffer byte-exact (ROADMAP.md's Part G, task G4) — see
+// point buffer byte-exact — see
 // GenericReparseXattrKey's own doc comment for why this is stored
 // opaquely, unlike the symlink case.
 func (f *Filesystem) SetGenericReparseData(ctx context.Context, uuid string, buf []byte) (Attr, error) {
@@ -1492,7 +1485,7 @@ func (f *Filesystem) SetGenericReparseData(ctx context.Context, uuid string, buf
 
 // DeleteGenericReparseData removes a file's stored non-symlink
 // reparse point buffer, if any — FSCTL_DELETE_REPARSE_POINT's real
-// effect (ROADMAP.md's Part G, task G4), reverting the file back to
+// effect, reverting the file back to
 // an ordinary one with no reparse point at all.
 func (f *Filesystem) DeleteGenericReparseData(ctx context.Context, uuid string) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
@@ -1647,10 +1640,7 @@ func (f *Filesystem) dirContains(ctx context.Context, ancestorUUID, targetUUID s
 
 // Rename moves/renames the entry named oldName inside oldDirKey to
 // newName inside newDirKey (same directory if oldDirKey == newDirKey),
-// matching POSIX rename(2) semantics — the access-layer-independent
-// core task F9 found missing everywhere (core, FUSE, and WinFsp alike;
-// see ROADMAP.md's F9 entry and TESTING.md's "A real gap found while
-// drafting this doc"), not something to solve ad hoc for one access
+// matching POSIX rename(2) semantics, here once for every access
 // layer.
 //
 // replace mirrors POSIX's implicit-overwrite default (true) vs.
@@ -1668,7 +1658,7 @@ func (f *Filesystem) dirContains(ctx context.Context, ancestorUUID, targetUUID s
 // together) — a concurrent reader could briefly observe the entry at
 // neither location. A real, documented limitation, not silently
 // assumed away; a distributed cross-directory transaction is out of
-// scope for this project's design (see ARCHITECTURE.md's Locking
+// scope for this project's design (see docs/architecture.md's Locking
 // section for the general class of simplification this follows).
 func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, newName string, replace bool) error {
 	if err := f.checkWritable(); err != nil {
@@ -1783,8 +1773,8 @@ func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, 
 // fetching the content and metadataObjectKey objects concurrently.
 // ReadFile also returns the content object's current ETag, so a caller
 // about to edit-then-write-back (see OpenFile) can condition that write
-// on not having changed since this read — see ARCHITECTURE.md's Locking
-// section and ROADMAP.md's task B1.
+// on not having changed since this read — see docs/architecture.md's
+// Concurrency section.
 func (f *Filesystem) ReadFile(ctx context.Context, key string) ([]byte, Attr, string, error) {
 	if isStreamKey(key) {
 		body, obj, err := f.store.Get(ctx, key)
@@ -1858,8 +1848,7 @@ func (f *Filesystem) WriteFile(ctx context.Context, key string, data []byte, ifM
 	return f.writeFileFrom(ctx, key, bytes.NewReader(data), ifMatch)
 }
 
-// writeFileFrom is WriteFile's streaming counterpart (ROADMAP.md's
-// Part G, task G3): OpenFile.Flush passes a local scratch file's own
+// writeFileFrom is WriteFile's streaming counterpart: OpenFile.Flush passes a local scratch file's own
 // *os.File directly (via io.NewSectionReader) rather than a fully
 // materialized []byte, so a large file's flush never needs to hold
 // its entire content in RAM at once — objstore.Store.Put already
@@ -2011,10 +2000,10 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 // TouchAtime bumps key's recorded last-access time to now — called by
 // access layers after a real read(2)/readdir(2), never from Stat/
 // Getattr itself, matching POSIX semantics (stat(2) must not itself
-// update atime). Part of ROADMAP.md's Part G, task G1's deliberately
-// strict (not relatime-approximated) semantics: every real read
-// triggers this, accepting the real cost of a metadata write on every
-// read rather than batching or approximating it.
+// update atime). Deliberately strict (not relatime-approximated): a
+// file's first read in each open session, and every directory listing,
+// triggers this, accepting the cost of a metadata write rather than
+// batching or approximating it.
 //
 // A lost CAS race against a concurrent chmod/chown/write (the
 // underlying updateFileMetadata/UpdateMetadata calls both retry a

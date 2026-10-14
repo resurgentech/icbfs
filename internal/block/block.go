@@ -1,7 +1,7 @@
 // Package block implements the directory block format.
 //
 // A directory's entries are stored as a median-key B-tree, per
-// ARCHITECTURE.md's large-directory design: a Leaf block holds a sorted
+// docs/architecture.md's large-directory design: a Leaf block holds a sorted
 // list of name -> UUID rows directly; once a node overflows a size
 // threshold, it splits at its median key into two children, and an
 // Internal block holds sorted range pointers to its children instead of
@@ -13,7 +13,7 @@
 // Known simplification: splitting on insert-overflow is implemented;
 // merging underfull nodes back together on delete is not. An
 // over-sharded, mostly-empty directory just stays taller than necessary
-// rather than being compacted — see ARCHITECTURE.md.
+// rather than being compacted — see docs/architecture.md.
 package block
 
 import (
@@ -27,8 +27,7 @@ import (
 
 // EntryType is the kind of node a directory row points at.
 //
-// TypeFifo/TypeCharDevice/TypeBlockDevice/TypeSocket (ROADMAP.md's
-// Part G, task G2) are POSIX/FUSE-only — Windows/NTFS has no
+// TypeFifo/TypeCharDevice/TypeBlockDevice/TypeSocket are POSIX/FUSE-only — Windows/NTFS has no
 // equivalent, so internal/winfspserver never produces or expects
 // these. Order must match spec/proto/icbfs/v1/block.proto's
 // EntryType enum exactly: Encode/Decode cast between the two

@@ -15,8 +15,8 @@ import (
 	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
 )
 
-// Standalone is what host would supply, from a configuration file,
-// for testing without host (cmd/drive-api): one static token, a fixed
+// Standalone is what a host application would supply, from a
+// configuration file, for testing without one (cmd/drive-api): one static token, a fixed
 // drive list, a profile per actor, and which permissions each actor has.
 // The actor is named by the X-Drive-Actor header.
 type Standalone struct {

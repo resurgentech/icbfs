@@ -34,9 +34,8 @@ var (
 )
 
 // Windows FILE_ATTRIBUTE_* bits this project stores with native
-// fidelity for a file/symlink's Hidden/System/ReadOnly/Archive state
-// (ROADMAP.md's Part F, task F7; ARCHITECTURE.md's "File attribute
-// bits" rule). These duplicate golang.org/x/sys/windows's own
+// fidelity for a file/symlink's Hidden/System/ReadOnly/Archive state.
+// These duplicate golang.org/x/sys/windows's own
 // documented Win32 values (not imported from there) so this package
 // stays portable with no Windows dependency — same reasoning
 // winnames.go's own reserved-character constants give. Numerically
@@ -54,8 +53,8 @@ const (
 
 // WindowsAttributesXattrKey is the well-known xattrs map key a file/
 // symlink's native Windows attribute byte is stored under — "another
-// entry in .metadata's xattrs map," the same place task F8 plans to
-// land Windows ACLs (under "windows.acl") and POSIX already keeps its
+// entry in .metadata's xattrs map," the same place Windows ACLs
+// (under "windows.acl") and POSIX ACLs keep their
 // own ACL entry (under "system.posix_acl_access"): no special-casing
 // at the storage layer, just another named entry in the union map.
 const WindowsAttributesXattrKey = "windows.attributes"
@@ -75,8 +74,7 @@ func WindowsAttributesFromXattrs(xattrs map[string][]byte) (bits uint32, ok bool
 }
 
 // WindowsACLXattrKey is the well-known xattrs map key a file/symlink's
-// native Windows security descriptor is stored under (ROADMAP.md's
-// Part F, task F8) — metadata.proto's own doc comment already reserved
+// native Windows security descriptor is stored under — metadata.proto's own doc comment already reserved
 // this name. The value is a security descriptor's SDDL string
 // representation (ASCII, e.g. "O:...G:...D:..."), not the raw
 // self-relative binary layout: SDDL round-trips through
@@ -89,8 +87,7 @@ const WindowsACLXattrKey = "windows.acl"
 // WindowsACLFromXattrs reads a file/symlink's natively-stored security
 // descriptor's SDDL string, if SetWindowsACL has ever been called for
 // it. ok is false if nothing has been stored yet — callers (winfspserver)
-// decide what to fall back to (the mounting process's own identity, per
-// ROADMAP.md's F8 entry).
+// decide what to fall back to (the mounting process's own identity).
 func WindowsACLFromXattrs(xattrs map[string][]byte) (sddl []byte, ok bool) {
 	v, present := xattrs[WindowsACLXattrKey]
 	if !present || len(v) == 0 {
@@ -106,8 +103,7 @@ func WindowsACLFromXattrs(xattrs map[string][]byte) (sddl []byte, ok bool) {
 const WindowsDirSymlinkXattrKey = "windows.symlinkd"
 
 // GenericReparseXattrKey is the well-known xattrs map key a file's
-// *non-symlink* reparse point data is stored under (ROADMAP.md's Part
-// G, task G4) — `winfsp-tests`' own `reparse_guid_test`/
+// *non-symlink* reparse point data is stored under — `winfsp-tests`' own `reparse_guid_test`/
 // `reparse_nfs_test` set an arbitrary custom/NFS-style reparse tag on
 // an ordinary file via `FSCTL_SET_REPARSE_POINT`, carrying an opaque
 // data buffer this driver has no reason to parse — unlike the
@@ -131,8 +127,7 @@ func GenericReparseFromXattrs(xattrs map[string][]byte) (buf []byte, ok bool) {
 }
 
 // Attr is the POSIX-ish attribute set for one inode. Where it comes from
-// differs by type — see ARCHITECTURE.md's Metadata model and Multiple
-// filesystems per bucket sections:
+// differs by type — see docs/architecture.md's Metadata and master block sections:
 //
 //   - For a file or symlink: mode/uid/gid/nlink/xattrs come from the
 //     dedicated <uuid>.metadata object's body (Protobuf-encoded, below);
@@ -163,7 +158,7 @@ type Attr struct {
 	// Streams maps a named data stream's name to its id (see StreamKey)
 	// — Windows alternate data streams; nil when there are none.
 	Streams map[string]uint64
-	Rdev    uint32 // TypeCharDevice/TypeBlockDevice only (ROADMAP.md's Part G, task G2); 0 for every other type
+	Rdev    uint32 // TypeCharDevice/TypeBlockDevice only; 0 for every other type
 
 	// mtimeOverrideETag is the content ETag an explicit mtime override
 	// (Mtime, as decoded from .metadata) was set against — see
@@ -310,7 +305,7 @@ func NewUUIDv7() (string, error) {
 
 // Btime extracts the embedded creation timestamp from a key. Every
 // object a filesystem owns is prefixed with its 4-hex-digit ID (see
-// ARCHITECTURE.md's Multiple filesystems per bucket section), so this
+// docs/architecture.md's master block section), so this
 // strips a recognized "<4-hex>-" prefix before trying to parse what
 // remains as a UUIDv7. Returns the zero Time if nothing UUIDv7-shaped is
 // found — e.g. a root key, which is "<id>-root-<name>", not a UUID at
@@ -333,7 +328,7 @@ func Btime(key string) time.Time {
 
 // Ino derives a FUSE/stat inode number from a blob's UUID via a
 // high-quality 64-bit hash. This is stateless by design — see
-// ARCHITECTURE.md's FUSE inode mapping decision: inode numbers only need
+// docs/architecture.md's FUSE inode mapping decision: inode numbers only need
 // to be unique and stable within one mount's lifetime, so no shared or
 // persisted allocation table is needed, and a deterministic hash also
 // gets us stability across remounts for free.
@@ -349,7 +344,7 @@ const (
 	TypeFile        = block.TypeFile
 	TypeDir         = block.TypeDir
 	TypeSymlink     = block.TypeSymlink
-	TypeFifo        = block.TypeFifo        // ROADMAP.md's Part G, task G2 — POSIX/FUSE-only, no Windows/NTFS equivalent
+	TypeFifo        = block.TypeFifo        // POSIX/FUSE-only, no Windows/NTFS equivalent
 	TypeCharDevice  = block.TypeCharDevice  // same
 	TypeBlockDevice = block.TypeBlockDevice // same
 	TypeSocket      = block.TypeSocket      // same

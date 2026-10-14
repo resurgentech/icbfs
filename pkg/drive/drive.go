@@ -2,7 +2,7 @@
 // superset of what drives can do, with per-backend capabilities), the
 // icbfs backend (package icbfsdrive), copying between drives, diffs,
 // drafts in a side store, and the HTTP handlers (package driveapi) that
-// host mounts. See apiproposal.md.
+// a host application mounts. See docs/api.md.
 //
 // Who is acting, and as which profile on the drive's storage, comes in
 // the context (WithActor, WithProfile). A Drive checks the item's own

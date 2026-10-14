@@ -174,10 +174,10 @@ func TestResolvePathHardlinkedNamesShareUUID(t *testing.T) {
 	}
 }
 
-// TestResolvePathCaseInsensitiveMatchesDifferentCase covers task F4:
+// TestResolvePathCaseInsensitiveMatchesDifferentCase:
 // with caseInsensitive=true, a path using different case than what
 // was actually stored still resolves to the same entry — the
-// WinFsp-mount-flag-driven behavior ARCHITECTURE.md's Windows
+// WinFsp-mount-flag-driven behavior docs/architecture.md's Windows
 // compatibility section calls for (storage itself stays case-
 // sensitive/preserving; only lookup folds case, and only when this
 // flag is set).
@@ -195,8 +195,7 @@ func TestResolvePathCaseInsensitiveMatchesDifferentCase(t *testing.T) {
 	}
 
 	// caseInsensitive=false: a differently-cased request must still
-	// fail, exactly as it did before this task existed — case folding
-	// is opt-in, never the default.
+	// fail — case folding is opt-in.
 	if _, err := resolvePath(ctx, fsys, `\mixedcase\file.txt`, false); !errors.Is(err, icbfs.ErrNotFound) {
 		t.Fatalf("case-sensitive resolvePath(wrong case) = %v, want ErrNotFound", err)
 	}
