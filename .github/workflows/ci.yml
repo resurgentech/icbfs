@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux (vet, build, tests with MinIO and FUSE)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: taiki-e/install-action@just
+      - name: Install FUSE 3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fuse3
+          sudo chmod 666 /dev/fuse
+      # fmt, tidy, vet (Linux and Windows), build both, and the Go tests
+      # under the race detector. The tests start their own MinIO
+      # containers and mount real FUSE filesystems.
+      - run: just ci
+
+  windows:
+    name: Windows (build, portable tests)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: taiki-e/install-action@just
+      - run: just build-windows
+      # No Docker on Windows runners: the packages that don't need MinIO,
+      # with the folder side's tests on a real NTFS volume.
+      - run: just test-windows
