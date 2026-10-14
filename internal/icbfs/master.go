@@ -200,8 +200,8 @@ func Resize(ctx context.Context, store objstore.Store, fsName string, newSize ui
 	})
 }
 
-// Prune physically deletes every object fsName owns (everything under
-// its ID prefix, the same listing df/du use for "Used") and then blanks
+// Prune physically deletes every object fsName owns, every version of
+// each (everything under its ID prefix: content, trash, names), and then blanks
 // its master block entry, freeing the slot for reuse by a later Create.
 // Does not require the filesystem to be archived first — callers are
 // expected to archive, let any in-flight backup finish, and then prune,
@@ -223,14 +223,10 @@ func Prune(ctx context.Context, store objstore.Store, fsName string) error {
 	}
 	prefix := fsID(idx) + "-"
 
-	objs, err := store.ListByPrefix(ctx, prefix)
-	if err != nil {
-		return err
-	}
-	for _, o := range objs {
-		if err := store.Delete(ctx, o.Key, ""); err != nil {
-			return fmt.Errorf("prune %s: delete %s: %w", fsName, o.Key, err)
-		}
+	// Every version, not just the current objects: a filesystem that
+	// later reuses this slot (and ID prefix) must start with no past.
+	if err := eraseAllVersions(ctx, store, prefix); err != nil {
+		return fmt.Errorf("prune %s: %w", fsName, err)
 	}
 
 	return updateFilesystemEntry(ctx, store, fsName, func(e *pb.FilesystemEntry) {

@@ -379,7 +379,13 @@ and the ordinary filesystem code runs on top of it unchanged
   hadn't been created yet at T fails, and a name pruned and recreated
   since resolves to the filesystem that had it then.
 - A T after the object store's own clock is refused (that view would
-  still be changing).
+  still be changing), except within two seconds, which is waited out: the
+  store's clock reads in whole seconds.
+- T can be a **named version** (`icbfs-cli names create`): one object per
+  name, `<id>-name-<name>`, holding its time — or, for a name made "now",
+  no time, so its time is the store's own timestamp of writing it, which
+  orders it exactly after every write that finished first. Names are
+  created and deleted, never moved, and can't look like a time.
 - Each object's version listing is resolved once and kept in a local
   SQLite database — the past doesn't change, so it never goes stale. It
   lives in a fresh directory under `-cache-dir` (or the temp directory),
@@ -422,6 +428,31 @@ git-tree style) was explicitly rejected: it would make point-in-time reads
 cheaper, but at the cost of forcing every write anywhere to propagate a
 pointer update up to the root — reintroducing the exact write-amplification
 problem the metadata model above was built to avoid.
+
+## Trash and permanent delete
+
+Deleting under versioning leaves an item's versions in place, and an item
+is stored under its id, never its name — so a deleted item can come back
+whole. Each delete that takes a file's last name, or removes a directory
+(an unlink, rmdir, or a rename replacing either; from a mount or the
+API), writes a **trash entry**, `<id>-trash-<inverted time>-<entry id>`
+(listing order is newest first): the item's id, name, parent, path, who,
+when, size and version. Kept forever; there is no emptying the trash.
+**Restoring** removes the delete markers on the item's objects (content,
+`.metadata`, streams) — the version before each marker is current again,
+so the history simply continues — and inserts a name for it: where it
+was or anywhere else, refusing a taken name unless replacing. A recursive
+delete through the API is one batch, its directory's entry id the
+batch's, and restoring that directory restores the batch.
+
+**Permanent delete** (purge) erases every version of an item's objects —
+a directory's included, with every block its tree has had, and everything
+under it — and its trash entries. Its name stays in its parent
+directory's history (a past-time listing still shows it; opening it finds
+nothing). A file with other names is refused unless all its names go too,
+found by a walk of the tree. **Prune** of a filesystem likewise erases
+every version under its prefix, so a filesystem reusing the slot starts
+with no past.
 
 ## Large directories: median-key B-tree sharding
 
