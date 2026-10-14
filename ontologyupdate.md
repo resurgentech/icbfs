@@ -19,7 +19,7 @@ now, and what it should say.
   backend can't do is refused as not supported, so the app shows only what
   works.
 - **Host owns the drive registry**: id, name, kind, backend, root (a whole
-  icbfs filesystem or a directory in one), writable policy, owning org, and
+  icbfs filesystem or a directory in one), owning org, and
   the role assignments on it. The library serves whatever drive host hands
   it and keeps no state about drives.
 - **Storage under icbfs drives.** Infrastructure provides buckets (versioning
@@ -89,7 +89,8 @@ now, and what it should say.
 - Two layers on a drive. First host's check: the operation's permission
   (kind-dot-action, proposed `drive.read`, `drive.write`, `drive.delete`,
   `drive.restore`, `drive.purge`, `drive.name`, `drive.permissions.read`,
-  `storage.read`, `storage.admin`) against the actor's role assignments.
+  and for registered buckets `bucket.read`, `bucket.admin`, `bucket.prune`)
+  against the actor's role assignments; no per-drive writable switch.
   Then the file's own permissions, checked as the actor's **profile**.
 - **Profile**: an identity the drive's storage knows — a Windows account (SID
   and group SIDs) on a primary-Windows filesystem, a POSIX uid and gids on a

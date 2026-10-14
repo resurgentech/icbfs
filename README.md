@@ -94,6 +94,10 @@ icbfs-cli names list -fs docs | delete -fs docs -name NAME
 icbfs mount -as-of q3-signoff ... /mnt/q3
 ```
 
+Names and the trash belong to a drive: here, with store credentials, the
+filesystem `-fs` (or a directory in it, `-root /team`); through the daemon,
+host's drive, `-drive ID` (see below).
+
 ## Trash
 
 Every delete — from a mount or the API — that removes a file's last name,
@@ -102,7 +106,7 @@ restore brings the item back with its whole history:
 
 ```
 icbfs-cli trash list -fs docs [-path /reports]
-icbfs-cli trash restore -fs docs -id ENTRY [-as NEWNAME] [-replace]
+icbfs-cli trash restore -fs docs -id ENTRY [-to /new/path [-parents]] [-replace]
 ```
 
 Permanently deleting an item (the drive API's purge) erases every version
@@ -111,24 +115,31 @@ everything in it.
 
 ## Logging through a daemon (Linux)
 
-A FUSE mount can log what happens on it, and get the credentials it
-mounts with, through a local daemon that relays over one websocket to a
-server — the same shape as host's `hostd`:
+On an host machine a FUSE mount names a **drive**, and gets
+everything else — the store's credentials, the filesystem and directory
+the drive is, whether this machine may only read it — through a local
+daemon that relays over one websocket to the server, the same shape as
+host's `hostd`; it logs what happens on it the same way:
 
 ```
-icbfs-mockserver -secret S -log events.jsonl -endpoint ... -bucket ... -access-key ... -secret-key ...
+icbfs-mockserver -secret S -log events.jsonl -drives docs=docs,team=docs:/team:ro -endpoint ... -bucket ... -access-key ... -secret-key ...
 icbfs-logd -socket /run/icbfs-logd.sock -server ws://server:8090/ws/daemon -secret S
-icbfs mount -log-socket /run/icbfs-logd.sock -fs name /mnt/name      # add -log-async to never wait
+icbfs mount -log-socket /run/icbfs-logd.sock -drive team /mnt/team     # add -log-async to never wait
 ```
 
 `icbfs-cli` can go through the daemon too: with `-daemon SOCKET` (or
 `$ICBFS_DAEMON`) instead of store credentials, each command goes to the
 server, which checks it and runs it as the machine's account — the one
 the daemon sees on its socket, whatever the client claims — and logs it
-(`icbfs-mockserver -allow-commands` limits which).
+(`icbfs-mockserver -allow-commands` limits which). Names and trash
+commands then name the drive (`-drive team`), never a filesystem: only
+the server knows which filesystem and directory that is, and its
+permissions are on drives. The `fs` commands (administering a bucket's
+filesystems, which drives are made on) keep `-fs`.
 
 With `-log-socket` the mount takes its store endpoint, bucket and keys
-from the server (and can't mount without them), and logs a `read` when a
+from the server (and can't mount without them), mounts the drive's
+directory as its root (read-only if the server says so), and logs a `read` when a
 file is opened for reading, a `write` (with the size) when a file that
 was written is closed, a `delete` for each unlink and rmdir, and an `ls`
 for each directory listing — each with the caller's uid, gid and pid. By

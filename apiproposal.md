@@ -25,7 +25,7 @@ drives, through the Go interface underneath the HTTP API.
 
 | term | meaning |
 |---|---|
-| **drive** | what users and the API deal with: a connection to a place in some backend's storage — a whole icbfs filesystem or a directory in one, a SharePoint library, a Git repository — with a kind, a writable policy, and an owning org. Host keeps the list of drives. |
+| **drive** | what users and the API deal with: a connection to a place in some backend's storage — a whole icbfs filesystem or a directory in one, a SharePoint library, a Git repository — with a kind and an owning org. Host keeps the list of drives. |
 | **backend** | a kind of storage a drive can be on, implementing the `Drive` interface: icbfs first; SharePoint, a network file share, Git later. |
 | **icbfs filesystem** | icbfs's own storage unit, in the bucket's master block, what a mount attaches to (`-fs`). The engine keeps this name; one filesystem can back several drives (the whole tree, subtrees). |
 | **registered bucket** | a bucket host knows: endpoint, bucket name, credentials. icbfs filesystems are created in registered buckets. |
@@ -60,7 +60,7 @@ drives, through the Go interface underneath the HTTP API.
 host-server
   ├── its drive registry, role assignments, users/groups/orgs, admin panel
   └── mounts  pkg/drive (library)
-                ├── HTTP handlers  /api/v1/drives/{drive}/…, /api/v1/storage/…
+                ├── HTTP handlers  /api/v1/drives/{drive}/…, /api/v1/buckets/…
                 ├── Drive interface + capabilities
                 │     └── backends: icbfs (first), later SharePoint, file share, Git
                 ├── side store (drafts, review data) on an icbfs filesystem
@@ -137,8 +137,8 @@ This document specifies the full set, as the icbfs backend does it.
 Infrastructure provides buckets (with versioning on) and their credentials;
 host registers them. Everything else is done here.
 
-`/api/v1/storage/{bucket}/…` (host's registered bucket id), for those
-holding the storage permissions:
+`/api/v1/buckets/{bucket}/…` (host's registered bucket id, a resource of
+kind `bucket`), for those holding the bucket permissions:
 
 - `GET  …/filesystems` — the icbfs filesystems in the bucket (its master
   block), with their settings.
@@ -182,7 +182,13 @@ declares for the drive kind (**proposed** names):
 | `drive.purge` | permanent delete |
 | `drive.name` | create and delete named versions |
 | `drive.permissions.read` | the identities scan, an item's ACL |
-| `storage.read`, `storage.admin` | the storage endpoints |
+| `bucket.read` | list and describe a bucket's filesystems |
+| `bucket.admin` | create, resize and archive filesystems |
+| `bucket.prune` | prune a filesystem (irreversible, so apart from admin) |
+
+There is no per-drive writable switch (owner, 2026-10-13): whether an actor
+may write is whether it holds `drive.write`, through a role, like every other
+permission. A drive no one may change is one where no such role is assigned.
 
 **Profiles.** For each drive, host maps an actor to a profile: a
 Windows SID and its group SIDs on a primary-Windows filesystem, a uid and its
@@ -266,7 +272,7 @@ and exactly on primary-POSIX ones.
 
 ### The drive
 
-`GET /api/v1/drives/{drive}` — name, kind, writable, capabilities, the
+`GET /api/v1/drives/{drive}` — name, kind, capabilities, the
 actor's profile and permissions. (Listing drives is host's.)
 
 ### Browsing and reading
@@ -380,10 +386,17 @@ A separate binary for what isn't a filesystem operation. Two ways to run:
   machine.
 - **With credentials directly**, for use without host.
 
-Commands: `names create|delete|list` now; `fs create|list|describe|resize|
-archive|prune` (direct credentials, or through host's storage
-permissions); more later (trash, restore). (The VM test scripts currently
-build the FUSE mount command as `icbfs-cli`; they'll be renamed.)
+Commands: `names create|delete|list` and `trash list|restore` act on a
+drive — through the daemon `-drive ID`, host's, since host's
+permissions are on drives and only it knows which filesystem and directory a
+drive is; with credentials directly, `-fs NAME [-root DIR]`. `fs create|list|
+describe|resize|archive|prune` administer a bucket's filesystems and name a
+filesystem either way (through the daemon, the bucket permissions).
+
+Mounts through the daemon name a drive too (`icbfs mount -log-socket SOCK
+-drive ID`): the server answers with the store's credentials, the drive's
+filesystem and directory — mounted as the mount's root — and whether this
+machine may only read it.
 
 ## Errors
 
@@ -436,9 +449,10 @@ item in neither or both.
 
 ## Open questions
 
-1. **Permission names**: the `drive.*` and `storage.*` set above is a
+1. **Permission names**: the `drive.*` and `bucket.*` set above is a
    proposal for host's registry; does it match how host names and
-   groups permissions?
+   groups permissions? (Whether document operations belong to a kind of
+   their own is under discussion.)
 
 ## As built
 
@@ -449,7 +463,7 @@ item in neither or both.
   `pkg/icbfs` (buckets and filesystem administration), `cmd/drive-api`.
   The Windows access check is `internal/acl`.
 - `Config` is what host supplies: `Drive` (its registry), `Authorize`
-  and `AuthorizeStorage` (its role check, answering the actor and the
+  and `AuthorizeBucket` (its role check, answering the actor and the
   actor's profile), `Bucket`, `Drafts` (a drive's drafts, from its
   bucket's side store or the deployment's), and `Audit`, told of every
   operation (actor, profile, route, item, status) for the logging chain.

@@ -22,10 +22,10 @@ const secret = "s3cret"
 
 // server runs a logserver on addr ("127.0.0.1:0" for any port) until
 // the returned stop is called.
-func server(t *testing.T, addr, logPath string, allow ...string) (url string, stop func()) {
+func server(t *testing.T, addr, logPath string, drives ...string) (url string, stop func()) {
 	t.Helper()
 	s, err := logserver.New(logserver.Config{
-		Secret: secret, Log: logPath, Allow: allow,
+		Secret: secret, Log: logPath, Drives: registry(drives...),
 		Creds: fslog.Creds{Endpoint: "http://store", Bucket: "b", AccessKey: "ak", SecretKey: "sk"},
 	})
 	if err != nil {
@@ -82,7 +82,17 @@ func paths(evs []fslog.Event) string {
 	return strings.Join(p, ", ")
 }
 
-func TestCredentials(t *testing.T) {
+// registry is a drive registry with a drive per name, each on the
+// filesystem of that name.
+func registry(names ...string) map[string]fslog.Mount {
+	m := map[string]fslog.Mount{}
+	for _, n := range names {
+		m[n] = fslog.Mount{Filesystem: n}
+	}
+	return m
+}
+
+func TestMount(t *testing.T) {
 	dir := t.TempDir()
 	url, stop := server(t, "127.0.0.1:0", filepath.Join(dir, "log"), "allowed")
 	defer stop()
@@ -93,22 +103,22 @@ func TestCredentials(t *testing.T) {
 	defer cancel()
 	c := fslog.NewClient(socket, "allowed", false)
 	defer c.Close(time.Second)
-	creds, err := c.Credentials(ctx)
-	if err != nil || creds.AccessKey != "ak" || creds.Endpoint != "http://store" {
-		t.Fatalf("credentials: %+v, %v", creds, err)
+	creds, m, err := c.Mount(ctx)
+	if err != nil || creds.AccessKey != "ak" || creds.Endpoint != "http://store" || m.Filesystem != "allowed" {
+		t.Fatalf("mount: %+v %+v, %v", creds, m, err)
 	}
 	other := fslog.NewClient(socket, "other", false)
 	defer other.Close(time.Second)
-	if _, err := other.Credentials(ctx); err == nil || !strings.Contains(err.Error(), "not allowed") {
-		t.Fatalf("credentials for a disallowed filesystem: %v", err)
+	if _, _, err := other.Mount(ctx); err == nil || !strings.Contains(err.Error(), "not allowed") {
+		t.Fatalf("mount of a drive not in the registry: %v", err)
 	}
 
-	// No daemon at all: the mount gets no credentials, after ctx.
+	// No daemon at all: the mount gets no answer, after ctx.
 	none := fslog.NewClient(filepath.Join(dir, "nobody"), "allowed", false)
 	short, cancel2 := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel2()
-	if _, err := none.Credentials(short); err == nil {
-		t.Fatal("credentials without a daemon succeeded")
+	if _, _, err := none.Mount(short); err == nil {
+		t.Fatal("mount without a daemon succeeded")
 	}
 }
 
@@ -151,7 +161,7 @@ func TestSyncSurvivesServerAndDaemonRestarts(t *testing.T) {
 	if paths(got) != "write /a, delete /a, ls /" {
 		t.Fatalf("log = %s", paths(got))
 	}
-	if got[0].Bytes != 3 || got[0].Uid != 1 || got[0].Gid != 2 || got[0].Pid != 3 || got[0].FS != "fs" {
+	if got[0].Bytes != 3 || got[0].Uid != 1 || got[0].Gid != 2 || got[0].Pid != 3 || got[0].Drive != "fs" {
 		t.Fatalf("first event = %+v", got[0])
 	}
 }

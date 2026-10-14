@@ -31,8 +31,11 @@ const asyncQueue = 4096
 // logged (EventDropped) once delivery resumes.
 type Client struct {
 	socket string
-	fs     string
+	drive  string
 	host   string
+
+	fsMu sync.Mutex
+	fs   string // the drive's filesystem, once Mount has said
 
 	mu      sync.Mutex // guards conn, enc, nextID, pending
 	conn    net.Conn
@@ -46,11 +49,12 @@ type Client struct {
 	drained chan struct{}
 }
 
-// NewClient returns a client for the daemon listening on socket, for
-// filesystem fs. It connects lazily, on the first request.
-func NewClient(socket, fs string, async bool) *Client {
+// NewClient returns a client for the daemon listening on socket, for a
+// mount of drive (host's id; "" for a client that only runs
+// commands). It connects lazily, on the first request.
+func NewClient(socket, drive string, async bool) *Client {
 	host, _ := os.Hostname()
-	c := &Client{socket: socket, fs: fs, host: host, pending: map[uint64]chan Frame{}, async: async}
+	c := &Client{socket: socket, drive: drive, host: host, pending: map[uint64]chan Frame{}, async: async}
 	if async {
 		c.queue = make(chan Event, asyncQueue)
 		c.drained = make(chan struct{})
@@ -59,18 +63,29 @@ func NewClient(socket, fs string, async bool) *Client {
 	return c
 }
 
-// Credentials asks the server, through the daemon, how to reach this
-// filesystem's object store. The mount can't proceed without them: an
-// error means the server refused, or no answer came before ctx ended.
-func (c *Client) Credentials(ctx context.Context) (Creds, error) {
-	reply, err := c.request(ctx, Frame{Op: OpCreds, FS: c.fs, Host: c.host})
+// Mount asks the server, through the daemon, how to mount the drive:
+// how to reach its object store, which filesystem and directory it is,
+// and whether this machine may only read it. The mount can't proceed
+// without the answer: an error means the server refused, or no answer
+// came before ctx ended.
+func (c *Client) Mount(ctx context.Context) (Creds, Mount, error) {
+	reply, err := c.request(ctx, Frame{Op: OpCreds, Drive: c.drive, Host: c.host})
 	if err != nil {
-		return Creds{}, err
+		return Creds{}, Mount{}, err
 	}
-	if !reply.OK || reply.Creds == nil {
-		return Creds{}, fmt.Errorf("server refused credentials for %q: %s", c.fs, reply.Error)
+	if !reply.OK || reply.Creds == nil || reply.Mount == nil {
+		return Creds{}, Mount{}, fmt.Errorf("server refused to mount drive %q: %s", c.drive, reply.Error)
 	}
-	return *reply.Creds, nil
+	c.fsMu.Lock()
+	c.fs = reply.Mount.Filesystem
+	c.fsMu.Unlock()
+	return *reply.Creds, *reply.Mount, nil
+}
+
+func (c *Client) filesystem() string {
+	c.fsMu.Lock()
+	defer c.fsMu.Unlock()
+	return c.fs
 }
 
 // Command runs a side command on the server, through the daemon, and
@@ -89,7 +104,7 @@ func (c *Client) Command(ctx context.Context, name string, args map[string]strin
 // Log records op on path (bytes for a write), by the caller uid/gid/pid.
 func (c *Client) Log(op, path string, bytes int64, uid, gid, pid uint32) {
 	ev := Event{
-		ID: uuid.NewString(), Time: time.Now().UTC(), Host: c.host, FS: c.fs,
+		ID: uuid.NewString(), Time: time.Now().UTC(), Host: c.host, Drive: c.drive, FS: c.filesystem(),
 		Op: op, Path: path, Bytes: bytes, Uid: uid, Gid: gid, Pid: pid,
 	}
 	if !c.async {
@@ -124,7 +139,7 @@ func (c *Client) drain() {
 	defer close(c.drained)
 	for ev := range c.queue {
 		if n := c.dropped.Swap(0); n > 0 {
-			c.deliver(Event{ID: uuid.NewString(), Time: time.Now().UTC(), Host: c.host, FS: c.fs, Op: EventDropped, Bytes: int64(n)})
+			c.deliver(Event{ID: uuid.NewString(), Time: time.Now().UTC(), Host: c.host, Drive: c.drive, FS: c.filesystem(), Op: EventDropped, Bytes: int64(n)})
 		}
 		c.deliver(ev)
 	}

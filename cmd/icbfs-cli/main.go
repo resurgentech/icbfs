@@ -9,18 +9,22 @@
 //	icbfs-cli fs resize   -fs NAME -size N
 //	icbfs-cli fs archive  -fs NAME
 //	icbfs-cli fs prune    -fs NAME -yes
-//	icbfs-cli names create -fs NAME -name VERSION [-at TIME] [-scope PATH]
-//	icbfs-cli names list   -fs NAME
-//	icbfs-cli names delete -fs NAME -name VERSION
-//	icbfs-cli trash list    -fs NAME [-path PATH] [-limit N]
-//	icbfs-cli trash restore -fs NAME -id ENTRY [-as NAME] [-replace]
+//	icbfs-cli names create DRIVE -name VERSION [-at TIME] [-filesystem-wide]
+//	icbfs-cli names list   DRIVE
+//	icbfs-cli names delete DRIVE -name VERSION
+//	icbfs-cli trash list    DRIVE [-path PATH] [-limit N]
+//	icbfs-cli trash restore DRIVE -id ENTRY [-to PATH [-parents]] [-replace]
 //
 // Two ways to run. With the store's connection (-endpoint, -bucket,
 // -region, -access-key, -secret-key; or $ICBFS_ENDPOINT, $ICBFS_BUCKET,
-// $ICBFS_ACCESS_KEY, $ICBFS_SECRET_KEY), it does the work itself. On a
-// machine with the daemon, -daemon SOCKET (or $ICBFS_DAEMON) sends the
-// command through it to the server instead, which checks it and runs it
-// as this machine's account — no store credentials on the machine.
+// $ICBFS_ACCESS_KEY, $ICBFS_SECRET_KEY), it does the work itself; a
+// DRIVE is then -fs NAME [-root DIR], a filesystem or a directory in one.
+// On a machine with the daemon, -daemon SOCKET (or $ICBFS_DAEMON) sends
+// the command through it to the server instead, which checks it and runs
+// it as this machine's account — no store credentials on the machine; a
+// DRIVE is then -drive ID, host's, and the server knows which
+// filesystem and directory that is. The fs commands name a filesystem
+// either way: they administer the bucket's filesystems, drives' storage.
 package main
 
 import (
@@ -43,6 +47,7 @@ import (
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/internal/sidecmd"
+	"github.com/resurgentech/icbfs/pkg/drive"
 )
 
 const usage = `usage: icbfs-cli fs create|list|describe|resize|archive|prune [flags]
@@ -110,16 +115,22 @@ func (s storeFlags) store() objstore.Store {
 	return objstore.NewS3Store(client, *s.bucket)
 }
 
-// run runs a side command — here, or on the server through the daemon —
-// and decodes its result into out (if not nil).
+// run runs a storage command — here, or on the server through the
+// daemon — and decodes its result into out (if not nil).
 func (s storeFlags) run(name string, args map[string]string, out any) error {
+	return s.runWith(name, args, out, nil)
+}
+
+// runWith is run, with how to open the drive a drive command names when
+// it runs here.
+func (s storeFlags) runWith(name string, args map[string]string, out any, openDrive func(context.Context, map[string]string) (drive.Drive, error)) error {
 	var result json.RawMessage
 	var err error
 	if *s.daemon != "" {
 		c := fslog.NewClient(*s.daemon, "", false)
 		result, err = c.Command(ctx(), name, args)
 	} else {
-		result, err = sidecmd.Run(ctx(), s.store(), sidecmd.Request{Name: name, Args: args, Actor: actor()})
+		result, err = sidecmd.Run(ctx(), sidecmd.Env{Store: s.store(), Drive: openDrive}, sidecmd.Request{Name: name, Args: args, Actor: actor()})
 	}
 	if err != nil {
 		return err

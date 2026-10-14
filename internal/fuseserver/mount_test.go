@@ -1554,3 +1554,48 @@ func TestInterruptedFlushStillStores(t *testing.T) {
 		t.Fatalf("an interrupted blocking wait maps to %v, want EINTR", got)
 	}
 }
+
+// TestMountDirectoryAsRoot: a drive on a directory mounts that directory
+// as the mount's root — only what's under it is visible — and a delete
+// through the mount records the item's path in the filesystem, not just
+// in the mount, so the trash knows where it was.
+func TestMountDirectoryAsRoot(t *testing.T) {
+	ctx := context.Background()
+	fsys := icbfs.New(newMountTestStore(t), "test")
+	if err := fsys.Bootstrap(ctx, 1<<30, 0755, uint32(os.Getuid()), uint32(os.Getgid()), false); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := uint32(os.Getuid()), uint32(os.Getgid())
+	team, _, err := fsys.Mkdir(ctx, fsys.RootKey(), "team", 0755, uid, gid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := fsys.Create(ctx, fsys.RootKey(), "outside", 0644, uid, gid); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := fsys.Create(ctx, team, "inside", 0644, uid, gid); err != nil {
+		t.Fatal(err)
+	}
+
+	mnt := t.TempDir()
+	server, err := fs.Mount(mnt, Root(fsys, nil, WithRoot(team, "/team")), &fs.Options{
+		MountOptions:    fuse.MountOptions{FsName: "icbfs-test", Name: "icbfs-test", Options: []string{"default_permissions"}},
+		NullPermissions: true,
+	})
+	if err != nil {
+		t.Fatalf("mount: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Unmount() })
+
+	entries, err := os.ReadDir(mnt)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "inside" {
+		t.Fatalf("the mount's root lists %v, %v; want just inside", entries, err)
+	}
+	if err := os.Remove(filepath.Join(mnt, "inside")); err != nil {
+		t.Fatal(err)
+	}
+	trash, err := fsys.ListTrash(ctx, icbfs.TrashOptions{})
+	if err != nil || len(trash) != 1 || trash[0].Path != "/team/inside" {
+		t.Fatalf("trash = %+v, %v; want /team/inside", trash, err)
+	}
+}

@@ -3,6 +3,7 @@ package fuseserver
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 
@@ -41,9 +42,19 @@ func (n *Node) childPath(name string) string {
 	return "/" + name
 }
 
-// deleting attaches, for the trash, who is deleting path.
+// WithRoot mounts directory key, at path in the filesystem, as the
+// mount's root: a drive on a directory.
+func WithRoot(key, path string) Option {
+	return func(n *Node) {
+		n.key = key
+		n.under = strings.TrimSuffix(path, "/")
+	}
+}
+
+// deleting attaches, for the trash, who is deleting path (from the
+// mount's root; recorded from the filesystem's).
 func (n *Node) deleting(ctx context.Context, path string) context.Context {
-	info := icbfs.DeleteInfo{Path: path}
+	info := icbfs.DeleteInfo{Path: n.under + path}
 	if caller, ok := fuse.FromContext(ctx); ok {
 		info.By = fmt.Sprintf("uid:%d", caller.Uid)
 	}

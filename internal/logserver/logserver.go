@@ -1,6 +1,6 @@
 // Package logserver is a mock of the server end of icbfs's logging
 // (cmd/icbfs-mockserver): daemons connect over a websocket with a shared
-// secret; it answers credential requests for the filesystems it allows,
+// secret; it answers mount requests for the drives in its registry,
 // runs side commands (icbfs-cli through the daemon; internal/sidecmd) on
 // the configured store, and appends every event to a JSON-lines log, one event per line,
 // before acknowledging it — so a mount logging synchronously knows its
@@ -26,6 +26,8 @@ import (
 	"github.com/resurgentech/icbfs/internal/fslog"
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/internal/sidecmd"
+	"github.com/resurgentech/icbfs/pkg/drive"
+	"github.com/resurgentech/icbfs/pkg/drive/icbfsdrive"
 	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
 )
 
@@ -33,8 +35,11 @@ import (
 type Config struct {
 	Secret string      // the bearer secret daemons must present
 	Log    string      // the JSON-lines event log, appended to
-	Creds  fslog.Creds // the store credentials every allowed filesystem gets
-	Allow  []string    // filesystem names allowed to mount; empty allows any
+	Creds  fslog.Creds // the store credentials every drive's mount gets
+	// Drives is the registry: drive id → its filesystem, root and
+	// whether machines may only read it. A drive not in it can't be
+	// mounted, nor named by a command.
+	Drives map[string]fslog.Mount
 	// AllowCommands are the side commands daemons may run ("names
 	// create", ...); empty allows every one.
 	AllowCommands []string
@@ -53,6 +58,9 @@ type Server struct {
 	seen  map[string]bool
 	conns map[*websocket.Conn]bool
 	store objstore.Store // the store side commands run on
+
+	drivesMu sync.Mutex
+	drives   map[string]*icbfsdrive.Drive // opened on first use
 }
 
 // New opens cfg.Log for appending, remembering the IDs it already holds
@@ -142,13 +150,13 @@ func (s *Server) serveDaemon(w http.ResponseWriter, r *http.Request) {
 		}
 		switch f.Op {
 		case fslog.OpCreds:
-			if len(s.cfg.Allow) == 0 || slices.Contains(s.cfg.Allow, f.FS) {
+			if m, ok := s.cfg.Drives[f.Drive]; ok {
 				creds := s.cfg.Creds
-				reply.OK, reply.Creds = true, &creds
-				log.Printf("logserver: credentials for %q to %s", f.FS, f.Host)
+				reply.OK, reply.Creds, reply.Mount = true, &creds, &m
+				log.Printf("logserver: mount of drive %q (%s:%s) for %s", f.Drive, m.Filesystem, m.Root, f.Host)
 			} else {
-				reply.Error = fmt.Sprintf("filesystem %q is not allowed to mount", f.FS)
-				log.Printf("logserver: refused credentials for %q to %s", f.FS, f.Host)
+				reply.Error = fmt.Sprintf("drive %q is not allowed to mount", f.Drive)
+				log.Printf("logserver: refused to mount drive %q for %s", f.Drive, f.Host)
 			}
 		case fslog.OpEvent:
 			if err := s.record(f.Event); err != nil {
@@ -175,10 +183,16 @@ func (s *Server) command(f fslog.Frame) (json.RawMessage, string) {
 		log.Printf("logserver: refused %q for %s", c.Name, c.Actor)
 		return nil, fmt.Sprintf("%s may not %s", c.Actor, c.Name)
 	}
+	if m := s.cfg.Drives[c.Args["drive"]]; m.ReadOnly && c.Name == "trash restore" {
+		return nil, fmt.Sprintf("drive %q is read-only here", c.Args["drive"])
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
-	result, err := sidecmd.Run(ctx, s.store, sidecmd.Request{Name: c.Name, Args: c.Args, Actor: c.Actor})
-	ev := &fslog.Event{ID: uuid.NewString(), Time: time.Now().UTC(), Host: f.Host, FS: c.Args["fs"], Op: fslog.EventCommand, Path: c.Name, Actor: c.Actor}
+	result, err := sidecmd.Run(ctx, sidecmd.Env{Store: s.store, Drive: s.drive}, sidecmd.Request{Name: c.Name, Args: c.Args, Actor: c.Actor})
+	ev := &fslog.Event{ID: uuid.NewString(), Time: time.Now().UTC(), Host: f.Host, Drive: c.Args["drive"], FS: c.Args["fs"], Op: fslog.EventCommand, Path: c.Name, Actor: c.Actor}
+	if m, ok := s.cfg.Drives[c.Args["drive"]]; ok {
+		ev.FS = m.Filesystem
+	}
 	if err != nil {
 		ev.Error = err.Error()
 	}
@@ -189,6 +203,29 @@ func (s *Server) command(f fslog.Frame) (json.RawMessage, string) {
 		return nil, err.Error()
 	}
 	return result, ""
+}
+
+// drive is the registry's drive a command names (args["drive"]).
+func (s *Server) drive(ctx context.Context, args map[string]string) (drive.Drive, error) {
+	id := args["drive"]
+	m, ok := s.cfg.Drives[id]
+	if !ok {
+		return nil, fmt.Errorf("no drive %q", id)
+	}
+	s.drivesMu.Lock()
+	defer s.drivesMu.Unlock()
+	if d, ok := s.drives[id]; ok {
+		return d, nil
+	}
+	d, err := icbfsdrive.New(ctx, icbfsdrive.Config{Store: s.store, Filesystem: m.Filesystem, Root: m.Root, ID: id})
+	if err != nil {
+		return nil, fmt.Errorf("drive %q: %w", id, err)
+	}
+	if s.drives == nil {
+		s.drives = map[string]*icbfsdrive.Drive{}
+	}
+	s.drives[id] = d
+	return d, nil
 }
 
 // record appends ev to the log and syncs it, once per event ID.

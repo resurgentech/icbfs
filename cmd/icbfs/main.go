@@ -45,7 +45,8 @@ func main() {
 	accessKey := fset.String("access-key", "minioadmin", "access key")
 	secretKey := fset.String("secret-key", "minioadmin", "secret key")
 	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
-	logSocket := fset.String("log-socket", "", "log reads, writes, deletes and directory listings through the icbfs-logd daemon on this Unix socket — which also supplies the store's endpoint, bucket and keys (-endpoint, -bucket, -region, -access-key and -secret-key are then ignored); the mount fails without them")
+	logSocket := fset.String("log-socket", "", "mount a drive (-drive) through the icbfs-logd daemon on this Unix socket, logging reads, writes, deletes and directory listings: the server says how to reach the store and which filesystem and directory the drive is (-endpoint, -bucket, -region, -access-key, -secret-key and -fs are then not used), and whether this machine may only read it; the mount fails without the answer")
+	driveID := fset.String("drive", "", "with -log-socket: the drive to mount (host's id)")
 	logAsync := fset.Bool("log-async", false, "with -log-socket: queue events instead of waiting for the server to log each one; never slows an operation, but drops (and counts) events while the daemon is unreachable")
 	asOf := fset.String("as-of", "", "mount read-only as the filesystem was at this time: a date (2006-01-02, meaning the end of that day), a date-time (2006-01-02T15:04:05) in local time, or RFC 3339 with a zone; or a version name (icbfs-cli names). Fails if the filesystem didn't exist yet then")
 	locking := fset.Bool("locking", false, "enable the Locking feature (flock/fcntl); off by default, per ARCHITECTURE.md's Locking section")
@@ -66,19 +67,27 @@ func main() {
 	ctx := context.Background()
 
 	var logger *fslog.Client
-	if *logSocket != "" {
-		logger = fslog.NewClient(*logSocket, *fsName, *logAsync)
+	var driveRoot string // the drive's directory in the filesystem; "" for all of it
+	var driveReadOnly bool
+	switch {
+	case *logSocket != "" && *driveID == "":
+		log.Fatal("-log-socket mounts a drive: give -drive")
+	case *logSocket == "" && *driveID != "":
+		log.Fatal("-drive needs -log-socket: only the server knows what a drive is")
+	case *logSocket != "":
+		logger = fslog.NewClient(*logSocket, *driveID, *logAsync)
 		defer logger.Close(10 * time.Second)
 		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		creds, err := logger.Credentials(cctx)
+		creds, m, err := logger.Mount(cctx)
 		cancel()
 		if err != nil {
-			log.Fatalf("no credentials for %q from the logging daemon: %v", *fsName, err)
+			log.Fatalf("drive %q: %v", *driveID, err)
 		}
 		*endpoint, *bucket, *accessKey, *secretKey = creds.Endpoint, creds.Bucket, creds.AccessKey, creds.SecretKey
 		if creds.Region != "" {
 			*region = creds.Region
 		}
+		*fsName, driveRoot, driveReadOnly = m.Filesystem, strings.TrimSuffix(m.Root, "/"), m.ReadOnly
 	}
 
 	client := s3.New(s3.Options{
@@ -148,9 +157,16 @@ func main() {
 	if logger != nil {
 		rootOpts = append(rootOpts, fuseserver.WithLogger(logger))
 	}
+	if driveRoot != "" {
+		key, err := resolveDir(ctx, fsys, driveRoot)
+		if err != nil {
+			log.Fatalf("drive %q: its root %s: %v", *driveID, driveRoot, err)
+		}
+		rootOpts = append(rootOpts, fuseserver.WithRoot(key, driveRoot))
+	}
 	root := fuseserver.Root(fsys, fuseSignals, rootOpts...)
 	server, err := fs.Mount(mountpoint, root, &fs.Options{
-		MountOptions: fuseMountOptions(*debug, *allowOther, view != nil),
+		MountOptions: fuseMountOptions(*debug, *allowOther, view != nil || driveReadOnly),
 		// Without this, go-fuse silently rewrites a real, stored "0000"
 		// mode to 0644/0755 on every Getattr — found by testing chmod 000
 		// and seeing stat report 644 back.
@@ -238,4 +254,27 @@ func fuseMountOptions(debug, allowOther, readOnly bool) fuse.MountOptions {
 		// ASSUMPTIONS.md's B8 entry).
 		EnableLocks: true,
 	}
+}
+
+// resolveDir is the key of directory p ("/a/b") in fsys.
+func resolveDir(ctx context.Context, fsys *icbfs.Filesystem, p string) (string, error) {
+	key := fsys.RootKey()
+	for _, part := range strings.Split(strings.Trim(p, "/"), "/") {
+		if part == "" {
+			continue
+		}
+		lookup := fsys.Lookup
+		if fsys.PrimaryWindows() {
+			lookup = fsys.LookupFold
+		}
+		e, _, err := lookup(ctx, key, part)
+		if err != nil {
+			return "", err
+		}
+		if e.Type != icbfs.TypeDir {
+			return "", fmt.Errorf("%s: %w", part, icbfs.ErrNotDir)
+		}
+		key = e.UUID
+	}
+	return key, nil
 }

@@ -36,7 +36,7 @@ func TestMountLogsThroughDaemon(t *testing.T) {
 			logPath := filepath.Join(dir, "events.jsonl")
 
 			srv, err := logserver.New(logserver.Config{
-				Secret: "s", Log: logPath, Allow: []string{"logged"},
+				Secret: "s", Log: logPath, Drives: map[string]fslog.Mount{"logged-drive": {Filesystem: "logged"}},
 				Creds: fslog.Creds{Endpoint: store.endpoint, Bucket: store.bucket, Region: "us-east-1", AccessKey: store.accessKey, SecretKey: store.secretKey},
 			})
 			if err != nil {
@@ -59,14 +59,14 @@ func TestMountLogsThroughDaemon(t *testing.T) {
 			defer stopDaemon()
 			go d.Run(dctx)
 
-			client := fslog.NewClient(socket, "logged", async)
+			client := fslog.NewClient(socket, "logged-drive", async)
 			cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			creds, err := client.Credentials(cctx)
+			creds, m, err := client.Mount(cctx)
 			cancel()
 			if err != nil {
-				t.Fatalf("credentials: %v", err)
+				t.Fatalf("mount: %v", err)
 			}
-			fsys := icbfs.New(newS3Store(testMinIO{endpoint: creds.Endpoint, bucket: creds.Bucket, accessKey: creds.AccessKey, secretKey: creds.SecretKey}), "logged")
+			fsys := icbfs.New(newS3Store(testMinIO{endpoint: creds.Endpoint, bucket: creds.Bucket, accessKey: creds.AccessKey, secretKey: creds.SecretKey}), m.Filesystem)
 			if err := fsys.Bootstrap(ctx, 1<<30, 0755, uint32(os.Getuid()), uint32(os.Getgid()), false); err != nil {
 				t.Fatalf("bootstrap with the server's credentials: %v", err)
 			}
@@ -133,7 +133,7 @@ func TestMountLogsThroughDaemon(t *testing.T) {
 			var lines []string
 			for _, e := range got {
 				lines = append(lines, fmt.Sprintf("%s %s %d", e.Op, e.Path, e.Bytes))
-				if e.FS != "logged" || e.Uid != uint32(os.Getuid()) || e.Pid == 0 || e.Host == "" || e.ID == "" {
+				if e.FS != "logged" || e.Drive != "logged-drive" || e.Uid != uint32(os.Getuid()) || e.Pid == 0 || e.Host == "" || e.ID == "" {
 					t.Errorf("event %+v: wrong fs, uid, host or id, or no pid", e)
 				}
 			}

@@ -16,6 +16,7 @@ import (
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/logserver"
 	"github.com/resurgentech/icbfs/internal/testutil/miniotest"
+	"github.com/resurgentech/icbfs/pkg/drive"
 )
 
 // TestCommandsThroughTheDaemon: icbfs-cli's side commands go through the
@@ -30,6 +31,7 @@ func TestCommandsThroughTheDaemon(t *testing.T) {
 		Secret: secret, Log: logPath,
 		Creds:         fslog.Creds{Endpoint: srv.Endpoint, Bucket: srv.Bucket, Region: "us-east-1", AccessKey: srv.AccessKey, SecretKey: srv.SecretKey},
 		AllowCommands: []string{"fs create", "names create", "names list"},
+		Drives:        map[string]fslog.Mount{"team": {Filesystem: "viadaemon"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -58,14 +60,15 @@ func TestCommandsThroughTheDaemon(t *testing.T) {
 		t.Fatalf("fs create result %s: %v", res, err)
 	}
 	time.Sleep(1100 * time.Millisecond)
-	if _, err := c.Command(ctx, "names create", map[string]string{"fs": "viadaemon", "name": "first"}); err != nil {
+	// Drive commands name the drive; the server knows its filesystem.
+	if _, err := c.Command(ctx, "names create", map[string]string{"drive": "team", "name": "first"}); err != nil {
 		t.Fatalf("names create: %v", err)
 	}
-	res, err = c.Command(ctx, "names list", map[string]string{"fs": "viadaemon"})
+	res, err = c.Command(ctx, "names list", map[string]string{"drive": "team"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var names []icbfs.NamedVersion
+	var names []drive.Name
 	if err := json.Unmarshal(res, &names); err != nil || len(names) != 1 {
 		t.Fatalf("names: %s, %v", res, err)
 	}
@@ -77,8 +80,8 @@ func TestCommandsThroughTheDaemon(t *testing.T) {
 	if _, err := c.Command(ctx, "fs archive", map[string]string{"fs": "viadaemon"}); err == nil || !strings.Contains(err.Error(), "may not fs archive") {
 		t.Fatalf("a command the server doesn't allow: %v", err)
 	}
-	if _, err := c.Command(ctx, "names create", map[string]string{"fs": "nope", "name": "x"}); err == nil {
-		t.Fatal("a command that fails on the server succeeded")
+	if _, err := c.Command(ctx, "names create", map[string]string{"drive": "nope", "name": "x"}); err == nil || !strings.Contains(err.Error(), `no drive "nope"`) {
+		t.Fatalf("a drive not in the registry: %v", err)
 	}
 
 	var cmds []string

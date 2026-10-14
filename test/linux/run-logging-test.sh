@@ -10,7 +10,10 @@
 # of filesystem actions is then run through it from a shell, and the
 # server's log must record exactly those actions. Run twice: logging
 # synchronously (each operation waits for the server) and with
-# -log-async. A mount of a filesystem the server doesn't allow must fail.
+# -log-async. Mounts name a drive; the server's registry says which
+# filesystem and directory it is, and whether it's read-only: a read-only
+# drive on a directory must mount just that, refusing writes; a drive the
+# server doesn't have must fail to mount.
 # Then icbfs-cli, with no credentials either, names a version through the
 # daemon: the server runs it, as the VM account the daemon saw, and logs it.
 set -euo pipefail
@@ -47,7 +50,8 @@ SERVER_CONTAINER="icbfs-test-mockserver-$$"
 MINIO_BRIDGE_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$ICBFS_MINIO_CONTAINER")
 docker run -d --rm --name "$SERVER_CONTAINER" --user "$(id -u):$(id -g)" \
   -v "$WORK_DIR:/work" -p 0.0.0.0::8090 --entrypoint /work/icbfs-mockserver "${ICBFS_MINIO_IMAGE:-minio/minio:latest}" \
-  -addr :8090 -secret "$SECRET" -log "/work/$LOG_NAME" -allow "logged-sync,logged-async" \
+  -addr :8090 -secret "$SECRET" -log "/work/$LOG_NAME" \
+  -drives "logged-sync=logged-sync,logged-async=logged-async,setup=logged-sync,team=logged-sync:/team:ro" \
   -endpoint "$ICBFS_MINIO_VM_ENDPOINT" -bucket "$ICBFS_MINIO_BUCKET" \
   -access-key "$ICBFS_MINIO_ACCESS_KEY" -secret-key "$ICBFS_MINIO_SECRET_KEY" \
   -store-endpoint "http://$MINIO_BRIDGE_IP:9000" >/dev/null
@@ -63,17 +67,25 @@ ssh_vm "$IP" "sudo pkill -x icbfs-logd; sudo $VM_SRC/icbfs-logd -socket $SOCK -s
 for i in \$(seq 1 20); do [ -S $SOCK ] && exit 0; sleep 0.25; done; echo 'icbfs-logd never came up'; cat /tmp/icbfs-logd.log; exit 1"
 
 fail=0
-# run_mode <fs name> [-log-async]: mount with only -log-socket, run the
-# actions, unmount (which delivers anything async logging still holds).
-run_mode() {
-  local fs="$1"; shift
+# on_drive <drive> <shell commands> [mount flags]: mount the drive with
+# only -log-socket and -drive (the server says what it is), run the
+# commands as root, unmount (which delivers anything async logging still
+# holds). The commands' output is printed.
+on_drive() {
+  local drive="$1" cmds="$2"; shift 2
   ssh_vm "$IP" "bash -s" <<EOF
 set -e
 sudo mkdir -p $MNT
-sudo $VM_SRC/icbfs mount -log-socket $SOCK $* -fs $fs -allow-other $MNT > /tmp/icbfs-log-mount.log 2>&1 &
+sudo $VM_SRC/icbfs mount -log-socket $SOCK $* -drive $drive -allow-other $MNT > /tmp/icbfs-log-mount.log 2>&1 &
 for i in \$(seq 1 120); do findmnt -n -o FSTYPE $MNT | grep -q fuse && break; sleep 0.25; done
 findmnt -n $MNT >/dev/null || { echo "mount failed:"; cat /tmp/icbfs-log-mount.log; cat /tmp/icbfs-logd.log; exit 1; }
-sudo bash -c '
+sudo bash -c '$cmds' || true
+sudo umount $MNT
+for i in \$(seq 1 60); do pgrep -x icbfs >/dev/null || break; sleep 0.25; done
+EOF
+}
+
+ACTIONS="
   mkdir $MNT/d
   echo hello > $MNT/d/a
   cat $MNT/d/a > /dev/null
@@ -83,10 +95,10 @@ sudo bash -c '
   rm $MNT/d/b
   rmdir $MNT/d
   ls $MNT > /dev/null
-'
-sudo umount $MNT
-for i in \$(seq 1 60); do pgrep -x icbfs >/dev/null || break; sleep 0.25; done
-EOF
+"
+run_mode() {
+  local drive="$1"; shift
+  on_drive "$drive" "$ACTIONS" "$@"
 }
 
 create_fs logged-sync
@@ -105,24 +117,36 @@ for line in open(sys.argv[1]):
     e = json.loads(line)
     if e["op"] == "command":
         continue
-    got.setdefault(e["fs"], []).append(f'{e["op"]} {e["path"]} {e.get("bytes", 0)}')
+    if e.get("drive") not in ("logged-sync", "logged-async") or e.get("fs") != e.get("drive"):
+        continue
+    got.setdefault(e["drive"], []).append(f'{e["op"]} {e["path"]} {e.get("bytes", 0)}')
 ok = True
-for fs in ("logged-sync", "logged-async"):
-    if got.get(fs) == want:
-        print(f"PASS  {fs}: the server logged exactly the {len(want)} actions")
+for d in ("logged-sync", "logged-async"):
+    if got.get(d) == want:
+        print(f"PASS  {d}: the server logged exactly the {len(want)} actions")
     else:
         ok = False
-        print(f"FAIL  {fs}: the server logged\n        " + "\n        ".join(got.get(fs, ["(nothing)"])))
+        print(f"FAIL  {d}: the server logged\n        " + "\n        ".join(got.get(d, ["(nothing)"])))
 sys.exit(0 if ok else 1)
 PY
 
-out=$(ssh_vm "$IP" "sudo timeout 60 $VM_SRC/icbfs mount -log-socket $SOCK -fs not-allowed $MNT 2>&1; echo exit=\$?" 2>/dev/null | tail -2)
-if echo "$out" | grep -q "not allowed" && ! echo "$out" | grep -q "exit=0"; then
-  echo "PASS  a filesystem the server doesn't allow can't mount"
+# A drive on a directory, read-only for this machine: its directory is
+# the mount's root, and writes are refused.
+on_drive setup "mkdir $MNT/team; echo inside > $MNT/team/f; echo outside > $MNT/g" >/dev/null
+out=$(on_drive team "ls $MNT; cat $MNT/f; touch $MNT/new 2>&1" 2>/dev/null)
+if [ "$(echo "$out" | head -2 | tr '\n' ' ')" = "f inside " ] && echo "$out" | grep -q "Read-only file system"; then
+  echo "PASS  a read-only drive on a directory mounts that directory, read-only"
 else
-  echo "FAIL  mount of a disallowed filesystem: $out"; fail=1
+  echo "FAIL  the read-only drive on /team: $out"; fail=1
 fi
-out=$(ssh_vm "$IP" "sleep 1.2; sudo $VM_SRC/icbfs-cli names create -daemon $SOCK -fs logged-sync -name vm-check >/dev/null && sudo $VM_SRC/icbfs-cli names list -daemon $SOCK -fs logged-sync -json" 2>&1 | tail -1 || true)
+
+out=$(ssh_vm "$IP" "sudo timeout 60 $VM_SRC/icbfs mount -log-socket $SOCK -drive not-allowed $MNT 2>&1; echo exit=\$?" 2>/dev/null | tail -2)
+if echo "$out" | grep -q "not allowed" && ! echo "$out" | grep -q "exit=0"; then
+  echo "PASS  a drive the server doesn't have can't mount"
+else
+  echo "FAIL  mount of a drive not in the registry: $out"; fail=1
+fi
+out=$(ssh_vm "$IP" "sleep 1.2; sudo $VM_SRC/icbfs-cli names create -daemon $SOCK -drive logged-sync -name vm-check >/dev/null && sudo $VM_SRC/icbfs-cli names list -daemon $SOCK -drive logged-sync -json" 2>&1 | tail -1 || true)
 if echo "$out" | python3 -c '
 import json, sys
 names = json.load(sys.stdin)

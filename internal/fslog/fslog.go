@@ -16,7 +16,7 @@ import (
 
 // Frame ops.
 const (
-	OpCreds = "creds" // driver → server: the store credentials to mount FS with
+	OpCreds = "creds" // driver → server: how to mount Drive (credentials, filesystem, root)
 	OpEvent = "event" // driver → server: log Event
 	// OpCommand: icbfs-cli → server: run a side command (Command); the
 	// daemon sets who is asking (Command.Actor), from the socket's peer.
@@ -28,17 +28,27 @@ const (
 type Frame struct {
 	Op      string   `json:"op"`
 	ID      uint64   `json:"id"`
-	FS      string   `json:"fs,omitempty"`      // OpCreds: the filesystem being mounted
+	Drive   string   `json:"drive,omitempty"`   // OpCreds: the drive being mounted (host's id)
 	Host    string   `json:"host,omitempty"`    // OpCreds: the machine asking
 	Event   *Event   `json:"event,omitempty"`   // OpEvent
 	Command *Command `json:"command,omitempty"` // OpCommand
 
-	// OpReply: OK, or Error saying why not; Creds for an OpCreds, Result
-	// for an OpCommand.
+	// OpReply: OK, or Error saying why not; Creds and Mount for an
+	// OpCreds, Result for an OpCommand.
 	OK     bool            `json:"ok,omitempty"`
 	Error  string          `json:"error,omitempty"`
 	Creds  *Creds          `json:"creds,omitempty"`
+	Mount  *Mount          `json:"mount,omitempty"`
 	Result json.RawMessage `json:"result,omitempty"`
+}
+
+// Mount is what a drive is, for a mount: the filesystem it's on, the
+// directory in it that is the drive's root ("" or "/" for the whole
+// filesystem), and whether this machine may only read it.
+type Mount struct {
+	Filesystem string `json:"filesystem"`
+	Root       string `json:"root,omitempty"`
+	ReadOnly   bool   `json:"readOnly,omitempty"`
 }
 
 // Command is a side command (see internal/sidecmd): a name like
@@ -66,6 +76,7 @@ type Event struct {
 	ID    string    `json:"id"` // unique; the server ignores a repeat (a resend after a reconnect)
 	Time  time.Time `json:"time"`
 	Host  string    `json:"host"`
+	Drive string    `json:"drive,omitempty"` // the drive mounted; Path is from its root
 	FS    string    `json:"fs"`
 	Op    string    `json:"op"`
 	Path  string    `json:"path"`

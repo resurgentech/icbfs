@@ -39,6 +39,10 @@ type Node struct {
 	typ     icbfs.EntryType
 	watches *watchRegistry
 	logger  Logger // nil unless the mount logs; see WithLogger
+	// under is the filesystem path of the mount's root ("" when it is
+	// the filesystem's root; see WithRoot), so a trash entry records
+	// where a deleted item was in the filesystem, not just in the mount.
+	under string
 }
 
 var (
@@ -224,7 +228,7 @@ func errnoFromErr(err error) syscall.Errno {
 
 func (n *Node) newChild(ctx context.Context, key string, typ icbfs.EntryType) *fs.Inode {
 	ctx = detach(ctx)
-	child := &Node{fsys: n.fsys, key: key, typ: typ, watches: n.watches, logger: n.logger}
+	child := &Node{fsys: n.fsys, key: key, typ: typ, watches: n.watches, logger: n.logger, under: n.under}
 	stable := fs.StableAttr{Ino: icbfs.Ino(key), Mode: typeToFuseMode(typ)}
 	// StableAttr.Ino dedups against any already-known inode with the same
 	// number — this is exactly how hardlinks (Link, below) end up sharing
