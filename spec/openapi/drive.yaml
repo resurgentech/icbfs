@@ -1,0 +1,673 @@
+openapi: 3.0.3
+info:
+  title: Drive API
+  version: 1.0.0
+  description: |
+    Host's document API over drives (icbfs filesystems, or directories
+    in them, first). See apiproposal.md for the design. Items are named by
+    `path` (from the drive's root) or `id`; JSON for metadata, raw bytes for
+    content, RFC 3339 times. Errors are `{"error", "code"}`.
+
+    Authentication and the role check are host's: every operation names
+    the permission it needs (`x-permission`). The item's own permissions are
+    then checked as the actor's profile on the drive.
+servers:
+  - url: /api/v1
+tags:
+  - name: drive
+  - name: storage
+paths:
+  /drives/{drive}:
+    parameters: [{$ref: '#/components/parameters/DriveParam'}]
+    get:
+      operationId: getDrive
+      tags: [drive]
+      x-permission: drive.read
+      summary: The drive, its capabilities, and the actor's profile on it.
+      responses:
+        '200': {description: The drive., content: {application/json: {schema: {$ref: '#/components/schemas/DriveInfo'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/list:
+    parameters: [{$ref: '#/components/parameters/DriveParam'}]
+    get:
+      operationId: listItems
+      tags: [drive]
+      x-permission: drive.read
+      summary: One directory's entries (FIFOs, sockets, devices and what the profile can't list are left out).
+      parameters:
+        - {$ref: '#/components/parameters/PathParam'}
+        - {$ref: '#/components/parameters/IDParam'}
+        - {$ref: '#/components/parameters/AsOfParam'}
+        - {$ref: '#/components/parameters/VersionParam'}
+        - {name: depth, in: query, schema: {type: integer, minimum: 1, default: 1}}
+        - {name: limit, in: query, schema: {type: integer, minimum: 0}}
+        - {name: cursor, in: query, schema: {type: string}}
+        - {name: sort, in: query, schema: {type: string, enum: [name, modified, size]}}
+      responses:
+        '200': {description: A page., content: {application/json: {schema: {$ref: '#/components/schemas/Page'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/stat:
+    parameters: [{$ref: '#/components/parameters/DriveParam'}]
+    get:
+      operationId: statItem
+      tags: [drive]
+      x-permission: drive.read
+      summary: One item, with every path to it, its owner and the actor's rights on it.
+      parameters:
+        - {$ref: '#/components/parameters/PathParam'}
+        - {$ref: '#/components/parameters/IDParam'}
+        - {$ref: '#/components/parameters/AsOfParam'}
+        - {$ref: '#/components/parameters/VersionParam'}
+      responses:
+        '200': {description: The item., content: {application/json: {schema: {$ref: '#/components/schemas/Item'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/content:
+    parameters: [{$ref: '#/components/parameters/DriveParam'}]
+    get:
+      operationId: getContent
+      tags: [drive]
+      x-permission: drive.read
+      summary: A file's bytes. `Range` gives 206; `If-None-Match` with the version gives 304; HEAD for headers.
+      parameters:
+        - {$ref: '#/components/parameters/PathParam'}
+        - {$ref: '#/components/parameters/IDParam'}
+        - {$ref: '#/components/parameters/AsOfParam'}
+        - {$ref: '#/components/parameters/VersionParam'}
+        - {name: download, in: query, schema: {type: boolean}, description: 'Content-Disposition: attachment.'}
+        - {name: Range, in: header, schema: {type: string}}
+        - {name: If-None-Match, in: header, schema: {type: string}}
+      responses:
+        '200':
+          description: The content, with Content-Type, ETag (the version id), Last-Modified and x-drive-item-id.
+          content: {application/octet-stream: {schema: {type: string, format: binary}}}
+        '206': {description: Part of it., content: {application/octet-stream: {schema: {type: string, format: binary}}}}
+        '304': {description: Unchanged.}
+        default: {$ref: '#/components/responses/Error'}
+    put:
+      operationId: putContent
+      tags: [drive]
+      x-permission: drive.write
+      summary: The body becomes the file's content, as a new version. Conditional with If-Match (the version id) or If-None-Match *.
+      parameters:
+        - {name: path, in: query, required: true, schema: {type: string}}
+        - {name: parents, in: query, schema: {type: boolean}}
+        - {name: If-Match, in: header, schema: {type: string}}
+        - {name: If-None-Match, in: header, schema: {type: string}}
+      requestBody:
+        required: true
+        content: {application/octet-stream: {schema: {type: string, format: binary}}}
+      responses:
+        '200': {description: The file now., content: {application/json: {schema: {$ref: '#/components/schemas/Item'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: deleteItem
+      tags: [drive]
+      x-permission: drive.delete
+      summary: To the trash; recursive for a non-empty directory (one trash batch).
+      parameters:
+        - {$ref: '#/components/parameters/PathParam'}
+        - {$ref: '#/components/parameters/IDParam'}
+        - {name: recursive, in: query, schema: {type: boolean}}
+        - {name: If-Match, in: header, schema: {type: string}}
+      responses:
+        '204': {description: Deleted.}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/versions:
+    parameters: [{$ref: '#/components/parameters/DriveParam'}]
+    get:
+      operationId: listVersions
+      tags: [drive]
+      x-permission: drive.read
+      summary: A file's versions, newest first, with the names each was current at. A trashed file's too, by id.
+      parameters:
+        - {$ref: '#/components/parameters/PathParam'}
+        - {$ref: '#/components/parameters/IDParam'}
+      responses:
+        '200': {description: The versions., content: {application/json: {schema: {$ref: '#/components/schemas/Versions'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/diff:
+    parameters: [{$ref: '#/components/parameters/DriveParam'}]
+    get:
+      operationId: diffVersions
+      tags: [drive]
+      x-permission: drive.read
+      summary: A unified diff of two versions of a text file (from and to are version ids; omitted means the current one).
+      parameters:
+        - {name: id, in: query, required: true, schema: {type: string}}
+        - {name: from, in: query, schema: {type: string}}
+        - {name: to, in: query, schema: {type: string}}
+      responses:
+        '200': {description: The diff., content: {text/plain: {schema: {type: string}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/mkdir:
+    parameters: [{$ref: '#/components/parameters/DriveParam'}]
+    post:
+      operationId: mkdir
+      tags: [drive]
+      x-permission: drive.write
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/MkdirRequest'}}}}
+      responses:
+        '200': {description: The directory., content: {application/json: {schema: {$ref: '#/components/schemas/Item'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/move:
+    parameters: [{$ref: '#/components/parameters/DriveParam'}]
+    post:
+      operationId: move
+      tags: [drive]
+      x-permission: drive.write
+      summary: Rename or move; the id doesn't change.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/MoveRequest'}}}}
+      responses:
+        '200': {description: The item at its new path., content: {application/json: {schema: {$ref: '#/components/schemas/Item'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/copy:
+    parameters: [{$ref: '#/components/parameters/DriveParam'}]
+    post:
+      operationId: copy
+      tags: [drive]
+      x-permission: drive.write
+      summary: Copy within the drive or to another (toDrive; needs drive.write there too), optionally of an old or named version; the copy records its origin.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CopyRequest'}}}}
+      responses:
+        '200': {description: The copy., content: {application/json: {schema: {$ref: '#/components/schemas/Item'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/restore-version:
+    parameters: [{$ref: '#/components/parameters/DriveParam'}]
+    post:
+      operationId: restoreVersion
+      tags: [drive]
+      x-permission: drive.write
+      summary: That version's content becomes current again, as a new version.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/RestoreVersionRequest'}}}}
+      responses:
+        '200': {description: The file now., content: {application/json: {schema: {$ref: '#/components/schemas/Item'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/names:
+    parameters: [{$ref: '#/components/parameters/DriveParam'}]
+    get:
+      operationId: listNames
+      tags: [drive]
+      x-permission: drive.read
+      summary: The drive's named versions and the filesystem's, oldest first (a sibling drive's aren't shown).
+      responses:
+        '200': {description: The names., content: {application/json: {schema: {$ref: '#/components/schemas/Names'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      operationId: createName
+      tags: [drive]
+      x-permission: drive.name
+      summary: Name now (at omitted) or a past moment, for the drive or the whole filesystem.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateNameRequest'}}}}
+      responses:
+        '201': {description: The name., content: {application/json: {schema: {$ref: '#/components/schemas/Name'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/names/{name}:
+    parameters:
+      - {$ref: '#/components/parameters/DriveParam'}
+      - {name: name, in: path, required: true, schema: {type: string}}
+    delete:
+      operationId: deleteName
+      tags: [drive]
+      x-permission: drive.name
+      responses:
+        '204': {description: Deleted.}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/trash:
+    parameters: [{$ref: '#/components/parameters/DriveParam'}]
+    get:
+      operationId: listTrash
+      tags: [drive]
+      x-permission: drive.read
+      summary: Deleted items, newest first, optionally only from under a directory.
+      parameters:
+        - {$ref: '#/components/parameters/PathParam'}
+        - {name: limit, in: query, schema: {type: integer, minimum: 0}}
+        - {name: cursor, in: query, schema: {type: string}}
+      responses:
+        '200': {description: A page of the trash., content: {application/json: {schema: {$ref: '#/components/schemas/TrashPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/trash/{entry}/restore:
+    parameters:
+      - {$ref: '#/components/parameters/DriveParam'}
+      - {name: entry, in: path, required: true, schema: {type: string}}
+    post:
+      operationId: restoreTrash
+      tags: [drive]
+      x-permission: drive.restore
+      summary: Bring a deleted item back, with its history, where it was or to `to`; a directory brings its batch.
+      requestBody: {content: {application/json: {schema: {$ref: '#/components/schemas/RestoreRequest'}}}}
+      responses:
+        '200': {description: The restored item., content: {application/json: {schema: {$ref: '#/components/schemas/Item'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/purge:
+    parameters: [{$ref: '#/components/parameters/DriveParam'}]
+    delete:
+      operationId: purge
+      tags: [drive]
+      x-permission: drive.purge
+      summary: Permanently delete a live or trashed item, every version of it, its trash entry and every user's drafts of it. Irreversible.
+      parameters:
+        - {$ref: '#/components/parameters/PathParam'}
+        - {$ref: '#/components/parameters/IDParam'}
+        - {name: allNames, in: query, schema: {type: boolean}, description: Also remove the file's other names (hard links).}
+      responses:
+        '204': {description: Gone.}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/drafts:
+    parameters:
+      - {$ref: '#/components/parameters/DriveParam'}
+      - {name: id, in: query, required: true, schema: {type: string}}
+    get:
+      operationId: getDraft
+      tags: [drive]
+      x-permission: drive.read
+      summary: The actor's draft of a file (its bytes; the base version in x-drive-base-version).
+      responses:
+        '200': {description: The draft., content: {application/octet-stream: {schema: {type: string, format: binary}}}}
+        default: {$ref: '#/components/responses/Error'}
+    put:
+      operationId: putDraft
+      tags: [drive]
+      x-permission: drive.write
+      summary: Save the actor's draft (autosave); x-drive-base-version is the version it started from.
+      parameters:
+        - {name: x-drive-base-version, in: header, schema: {type: string}}
+      requestBody:
+        required: true
+        content: {application/octet-stream: {schema: {type: string, format: binary}}}
+      responses:
+        '200': {description: Saved., content: {application/json: {schema: {$ref: '#/components/schemas/Draft'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: discardDraft
+      tags: [drive]
+      x-permission: drive.write
+      responses:
+        '204': {description: Discarded.}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/drafts/publish:
+    parameters:
+      - {$ref: '#/components/parameters/DriveParam'}
+      - {name: id, in: query, required: true, schema: {type: string}}
+      - {name: force, in: query, schema: {type: boolean}}
+    post:
+      operationId: publishDraft
+      tags: [drive]
+      x-permission: drive.write
+      summary: The draft becomes the file's content if the file is still at the draft's base version (else 412), and is discarded.
+      responses:
+        '200': {description: The file now., content: {application/json: {schema: {$ref: '#/components/schemas/Item'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/identities:
+    parameters: [{$ref: '#/components/parameters/DriveParam'}]
+    post:
+      operationId: startIdentities
+      tags: [drive]
+      x-permission: drive.permissions.read
+      summary: Start a scan of every principal the drive's items name.
+      responses:
+        '202': {description: Started., content: {application/json: {schema: {$ref: '#/components/schemas/IdentitiesJob'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/identities/{job}:
+    parameters:
+      - {$ref: '#/components/parameters/DriveParam'}
+      - {name: job, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getIdentities
+      tags: [drive]
+      x-permission: drive.permissions.read
+      responses:
+        '200': {description: The scan's progress, and when done what it found., content: {application/json: {schema: {$ref: '#/components/schemas/IdentitiesJob'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/permissions:
+    parameters: [{$ref: '#/components/parameters/DriveParam'}]
+    get:
+      operationId: getPermissions
+      tags: [drive]
+      x-permission: drive.permissions.read
+      summary: One item's ACL (SDDL, and where it's inherited from when the item has none), or owner, group and mode.
+      parameters:
+        - {$ref: '#/components/parameters/PathParam'}
+        - {$ref: '#/components/parameters/IDParam'}
+      responses:
+        '200': {description: Its permissions., content: {application/json: {schema: {$ref: '#/components/schemas/Permissions'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/events:
+    parameters: [{$ref: '#/components/parameters/DriveParam'}]
+    get:
+      operationId: events
+      tags: [drive]
+      x-permission: drive.read
+      summary: 'Server-Sent Events: `changed`, with the directory (path, id) when known.'
+      responses:
+        '200': {description: The stream., content: {text/event-stream: {schema: {type: string}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /storage/{bucket}/filesystems:
+    parameters: [{$ref: '#/components/parameters/BucketParam'}]
+    get:
+      operationId: listFilesystems
+      tags: [storage]
+      x-permission: storage.read
+      responses:
+        '200': {description: The bucket's filesystems., content: {application/json: {schema: {$ref: '#/components/schemas/Filesystems'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      operationId: createFilesystem
+      tags: [storage]
+      x-permission: storage.admin
+      summary: Create a filesystem; every setting is given. Its root starts with the creating admin's profile holding full control.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/CreateFilesystemRequest'}}}}
+      responses:
+        '201': {description: Created., content: {application/json: {schema: {$ref: '#/components/schemas/Filesystem'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /storage/{bucket}/filesystems/{name}:
+    parameters:
+      - {$ref: '#/components/parameters/BucketParam'}
+      - {name: name, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: getFilesystem
+      tags: [storage]
+      x-permission: storage.read
+      responses:
+        '200': {description: The filesystem., content: {application/json: {schema: {$ref: '#/components/schemas/Filesystem'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    patch:
+      operationId: resizeFilesystem
+      tags: [storage]
+      x-permission: storage.admin
+      summary: The declared size is the one setting that changes after creation.
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/ResizeRequest'}}}}
+      responses:
+        '200': {description: Resized., content: {application/json: {schema: {$ref: '#/components/schemas/Filesystem'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      operationId: pruneFilesystem
+      tags: [storage]
+      x-permission: storage.admin
+      summary: Erase an archived filesystem, every version of everything in it. Irreversible.
+      responses:
+        '204': {description: Gone.}
+        default: {$ref: '#/components/responses/Error'}
+  /storage/{bucket}/filesystems/{name}/archive:
+    parameters:
+      - {$ref: '#/components/parameters/BucketParam'}
+      - {name: name, in: path, required: true, schema: {type: string}}
+    post:
+      operationId: archiveFilesystem
+      tags: [storage]
+      x-permission: storage.admin
+      summary: Read-only from now on.
+      responses:
+        '200': {description: Archived., content: {application/json: {schema: {$ref: '#/components/schemas/Filesystem'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+components:
+  parameters:
+    DriveParam: {name: drive, in: path, required: true, schema: {type: string}, description: Host's drive id.}
+    BucketParam: {name: bucket, in: path, required: true, schema: {type: string}, description: Host's registered bucket id.}
+    PathParam: {name: path, in: query, schema: {type: string}, description: The item's path from the drive's root.}
+    IDParam: {name: id, in: query, schema: {type: string}, description: The item's id (wins over path).}
+    AsOfParam: {name: asOf, in: query, schema: {type: string, format: date-time}, description: Read the drive as it was then (read-only).}
+    VersionParam: {name: version, in: query, schema: {type: string}, description: 'A version id (content and stat of a file), or a named version (anywhere asOf is accepted).'}
+  responses:
+    Error:
+      description: An error.
+      content: {application/json: {schema: {$ref: '#/components/schemas/Error'}}}
+  schemas:
+    Error:
+      type: object
+      required: [error, code]
+      properties:
+        error: {type: string}
+        code:
+          type: string
+          enum: [not_found, forbidden, no_access, not_supported, exists, not_empty, not_dir, is_dir, has_other_names,
+                 precondition_failed, invalid_name, invalid, too_large, read_only, busy, internal]
+        currentVersion: {type: string, description: 'With precondition_failed: the version the file is at now.'}
+    Capabilities:
+      type: object
+      required: [ids, versions, asOf, names, trash, purge, conditionalWrite, events, origin, permissions, diff]
+      properties:
+        ids: {type: boolean}
+        versions: {type: boolean}
+        asOf: {type: boolean}
+        names: {type: boolean}
+        trash: {type: boolean}
+        purge: {type: boolean}
+        conditionalWrite: {type: boolean}
+        events: {type: boolean}
+        origin: {type: boolean}
+        permissions: {type: string, enum: [windows, posix, '']}
+        diff: {type: string}
+    Profile:
+      type: object
+      properties:
+        windows:
+          type: object
+          required: [user]
+          properties:
+            user: {type: string}
+            groups: {type: array, items: {type: string}}
+            domain: {type: string}
+        posix:
+          type: object
+          required: [uid]
+          properties:
+            uid: {type: integer, format: uint32}
+            gids: {type: array, items: {type: integer, format: uint32}}
+    DriveInfo:
+      type: object
+      required: [id, kind, writable, capabilities]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        kind: {type: string}
+        writable: {type: boolean}
+        capabilities: {$ref: '#/components/schemas/Capabilities'}
+        profile: {$ref: '#/components/schemas/Profile'}
+        actor: {type: string}
+    Version:
+      type: object
+      required: [version, time, size]
+      properties:
+        version: {type: string}
+        time: {type: string, format: date-time}
+        size: {type: integer, format: int64}
+        current: {type: boolean}
+        names: {type: array, items: {type: string}}
+    Versions:
+      type: object
+      required: [id, versions]
+      properties:
+        id: {type: string}
+        versions: {type: array, items: {$ref: '#/components/schemas/Version'}}
+    Rights:
+      type: object
+      required: [read, write, delete, changePermissions]
+      properties:
+        read: {type: boolean}
+        write: {type: boolean}
+        delete: {type: boolean}
+        changePermissions: {type: boolean}
+    Origin:
+      type: object
+      required: [drive, id, copied]
+      properties:
+        drive: {type: string}
+        id: {type: string}
+        version: {type: string}
+        path: {type: string}
+        copied: {type: string, format: date-time}
+    Item:
+      type: object
+      required: [id, name, path, type, size, modified, changed]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        path: {type: string}
+        type: {type: string, enum: [file, dir, symlink]}
+        size: {type: integer, format: int64}
+        contentType: {type: string}
+        version: {$ref: '#/components/schemas/Version'}
+        modified: {type: string, format: date-time}
+        changed: {type: string, format: date-time}
+        created: {type: string, format: date-time}
+        target: {type: string}
+        origin: {$ref: '#/components/schemas/Origin'}
+        hasDraft: {type: boolean}
+        draftsBy: {type: array, items: {type: string}}
+        parentId: {type: string}
+        paths: {type: array, items: {type: string}}
+        owner: {type: string}
+        rights: {$ref: '#/components/schemas/Rights'}
+    Page:
+      type: object
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/Item'}}
+        next: {type: string}
+    MkdirRequest:
+      type: object
+      required: [path]
+      properties:
+        path: {type: string}
+        parents: {type: boolean}
+    MoveRequest:
+      type: object
+      required: [to]
+      properties:
+        from: {type: string, description: The item's path.}
+        fromId: {type: string, description: Or its id.}
+        to: {type: string}
+        replace: {type: boolean}
+    CopyRequest:
+      type: object
+      required: [to]
+      properties:
+        from: {type: string}
+        fromId: {type: string}
+        version: {type: string, description: A version id or a named version.}
+        asOf: {type: string, format: date-time}
+        to: {type: string}
+        toDrive: {type: string}
+    RestoreVersionRequest:
+      type: object
+      required: [id, version]
+      properties:
+        id: {type: string}
+        version: {type: string}
+    Name:
+      type: object
+      required: [name, time, createdAt]
+      properties:
+        name: {type: string}
+        time: {type: string, format: date-time}
+        filesystemWide: {type: boolean}
+        scope: {type: string}
+        createdBy: {type: string}
+        createdAt: {type: string, format: date-time}
+    Names:
+      type: object
+      required: [names]
+      properties:
+        names: {type: array, items: {$ref: '#/components/schemas/Name'}}
+    CreateNameRequest:
+      type: object
+      required: [name]
+      properties:
+        name: {type: string}
+        at: {type: string, format: date-time}
+        scope: {type: string, enum: [drive, filesystem], default: drive}
+    TrashEntry:
+      type: object
+      required: [id, itemId, name, type, deletedAt, size]
+      properties:
+        id: {type: string}
+        itemId: {type: string}
+        name: {type: string}
+        path: {type: string}
+        type: {type: string}
+        deletedAt: {type: string, format: date-time}
+        deletedBy: {type: string}
+        size: {type: integer, format: int64}
+        version: {type: string}
+        batch: {type: string}
+    TrashPage:
+      type: object
+      required: [entries]
+      properties:
+        entries: {type: array, items: {$ref: '#/components/schemas/TrashEntry'}}
+        next: {type: string}
+    RestoreRequest:
+      type: object
+      properties:
+        to: {type: string}
+        parents: {type: boolean}
+        replace: {type: boolean}
+    Draft:
+      type: object
+      required: [drive, itemId, user, baseVersion, saved, size]
+      properties:
+        drive: {type: string}
+        itemId: {type: string}
+        user: {type: string}
+        baseVersion: {type: string}
+        saved: {type: string, format: date-time}
+        size: {type: integer, format: int64}
+    Identity:
+      type: object
+      required: [id, kind, items]
+      properties:
+        id: {type: string}
+        kind: {type: string, enum: [sid, uid, gid]}
+        items: {type: integer}
+    IdentitiesJob:
+      type: object
+      required: [job, done, scanned]
+      properties:
+        job: {type: string}
+        done: {type: boolean}
+        scanned: {type: integer}
+        error: {type: string}
+        identities: {type: array, items: {$ref: '#/components/schemas/Identity'}}
+    Permissions:
+      type: object
+      required: [kind]
+      properties:
+        kind: {type: string, enum: [windows, posix]}
+        sddl: {type: string}
+        inherited: {type: string}
+        owner: {type: string}
+        group: {type: string}
+        mode: {type: integer, format: uint32}
+    Filesystem:
+      type: object
+      required: [name, primaryMode, maxFileSize, size, archived]
+      properties:
+        name: {type: string}
+        id: {type: string}
+        primaryMode: {type: string, enum: [windows, posix]}
+        maxFileSize: {type: integer, format: int64}
+        size: {type: integer, format: int64}
+        used: {type: integer, format: int64}
+        archived: {type: boolean}
+        created: {type: string, format: date-time}
+    Filesystems:
+      type: object
+      required: [filesystems]
+      properties:
+        filesystems: {type: array, items: {$ref: '#/components/schemas/Filesystem'}}
+    CreateFilesystemRequest:
+      type: object
+      required: [name, primaryMode, maxFileSize, size]
+      properties:
+        name: {type: string}
+        primaryMode: {type: string, enum: [windows, posix]}
+        maxFileSize: {type: integer, format: int64}
+        size: {type: integer, format: int64}
+    ResizeRequest:
+      type: object
+      required: [size]
+      properties:
+        size: {type: integer, format: int64}

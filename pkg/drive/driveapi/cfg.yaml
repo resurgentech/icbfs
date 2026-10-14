@@ -1,0 +1,9 @@
+# oapi-codegen config. Fiber v3 has no upstream server generator, so (as in
+# host) this generates typed models and a Go client only; the Fiber v3
+# handlers are hand-written against these models. spec/openapi/drive.yaml
+# is the contract.
+package: driveapi
+output: api.gen.go
+generate:
+  models: true
+  client: true
