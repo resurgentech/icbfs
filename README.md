@@ -1,239 +1,241 @@
 # icbfs
 
-I Can't Believe this isn't already a Filesystem.
+*I Can't Believe this isn't already a Filesystem.*
 
-A filesystem built directly on versioned object storage — in the spirit of
-[JuiceFS](https://juicefs.com/), but simpler: no chunking, no bespoke block
-format. An object is an object.
+icbfs is a filesystem stored directly in a versioned S3 bucket. It works in
+the spirit of [JuiceFS](https://juicefs.com/), but is simpler: there is no
+chunking and no block format of its own. A file is one object, and the
+bucket's own version history is the filesystem's history.
 
-## What it is
+It mounts on Linux (FUSE) and on Windows (WinFsp). It also serves the same
+files through an HTTP document API, and keeps Windows folders in step with
+a drive.
 
-- **Instant snapshotting**, by requiring the underlying object store to
-  have versioning enabled and relying on that native version history,
-  rather than building a separate versioning layer on top.
-- **A full POSIX-like metadata set** — permissions, ownership, timestamps,
-  hard links, symlinks — plus a parallel path to solid Windows support.
-- **Three backends, on purpose**: AWS S3, Azure Blob Storage, and MinIO
-  (S3 API). No generic multi-cloud abstraction.
+## Goals
 
-Files are never named by their filename in the underlying store. Every
-file and directory is a plain object addressed by UUID; directories are
-objects too, holding rows of `name → UUID`. A write to a file's content
-never has to touch its parent directory, because identity (the UUID) is
-decoupled from both the name and the metadata — see `ARCHITECTURE.md` for
-why that one choice is what makes the rest of the design work.
+- **Every past moment is readable.** Each write is a new object version, so
+  a filesystem can be mounted read-only as it was at any time, or at a
+  named version, without copying anything.
+- **Nothing deleted is lost** until it is purged. Every delete goes to a
+  trash, kept forever, and a restored item comes back with its whole
+  history.
+- **Full metadata on both platforms.**
+  - POSIX: permissions, owners, hard links, symlinks, xattrs, POSIX ACLs,
+    special files.
+  - Windows: security descriptors, attribute bits, alternate data streams,
+    case-insensitive lookup.
+- **No other infrastructure.** Concurrency is compare-and-swap on the
+  store's conditional writes. There is no metadata database and no lock
+  server.
+
+## How it works
+
+```mermaid
+flowchart LR
+  subgraph Clients
+    L["Linux apps"]
+    W["Windows apps"]
+    H["Web apps / services"]
+    F["Windows folders"]
+  end
+  subgraph icbfs
+    FUSE["icbfs mount<br/>FUSE"]
+    WFS["icbfs-winfsp<br/>WinFsp"]
+    API["drive API<br/>pkg/drive"]
+    SYNC["icbfs-sync"]
+    CORE["filesystem core<br/>internal/icbfs"]
+  end
+  S3[("versioned bucket<br/>MinIO / S3")]
+  L --> FUSE --> CORE
+  W --> WFS --> CORE
+  H --> API --> CORE
+  F --> SYNC --> API
+  CORE --> S3
+```
+
+- Every file and directory is an object named by a **UUID**, never by its
+  name.
+- **Directories** are B-trees of small blocks, holding `name → UUID` rows,
+  and split at the median name.
+- **Attributes** live in a separate `.metadata` object. Writing a file
+  doesn't touch its directory, and renaming a file doesn't touch its
+  content.
+- **Every change is a conditional write** (`If-Match` on the ETag). A
+  writer that loses a race re-applies only its own edit and retries.
+- **One bucket holds many filesystems**, each under its own key prefix,
+  listed in a master block.
+
+[docs/architecture.md](docs/architecture.md) has the full design.
+
+## Features
+
+| | |
+|---|---|
+| **Mounts** | Linux via FUSE 3; Windows via WinFsp |
+| **Past views** | mount read-only as of any time (`-as-of 2026-10-12T15:04`) or a named version |
+| **Named versions** | a name for a moment: a snapshot that copies nothing |
+| **Trash** | every delete recorded forever; restore with full history; permanent purge |
+| **POSIX** | modes, owners, hard links, symlinks, xattrs, POSIX ACLs, FIFOs, sockets, device nodes, `utimensat` |
+| **Windows** | security descriptors (SDDL), ACL inheritance, attribute bits, alternate data streams, case-insensitive lookup, share modes |
+| **Large files** | multipart uploads that send only the parts an edit changed; per-filesystem max file size (default 1 TiB) |
+| **Locking** | optional `flock`/`fcntl` byte-range locks shared between Linux mounts, with leases |
+| **Drive API** | HTTP API and Go library: browse, read, write, versions, diffs, drafts, trash, copy between drives, permissions checked per item |
+| **Folder sync** | `icbfs-sync`: one-way or two-way sync of Windows folders, including WebDAV drives, with a tray app |
+| **Managed mounts** | mounts and CLI commands through a local daemon that gets credentials from a server and logs every access (Linux) |
+
+## Tools
+
+| command | what it does | docs |
+|---|---|---|
+| `icbfs mount` | mount a filesystem on Linux (FUSE) | [mount.md](docs/mount.md) |
+| `icbfs-winfsp` | mount a filesystem on Windows (WinFsp) | [mount.md](docs/mount.md#windows-winfsp) |
+| `icbfs-cli` | create and manage filesystems; named versions; trash | [cli.md](docs/cli.md) |
+| `icbfs-sync` | keep Windows folders in step with drives | [sync.md](docs/sync.md) |
+| `drive-api` | serve the drive API on its own | [api.md](docs/api.md) |
+| `icbfs-logd` | the local daemon for managed mounts (Linux) | [daemon.md](docs/daemon.md) |
+| `icbfs-mockserver` | a stand-in server for the daemon | [daemon.md](docs/daemon.md) |
 
 ## Status
 
-Design is settled; implementation is in progress, and the two aren't
-fully in step yet. See:
+The core filesystem, both mounts, the drive API, and icbfs-sync are built
+and tested against MinIO. The latest full run, on 2026-10-14:
 
-- **`ARCHITECTURE.md`** — the settled design: object model, metadata
-  placement, concurrency, snapshotting, directory sharding, locking,
-  change notifications, multi-filesystem support, FUSE/WinFsp access
-  layers, and Windows compatibility.
-- **`ROADMAP.md`** — concrete, sequenced development tasks closing the
-  gap between what's shipped and what `ARCHITECTURE.md` describes. A
-  working FUSE driver, object-store layer, and directory-sharding logic
-  already exist and are tested — but they predate several decisions the
-  design has since evolved to (Protobuf instead of JSON, the `.metadata`
-  consolidation, the master block for multi-filesystem support), so the
-  code and the architecture doc are not currently describing the exact
-  same thing. `ROADMAP.md` is what closes that gap.
+| suite | where | result |
+|---|---|---|
+| Go tests (`go test ./...`) | Linux, MinIO in Docker, real FUSE mounts | all 16 packages pass, except one flaky lock-renewal test (see [known issues](docs/testing.md#known-issues)) |
+| [pjdfstest](https://github.com/pjd/pjdfstest) (POSIX conformance) | FUSE mount, Ubuntu 24.04 VM | 8,798 assertions: all pass but 4 accepted (directory link count, as on Btrfs) |
+| [winfsp-tests](https://github.com/winfsp/winfsp/wiki/WinFsp-Testing) `--external`, case-insensitive | WinFsp mount, Windows Server 2025 VM | 78 / 78 |
+| winfsp-tests `--external`, case-sensitive | same | 77 / 78 (`getfileinfo_name_test`, which WinFsp's memfs also fails case-sensitive) |
+| Logging chain end to end | Linux VM | 5 / 5 checks |
+| icbfs-sync end to end | Windows Server 2025 VM | 12 / 12 checks |
+| Large files (6 GiB, multipart edits, max size) | Linux VM | 7 / 7 checks |
 
-## Supported object stores
+**Not yet tested:**
 
-- AWS S3
-- MinIO (S3 API)
-- Azure Blob Storage
+- **Real AWS S3.** The code is the same S3-API code as for MinIO, but it
+  hasn't been run against AWS.
+- **Azure Blob Storage.** There is no Azure store implementation.
+- **xfstests and fsx** stress testing.
+- **Scale:** millions of files, many concurrent machines, and performance
+  generally.
 
-All three require object versioning enabled on the bucket/container —
-that's the mechanism snapshotting is built on.
+[docs/testing.md](docs/testing.md) has the details and the known issues.
 
-## Creating a filesystem
+## Building
 
-Mounts don't create filesystems; `icbfs-cli` does, in a bucket with
-versioning on:
+Requirements:
 
-```
-icbfs-cli fs create -fs docs                                  # primary-POSIX, root owned by you
-icbfs-cli fs create -fs share -primary-windows -root-owner S-1-5-21-…-1001
-icbfs-cli fs list | describe -fs NAME | resize | archive | prune
-```
+- **Go 1.27** or later.
+- To mount on Linux: FUSE 3 (`fuse3`).
+- To mount on Windows: [WinFsp](https://github.com/winfsp/winfsp/releases/latest),
+  installed on the machine. It isn't needed to build.
+- To run the Go tests: Docker. The tests start their own MinIO containers.
 
-Primary mode and max file size are fixed at creation; the declared size
-can change (`resize`). On Windows, a primary-Windows filesystem's root
-defaults to the creating account's permissions; elsewhere give
-`-root-owner` (full control for that SID, SYSTEM and Administrators) or
-`-root-sddl`. Store connection: `-endpoint`, `-bucket`, `-access-key`,
-`-secret-key`, or `$ICBFS_ENDPOINT` and friends.
+Everything is pure Go (`CGO_ENABLED=0` works), and cross-compiles from any
+OS:
 
-## Mounting the past
+```sh
+# Linux
+go build -o bin/ ./cmd/icbfs ./cmd/icbfs-cli ./cmd/icbfs-logd ./cmd/icbfs-mockserver ./cmd/drive-api
 
-Either mount command can show a filesystem read-only as it was at an
-earlier time:
+# Windows
+GOOS=windows go build -o bin/ ./cmd/icbfs-winfsp ./cmd/icbfs-cli ./cmd/drive-api
+GOOS=windows go build -ldflags -H=windowsgui -o bin/icbfs-sync.exe ./cmd/icbfs-sync
 
-```
-icbfs mount -as-of 2026-10-12 ... /mnt/yesterday        # as the day ended, local time
-icbfs mount -as-of 2026-10-12T15:04:05 ... /mnt/then    # local time
-icbfs-winfsp -as-of 2026-10-12T22:04:05Z ... Y:         # RFC 3339
+# tests (needs Docker; the FUSE tests need /dev/fuse)
+go test ./...
 ```
 
-The mount fails if the filesystem didn't exist yet at that time, or if
-the time is in the future. Unmount as usual (or Ctrl+C the command); its
-local version cache is deleted then. See `ARCHITECTURE.md`'s Snapshots
-section for how it works and what it costs.
+The generated code is checked in. Regenerate it only after changing a
+schema:
 
-A moment can be given a name — a snapshot that copies nothing — and
-mounted by it:
+- the drive API: `go generate ./pkg/drive/driveapi`, from
+  `spec/openapi/drive.yaml`;
+- Protobuf: see [spec/proto/README.md](spec/proto/README.md).
 
-```
-icbfs-cli names create -fs docs -name q3-signoff                 # now
-icbfs-cli names create -fs docs -name before-import -at 2026-10-01T09:00
-icbfs-cli names list -fs docs | delete -fs docs -name NAME
-icbfs mount -as-of q3-signoff ... /mnt/q3
-```
+## Quick start
 
-Names and the trash belong to a drive: here, with store credentials, the
-filesystem `-fs` (or a directory in it, `-root /team`); through the daemon,
-host's drive, `-drive ID` (see below).
+Start a MinIO with a versioned bucket, create a filesystem, and mount it:
 
-## Trash
+```sh
+docker run -d --name minio -p 9000:9000 minio/minio server /data
+docker run --rm --network host --entrypoint sh minio/mc -c \
+  'mc alias set local http://127.0.0.1:9000 minioadmin minioadmin && mc mb --with-versioning local/icbfs'
 
-Every delete — from a mount or the API — that removes a file's last name,
-or a directory, is recorded in the filesystem's trash, kept forever. A
-restore brings the item back with its whole history:
-
-```
-icbfs-cli trash list -fs docs [-path /reports]
-icbfs-cli trash restore -fs docs -id ENTRY [-to /new/path [-parents]] [-replace]
+export ICBFS_ENDPOINT=http://127.0.0.1:9000 ICBFS_BUCKET=icbfs \
+       ICBFS_ACCESS_KEY=minioadmin ICBFS_SECRET_KEY=minioadmin
+bin/icbfs-cli fs create -fs docs
+mkdir -p /tmp/docs && bin/icbfs mount -fs docs /tmp/docs
 ```
 
-Permanently deleting an item (the drive API's purge) erases every version
-of it and its trash entry; pruning a filesystem erases every version of
-everything in it.
+Then, from another shell with the same variables set, use it, delete
+something, and look back:
 
-## Logging through a daemon (Linux)
-
-On an host machine a FUSE mount names a **drive**, and gets
-everything else — the store's credentials, the filesystem and directory
-the drive is, whether this machine may only read it — through a local
-daemon that relays over one websocket to the server, the same shape as
-host's `hostd`; it logs what happens on it the same way:
-
-```
-icbfs-mockserver -secret S -log events.jsonl -drives docs=docs,team=docs:/team:ro -endpoint ... -bucket ... -access-key ... -secret-key ...
-icbfs-logd -socket /run/icbfs-logd.sock -server ws://server:8090/ws/daemon -secret S
-icbfs mount -log-socket /run/icbfs-logd.sock -drive team /mnt/team     # add -log-async to never wait
+```sh
+echo hello > /tmp/docs/a.txt
+bin/icbfs-cli names create -fs docs -name first
+rm /tmp/docs/a.txt
+bin/icbfs-cli trash list -fs docs
+mkdir -p /tmp/first && bin/icbfs mount -as-of first -fs docs /tmp/first
 ```
 
-`icbfs-cli` can go through the daemon too: with `-daemon SOCKET` (or
-`$ICBFS_DAEMON`) instead of store credentials, each command goes to the
-server, which checks it and runs it as the machine's account — the one
-the daemon sees on its socket, whatever the client claims — and logs it
-(`icbfs-mockserver -allow-commands` limits which). Names and trash
-commands then name the drive (`-drive team`), never a filesystem: only
-the server knows which filesystem and directory that is, and its
-permissions are on drives. The `fs` commands (administering a bucket's
-filesystems, which drives are made on) keep `-fs`.
+The mount commands take their defaults (`http://127.0.0.1:9000`, bucket
+`icbfs`, `minioadmin`) from flags, not from the environment.
 
-With `-log-socket` the mount takes its store endpoint, bucket and keys
-from the server (and can't mount without them), mounts the drive's
-directory as its root (read-only if the server says so), and logs a `read` when a
-file is opened for reading, a `write` (with the size) when a file that
-was written is closed, a `delete` for each unlink and rmdir, and an `ls`
-for each directory listing — each with the caller's uid, gid and pid. By
-default every logged operation waits until the server has written the
-event; with `-log-async` events are queued instead, and dropped (and
-counted) while the daemon is unreachable. `icbfs-mockserver` is a mock:
-one shared secret, one set of credentials, a JSON-lines log.
+## Documentation
 
-## Keeping a folder in step: icbfs-sync
+| | |
+|---|---|
+| [architecture.md](docs/architecture.md) | the design: objects, directories, metadata, concurrency, locking, past views, trash, Windows compatibility |
+| [mount.md](docs/mount.md) | mounting on Linux and Windows, installing WinFsp, mounting the past |
+| [cli.md](docs/cli.md) | `icbfs-cli`: filesystems, named versions, trash |
+| [api.md](docs/api.md) | the drive API: library, endpoints, permissions, versions, drafts |
+| [sync.md](docs/sync.md) | `icbfs-sync`: setup, settings, how it decides, safety, the tray |
+| [daemon.md](docs/daemon.md) | managed mounts through `icbfs-logd`, and what is logged |
+| [testing.md](docs/testing.md) | the test layers, how to run them, latest results, known issues |
+| [test/linux](test/linux/README.md), [test/windows](test/windows/README.md) | the disposable test VMs |
 
-`icbfs-sync` keeps folders on a Windows machine in step with icbfs drives:
-**one-way** (the folder is the truth; the drive mirrors it) or **two-way**
-(changes go both ways; when both sides changed, the folder wins). Nothing is
-lost on the drive: an overwrite is a new version, a delete goes to its
-trash.
-
-It works from listings, not change events, so it works on folders that
-can't report changes, such as a WebDAV drive, and catches up after any time
-away. On NTFS it uses stable file ids (renames are seen as renames) and
-copies ACLs. Where there are no ids, a new file the size of one that's gone
-is hashed, and if it matches it is moved on the drive, history and all, not
-uploaded again. A pass that would remove more than a set number of files
-waits for confirmation, and a folder that lists as empty, or lacks a marker
-file, is taken as disconnected and left alone.
+## Repository layout
 
 ```
-icbfs-sync init          # write a settings file to edit (paths: icbfs-sync paths)
-icbfs-sync set-secret    # store the secret key encrypted for this account
-icbfs-sync once          # one pass of every pair, from a command prompt
-icbfs-sync install       # start the tray at login
-icbfs-sync               # the tray: status, traffic, pause, confirm, log
+cmd/            the commands above
+internal/
+  icbfs/        the filesystem core
+  block/        directory B-tree blocks
+  objstore/     the S3 store, and as-of views of it
+  fuseserver/   the FUSE driver
+  winfspserver/ the WinFsp driver
+  acl/          the Windows access check
+  notify/       change-notification sources (MinIO, SQS, Azure change feed)
+  fslog/ logd/ logserver/ sidecmd/   the daemon chain
+  syncer/       icbfs-sync's engine, and its folder and drive sides
+  pb/           generated Protobuf code
+pkg/
+  drive/        the drive library, icbfs backend, and HTTP handlers
+  icbfs/        opening a bucket; filesystem administration
+spec/           Protobuf schemas and the OpenAPI spec
+test/           VM test environments and runners
+third_party/go-winfsp/   vendored WinFsp binding, patched
 ```
 
-It runs in the user's session, not as a service, because a mapped network
-drive belongs to the user's logon and exists only while they're logged in.
-To start a pair from a copy already in hand, copy it onto the drive first
-through a mount (robocopy keeps the times), then start the sync: files whose
-path, size and time match are adopted without being copied again.
+## License
 
-## The drive API
+MIT; see [LICENSE](LICENSE).
 
-Host's document API, as a Go library host-server mounts
-(`apiproposal.md` is the design, `spec/openapi/drive.yaml` the contract):
-
-- `pkg/drive` — the `Drive` interface (with per-backend capabilities),
-  copying between drives, diffs, drafts in a side store;
-- `pkg/drive/icbfsdrive` — the icbfs backend: a drive on a filesystem or a
-  directory in one, checking each item's own permissions as the actor's
-  profile (Windows ACLs on primary-Windows filesystems, evaluated in Go,
-  with inheritance; POSIX modes on primary-POSIX ones);
-- `pkg/drive/driveapi` — Fiber v3 handlers (`Mount`), plus the generated
-  models and Go client (`go generate ./pkg/drive/driveapi`);
-- `pkg/icbfs` — opening a bucket and administering its filesystems.
-
-`drive-api -config drive-api.json` serves it standalone for testing: a
-static token, drives, profiles and permissions from the file
-(`driveapi.Standalone`); requests carry `Authorization: Bearer TOKEN` and
-`X-Drive-Actor: NAME`.
-
-## Windows mount: install WinFsp first
-
-`cmd/icbfs-winfsp` does **not** carry or install
-[WinFsp](https://github.com/winfsp/winfsp) itself — it's a real,
-separate prerequisite (a kernel-mode driver plus a user-mode DLL) that
-has to be installed on the target Windows machine *before* a mount is
-attempted, not something icbfs's own binary bundles. Skip this and a
-mount attempt fails outright with a DLL-not-found-style error, not a
-helpful message pointing back here.
-
-Install it one of two ways, either requiring administrator rights (it
-installs a Windows service and files under `Program Files`):
-
-- Download and run the installer from
-  [WinFsp's latest release](https://github.com/winfsp/winfsp/releases/latest)
-  (`winfsp-<version>.msi`), or
-- `choco install winfsp`, if [Chocolatey](https://chocolatey.org/) is
-  already set up.
-
-Supported on Windows 7 through 11, x86/x64/ARM64 (per WinFsp's own
-documentation). Verified end to end on a real Windows Server VM — see
-`test/windows/README.md`'s "Installing WinFsp itself" section for the
-exact commands and a real gotcha found along the way (the installer
-doesn't add its own `bin` directory to `Path`).
-
-## Third-party notice
+### Third-party notice
 
 The Windows mount (`cmd/icbfs-winfsp`) is built on
-[WinFsp](https://github.com/winfsp/winfsp), licensed GPLv3 with a FLOSS
-exception. icbfs qualifies under that exception (MIT-licensed, meeting
-the Open Source Definition; never bundled or distributed alongside
-proprietary software) and carries the exception's required notice:
+[WinFsp](https://github.com/winfsp/winfsp), which is licensed GPLv3 with a
+FLOSS exception. icbfs qualifies under that exception: it is MIT-licensed,
+meets the Open Source Definition, and is never bundled or distributed with
+proprietary software. It carries the exception's required notice:
 
 > WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos
 > https://github.com/winfsp/winfsp
 
-The same notice is printed by `cmd/icbfs-winfsp` itself, at every mount
-and in its `--help` output — not just noted here.
+`icbfs-winfsp` prints the same notice at every mount and in its `-help`
+output.
+
+`third_party/go-winfsp` is a copy of
+[go-winfsp](https://github.com/winfsp/go-winfsp), patched to expose the
+callbacks icbfs needs. Its own license is in that directory.

@@ -1,0 +1,420 @@
+# Architecture
+
+icbfs is a filesystem stored directly in a versioned object-store bucket.
+It is built around two ideas:
+
+- **The store's own version history is the filesystem's history.** Every
+  write is a new object version with a server-assigned time, so any past
+  moment can be read back, and nothing deleted is really gone until it is
+  purged.
+- **Identity is separate from name and from attributes.** Every file and
+  directory is an object named by a UUID. Directories map names to UUIDs.
+  Attributes live in a small side object. Writing a file's content never
+  touches its directory, and renaming it never touches its content.
+
+```mermaid
+flowchart TB
+  subgraph Access["Access layers"]
+    FUSE["icbfs mount<br/>(FUSE, Linux)"]
+    WinFsp["icbfs-winfsp<br/>(WinFsp, Windows)"]
+    API["drive library + HTTP API<br/>(pkg/drive)"]
+    CLI["icbfs-cli"]
+    Sync["icbfs-sync"]
+  end
+  Core["internal/icbfs<br/>filesystem core: lookup, create, write,<br/>rename, link, trash, names, as-of views"]
+  Block["internal/block<br/>directory B-tree blocks"]
+  Store["internal/objstore<br/>S3 API: conditional writes, versions"]
+  Bucket[("Versioned bucket<br/>MinIO / S3")]
+  FUSE --> Core
+  WinFsp --> Core
+  API --> Core
+  CLI --> API
+  CLI --> Core
+  Sync --> API
+  Core --> Block
+  Core --> Store
+  Block --> Store
+  Store --> Bucket
+```
+
+## Object layout
+
+A bucket can hold many filesystems. Every object a filesystem owns starts
+with its four-hex-digit ID, so one prefix listing finds all of it.
+
+| key | what it is |
+|---|---|
+| `_master` | the bucket's list of filesystems (one per bucket) |
+| `<id>-root-<name>` | the filesystem's root directory block |
+| `<id>-<uuid>` | a file's content, or a directory's top block |
+| `<id>-<uuid>.metadata` | the item's attributes (mode, owner, times, xattrs, ACL, stream table) |
+| `<id>-<uuid>.ads.<n>` | an alternate data stream's bytes |
+| `<id>-<uuid>.lock` | byte-range and whole-file locks, when locking is on |
+| `<id>-trash-<inverted time>-<entry>` | one trash entry |
+| `<id>-name-<name>` | a named version |
+
+Item keys are **UUIDv7**. Their embedded millisecond timestamp gives each
+item a creation time for free and keeps keys roughly time-ordered.
+
+Encodings are Protobuf; the schemas are in [`spec/proto`](../spec/proto).
+
+## The master block
+
+The master block is a list of `FilesystemEntry` records: name, declared
+size, archived flag, primary mode (Windows or POSIX), max file size, and
+creation time. **A filesystem's ID is its position in the list.**
+
+- Creating a filesystem reads the list, takes the first free slot (or
+  appends one), and writes the list back with a conditional write.
+- Deleting a filesystem blanks its entry in place. The list never shrinks
+  or reorders, because an entry that moved would change its ID, and every
+  object it owns is keyed by that ID. A freed slot can be reused.
+- Sixteen bits of ID allow 65,536 filesystems to exist at once in one
+  bucket.
+
+Filesystems are created explicitly, by `icbfs-cli fs create` or the drive
+API, with every setting given then. A mount only attaches to an existing
+filesystem, so a mistyped name fails instead of making a new, empty one.
+
+**Lifecycle: active → archived → pruned.** An archived filesystem is
+read-only but still whole, so it can be backed up. The flag is read when a
+mount starts, so archiving takes effect on the next mount. Pruning deletes
+every version of every object under the filesystem's prefix, then blanks
+its entry, so a filesystem that later reuses the slot starts with no past.
+
+**`df`** reports the declared size as "Total". "Used" is the sum of a
+prefix listing of the filesystem's objects. That costs one listing page per
+thousand objects; none of the supported stores has a faster size query.
+
+## Files and directories
+
+**A file is one object.** There is no chunking. A file larger than one
+upload part is written as a multipart upload. Parts the edit didn't touch
+are copied on the server from the version the edit started from, so an edit
+uploads only what changed, but the result is still one object.
+
+- The part size is the smallest power-of-two MiB, at least 8 MiB, that fits
+  the filesystem's max file size into S3's 10,000 parts. That is 8 MiB for
+  an 8 GiB limit and 128 MiB for 1 TiB.
+- The **max file size** is set per filesystem at creation; the default is
+  1 TiB. A write or truncate past it fails with `EFBIG` on Linux, or
+  `STATUS_FILE_TOO_LARGE` on Windows.
+
+**Open files are edited in a local scratch file, not in memory.** Opening a
+file copies it from a shared on-disk read cache into a private scratch
+file, fetching it from the store if the cache doesn't have it. Reads and
+writes go to the scratch file, and flush writes it back.
+
+- The read cache is LRU-bounded, 512 MiB by default (`-cache-dir`,
+  `-cache-size`).
+- Each open session's edits stay invisible to other sessions until it
+  flushes.
+
+**Directories are B-trees of blocks.** A block holds `name → UUID + type`
+rows. When a block overflows, it splits at the **median key actually in
+it**, rather than at a fixed boundary or a hash. Real names cluster by
+prefix, and the median split keeps sorted listing cheap. The parent then
+holds range pointers.
+
+- A directory's own key is always the entry point to its tree. A split
+  keeps that key for the left half, except at the top, where both halves
+  get new keys and the top becomes an internal node.
+- Blocks hold up to 8 entries.
+- Lookup descends the tree. Listing walks it in order.
+- Underfull blocks are not merged back. A directory that grew and then
+  shrank stays as tall as it grew; this costs nothing in correctness.
+- The sort order is the filesystem's collation, fixed by its primary mode:
+  - primary-POSIX: plain byte order;
+  - primary-Windows: case-insensitive order (NTFS's uppercase table, pinned
+    in `internal/block/upcase_table.go`), with byte order breaking ties.
+
+**Hard links** are several rows pointing at one UUID; the link count is in
+`.metadata`. **Symlinks** keep their target as their content. **FIFOs,
+sockets and device nodes** are entries with a type, with the device number
+in `.metadata`.
+
+**Inode numbers** are a 64-bit xxhash of the item's key. They are stateless,
+and stable across remounts.
+
+## Metadata
+
+Every item has a `.metadata` object holding everything mutable except
+content:
+
+- mode, uid, gid, link count, device number;
+- access time, an explicit modification-time override, a creation-time
+  override, and the change time;
+- an xattr map holding:
+  - user xattrs;
+  - POSIX ACLs (`system.posix_acl_access` and `system.posix_acl_default`,
+    as Linux stores them);
+  - the Windows security descriptor as SDDL (`windows.acl`);
+  - the Windows attribute bits (`windows.attributes`);
+- the alternate-stream table.
+
+**Why a separate object.** An S3 ETag is a hash of the object's body. A
+change to an object's native metadata doesn't change its ETag, so a
+conditional write can't protect it. `.metadata`'s body *is* the attributes,
+so every change moves its ETag and compare-and-swap works.
+
+**Why one object, not one per field.** `stat()` reads these attributes
+together, and they change rarely. Locks are different: they are read by
+other callers and can change very often, so they get their own `.lock`
+object.
+
+**Derived, never stored twice:**
+
+- **Size** is the content object's length.
+- **mtime** is the content object's `Last-Modified`, unless an explicit
+  time was set (`utimensat`, `SetFileTime`). An explicit time holds only
+  while the content is still the version it was set on, so a later write
+  moves mtime again, as on any local filesystem.
+- **ctime** is the later of the recorded change time and the content's last
+  write.
+- **Creation time** is the time in the UUIDv7 key, unless overridden.
+- **Access time** is recorded in `.metadata` on a file's first read in each
+  open, and on a directory listing. It is best-effort: a lost race never
+  fails the read, and it doesn't count as a change for ctime. As-of mounts
+  record nothing.
+
+A full `stat()` is two requests, one for `.metadata` and one `HEAD` on the
+content, issued concurrently.
+
+## Concurrency
+
+**Every write is a conditional write.** A client reads an object, changes
+it, and writes it back with `If-Match` on the ETag it read. If someone else
+wrote first, the store rejects the write, and the client re-reads and
+retries.
+
+- Directory and metadata operations retry the whole operation, top down,
+  up to 20 times.
+- A lost race in the middle of a split can leave an unreferenced half-block
+  behind, which is harmless.
+- Conditional writes are verified against MinIO by the test suite: a stale
+  ETag is rejected with 412, and the rejected write never lands. MinIO does
+  not enforce `If-Match` on `DeleteObject`, so the design never depends on
+  conditional deletes.
+
+**Content writes re-apply only the caller's own edit.** A flush that loses
+the race does not resend its stale copy. It fetches the current content,
+applies only its own writes (the offsets and bytes it was given), and tries
+again. Two processes writing different parts of one file therefore both
+land, as they would on a local disk.
+
+- Retrying is bounded by time: 5 seconds, rather than a count, because a
+  retry of a large file costs more than one of a small file.
+- When the time runs out, the writer takes the file's lock (below) and
+  makes one last conditional attempt while holding it.
+- Every access layer follows this sequence. That is what guarantees a
+  writer under contention eventually makes progress.
+
+When two link-count changes race, the one reaching zero first writes a
+tombstone under the same conditional write before the object is deleted,
+so a concurrent `link()` can't revive a file that is being removed.
+
+## Locking
+
+Locking is optional (`icbfs mount -locking`) and best-effort. It is built
+from the same object-store primitives as everything else, not from a
+coordination service.
+
+- A file's locks are a list of `{range, holder, shared, expires}` entries
+  in its `.lock` object. Acquiring one checks for overlaps, then writes
+  conditionally.
+- **Leases.** Every lock has a 30-second lease, renewed every 10 seconds
+  while it is held, so a crashed holder's locks expire. A lease's expiry is
+  computed from the store's `Last-Modified` time for the lock write, not
+  the client's clock. Stealing an expired lock is itself a conditional
+  write, so clock skew can only shift when a lease looks expired; it can't
+  let two clients take the same lock.
+- **Waiting** is polling. With `-notify` on MinIO, a change notification on
+  the `.lock` key triggers an immediate retry. Polling still runs as the
+  fallback, because notifications can be missed.
+- **Enforcement.** Before writing, a client compares its scratch file with
+  the version it opened, takes the span of bytes that changed, re-reads the
+  lock list, and refuses the write if that span overlaps someone else's
+  lock. This is stronger than advisory, but not mandatory: a new lock can
+  still slip in between the check and the write.
+- The same mechanism serves `flock`/`fcntl` from applications and the write
+  path's own escalation.
+- **Windows mounts don't take part.** WinFsp has no byte-range-lock
+  callback; its kernel driver keeps `LockFileEx` locks in a table local to
+  the machine. So locks on a Windows mount neither see nor conflict with
+  locks from Linux mounts.
+
+## Change notifications
+
+Optional (`icbfs mount -notify`), and MinIO only for mounts. A notification
+is a hint to "go look". It never says authoritatively what changed.
+
+- **On a FUSE mount**, a notification for a file the kernel knows about
+  is passed on to the kernel to invalidate it. The mount sets no kernel
+  cache timeouts and doesn't keep page cache across opens, so every read
+  already reaches the store, and this has no visible effect today. The
+  table of watched files is never pruned, so it grows with the number of
+  distinct files a long-running mount touches.
+- **For locking**, a notification wakes a waiter early.
+- **In the drive API**, `icbfsdrive.Drive.Notify` takes signals for its
+  event stream.
+
+The sources are behind one interface (`internal/notify`):
+
+| | MinIO (`miniosrc`) | AWS S3 (`sqssrc`) | Azure (`azurecf`) |
+|---|---|---|---|
+| mechanism | `ListenBucketNotification` stream | event notifications to SQS | Change Feed |
+| latency | near real time | seconds, sometimes a minute | minutes |
+| can drop events | yes, in async mode under overload | no (at least once) | no |
+| server-side prefix filter | yes | yes | no |
+| status | wired to `icbfs mount -notify` | adapter built, not wired to a command | filter logic only, no client |
+
+A mount with no notification source behaves exactly as one that never had
+the feature.
+
+## Past views: as-of mounts and named versions
+
+`icbfs mount -as-of T` and `icbfs-winfsp -as-of T` mount the filesystem
+read-only as it was at T. T can be:
+
+- a date (the end of that day, local time);
+- a date and time without a zone (local time);
+- an RFC 3339 time;
+- a named version.
+
+There is no separate walking code. `objstore.AsOf` is a read-only view of
+the store at T: each read returns the newest version at or before T, or
+"not found" if the item didn't exist then. The ordinary filesystem code
+runs on top of it.
+
+- The master block is read as of T too. Mounting a filesystem that didn't
+  exist at T fails, and a name reused since T resolves to the filesystem
+  that had it then.
+- A T later than the store's own clock is refused, except within two
+  seconds, which is waited out (the store's clock reads in whole seconds).
+- Each object's version list is resolved once and cached in a local SQLite
+  database. The past doesn't change, so the cache never goes stale. It is
+  deleted at unmount; a mount that was killed leaves it behind, and the
+  next as-of mount cleans it up.
+- `df` and `du` are computed as of T, from every version under the prefix.
+  That is slow for a long history, so a mount computes them once.
+
+**Named versions** are one object each, `<id>-name-<name>`, holding a time.
+A name made "now" holds no time: its time is the store's timestamp for
+writing it, which orders it after every write that had already finished.
+Names are created and deleted, never moved, and can't look like a time.
+
+**Limits:**
+
+- T is compared with the store's timestamps. MinIO lists milliseconds;
+  AWS S3 lists seconds.
+- An operation that touches several objects and is in flight at T (a
+  rename is a remove plus an insert) can show half done, as when copying a
+  live filesystem.
+- Reconstructing a whole tree at T costs a version listing per object.
+  This is the price of not storing version pointers in directories, which
+  would make every write propagate up to the root.
+
+## Trash and permanent delete
+
+A delete under versioning leaves the item's versions in place, and an item
+is stored under its ID, not its name, so a deleted item can come back
+whole.
+
+**Trash entries.** A delete that removes a file's last name, or removes a
+directory, writes a trash entry. This covers `unlink`, `rmdir`, and a rename
+over an existing item, from any mount or the API.
+
+- An entry records the item's ID, name, parent, path, who deleted it,
+  when, its size and its version.
+- The key's inverted time lists entries newest first.
+- Entries are kept forever; there is no emptying the trash.
+
+**Restoring** removes the delete markers on the item's objects (content,
+`.metadata`, streams), so the history simply continues. It then gives the
+item a name: its old one, or any other. A taken name is refused unless the
+restore is told to replace it. A recursive delete through the API is one
+batch, and restoring its directory restores the batch.
+
+**Purge** permanently erases every version of an item's objects, its trash
+entries, and its drafts. For a directory, that includes every block its tree
+has had and everything under it.
+
+- The item's name stays in its parent directory's history: a past listing
+  still shows it, and opening it finds nothing.
+- A file with other names is refused unless all of its names go too.
+
+## Windows compatibility: primary mode
+
+Each filesystem is created **primary-Windows** or **primary-POSIX**. The
+primary side's fields are stored with full fidelity; the other side's are
+derived when a mount needs them.
+
+- **Permissions.**
+  - A primary-Windows filesystem stores each item's security descriptor as
+    SDDL. Linux mounts don't translate it: they use the POSIX mode stored
+    alongside it.
+  - A primary-POSIX filesystem stores modes. Windows mounts derive a DACL
+    from the mode.
+  - An item with no descriptor of its own takes its nearest ancestor's.
+  - New items inherit as Windows would give them: OI, CI, NP and IO flags,
+    and CREATOR OWNER.
+- **Reserved names.** A primary-Windows filesystem refuses names Windows
+  can't hold: `< > : " / \ | ? *`, a trailing space or period, and `CON`,
+  `AUX`, `COM1` and the like.
+- **Name length.** A name is at most 255, counted the way the primary side
+  counts it: bytes on primary-POSIX, UTF-16 code units on primary-Windows.
+  This is enforced in the core, on lookups too.
+- **Attribute bits** (ReadOnly, Hidden, System, Archive) are stored on
+  primary-Windows filesystems. On primary-POSIX ones, only ReadOnly is
+  derived, from the mode.
+- **Case.** Names are stored as given. Two names that differ only in case
+  can coexist.
+  - The Windows mount looks names up case-insensitively by default
+    (`-case-insensitive`), using NTFS's rule. An exact match wins.
+  - On primary-Windows filesystems, that lookup is a normal descent,
+    because directories are sorted case-insensitively.
+  - On primary-POSIX filesystems, a case-insensitive lookup with no exact
+    match reads the whole directory.
+- **Times.** Creation time comes from the UUIDv7 key; any of the four times
+  can be set explicitly.
+- **Symlinks** appear as reparse points. Other reparse tags are not
+  supported.
+- **Open-file semantics.** Share modes and delete-on-close are enforced by
+  WinFsp's kernel driver; the driver defers deletes to cleanup.
+- **Alternate data streams** work on files and directories.
+  - Each stream is its own object. The owner's `.metadata` maps stream
+    names to IDs, which are never reused.
+  - Linux mounts don't show streams, so a copy made on Linux doesn't carry
+    them.
+  - Listing streams needs WinFsp's `GetStreamInfo` callback. The copy of
+    go-winfsp vendored in `third_party/go-winfsp` is patched to expose it.
+
+## The drive API's permission check
+
+The drive API has no operating system between it and the store, so it
+checks file permissions itself (`internal/acl`):
+
+- **Primary-Windows:** a Windows access check of the actor's SIDs against
+  the item's SDDL. Rules:
+  - the first entry that names a right decides it;
+  - the owner always keeps READ_CONTROL and WRITE_DAC;
+  - generic rights are mapped;
+  - the descriptor is inherited from the nearest ancestor that has one.
+- **Primary-POSIX:** mode bits against the actor's uid and gids.
+
+See [api.md](api.md).
+
+## Not supported
+
+- **Object stores:**
+  - Azure Blob Storage has no store implementation, only the change-feed
+    filter.
+  - AWS S3 uses the same S3-API code as MinIO, but hasn't been run against
+    real S3.
+- **Directory structure:** 8.3 short names, directory junctions, and volume
+  mount points.
+- **Coordination:** a strongly consistent lock service. Locking (above) is
+  best-effort by design.
+- **Quotas** for users or groups within a filesystem. Only the
+  per-filesystem declared size exists.
+- **Sparse files:** a hole is stored as zero bytes.

@@ -3,12 +3,12 @@ info:
   title: Drive API
   version: 1.0.0
   description: |
-    Host's document API over drives (icbfs filesystems, or directories
-    in them, first). See apiproposal.md for the design. Items are named by
+    A document API over drives (icbfs filesystems, or directories in
+    them). See docs/api.md for the design. Items are named by
     `path` (from the drive's root) or `id`; JSON for metadata, raw bytes for
     content, RFC 3339 times. Errors are `{"error", "code"}`.
 
-    Authentication and the role check are host's: every operation names
+    Authentication and the role check are the host application's: every operation names
     the permission it needs (`x-permission`). The item's own permissions are
     then checked as the actor's profile on the drive.
 servers:
@@ -404,8 +404,8 @@ paths:
 
 components:
   parameters:
-    DriveParam: {name: drive, in: path, required: true, schema: {type: string}, description: Host's drive id.}
-    BucketParam: {name: bucket, in: path, required: true, schema: {type: string}, description: Host's registered bucket id.}
+    DriveParam: {name: drive, in: path, required: true, schema: {type: string}, description: The host's drive id.}
+    BucketParam: {name: bucket, in: path, required: true, schema: {type: string}, description: The host's registered bucket id.}
     PathParam: {name: path, in: query, schema: {type: string}, description: The item's path from the drive's root.}
     IDParam: {name: id, in: query, schema: {type: string}, description: The item's id (wins over path).}
     AsOfParam: {name: asOf, in: query, schema: {type: string, format: date-time}, description: Read the drive as it was then (read-only).}
