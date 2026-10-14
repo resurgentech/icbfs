@@ -197,7 +197,7 @@ func (p *pairRun) open(ctx context.Context) (*syncer.Engine, error) {
 	if _, err := os.Stat(c.Folder); err != nil {
 		return nil, fmt.Errorf("the folder %s isn't there (not connected?)", c.Folder)
 	}
-	local, err := folderside.Open(c.Folder, folderside.Options{IDs: c.IDs, ACLs: c.ACLs})
+	local, err := folderside.Open(c.Folder, folderside.Options{IDs: c.IDs, ACLs: c.ACLs, TimeResolution: durationOr(c.TimeResolution, 0)})
 	if err != nil {
 		return nil, err
 	}

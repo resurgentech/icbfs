@@ -148,6 +148,37 @@ event; with `-log-async` events are queued instead, and dropped (and
 counted) while the daemon is unreachable. `icbfs-mockserver` is a mock:
 one shared secret, one set of credentials, a JSON-lines log.
 
+## Keeping a folder in step: icbfs-sync
+
+`icbfs-sync` keeps folders on a Windows machine in step with icbfs drives:
+**one-way** (the folder is the truth; the drive mirrors it) or **two-way**
+(changes go both ways; when both sides changed, the folder wins). Nothing is
+lost on the drive: an overwrite is a new version, a delete goes to its
+trash.
+
+It works from listings, not change events, so it works on folders that
+can't report changes, such as a WebDAV drive, and catches up after any time
+away. On NTFS it uses stable file ids (renames are seen as renames) and
+copies ACLs. Where there are no ids, a new file the size of one that's gone
+is hashed, and if it matches it is moved on the drive, history and all, not
+uploaded again. A pass that would remove more than a set number of files
+waits for confirmation, and a folder that lists as empty, or lacks a marker
+file, is taken as disconnected and left alone.
+
+```
+icbfs-sync init          # write a settings file to edit (paths: icbfs-sync paths)
+icbfs-sync set-secret    # store the secret key encrypted for this account
+icbfs-sync once          # one pass of every pair, from a command prompt
+icbfs-sync install       # start the tray at login
+icbfs-sync               # the tray: status, traffic, pause, confirm, log
+```
+
+It runs in the user's session, not as a service, because a mapped network
+drive belongs to the user's logon and exists only while they're logged in.
+To start a pair from a copy already in hand, copy it onto the drive first
+through a mount (robocopy keeps the times), then start the sync: files whose
+path, size and time match are adopted without being copied again.
+
 ## The drive API
 
 Host's document API, as a Go library host-server mounts

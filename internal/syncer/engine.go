@@ -289,6 +289,7 @@ func (e *Engine) Pass(ctx context.Context) (rep Report) {
 			break
 		}
 		e.doing(a.String())
+		x.said = ""
 		err := x.do(a)
 		if err != nil {
 			rep.Errors = append(rep.Errors, fmt.Errorf("%s: %w", a, err))
@@ -300,7 +301,11 @@ func (e *Engine) Pass(ctx context.Context) (rep Report) {
 			continue
 		}
 		rep.Done++
-		if a.Kind != Adopt && a.Kind != Forget {
+		switch {
+		case x.said == "-":
+		case x.said != "":
+			e.log(Event{Action: x.said, Note: a.Note})
+		case a.Kind != Adopt && a.Kind != Forget:
 			e.log(Event{Action: a.String(), Note: a.Note})
 		}
 	}
@@ -349,6 +354,9 @@ type executor struct {
 	local    map[string]Entry
 	remote   map[string]Entry
 	consumed map[string]bool // files a rename used, not to be removed
+	// said, set by an action, is what it really did, for the log, when
+	// that isn't what was planned ("-": nothing worth saying).
+	said string
 
 	trashBySize map[int64][]Trashed
 }
@@ -436,6 +444,7 @@ func (x *executor) do(a Action) error {
 		return nil
 	case RemoveRemote:
 		if x.consumed[a.Key] {
+			x.said = "-" // it was moved, by a rename
 			return nil
 		}
 		if err := R.Remove(x.ctx, a.Path); err != nil {
@@ -539,6 +548,7 @@ func (x *executor) upload(a Action) error {
 		x.consumed[k] = true
 		delete(x.base, k)
 		x.rep.Renames++
+		x.said = "move-remote " + b.Path + " -> " + a.Path + " (renamed: the same content)"
 		return x.recordUp(a, l, moved, hash)
 	}
 	if tr, ok := R.(Trash); ok {
@@ -553,6 +563,7 @@ func (x *executor) upload(a Action) error {
 			}
 			x.dropTrashed(t)
 			x.rep.Renames++
+			x.said = "restore-remote " + t.Path + " -> " + a.Path + " (from the trash: the same content)"
 			return x.recordUp(a, l, restored, hash)
 		}
 	}

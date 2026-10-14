@@ -53,6 +53,9 @@ type Pair struct {
 	// IDs and ACLs: "auto" (ask the volume), "on", "off".
 	IDs  string `json:"ids,omitempty"`
 	ACLs string `json:"acls,omitempty"`
+	// TimeResolution, if set ("1s"), is how finely the folder keeps
+	// times, instead of what the volume says.
+	TimeResolution string `json:"timeResolution,omitempty"`
 	// CaseSensitive pairs tell names apart by case; the default doesn't,
 	// as Windows doesn't.
 	CaseSensitive bool `json:"caseSensitive,omitempty"`
