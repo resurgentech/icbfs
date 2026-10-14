@@ -1210,26 +1210,26 @@ const nlinkZero = 0
 // and retries against the fresh state, never silently resurrecting a
 // target this call just decided to delete), then deletes both the
 // metadata object and the content object.
-func (f *Filesystem) adjustNlink(ctx context.Context, uuid string, delta int) error {
+func (f *Filesystem) adjustNlink(ctx context.Context, uuid string, delta int) (deleted bool, err error) {
 	mk := metadataObjectKey(uuid)
 	for attempt := 0; attempt < maxTreeRetries; attempt++ {
 		body, obj, err := f.store.Get(ctx, mk)
 		if err != nil {
-			return mapNotFound(err)
+			return false, mapNotFound(err)
 		}
 		data, readErr := io.ReadAll(body)
 		body.Close()
 		if readErr != nil {
-			return readErr
+			return false, readErr
 		}
 		attr, err := decodeFileMetadata(data)
 		if err != nil {
-			return err
+			return false, err
 		}
 		if attr.Nlink == nlinkZero {
 			// Already tombstoned by a prior/concurrent Unlink; nothing to
 			// resurrect, and nothing further for a decrement to do either.
-			return ErrNotFound
+			return false, ErrNotFound
 		}
 		newNlink := int(attr.Nlink) + delta
 		attr.Ctime = time.Now() // a link count change is a status change
@@ -1238,14 +1238,14 @@ func (f *Filesystem) adjustNlink(ctx context.Context, uuid string, delta int) er
 			attr.Nlink = nlinkZero
 			tomb, err := encodeFileMetadata(attr)
 			if err != nil {
-				return err
+				return false, err
 			}
 			_, err = f.store.Put(ctx, mk, bytes.NewReader(tomb), nil, obj.ETag)
 			if objstore.IsPreconditionFailed(err) {
 				continue
 			}
 			if err != nil {
-				return err
+				return false, err
 			}
 			// We are the one who observed and serialized "really at
 			// zero" via the CAS write above — no concurrent Link can
@@ -1253,21 +1253,21 @@ func (f *Filesystem) adjustNlink(ctx context.Context, uuid string, delta int) er
 			// either our tombstone (and bailed, above) or lost its own
 			// CAS race against it. Safe to physically delete now.
 			f.deleteUnlessOpen(ctx, uuid, attr.Streams)
-			return nil
+			return true, nil
 		}
 
 		attr.Nlink = uint32(newNlink)
 		updated, err := encodeFileMetadata(attr)
 		if err != nil {
-			return err
+			return false, err
 		}
 		_, err = f.store.Put(ctx, mk, bytes.NewReader(updated), nil, obj.ETag)
 		if objstore.IsPreconditionFailed(err) {
 			continue
 		}
-		return err
+		return false, err
 	}
-	return fmt.Errorf("adjust nlink %s: exceeded %d retries", uuid, maxTreeRetries)
+	return false, fmt.Errorf("adjust nlink %s: exceeded %d retries", uuid, maxTreeRetries)
 }
 
 // updateFileMetadata applies mutate to a file/symlink's metadataObjectKey
@@ -1491,12 +1491,12 @@ func (f *Filesystem) Link(ctx context.Context, dirKey, name, targetUUID string, 
 	if err := f.checkName(name); err != nil {
 		return Attr{}, err
 	}
-	if err := f.adjustNlink(ctx, targetUUID, +1); err != nil {
+	if _, err := f.adjustNlink(ctx, targetUUID, +1); err != nil {
 		return Attr{}, err
 	}
 
 	if err := f.insertEntry(ctx, dirKey, name, targetUUID, targetType); err != nil {
-		_ = f.adjustNlink(ctx, targetUUID, -1) // best-effort rollback
+		_, _ = f.adjustNlink(ctx, targetUUID, -1) // best-effort rollback
 		return Attr{}, err
 	}
 	f.touchDir(ctx, dirKey)
@@ -1524,13 +1524,23 @@ func (f *Filesystem) Unlink(ctx context.Context, dirKey, name string) error {
 		return ErrIsDir
 	}
 
+	before, _ := f.store.Head(ctx, entry.UUID) // for the trash entry, if this was the last name
 	if _, err := f.removeEntry(ctx, dirKey, name); err != nil {
 		return err
 	}
 	f.touchDir(ctx, dirKey)
 
-	if err := f.adjustNlink(ctx, entry.UUID, -1); err != nil && !errors.Is(err, ErrNotFound) {
+	deleted, err := f.adjustNlink(ctx, entry.UUID, -1)
+	if err != nil && !errors.Is(err, ErrNotFound) {
 		return err
+	}
+	if deleted {
+		var size int64
+		var version string
+		if before != nil {
+			size, version = before.Size, before.VersionID
+		}
+		f.recordTrash(ctx, entry.UUID, entry.Type, dirKey, name, size, version)
 	}
 	return nil
 }
@@ -1578,6 +1588,7 @@ func (f *Filesystem) Rmdir(ctx context.Context, dirKey, name string) error {
 	if err := f.store.Delete(ctx, metadataObjectKey(entry.UUID), ""); err != nil && !objstore.IsNotFound(err) {
 		return err
 	}
+	f.recordTrash(ctx, entry.UUID, TypeDir, dirKey, name, 0, "")
 	return nil
 }
 
@@ -1701,15 +1712,29 @@ func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, 
 			if err := f.store.Delete(ctx, existing.UUID, ""); err != nil {
 				return err
 			}
+			if err := f.store.Delete(ctx, metadataObjectKey(existing.UUID), ""); err != nil && !objstore.IsNotFound(err) {
+				return err
+			}
+			f.recordTrash(ctx, existing.UUID, TypeDir, newDirKey, newName, 0, "")
 		} else {
 			if entry.Type == TypeDir {
 				return ErrNotDir
 			}
+			before, _ := f.store.Head(ctx, existing.UUID)
 			if _, err := f.removeEntry(ctx, newDirKey, newName); err != nil {
 				return err
 			}
-			if err := f.adjustNlink(ctx, existing.UUID, -1); err != nil && !errors.Is(err, ErrNotFound) {
+			deleted, err := f.adjustNlink(ctx, existing.UUID, -1)
+			if err != nil && !errors.Is(err, ErrNotFound) {
 				return err
+			}
+			if deleted {
+				var size int64
+				var version string
+				if before != nil {
+					size, version = before.Size, before.VersionID
+				}
+				f.recordTrash(ctx, existing.UUID, existing.Type, newDirKey, newName, size, version)
 			}
 		}
 	}

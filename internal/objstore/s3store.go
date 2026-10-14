@@ -364,6 +364,18 @@ func (s *S3Store) HeadVersion(ctx context.Context, key, versionID string) (*Obje
 	return s.headVersion(ctx, key, aws.String(versionID))
 }
 
+func (s *S3Store) DeleteVersion(ctx context.Context, key, versionID string) error {
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket:    aws.String(s.bucket),
+		Key:       aws.String(key),
+		VersionId: aws.String(versionID),
+	})
+	if err != nil {
+		return fmt.Errorf("delete %s version %s: %w", key, versionID, err)
+	}
+	return nil
+}
+
 func (s *S3Store) Delete(ctx context.Context, key string, ifMatch string) error {
 	in := &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket),

@@ -2,10 +2,12 @@ package fuseserver
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 
 	"github.com/resurgentech/icbfs/internal/fslog"
+	"github.com/resurgentech/icbfs/internal/icbfs"
 )
 
 // Logger receives the actions a mount logs — fslog.Client, relaying to
@@ -37,6 +39,15 @@ func (n *Node) childPath(name string) string {
 		return "/" + p + "/" + name
 	}
 	return "/" + name
+}
+
+// deleting attaches, for the trash, who is deleting path.
+func (n *Node) deleting(ctx context.Context, path string) context.Context {
+	info := icbfs.DeleteInfo{Path: path}
+	if caller, ok := fuse.FromContext(ctx); ok {
+		info.By = fmt.Sprintf("uid:%d", caller.Uid)
+	}
+	return icbfs.WithDeleteInfo(ctx, info)
 }
 
 // logEvent logs op on path by ctx's caller, if this mount logs.

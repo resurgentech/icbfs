@@ -46,7 +46,15 @@ mount_icbfs "$IP" "$MNT" "$FS_NAME"
 
 echo "Running pjdfstest (needs root; this can take several minutes against real network storage)..." >&2
 set +e
-ssh_vm "$IP" "sudo bash -c 'cd $MNT && prove -r /home/ubuntu/pjdfstest/tests'" > "$WORK_DIR/pjdfstest-${FS_NAME}.log" 2>&1
+# $PJDFSTEST_TESTS narrows the run (e.g. "link/00.t chmod"), repeated
+# $PJDFSTEST_REPEAT times (default once), to chase a flaky test.
+tests=/home/ubuntu/pjdfstest/tests
+if [ -n "${PJDFSTEST_TESTS:-}" ]; then
+  tests=$(for t in $PJDFSTEST_TESTS; do printf '/home/ubuntu/pjdfstest/tests/%s ' "$t"; done)
+fi
+for _ in $(seq "${PJDFSTEST_REPEAT:-1}"); do
+  ssh_vm "$IP" "sudo bash -c 'cd $MNT && prove -r $tests'"
+done > "$WORK_DIR/pjdfstest-${FS_NAME}.log" 2>&1
 set -e
 
 echo "" >&2

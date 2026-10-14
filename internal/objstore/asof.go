@@ -289,3 +289,7 @@ func (a *AsOf) UpdateMetadata(context.Context, string, map[string]string, string
 func (a *AsOf) Delete(context.Context, string, string) error {
 	return ErrReadOnly
 }
+
+func (a *AsOf) DeleteVersion(context.Context, string, string) error {
+	return ErrReadOnly
+}

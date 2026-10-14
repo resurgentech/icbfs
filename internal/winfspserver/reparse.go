@@ -273,12 +273,14 @@ func (d *driver) SetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 	// created and still empty, so Rmdir's "non-empty" rejection never
 	// applies here.
 	wasDir := h.typ == icbfs.TypeDir
+	// Replacing a placeholder isn't a delete anyone made: no trash entry.
+	pctx := icbfs.WithDeleteInfo(ctx(), icbfs.DeleteInfo{NoTrash: true})
 	if wasDir {
-		if err := d.fsys.Rmdir(ctx(), parent.Key, base); err != nil {
+		if err := d.fsys.Rmdir(pctx, parent.Key, base); err != nil {
 			return toWinError(err)
 		}
 	} else if h.typ != icbfs.TypeSymlink {
-		if err := d.fsys.Unlink(ctx(), parent.Key, base); err != nil {
+		if err := d.fsys.Unlink(pctx, parent.Key, base); err != nil {
 			return toWinError(err)
 		}
 	}

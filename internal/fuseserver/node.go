@@ -437,7 +437,7 @@ func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 }
 
 func (n *Node) Unlink(ctx context.Context, name string) syscall.Errno {
-	ctx = detach(ctx)
+	ctx = n.deleting(detach(ctx), n.childPath(name))
 	if err := n.fsys.Unlink(ctx, n.key, name); err != nil {
 		return errnoFromErr(err)
 	}
@@ -446,7 +446,7 @@ func (n *Node) Unlink(ctx context.Context, name string) syscall.Errno {
 }
 
 func (n *Node) Rmdir(ctx context.Context, name string) syscall.Errno {
-	ctx = detach(ctx)
+	ctx = n.deleting(detach(ctx), n.childPath(name))
 	if err := n.fsys.Rmdir(ctx, n.key, name); err != nil {
 		return errnoFromErr(err)
 	}
@@ -517,6 +517,7 @@ func (n *Node) Rename(ctx context.Context, name string, newParent fs.InodeEmbedd
 	}
 	const renameNoReplace = 0x1
 	replace := flags&renameNoReplace == 0
+	ctx = n.deleting(ctx, np.childPath(newName)) // for what the rename replaces
 	return errnoFromErr(n.fsys.Rename(ctx, n.key, name, np.key, newName, replace))
 }
 

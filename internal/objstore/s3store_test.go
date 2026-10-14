@@ -434,3 +434,43 @@ func TestPutPartsCopiesAndUploadsUnderIfMatch(t *testing.T) {
 		t.Fatalf("object after a failed PutParts: %v, %v; want unchanged %s", head, err, v2.ETag)
 	}
 }
+
+// TestDeleteVersion: removing a delete marker undoes a delete, and
+// removing a version erases it from history.
+func TestDeleteVersion(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	v1, err := store.Put(ctx, "k", strings.NewReader("one"), nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(ctx, "k", strings.NewReader("two"), nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete(ctx, "k", ""); err != nil {
+		t.Fatal(err)
+	}
+	versions, err := store.ListVersions(ctx, "k")
+	if err != nil || len(versions) != 3 || !versions[0].DeleteMarker {
+		t.Fatalf("after delete: %+v, %v", versions, err)
+	}
+	if err := store.DeleteVersion(ctx, "k", versions[0].VersionID); err != nil {
+		t.Fatalf("remove the delete marker: %v", err)
+	}
+	body, _, err := store.Get(ctx, "k")
+	if err != nil {
+		t.Fatalf("get after undelete: %v", err)
+	}
+	data, _ := io.ReadAll(body)
+	body.Close()
+	if string(data) != "two" {
+		t.Fatalf("after undelete: %q, want two", data)
+	}
+	if err := store.DeleteVersion(ctx, "k", v1.VersionID); err != nil {
+		t.Fatalf("erase version one: %v", err)
+	}
+	versions, _ = store.ListVersions(ctx, "k")
+	if len(versions) != 1 || versions[0].VersionID == v1.VersionID {
+		t.Fatalf("history after erasing one version: %+v", versions)
+	}
+}

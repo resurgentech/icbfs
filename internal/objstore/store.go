@@ -148,6 +148,13 @@ type Store interface {
 	// package.
 	Delete(ctx context.Context, key string, ifMatch string) error
 
+	// DeleteVersion permanently removes one version of key — the only
+	// truly destructive operation here: Delete leaves history alone and
+	// adds a delete marker, while this erases a version, or, given a
+	// delete marker's version ID, removes the marker (undoing a Delete:
+	// the version before it is current again).
+	DeleteVersion(ctx context.Context, key, versionID string) error
+
 	// PutIfAbsent writes body as the object body under key only if no
 	// object currently exists there — a true create-if-absent CAS
 	// primitive (unlike Put's ifMatch, which has no way to express

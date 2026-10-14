@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -533,10 +534,11 @@ func (d *driver) Cleanup(fs *winfsp.FileSystemRef, file uintptr, name string, cl
 	// when CaseSensitive(false) is in effect, which Rmdir/Unlink's
 	// exact-match lookup would otherwise silently fail to find.
 	base = realStoredName(ctx(), d.fsys, parent.Key, base, d.caseInsensitive)
+	dctx := icbfs.WithDeleteInfo(ctx(), icbfs.DeleteInfo{Path: strings.ReplaceAll(name, `\`, "/")})
 	if h.typ == icbfs.TypeDir {
-		_ = d.fsys.Rmdir(ctx(), parent.Key, base)
+		_ = d.fsys.Rmdir(dctx, parent.Key, base)
 	} else {
-		_ = d.fsys.Unlink(ctx(), parent.Key, base)
+		_ = d.fsys.Unlink(dctx, parent.Key, base)
 	}
 }
 
