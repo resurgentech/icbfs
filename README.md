@@ -84,6 +84,31 @@ the time is in the future. Unmount as usual (or Ctrl+C the command); its
 local version cache is deleted then. See `ARCHITECTURE.md`'s Snapshots
 section for how it works and what it costs.
 
+A moment can be given a name — a snapshot that copies nothing — and
+mounted by it:
+
+```
+icbfs-cli names create -fs docs -name q3-signoff                 # now
+icbfs-cli names create -fs docs -name before-import -at 2026-10-01T09:00
+icbfs-cli names list -fs docs | delete -fs docs -name NAME
+icbfs mount -as-of q3-signoff ... /mnt/q3
+```
+
+## Trash
+
+Every delete — from a mount or the API — that removes a file's last name,
+or a directory, is recorded in the filesystem's trash, kept forever. A
+restore brings the item back with its whole history:
+
+```
+icbfs-cli trash list -fs docs [-path /reports]
+icbfs-cli trash restore -fs docs -id ENTRY [-as NEWNAME] [-replace]
+```
+
+Permanently deleting an item (the drive API's purge) erases every version
+of it and its trash entry; pruning a filesystem erases every version of
+everything in it.
+
 ## Logging through a daemon (Linux)
 
 A FUSE mount can log what happens on it, and get the credentials it

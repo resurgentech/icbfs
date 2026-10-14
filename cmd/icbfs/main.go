@@ -47,7 +47,7 @@ func main() {
 	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
 	logSocket := fset.String("log-socket", "", "log reads, writes, deletes and directory listings through the icbfs-logd daemon on this Unix socket — which also supplies the store's endpoint, bucket and keys (-endpoint, -bucket, -region, -access-key and -secret-key are then ignored); the mount fails without them")
 	logAsync := fset.Bool("log-async", false, "with -log-socket: queue events instead of waiting for the server to log each one; never slows an operation, but drops (and counts) events while the daemon is unreachable")
-	asOf := fset.String("as-of", "", "mount read-only as the filesystem was at this time: a date (2006-01-02, meaning the end of that day), a date-time (2006-01-02T15:04:05) in local time, or RFC 3339 with a zone. Fails if the filesystem didn't exist yet then")
+	asOf := fset.String("as-of", "", "mount read-only as the filesystem was at this time: a date (2006-01-02, meaning the end of that day), a date-time (2006-01-02T15:04:05) in local time, or RFC 3339 with a zone; or a version name (icbfs-cli names). Fails if the filesystem didn't exist yet then")
 	locking := fset.Bool("locking", false, "enable the Locking feature (flock/fcntl); off by default, per ARCHITECTURE.md's Locking section")
 	enableNotify := fset.Bool("notify", false, "enable the Change notifications feature (ROADMAP.md Part E) via MinIO's ListenBucketNotification; off by default, same opt-in reasoning as --locking. Only the MinIO backend (task E4) is wired up here — Azure/AWS S3 adapters (tasks E5/E6) aren't reachable from this flag.")
 	debug := fset.Bool("debug", false, "log every FUSE operation")
@@ -91,7 +91,7 @@ func main() {
 
 	var view *objstore.AsOf
 	if *asOf != "" {
-		at, err := icbfs.ParseAsOf(*asOf, time.Local)
+		at, err := icbfs.ResolveAsOf(ctx, store, *fsName, *asOf, time.Local)
 		if err != nil {
 			log.Fatal(err)
 		}

@@ -1,5 +1,6 @@
 // Command icbfs-cli does what isn't a filesystem operation: creating and
-// managing icbfs filesystems in a bucket (fs), and more to come. Mounts
+// managing icbfs filesystems in a bucket (fs), naming versions (names),
+// and the trash (trash). Mounts
 // never create a filesystem; this does, or the drive API.
 //
 //	icbfs-cli fs create   -fs NAME [-primary-windows] [-size N] [-max-file-size N] [root options]
@@ -8,6 +9,11 @@
 //	icbfs-cli fs resize   -fs NAME -size N
 //	icbfs-cli fs archive  -fs NAME
 //	icbfs-cli fs prune    -fs NAME -yes
+//	icbfs-cli names create -fs NAME -name VERSION [-at TIME] [-scope PATH]
+//	icbfs-cli names list   -fs NAME
+//	icbfs-cli names delete -fs NAME -name VERSION
+//	icbfs-cli trash list    -fs NAME [-path PATH] [-limit N]
+//	icbfs-cli trash restore -fs NAME -id ENTRY [-as NAME] [-replace]
 //
 // Every command takes the store's connection (-endpoint, -bucket,
 // -region, -access-key, -secret-key; or $ICBFS_ENDPOINT, $ICBFS_BUCKET,
@@ -34,31 +40,43 @@ import (
 )
 
 const usage = `usage: icbfs-cli fs create|list|describe|resize|archive|prune [flags]
-run "icbfs-cli fs <command> -h" for a command's flags`
+       icbfs-cli names create|list|delete [flags]
+       icbfs-cli trash list|restore [flags]
+run "icbfs-cli <group> <command> -h" for a command's flags`
 
 func main() {
-	if len(os.Args) < 3 || os.Args[1] != "fs" {
+	if len(os.Args) < 3 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)
 	}
-	cmd, args := os.Args[2], os.Args[3:]
+	cmd, args := os.Args[1]+" "+os.Args[2], os.Args[3:]
 	c, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	opCtx = c
 	var err error
 	switch cmd {
-	case "create":
+	case "fs create":
 		err = fsCreate(args)
-	case "list":
+	case "fs list":
 		err = fsList(args)
-	case "describe":
+	case "fs describe":
 		err = fsDescribe(args)
-	case "resize":
+	case "fs resize":
 		err = fsResize(args)
-	case "archive":
+	case "fs archive":
 		err = fsArchive(args)
-	case "prune":
+	case "fs prune":
 		err = fsPrune(args)
+	case "names create":
+		err = namesCreate(args)
+	case "names list":
+		err = namesList(args)
+	case "names delete":
+		err = namesDelete(args)
+	case "trash list":
+		err = trashList(args)
+	case "trash restore":
+		err = trashRestore(args)
 	default:
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)

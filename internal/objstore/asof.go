@@ -41,17 +41,35 @@ type AsOf struct {
 
 var _ Store = (*AsOf)(nil)
 
+// asOfClockSlack is how far ahead of the store's clock an as-of time
+// may be and still be waited for.
+const asOfClockSlack = 2 * time.Second
+
 // NewAsOf returns store as it was at at, refusing a time after the
-// store's own current time (whose view would still be changing). Its
-// cache goes in a new directory under cacheParent ("" for the system
-// temp directory).
+// store's own current time (whose view would still be changing), unless
+// it's within asOfClockSlack, which it waits out. Its cache goes in a
+// new directory under cacheParent ("" for the system temp directory).
 func NewAsOf(ctx context.Context, store Store, at time.Time, cacheParent string) (*AsOf, error) {
-	now, err := store.ServerTime(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("as-of: read the store's clock: %w", err)
-	}
-	if at.After(now) {
-		return nil, fmt.Errorf("as-of %s is after the object store's current time %s", at.Format(time.RFC3339), now.Format(time.RFC3339))
+	// The store's clock reads in whole seconds (an HTTP Date), so a time
+	// just made — a version name made now — can look up to a second
+	// ahead: wait that out rather than refuse it.
+	deadline := time.Now().Add(asOfClockSlack)
+	for {
+		now, err := store.ServerTime(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("as-of: read the store's clock: %w", err)
+		}
+		if !at.After(now) {
+			break
+		}
+		if at.Sub(now) > asOfClockSlack || time.Now().After(deadline) {
+			return nil, fmt.Errorf("as-of %s is after the object store's current time %s", at.Format(time.RFC3339), now.Format(time.RFC3339))
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
 	}
 	removeStaleAsOfCaches(cacheParent)
 	dir, err := os.MkdirTemp(cacheParent, asOfCachePrefix)

@@ -53,7 +53,7 @@ func main() {
 	accessKey := fset.String("access-key", "minioadmin", "access key")
 	secretKey := fset.String("secret-key", "minioadmin", "secret key")
 	region := fset.String("region", "us-east-1", "region (ignored by MinIO, required by the SDK)")
-	asOf := fset.String("as-of", "", "mount read-only as the filesystem was at this time: a date (2006-01-02, meaning the end of that day), a date-time (2006-01-02T15:04:05) in local time, or RFC 3339 with a zone. Fails if the filesystem didn't exist yet then")
+	asOf := fset.String("as-of", "", "mount read-only as the filesystem was at this time: a date (2006-01-02, meaning the end of that day), a date-time (2006-01-02T15:04:05) in local time, or RFC 3339 with a zone; or a version name (icbfs-cli names). Fails if the filesystem didn't exist yet then")
 	caseInsensitive := fset.Bool("case-insensitive", true, "case-insensitive name lookup, following the standard NTFS/Samba/WSL2 pattern (ARCHITECTURE.md's Windows compatibility section) — storage itself always stays case-sensitive/case-preserving regardless of this flag")
 	cacheDir := fset.String("cache-dir", "", "local disk directory for the file-content cache (ROADMAP.md's Part G, task G3); empty (the default) uses a fresh os.TempDir() subdirectory")
 	cacheSize := fset.Uint64("cache-size", 512<<20, "maximum total bytes the local disk cache (-cache-dir) may hold before evicting the least-recently-used cached file")
@@ -77,7 +77,7 @@ func main() {
 
 	var view *objstore.AsOf
 	if *asOf != "" {
-		at, err := icbfs.ParseAsOf(*asOf, time.Local)
+		at, err := icbfs.ResolveAsOf(ctx, store, *fsName, *asOf, time.Local)
 		if err != nil {
 			log.Fatal(err)
 		}
