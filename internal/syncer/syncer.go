@@ -17,6 +17,8 @@ package syncer
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"strings"
 	"time"
@@ -136,4 +138,13 @@ func Key(path string, caseInsensitive bool) string {
 		return strings.ToLower(path)
 	}
 	return path
+}
+
+// HashReader is the SHA-256 of r's content, as a sync side keeps it.
+func HashReader(r io.Reader) (string, error) {
+	h := sha256.New()
+	if _, err := io.Copy(h, r); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
