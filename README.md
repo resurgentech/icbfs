@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/icbfs.png" alt="icbfs logo" width="200"></p>
+
 # icbfs
 
 *I Can't Believe this isn't already a Filesystem.*
