@@ -32,24 +32,24 @@ var ErrWriteContention = errors.New("content write: exceeded retry budget and lo
 // perfectly real end for a write at offset 0.
 const noTouch = -1
 
-// OpenFile is one open session of a file: its edits, kept in a private
-// local scratch file, and flushed back as one conditional whole-object
-// write that, on a lost race, is re-applied onto the current content
-// (docs/architecture.md's Concurrency section). It lives here, not in an
-// access layer, so FUSE and WinFsp share the retry and escalation logic.
+// content is a file's content while it's open in this process: a local
+// scratch file every open of the file reads and writes, as on a local
+// disk, flushed back as one conditional whole-object write that, on a
+// lost race, is re-applied onto the current content (docs/architecture.md's
+// Concurrency section). It lives here, not in an access layer, so FUSE and
+// WinFsp share the retry and escalation logic. The last close of the file
+// ends it.
 //
-// The scratch file belongs to this session alone: sharing one between
-// sessions would let one's unflushed edits leak into another's, breaking
-// the re-apply. Below it, a shared LRU cache of fetched versions
-// (diskCache) saves re-downloading unchanged content; sessions never modify
-// it, and a successful Flush replaces its entry.
-type OpenFile struct {
-	fsys   *Filesystem
-	key    string
-	holder string // this session's unique identity for escalation locks
+// Below it, a shared LRU cache of fetched versions (diskCache) saves
+// re-downloading unchanged content; content never modifies a cached
+// version, and a successful Flush replaces its entry.
+type content struct {
+	fsys *Filesystem
+	key  string
+	refs int // the OpenFiles using it; guarded by fsys.openMu
 
 	mu    sync.Mutex
-	file  *os.File // private local scratch file — see type doc comment
+	file  *os.File // the local scratch file
 	size  int64
 	etag  string
 	dirty bool
@@ -62,40 +62,74 @@ type OpenFile struct {
 	baseVersion string
 	baseSize    int64
 
-	// touchedStart and touchedEnd span every byte this session wrote. The
-	// writes themselves are already merged in the scratch file, in order,
-	// so a rebase needs only this range read back from it, not a log of
-	// writes.
+	// touchedStart and touchedEnd span every byte written since the last
+	// flush, through any open. The writes themselves are already merged in
+	// the scratch file, in order, so a rebase needs only this range read
+	// back from it, not a log of writes.
 	touchedStart, touchedEnd int64
 
-	// atimeTouched guards TouchAtime's at-most-once-per-session
-	// behavior — see its own doc comment.
-	atimeTouched bool
-
-	// truncated is set when Truncate has fixed this session's size since
-	// its last flush, so a rebase onto newer content keeps that size
-	// instead of the base's.
+	// truncated is set when Truncate has fixed the size since the last
+	// flush, so a rebase onto newer content keeps that size instead of the
+	// base's.
 	truncated bool
 
-	// lastWrite is when WriteAt last changed this session's content —
-	// the mtime Stat reports for it until it's flushed (see
-	// Filesystem.localOverlay).
+	// lastWrite is when the content last changed — the mtime Stat reports
+	// until it's flushed (see Filesystem.localOverlay).
 	lastWrite time.Time
 }
 
-// newOpenFileHolder mints a unique identity for this session's escalation
+// OpenFile is one open of a file: a handle on the file's content, shared
+// with every other open of it in this process, so each sees the others'
+// writes at once. Each open has its own identity for escalation locks and
+// records an access once.
+type OpenFile struct {
+	fsys   *Filesystem
+	key    string
+	holder string // this open's unique identity for escalation locks
+	c      *content
+
+	mu           sync.Mutex
+	closed       bool
+	atimeTouched bool // see TouchAtime
+}
+
+// newOpenFileHolder mints a unique identity for an open's escalation
 // locks.
 func newOpenFileHolder() (string, error) {
 	return NewUUIDv7()
 }
 
-// Open returns an OpenFile seeded with key's current content and ETag. A
-// Head learns the current ETag; only a cache miss on it fetches the
-// content.
+// Open returns an OpenFile on key's content: the content another open in
+// this process already has, or key's current content and ETag, from the
+// cache or the store. A Head learns the current ETag; only a cache miss on
+// it fetches the content.
+//
+// Content already open is brought up to the stored version if it has no
+// unflushed writes and another client has written since, so an open
+// still sees what was written elsewhere before it (close-to-open). With
+// unflushed writes, the next flush merges them onto the stored version.
 func (f *Filesystem) Open(ctx context.Context, key string) (*OpenFile, error) {
 	head, err := f.store.Head(ctx, key)
 	if err != nil {
 		return nil, mapNotFound(err)
+	}
+	holder, err := newOpenFileHolder()
+	if err != nil {
+		return nil, err
+	}
+	if c := f.shareContent(key); c != nil {
+		c.mu.Lock()
+		if !c.dirty && c.etag != head.ETag {
+			err = c.rebaseLocked(ctx)
+		}
+		c.mu.Unlock()
+		o := &OpenFile{fsys: f, key: key, holder: holder, c: c}
+		f.holdOpen(o)
+		if err != nil {
+			o.Close()
+			return nil, err
+		}
+		return o, nil
 	}
 	fetch := func(ctx context.Context) (io.ReadCloser, error) {
 		body, _, err := f.store.Get(ctx, key)
@@ -108,13 +142,9 @@ func (f *Filesystem) Open(ctx context.Context, key string) (*OpenFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	holder, err := newOpenFileHolder()
-	if err != nil {
-		file.Close()
-		return nil, err
-	}
-	o := &OpenFile{fsys: f, key: key, holder: holder, file: file, size: size, etag: head.ETag,
-		baseVersion: head.VersionID, baseSize: size, touchedStart: noTouch}
+	c := f.installContent(&content{fsys: f, key: key, file: file, size: size, etag: head.ETag,
+		baseVersion: head.VersionID, baseSize: size, touchedStart: noTouch})
+	o := &OpenFile{fsys: f, key: key, holder: holder, c: c}
 	f.holdOpen(o)
 	return o, nil
 }
@@ -125,70 +155,102 @@ func (f *Filesystem) NewOpenFile(key, etag string, data []byte) *OpenFile {
 	holder, err := newOpenFileHolder()
 	if err != nil {
 		// Only if the system's random source fails. A fixed holder means
-		// two such sessions could share a lock identity while escalating;
+		// two such opens could share a lock identity while escalating;
 		// nothing else is affected.
 		holder = "unknown-rng-failure"
 	}
-	file, err := f.cache.newScratchFile()
-	if err != nil {
-		// Only if a local temp file can't be created. The OpenFile then
-		// fails on first use, rather than every caller of Create and Mknod
-		// having to handle an error here.
-		o := &OpenFile{fsys: f, key: key, holder: holder, etag: etag, touchedStart: noTouch}
-		f.holdOpen(o)
-		return o
-	}
-	if len(data) > 0 {
-		if _, err := file.Write(data); err == nil {
-			_, _ = file.Seek(0, io.SeekStart)
+	c := f.shareContent(key)
+	if c == nil {
+		c = &content{fsys: f, key: key, etag: etag, baseSize: int64(len(data)), touchedStart: noTouch}
+		// Only if a local temp file can't be created is file nil: the
+		// OpenFile then fails on first use, rather than every caller of
+		// Create and Mknod having to handle an error here.
+		if file, err := f.cache.newScratchFile(); err == nil {
+			if len(data) > 0 {
+				if _, err := file.Write(data); err == nil {
+					_, _ = file.Seek(0, io.SeekStart)
+				}
+			}
+			c.file, c.size = file, int64(len(data))
 		}
+		c = f.installContent(c)
 	}
-	o := &OpenFile{fsys: f, key: key, holder: holder, file: file, size: int64(len(data)), etag: etag,
-		baseSize: int64(len(data)), touchedStart: noTouch}
+	o := &OpenFile{fsys: f, key: key, holder: holder, c: c}
 	f.holdOpen(o)
 	return o
 }
 
-// Close releases this session's scratch file. Access layers call it exactly
-// once, when the handle closes; it's safe on an OpenFile whose scratch file
-// couldn't be created.
+// Close ends this open. Access layers call it exactly once, when the
+// handle closes. The last open's Close removes the scratch file, unflushed
+// writes and all: flushing is the caller's (Flush, at every close(2)).
 //
 // The last Close of a file unlinked while open deletes its objects (see
 // openSessions).
 func (o *OpenFile) Close() error {
-	defer o.fsys.releaseOpen(o)
 	o.mu.Lock()
-	defer o.mu.Unlock()
-	if o.file == nil {
+	if o.closed {
+		o.mu.Unlock()
 		return nil
 	}
-	name := o.file.Name()
-	err := o.file.Close()
+	o.closed = true
+	o.mu.Unlock()
+	defer o.fsys.releaseOpen(o)
+	if !o.fsys.dropContent(o.c) {
+		return nil
+	}
+	c := o.c
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.file == nil {
+		return nil
+	}
+	name := c.file.Name()
+	err := c.file.Close()
 	_ = os.Remove(name)
-	o.file = nil
+	c.file = nil
 	return err
 }
 
-// pending reports this session's unflushed state: its current size, when
-// it last wrote, and whether anything is waiting to be flushed.
-func (o *OpenFile) pending() (size int64, lastWrite time.Time, dirty bool) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return o.size, o.lastWrite, o.dirty
+// pending reports the content's unflushed state: its current size, when
+// it last changed, and whether anything is waiting to be flushed.
+func (c *content) pending() (size int64, lastWrite time.Time, dirty bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.size, c.lastWrite, c.dirty
 }
 
-// Dirty reports whether the session has writes Flush hasn't stored.
+// Dirty reports whether the file has writes, through any open, that Flush
+// hasn't stored.
 func (o *OpenFile) Dirty() bool {
-	_, _, dirty := o.pending()
+	_, _, dirty := o.c.pending()
 	return dirty
 }
 
 // Size returns the current (post-edit, pre-flush) content length.
 func (o *OpenFile) Size() int64 {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return o.size
+	size, _, _ := o.c.pending()
+	return size
 }
+
+// ReadAt returns up to length bytes at off: every open's writes included,
+// before Flush makes them visible to anyone else.
+func (o *OpenFile) ReadAt(off, length int64) []byte { return o.c.ReadAt(off, length) }
+
+// WriteAt writes data at off, visible at once to every open of the file.
+// A negative offset is ErrInvalidArgument, and an end past the max file
+// size ErrFileTooLarge.
+func (o *OpenFile) WriteAt(data []byte, off int64) error { return o.c.WriteAt(data, off) }
+
+// Truncate sets the file's length, as ftruncate(2) does, for every open.
+func (o *OpenFile) Truncate(size int64) error { return o.c.Truncate(size) }
+
+// Allocate is fallocate(2); see content.Allocate.
+func (o *OpenFile) Allocate(off, length int64, mode uint32) error {
+	return o.c.Allocate(off, length, mode)
+}
+
+// Flush stores every open's writes; see content.Flush.
+func (o *OpenFile) Flush(ctx context.Context) (Attr, error) { return o.c.Flush(ctx, o.holder) }
 
 // TouchAtime records an access, at most once per session. The kernel splits
 // one read(2) into many FUSE reads (about 128 KiB each), and one metadata
@@ -206,21 +268,18 @@ func (o *OpenFile) TouchAtime(ctx context.Context) error {
 	return o.fsys.TouchAtime(ctx, o.key, TypeFile)
 }
 
-// ReadAt returns up to length bytes at off from the scratch file: this
-// session's own edits included, before Flush makes them visible to anyone
-// else.
-func (o *OpenFile) ReadAt(off, length int64) []byte {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if o.file == nil || off >= o.size || length <= 0 {
+func (c *content) ReadAt(off, length int64) []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.file == nil || off >= c.size || length <= 0 {
 		return nil
 	}
 	end := off + length
-	if end > o.size {
-		end = o.size
+	if end > c.size {
+		end = c.size
 	}
 	out := make([]byte, end-off)
-	n, err := o.file.ReadAt(out, off)
+	n, err := c.file.ReadAt(out, off)
 	if err != nil && err != io.EOF {
 		return nil
 	}
@@ -229,62 +288,43 @@ func (o *OpenFile) ReadAt(off, length int64) []byte {
 
 // WriteAt writes data at off into the scratch file, and widens the touched
 // range Flush re-applies after a lost race.
-//
-// A negative offset is ErrInvalidArgument, and an end past the max file
-// size ErrFileTooLarge (see applyLocked).
-func (o *OpenFile) WriteAt(data []byte, off int64) error {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if err := o.applyLocked(data, off); err != nil {
+func (c *content) WriteAt(data []byte, off int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.applyLocked(data, off); err != nil {
 		return err
 	}
 	end := off + int64(len(data))
-	if o.touchedStart == noTouch || off < o.touchedStart {
-		o.touchedStart = off
+	if c.touchedStart == noTouch || off < c.touchedStart {
+		c.touchedStart = off
 	}
-	if end > o.touchedEnd {
-		o.touchedEnd = end
+	if end > c.touchedEnd {
+		c.touchedEnd = end
 	}
-	o.dirty = true
-	o.lastWrite = time.Now()
+	c.dirty = true
+	c.lastWrite = time.Now()
 	return nil
 }
 
-// errSessionClosed is Flush on a session that has been closed.
-var errSessionClosed = errors.New("icbfs: session closed")
+// errSessionClosed is Flush on content whose last open has closed.
+var errSessionClosed = errors.New("icbfs: file closed")
 
-// truncateIfOpen is Truncate, reporting false and doing nothing if the
-// session has been closed.
-func (o *OpenFile) truncateIfOpen(size int64) (bool, error) {
-	o.mu.Lock()
-	closed := o.file == nil
-	o.mu.Unlock()
-	if closed {
-		return false, nil
-	}
-	err := o.Truncate(size)
-	if errors.Is(err, ErrInvalidArgument) && size >= 0 {
-		return false, nil // closed in between
-	}
-	return err == nil, err
-}
-
-// Truncate sets this session's content length, as ftruncate(2) does: a
-// shrink drops the tail, a grow extends with zeros (sparsely, on the
-// local scratch file). Like WriteAt, it's flushed by Flush.
-func (o *OpenFile) Truncate(size int64) error {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if size < 0 || o.file == nil {
+// Truncate sets the content's length, as ftruncate(2) does: a shrink
+// drops the tail, a grow extends with zeros (sparsely, on the local scratch
+// file). Like WriteAt, it's flushed by Flush.
+func (c *content) Truncate(size int64) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if size < 0 || c.file == nil {
 		return ErrInvalidArgument
 	}
-	if size > o.fsys.maxFileSize {
+	if size > c.fsys.maxFileSize {
 		return ErrFileTooLarge
 	}
-	if size == o.size {
+	if size == c.size {
 		return nil
 	}
-	return o.resizeLocked(size)
+	return c.resizeLocked(size)
 }
 
 // fallocate(2)'s modes. FUSE passes on only these; the kernel refuses
@@ -295,15 +335,14 @@ const (
 	FallocZeroRange = 0x10
 )
 
-// Allocate is fallocate(2) on this session's content, flushed as a write
-// is. Content is stored whole, zeros included, so there's no space to
+// Allocate is fallocate(2) on the content, flushed as a write is. Content is stored whole, zeros included, so there's no space to
 // reserve: a plain allocation only grows the size (unless FallocKeepSize),
 // and punching a hole and zeroing a range write zeros. Any other mode is
 // ErrNotSupported.
-func (o *OpenFile) Allocate(off, length int64, mode uint32) error {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if off < 0 || length <= 0 || o.file == nil {
+func (c *content) Allocate(off, length int64, mode uint32) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if off < 0 || length <= 0 || c.file == nil {
 		return ErrInvalidArgument
 	}
 	end := off + length
@@ -312,13 +351,13 @@ func (o *OpenFile) Allocate(off, length int64, mode uint32) error {
 	}
 	keep := mode&FallocKeepSize != 0
 	grow := func(size int64) error {
-		if size > o.fsys.maxFileSize {
+		if size > c.fsys.maxFileSize {
 			return ErrFileTooLarge
 		}
-		if keep || size <= o.size {
+		if keep || size <= c.size {
 			return nil
 		}
-		return o.resizeLocked(size)
+		return c.resizeLocked(size)
 	}
 	switch mode &^ FallocKeepSize {
 	case 0:
@@ -327,56 +366,56 @@ func (o *OpenFile) Allocate(off, length int64, mode uint32) error {
 		if !keep {
 			return ErrInvalidArgument // as Linux: a hole never changes the size
 		}
-		return o.zeroLocked(off, min(end, o.size))
+		return c.zeroLocked(off, min(end, c.size))
 	case FallocZeroRange:
 		if err := grow(end); err != nil {
 			return err
 		}
-		return o.zeroLocked(off, min(end, o.size))
+		return c.zeroLocked(off, min(end, c.size))
 	default:
 		return ErrNotSupported
 	}
 }
 
 // resizeLocked sets the scratch file's size, as Truncate does.
-func (o *OpenFile) resizeLocked(size int64) error {
-	if err := o.file.Truncate(size); err != nil {
+func (c *content) resizeLocked(size int64) error {
+	if err := c.file.Truncate(size); err != nil {
 		return err
 	}
-	o.touchLocked(min(size, o.size), max(size, o.size))
-	o.size = size
-	o.truncated = true
+	c.touchLocked(min(size, c.size), max(size, c.size))
+	c.size = size
+	c.truncated = true
 	return nil
 }
 
 // zeroLocked writes zeros over [lo, hi).
-func (o *OpenFile) zeroLocked(lo, hi int64) error {
+func (c *content) zeroLocked(lo, hi int64) error {
 	if lo >= hi {
 		return nil
 	}
 	zeros := make([]byte, min(hi-lo, 1<<20))
 	for at := lo; at < hi; {
 		n := min(hi-at, int64(len(zeros)))
-		if _, err := o.file.WriteAt(zeros[:n], at); err != nil {
+		if _, err := c.file.WriteAt(zeros[:n], at); err != nil {
 			return err
 		}
 		at += n
 	}
-	o.touchLocked(lo, hi)
+	c.touchLocked(lo, hi)
 	return nil
 }
 
 // touchLocked widens the touched range to cover [lo, hi) and marks the
-// session dirty, as WriteAt does.
-func (o *OpenFile) touchLocked(lo, hi int64) {
-	if o.touchedStart == noTouch || lo < o.touchedStart {
-		o.touchedStart = lo
+// content dirty, as WriteAt does.
+func (c *content) touchLocked(lo, hi int64) {
+	if c.touchedStart == noTouch || lo < c.touchedStart {
+		c.touchedStart = lo
 	}
-	if hi > o.touchedEnd {
-		o.touchedEnd = hi
+	if hi > c.touchedEnd {
+		c.touchedEnd = hi
 	}
-	o.dirty = true
-	o.lastWrite = time.Now()
+	c.dirty = true
+	c.lastWrite = time.Now()
 }
 
 // applyLocked extends the local scratch file to cover off+len(data) if
@@ -385,103 +424,106 @@ func (o *OpenFile) touchLocked(lo, hi int64) {
 // A negative offset is invalid; an end past the filesystem's max file
 // size is ErrFileTooLarge (see DefaultMaxFileSize), checked before the
 // scratch file is extended.
-func (o *OpenFile) applyLocked(data []byte, off int64) error {
+func (c *content) applyLocked(data []byte, off int64) error {
 	if off < 0 {
 		return ErrInvalidArgument
 	}
 	end := off + int64(len(data))
-	if end > o.fsys.maxFileSize {
+	if end > c.fsys.maxFileSize {
 		return ErrFileTooLarge
 	}
-	if o.file == nil {
+	if c.file == nil {
 		return ErrInvalidArgument
 	}
-	if end > o.size {
-		if err := o.file.Truncate(end); err != nil {
+	if end > c.size {
+		if err := c.file.Truncate(end); err != nil {
 			return err
 		}
-		o.size = end
+		c.size = end
 	}
 	if len(data) > 0 {
-		if _, err := o.file.WriteAt(data, off); err != nil {
+		if _, err := c.file.WriteAt(data, off); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// touchedRangeLocked returns the span this session's writes touched.
+// touchedRangeLocked returns the span written since the last flush.
 // Merging separate edits into one span over-approximates, which can only
 // make a lock check stricter, never miss a conflict. It's called only when
 // dirty, which WriteAt never sets without widening the range.
-func (o *OpenFile) touchedRangeLocked() (start, end int64) {
-	return o.touchedStart, o.touchedEnd
+func (c *content) touchedRangeLocked() (start, end int64) {
+	return c.touchedStart, c.touchedEnd
 }
 
 // rebaseLocked fetches key's current content into a fresh scratch file
-// (through the cache, as Open does), copies this session's touched range
-// onto it from the old scratch file, and updates o.etag.
-func (o *OpenFile) rebaseLocked(ctx context.Context) error {
+// (through the cache, as Open does), copies the touched range onto it from
+// the old scratch file, and updates c.etag. With nothing touched, it
+// brings the content up to the stored version.
+func (c *content) rebaseLocked(ctx context.Context) error {
 	var ownEdits []byte
-	ownSize := o.size
-	if o.touchedStart != noTouch && o.file != nil && o.touchedStart < ownSize {
-		// Only what's still inside this session's content: past its end
+	ownSize := c.size
+	if c.touchedStart != noTouch && c.file != nil && c.touchedStart < ownSize {
+		// Only what's still inside the content: past its end
 		// is a truncated-away tail, which the size below takes care of.
-		ownEdits = make([]byte, min(o.touchedEnd, ownSize)-o.touchedStart)
-		if _, err := o.file.ReadAt(ownEdits, o.touchedStart); err != nil && err != io.EOF {
+		ownEdits = make([]byte, min(c.touchedEnd, ownSize)-c.touchedStart)
+		if _, err := c.file.ReadAt(ownEdits, c.touchedStart); err != nil && err != io.EOF {
 			return err
 		}
 	}
 
-	head, err := o.fsys.store.Head(ctx, o.key)
+	head, err := c.fsys.store.Head(ctx, c.key)
 	if err != nil {
 		return mapNotFound(err)
 	}
 	fetch := func(ctx context.Context) (io.ReadCloser, error) {
-		body, _, err := o.fsys.store.Get(ctx, o.key)
+		body, _, err := c.fsys.store.Get(ctx, c.key)
 		if err != nil {
 			return nil, mapNotFound(err)
 		}
 		return body, nil
 	}
-	fresh, size, err := o.fsys.cache.seedScratch(ctx, o.key, head.ETag, fetch)
+	fresh, size, err := c.fsys.cache.seedScratch(ctx, c.key, head.ETag, fetch)
 	if err != nil {
 		return err
 	}
 	oldName := ""
-	if o.file != nil {
-		oldName = o.file.Name()
-		o.file.Close()
+	if c.file != nil {
+		oldName = c.file.Name()
+		c.file.Close()
 	}
-	o.file = fresh
-	o.size = size
+	c.file = fresh
+	c.size = size
 	if ownEdits != nil {
-		if err := o.applyLocked(ownEdits, o.touchedStart); err != nil {
+		if err := c.applyLocked(ownEdits, c.touchedStart); err != nil {
 			if oldName != "" {
 				_ = os.Remove(oldName)
 			}
 			return err
 		}
 	}
-	if o.truncated && o.size != ownSize {
-		if err := o.file.Truncate(ownSize); err != nil {
+	if c.truncated && c.size != ownSize {
+		if err := c.file.Truncate(ownSize); err != nil {
 			if oldName != "" {
 				_ = os.Remove(oldName)
 			}
 			return err
 		}
-		o.size = ownSize
+		c.size = ownSize
 	}
 	if oldName != "" {
 		_ = os.Remove(oldName)
 	}
-	o.etag = head.ETag
-	o.baseVersion, o.baseSize = head.VersionID, size
+	c.etag = head.ETag
+	c.baseVersion, c.baseSize = head.VersionID, size
 	return nil
 }
 
-// Flush writes the session's edits back as one whole-object write,
-// conditional on the ETag the scratch file is based on.
+// Flush writes the content back as one whole-object write, conditional on
+// the ETag the scratch file is based on: every open's writes, as a close on
+// a local disk stores them, whichever descriptor made them. holder is the
+// flushing open's identity, for the lock check and escalation.
 //
 // On a lost race the scratch file can't just be resent: it's built on
 // content that's no longer current, and would erase the other writer's
@@ -494,36 +536,36 @@ func (o *OpenFile) rebaseLocked(ctx context.Context) error {
 // conditional write while holding it, and releases it. Escalating writers
 // take turns on the lock instead of burning retries against each other, so
 // each one gets its write in.
-func (o *OpenFile) Flush(ctx context.Context) (Attr, error) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	if !o.dirty {
-		return o.fsys.statFile(ctx, o.key)
+func (c *content) Flush(ctx context.Context, holder string) (Attr, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.dirty {
+		return c.fsys.statFile(ctx, c.key)
 	}
-	if o.file == nil {
+	if c.file == nil {
 		return Attr{}, errSessionClosed
 	}
-	if o.fsys.isOrphan(o.key) {
+	if c.fsys.isOrphan(c.key) {
 		// Unlinked while open: nothing can see this content any more,
 		// and its objects go at the last Close. Drop the writes.
-		o.dirty = false
-		o.truncated = false
-		o.touchedStart, o.touchedEnd = noTouch, 0
-		return o.fsys.statFile(ctx, o.key)
+		c.dirty = false
+		c.truncated = false
+		c.touchedStart, c.touchedEnd = noTouch, 0
+		return c.fsys.statFile(ctx, c.key)
 	}
 
 	// Checked before every write: refuse at once if the touched range
 	// overlaps another holder's application lock (fcntl, LockFileEx). A
 	// lost race alone couldn't tell that apart from ordinary contention,
 	// which retry and escalation handle.
-	start, end := o.touchedRangeLocked()
-	if err := o.fsys.CheckRangeLockConflict(ctx, o.key, start, end, o.holder); err != nil {
+	start, end := c.touchedRangeLocked()
+	if err := c.fsys.CheckRangeLockConflict(ctx, c.key, start, end, holder); err != nil {
 		return Attr{}, err
 	}
 
 	deadline := time.Now().Add(contentWriteRetryBudget)
 	for {
-		attr, err := o.uploadLocked(ctx)
+		attr, err := c.uploadLocked(ctx)
 		if err == nil {
 			return attr, nil
 		}
@@ -533,54 +575,54 @@ func (o *OpenFile) Flush(ctx context.Context) (Attr, error) {
 		if time.Now().After(deadline) {
 			break
 		}
-		if err := o.rebaseLocked(ctx); err != nil {
+		if err := c.rebaseLocked(ctx); err != nil {
 			return Attr{}, err
 		}
 	}
 
-	if !o.fsys.lockingEnabled {
+	if !c.fsys.lockingEnabled {
 		// Escalation needs locking, so without it running out of retries is
 		// final.
 		return Attr{}, ErrWriteContention
 	}
-	if err := o.fsys.acquireEscalationLockRange(ctx, o.key, start, end, o.holder, lockEscalationLeaseTTL); err != nil {
+	if err := c.fsys.acquireEscalationLockRange(ctx, c.key, start, end, holder, lockEscalationLeaseTTL); err != nil {
 		return Attr{}, ErrWriteContention
 	}
-	defer func() { _ = o.fsys.ReleaseLockRange(context.WithoutCancel(ctx), o.key, start, end, o.holder) }()
+	defer func() { _ = c.fsys.ReleaseLockRange(context.WithoutCancel(ctx), c.key, start, end, holder) }()
 
-	if err := o.rebaseLocked(ctx); err != nil {
+	if err := c.rebaseLocked(ctx); err != nil {
 		return Attr{}, err
 	}
-	return o.uploadLocked(ctx)
+	return c.uploadLocked(ctx)
 }
 
 // uploadLocked writes the scratch file back to the store, conditioned on
 // the ETag it's based on: one Put for a file that fits in one part, and
 // otherwise a multipart write (partsLocked) that only uploads the parts
-// this session changed. On success the session is clean and based on
-// the version just written.
-func (o *OpenFile) uploadLocked(ctx context.Context) (Attr, error) {
-	if err := o.fsys.checkWritable(); err != nil {
+// that changed. On success the content is clean and based on the version
+// just written.
+func (c *content) uploadLocked(ctx context.Context) (Attr, error) {
+	if err := c.fsys.checkWritable(); err != nil {
 		return Attr{}, err
 	}
 	var obj *objstore.Object
 	var err error
-	if partSize := o.fsys.partSize(); o.size > partSize {
-		obj, err = o.fsys.store.PutParts(ctx, o.key, o.partsLocked(partSize), nil, o.etag)
+	if partSize := c.fsys.partSize(); c.size > partSize {
+		obj, err = c.fsys.store.PutParts(ctx, c.key, c.partsLocked(partSize), nil, c.etag)
 	} else {
-		obj, err = o.fsys.store.Put(ctx, o.key, io.NewSectionReader(o.file, 0, o.size), nil, o.etag)
+		obj, err = c.fsys.store.Put(ctx, c.key, io.NewSectionReader(c.file, 0, c.size), nil, c.etag)
 	}
 	if err != nil {
 		return Attr{}, err
 	}
-	o.etag = obj.ETag
-	o.baseVersion, o.baseSize = obj.VersionID, o.size
-	o.touchedStart = noTouch
-	o.touchedEnd = 0
-	o.dirty = false
-	o.truncated = false
-	o.updateSharedCacheLocked(obj.ETag)
-	return o.fsys.statFile(ctx, o.key)
+	c.etag = obj.ETag
+	c.baseVersion, c.baseSize = obj.VersionID, c.size
+	c.touchedStart = noTouch
+	c.touchedEnd = 0
+	c.dirty = false
+	c.truncated = false
+	c.updateSharedCacheLocked(obj.ETag)
+	return c.fsys.statFile(ctx, c.key)
 }
 
 // partsLocked splits the scratch file into parts of partSize for a
@@ -590,16 +632,16 @@ func (o *OpenFile) uploadLocked(ctx context.Context) (Attr, error) {
 // The copies are pinned to the base version; whether it's still current is
 // checked when the parts are assembled (If-Match), and a lost race rebases
 // like any other.
-func (o *OpenFile) partsLocked(partSize int64) []objstore.Part {
+func (c *content) partsLocked(partSize int64) []objstore.Part {
 	var parts []objstore.Part
-	for off := int64(0); off < o.size; off += partSize {
-		n := min(partSize, o.size-off)
+	for off := int64(0); off < c.size; off += partSize {
+		n := min(partSize, c.size-off)
 		end := off + n
-		untouched := o.touchedStart == noTouch || end <= o.touchedStart || off >= o.touchedEnd
-		if o.baseVersion != "" && end <= o.baseSize && untouched {
-			parts = append(parts, objstore.Part{Size: n, CopyVersion: o.baseVersion, CopyOffset: off})
+		untouched := c.touchedStart == noTouch || end <= c.touchedStart || off >= c.touchedEnd
+		if c.baseVersion != "" && end <= c.baseSize && untouched {
+			parts = append(parts, objstore.Part{Size: n, CopyVersion: c.baseVersion, CopyOffset: off})
 		} else {
-			parts = append(parts, objstore.Part{Size: n, Body: io.NewSectionReader(o.file, off, n)})
+			parts = append(parts, objstore.Part{Size: n, Body: io.NewSectionReader(c.file, off, n)})
 		}
 	}
 	return parts
@@ -608,11 +650,11 @@ func (o *OpenFile) partsLocked(partSize int64) []objstore.Part {
 // updateSharedCacheLocked puts what was just written in the shared cache,
 // so the next Open of this key needn't fetch it. Best effort: a failure
 // only costs that Open a fetch.
-func (o *OpenFile) updateSharedCacheLocked(newETag string) {
-	if o.file == nil {
+func (c *content) updateSharedCacheLocked(newETag string) {
+	if c.file == nil {
 		return
 	}
-	_ = o.fsys.cache.updateSharedFrom(o.key, newETag, o.file, o.size)
+	_ = c.fsys.cache.updateSharedFrom(c.key, newETag, c.file, c.size)
 }
 
 // TryAcquireLockRange, TryAcquireSharedLockRange, AcquireLockRange,

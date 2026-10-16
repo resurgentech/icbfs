@@ -1969,3 +1969,43 @@ func TestMountMknodRegularFile(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestMountOpensSeeEachOthersWrites: a write through one descriptor is
+// read through another open of the file before the first is closed, as
+// cat reads a file a server is still writing (xfstests' generic/131,
+// 571), and with O_DIRECT, which bypasses the page cache (451).
+func TestMountOpensSeeEachOthersWrites(t *testing.T) {
+	mnt := mountTestFS(t)
+	path := filepath.Join(mnt, "port")
+	w, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if _, err := w.Write([]byte("server port: 4242\n")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "server port: 4242\n" {
+		t.Fatalf("another open read %q while the writer held the file, want its write", got)
+	}
+
+	d, err := os.OpenFile(path, os.O_RDWR|syscall.O_DIRECT, 0)
+	if err != nil {
+		t.Skipf("O_DIRECT: %v", err)
+	}
+	defer d.Close()
+	if _, err := d.WriteAt([]byte("direct"), 0); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 6)
+	if _, err := w.ReadAt(buf, 0); err != nil {
+		t.Fatal(err)
+	}
+	if string(buf) != "direct" {
+		t.Fatalf("a buffered read got %q after a direct write through another descriptor", buf)
+	}
+}

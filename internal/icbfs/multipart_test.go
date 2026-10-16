@@ -119,14 +119,15 @@ func TestMultipartFlush(t *testing.T) {
 	}
 	check("one-byte edit")
 
-	// Two sessions edit different parts; the second loses the race,
+	// Two clients (two Filesystems, as two mounts: opens in one share
+	// their content) edit different parts; the second loses the race,
 	// rebases, and both edits land.
 	a, err := fsys.Open(ctx, key)
 	if err != nil {
 		t.Fatalf("open a: %v", err)
 	}
 	defer a.Close()
-	b, err := fsys.Open(ctx, key)
+	b, err := otherClient(t, fsys).Open(ctx, key)
 	if err != nil {
 		t.Fatalf("open b: %v", err)
 	}

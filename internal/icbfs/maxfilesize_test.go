@@ -105,7 +105,7 @@ func TestTruncateSurvivesARebase(t *testing.T) {
 		t.Fatalf("open a: %v", err)
 	}
 	defer a.Close()
-	b, err := fsys.Open(ctx, key)
+	b, err := otherClient(t, fsys).Open(ctx, key)
 	if err != nil {
 		t.Fatalf("open b: %v", err)
 	}

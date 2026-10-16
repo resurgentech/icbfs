@@ -109,8 +109,12 @@ file, for a mapping's pages written back after the close.
 
 - The read cache is LRU-bounded, 512 MiB by default (`-cache-dir`,
   `-cache-size`).
-- Each open session's edits stay invisible to other sessions until it
-  flushes.
+- Every open of a file in one mount shares that one scratch file, so a
+  write through one descriptor is read through every other at once, as on
+  a local disk. Any close or `fsync` stores all of them; the last close
+  removes the scratch file. Opening a file already open picks up another
+  machine's newer version if nothing here is unflushed (close-to-open);
+  otherwise the next flush merges onto it.
 
 **Directories are B-trees of blocks.** A block holds `name → UUID + type`
 rows. When a block overflows, it splits at the **median key actually in

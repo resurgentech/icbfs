@@ -16,6 +16,19 @@ import (
 // re-applying, the second Flush would overwrite the first's range with its
 // stale copy; with it, the loser rebases onto the winner's content and
 // applies only its own edit.
+// otherClient is another client of fsys's filesystem: a Filesystem of its
+// own on the same store, as another mount is. Opens within one Filesystem
+// share their content, so a race between writers needs two.
+func otherClient(t *testing.T, fsys *Filesystem) *Filesystem {
+	t.Helper()
+	c := New(fsys.store, fsys.fsName)
+	c.EnableLocking(fsys.lockingEnabled)
+	if err := c.Attach(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
 func TestConcurrentNonOverlappingWritesBothSurvive(t *testing.T) {
 	fsys, _ := newTestFilesystem(t)
 	ctx := context.Background()
@@ -35,7 +48,7 @@ func TestConcurrentNonOverlappingWritesBothSurvive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open 1: %v", err)
 	}
-	open2, err := fsys.Open(ctx, key)
+	open2, err := otherClient(t, fsys).Open(ctx, key)
 	if err != nil {
 		t.Fatalf("open 2: %v", err)
 	}
@@ -156,7 +169,7 @@ func TestFlushRefusedWhenTouchedRangeOverlapsExternalLock(t *testing.T) {
 	// Simulated client 2's write overlapping that locked range must be
 	// refused outright, not retried/escalated — this is someone else's
 	// cooperating lock, not same-codebase contention.
-	overlapping, err := fsys.Open(ctx, key)
+	overlapping, err := otherClient(t, fsys).Open(ctx, key)
 	if err != nil {
 		t.Fatalf("client-2 open: %v", err)
 	}
@@ -167,9 +180,9 @@ func TestFlushRefusedWhenTouchedRangeOverlapsExternalLock(t *testing.T) {
 
 	// Client 2's write to a genuinely non-overlapping range succeeds
 	// normally while client-1's lock is still held.
-	nonOverlapping, err := fsys.Open(ctx, key)
+	nonOverlapping, err := otherClient(t, fsys).Open(ctx, key)
 	if err != nil {
-		t.Fatalf("client-2 open (second session): %v", err)
+		t.Fatalf("client-3 open: %v", err)
 	}
 	nonOverlapping.WriteAt([]byte("YYYYY"), 15) // [15,20), disjoint from [0,10)
 	if _, err := nonOverlapping.Flush(ctx); err != nil {
@@ -338,9 +351,9 @@ func TestOpenFileCloseRemovesScratchFile(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 
-	open.mu.Lock()
-	scratchPath := open.file.Name()
-	open.mu.Unlock()
+	open.c.mu.Lock()
+	scratchPath := open.c.file.Name()
+	open.c.mu.Unlock()
 
 	if _, err := os.Stat(scratchPath); err != nil {
 		t.Fatalf("scratch file missing while session is open: %v", err)

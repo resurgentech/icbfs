@@ -2,6 +2,7 @@ package icbfs
 
 import (
 	"context"
+	"os"
 	"time"
 )
 
@@ -27,9 +28,69 @@ import (
 // disappears under this process's sessions as before.
 type openSessions struct {
 	sessions map[string]map[*OpenFile]struct{}
+	// contents is each open file's content, shared by its opens.
+	contents map[string]*content
 	// orphans holds the streams of each key whose last link went while
 	// it was open here, so its last Close can delete everything.
 	orphans map[string]map[string]uint64
+}
+
+// shareContent returns key's open content with one more reference, or nil
+// if the file isn't open here.
+func (f *Filesystem) shareContent(key string) *content {
+	f.openMu.Lock()
+	defer f.openMu.Unlock()
+	c := f.opens.contents[key]
+	if c != nil {
+		c.refs++
+	}
+	return c
+}
+
+// installContent makes c key's open content, with one reference, unless
+// another open installed one first: then that one is shared, and c's
+// scratch file removed.
+func (f *Filesystem) installContent(c *content) *content {
+	f.openMu.Lock()
+	if have := f.opens.contents[c.key]; have != nil {
+		have.refs++
+		f.openMu.Unlock()
+		if c.file != nil {
+			name := c.file.Name()
+			c.file.Close()
+			_ = os.Remove(name)
+		}
+		return have
+	}
+	if f.opens.contents == nil {
+		f.opens.contents = make(map[string]*content)
+	}
+	c.refs = 1
+	f.opens.contents[c.key] = c
+	f.openMu.Unlock()
+	return c
+}
+
+// dropContent drops one reference to c, and reports whether it was the
+// last, which leaves c to its caller to close.
+func (f *Filesystem) dropContent(c *content) bool {
+	f.openMu.Lock()
+	defer f.openMu.Unlock()
+	c.refs--
+	if c.refs > 0 {
+		return false
+	}
+	if f.opens.contents[c.key] == c {
+		delete(f.opens.contents, c.key)
+	}
+	return true
+}
+
+// openContent is key's open content, or nil.
+func (f *Filesystem) openContent(key string) *content {
+	f.openMu.Lock()
+	defer f.openMu.Unlock()
+	return f.opens.contents[key]
 }
 
 // holdOpen registers o as open on its key.
@@ -108,27 +169,19 @@ func (f *Filesystem) isOrphan(key string) bool {
 }
 
 // localOverlay applies this process's unflushed writes to a, key's
-// stored attributes: the size and mtime of the open session that wrote
-// most recently, if any has written since its last flush.
+// stored attributes: the open content's size and mtime, if it has changed
+// since its last flush.
 func (f *Filesystem) localOverlay(key string, a Attr) Attr {
-	f.openMu.Lock()
-	set := f.opens.sessions[key]
-	sessions := make([]*OpenFile, 0, len(set))
-	for o := range set {
-		sessions = append(sessions, o)
+	c := f.openContent(key)
+	if c == nil {
+		return a
 	}
-	f.openMu.Unlock()
-
-	var latest time.Time
-	for _, o := range sessions {
-		size, wrote, dirty := o.pending()
-		if dirty && wrote.After(latest) {
-			latest = wrote
-			a.Size = size
-			a.Mtime = wrote
-			if wrote.After(a.Ctime) {
-				a.Ctime = wrote
-			}
+	size, wrote, dirty := c.pending()
+	if dirty {
+		a.Size = size
+		a.Mtime = wrote
+		if wrote.After(a.Ctime) {
+			a.Ctime = wrote
 		}
 	}
 	return a
