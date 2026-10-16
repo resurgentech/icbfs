@@ -69,6 +69,7 @@ var (
 	_ fs.NodeRenamer     = (*Node)(nil)
 	_ fs.NodeStatfser    = (*Node)(nil)
 	_ fs.NodeOnForgetter = (*Node)(nil)
+	_ fs.NodeFsyncer     = (*Node)(nil)
 )
 
 // statfsBlockSize is the unit statfs reports sizes in. There are no real
@@ -619,6 +620,18 @@ func (h *FileHandle) Flush(ctx context.Context) syscall.Errno {
 		h.node.logEvent(ctx, fslog.EventWrite, h.node.path(), attr.Size)
 	}
 	return 0
+}
+
+// Fsync is fsync(2) and fdatasync(2), and msync(2)'s MS_SYNC: a file's
+// writes are stored, as a close stores them. A directory's changes are
+// stored before each operation returns, so it has nothing to do.
+func (n *Node) Fsync(ctx context.Context, f fs.FileHandle, flags uint32) syscall.Errno {
+	h, ok := f.(*FileHandle)
+	if !ok || h == nil {
+		return 0
+	}
+	_, err := h.open.Flush(detach(ctx))
+	return errnoFromErr(err)
 }
 
 // fcntlLockEOF is the lock end the kernel sends for "to end of file":

@@ -103,7 +103,8 @@ uploads only what changed, but the result is still one object.
 **Open files are edited in a local scratch file, not in memory.** Opening a
 file copies it from a shared on-disk read cache into a private scratch
 file, fetching it from the store if the cache doesn't have it. Reads and
-writes go to the scratch file, and flush writes it back.
+writes go to the scratch file, and flush writes it back: at every close,
+and at `fsync` (and `msync` with `MS_SYNC`).
 
 - The read cache is LRU-bounded, 512 MiB by default (`-cache-dir`,
   `-cache-size`).

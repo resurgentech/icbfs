@@ -1713,3 +1713,41 @@ func TestMountCloseToOpenAcrossMounts(t *testing.T) {
 	}
 	f.Close()
 }
+
+// TestMountFsync: fsync stores a file's writes before the close, so
+// another mount sees them, and fsync on a directory succeeds.
+func TestMountFsync(t *testing.T) {
+	store := newMountTestStore(t)
+	mnt := mountFS(t, store, "fs")
+	f, err := os.Create(filepath.Join(mnt, "f"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Write([]byte("synced")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Sync(); err != nil {
+		t.Fatalf("fsync: %v", err)
+	}
+	other := icbfs.New(store, "fs")
+	ctx := context.Background()
+	if err := other.Attach(ctx); err != nil {
+		t.Fatal(err)
+	}
+	entry, _, err := other.Lookup(ctx, other.RootKey(), "f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _, _, err := other.ReadFile(ctx, entry.UUID); err != nil || string(got) != "synced" {
+		t.Fatalf("another client read %q (%v) before the close, want synced", got, err)
+	}
+	d, err := os.Open(mnt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if err := d.Sync(); err != nil {
+		t.Fatalf("fsync on a directory: %v", err)
+	}
+}
