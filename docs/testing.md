@@ -198,7 +198,9 @@ test/minio/down.sh             # remove it; --all removes any left behind
 - **Locks on Windows mounts are local to the machine** (see
   [architecture.md](architecture.md#locking)).
 - **Directories don't shrink.** Blocks are split, never merged, so a
-  directory that grew and then emptied keeps its height.
+  directory that grew and then emptied keeps all its blocks: listing it
+  stays slow (see [architecture.md](architecture.md#files-and-directories)
+  for why, and the planned fix).
 - **Case-sensitive Windows mounts** fail winfsp-tests'
   `getfileinfo_name_test`, as WinFsp's own memfs does.
 

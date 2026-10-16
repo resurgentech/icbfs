@@ -139,12 +139,40 @@ holds range pointers.
   fewer requests per lookup and listing, and a larger block rewritten per
   change; the default favours reads.
 - Lookup descends the tree. Listing walks it in order.
-- Underfull blocks are not merged back. A directory that grew and then
-  shrank stays as tall as it grew; this costs nothing in correctness.
+- Underfull blocks are not merged back (below).
 - The sort order is the filesystem's collation, fixed by its primary mode:
   - primary-POSIX: plain byte order;
   - primary-Windows: case-insensitive order (NTFS's uppercase table, pinned
     in `internal/block/upcase_table.go`), with byte order breaking ties.
+
+**Directories don't shrink.** Blocks split but never merge, so a directory
+that grew and then emptied keeps every block it had. Nothing is wrong, but
+it costs time: a lookup still walks the full height (about three reads
+for a directory that once held 100,000 entries, at 128 per block), and a
+listing reads every block, so listing the ten names left in such a
+directory reads some 800 nearly empty blocks. A directory that never
+grew past one block isn't affected.
+
+- **Why not merge.** A split is safe without locks: it writes the right
+  half first, and one conditional write of the left half commits it,
+  which a reader finds by moving right. A merge is the reverse and much
+  harder: it changes two siblings and their parent, three objects with no
+  write across them, while other machines may be reading those blocks or
+  inserting into the one being emptied. Lehman and Yao's B-link tree has no
+  merge; later work (Lanin and Shasha) adds it with extra machinery.
+- **The planned fix** covers the case that costs, a directory that filled
+  and drained (temp, spool, upload staging), without general rebalancing:
+  - *Remove empty leaves, online.* A leaf that becomes empty is marked
+    dead, keeping its right link, so a reader that lands on it moves on;
+    then it's taken out of its parent, and its left neighbour's right link
+    is pointed past it. Each step is one conditional write, and no step
+    misleads a reader (the "drain" technique).
+  - *Collapse the top.* When the directory's top block has one child left,
+    that child's contents move up into it: the reverse of a top split.
+  - Not merging half-full neighbours, which is where the complexity is.
+- **Until then**, an offline compaction (rebuilding an idle directory's
+  tree) would be the cheap remedy for a directory known to be in this
+  state.
 
 **Hard links** are several rows pointing at one UUID; the link count is in
 `.metadata`. **Symlinks** keep their target as their content. **FIFOs,
