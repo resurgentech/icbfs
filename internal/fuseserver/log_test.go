@@ -71,7 +71,7 @@ func TestMountLogsThroughDaemon(t *testing.T) {
 				t.Fatalf("bootstrap with the server's credentials: %v", err)
 			}
 			mnt := t.TempDir()
-			server, err := fs.Mount(mnt, Root(fsys, nil, WithLogger(client)), &fs.Options{
+			server, err := Mount(mnt, Root(fsys, nil, WithLogger(client)), &fs.Options{
 				MountOptions:    fuse.MountOptions{FsName: "icbfs-log", Name: "icbfs-log", Options: []string{"default_permissions"}},
 				NullPermissions: true,
 			})

@@ -177,7 +177,7 @@ func main() {
 	if *driveID != "" {
 		source = *driveID
 	}
-	server, err := fs.Mount(mountpoint, root, &fs.Options{
+	server, err := fuseserver.Mount(mountpoint, root, &fs.Options{
 		MountOptions: fuseMountOptions(source, *debug, *allowOther, view != nil || driveReadOnly || *readOnly, acls),
 		// Without it, go-fuse reports a stored mode 0000 as 0644 or
 		// 0755.

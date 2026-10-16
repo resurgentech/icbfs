@@ -114,7 +114,7 @@ func mountFSWithLocking(t *testing.T, store objstore.Store, fsName string, locki
 	fsys.EnablePosixACLs(true)
 
 	mountDir := t.TempDir()
-	server, err := fs.Mount(mountDir, Root(fsys, nil), &fs.Options{
+	server, err := Mount(mountDir, Root(fsys, nil), &fs.Options{
 		MountOptions: fuse.MountOptions{
 			FsName: "icbfs-test",
 			Name:   "icbfs-test",
@@ -172,7 +172,7 @@ func mountTestFSWithFsys(t *testing.T) (string, *icbfs.Filesystem) {
 	fsys.EnablePosixACLs(true)
 
 	mountDir := t.TempDir()
-	server, err := fs.Mount(mountDir, Root(fsys, nil), &fs.Options{
+	server, err := Mount(mountDir, Root(fsys, nil), &fs.Options{
 		MountOptions: fuse.MountOptions{
 			FsName:    "icbfs-test",
 			Name:      "icbfs-test",
@@ -915,6 +915,58 @@ func TestMountFcntlByteRangeLocksAcrossProcesses(t *testing.T) {
 	}
 }
 
+// TestMountFcntlCloseOfAnyDescriptorReleases: closing any descriptor for a
+// file releases the process's fcntl locks on it, not just one taken through
+// that descriptor (POSIX).
+func TestMountFcntlCloseOfAnyDescriptorReleases(t *testing.T) {
+	mnt := mountTestFSWithLocking(t)
+	path := filepath.Join(mnt, "fcntl-any-close.bin")
+	if err := os.WriteFile(path, make([]byte, 100), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// helperLocks runs the lock-holder helper, which takes [0,10), and
+	// reports whether it got it.
+	helperLocks := func() bool {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "release"), nil, 0644); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(os.Args[0], "-test.run=NoSuchTest")
+		cmd.Env = append(os.Environ(),
+			"ICBFS_FCNTL_HELPER=1",
+			"ICBFS_FCNTL_HELPER_PATH="+path,
+			"ICBFS_FCNTL_HELPER_READY="+filepath.Join(dir, "ready"),
+			"ICBFS_FCNTL_HELPER_RELEASE="+filepath.Join(dir, "release"),
+		)
+		return cmd.Run() == nil
+	}
+
+	f1, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f1.Close()
+	lk := syscall.Flock_t{Type: syscall.F_WRLCK, Whence: 0, Start: 0, Len: 10}
+	if err := syscall.FcntlFlock(f1.Fd(), syscall.F_SETLK, &lk); err != nil {
+		t.Fatalf("F_SETLK [0,10): %v", err)
+	}
+	if helperLocks() {
+		t.Fatal("another process locked [0,10) while this one holds it")
+	}
+
+	f2, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f2.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !helperLocks() {
+		t.Fatal("closing a second descriptor didn't release this process's lock")
+	}
+}
+
 // TestMountFcntlLockSurvivesPastOriginalTTLViaRenewal: a lock held by a
 // live process with the file open is still held after several lease
 // periods, because renewal (ensureRenewal, runRenewal) keeps it alive.
@@ -1035,7 +1087,7 @@ func TestMountNotifyDispatchesSignalToCorrectInode(t *testing.T) {
 
 	source := notify.NewFakeSource(4)
 	mountDir := t.TempDir()
-	server, err := fs.Mount(mountDir, Root(fsys, source.Signals()), &fs.Options{
+	server, err := Mount(mountDir, Root(fsys, source.Signals()), &fs.Options{
 		MountOptions: fuse.MountOptions{
 			FsName:  "icbfs-test",
 			Name:    "icbfs-test",
@@ -1117,7 +1169,7 @@ func TestMountNotifyRegistryForgets(t *testing.T) {
 	source := notify.NewFakeSource(4)
 	root := Root(fsys, source.Signals())
 	mountDir := t.TempDir()
-	server, err := fs.Mount(mountDir, root, &fs.Options{
+	server, err := Mount(mountDir, root, &fs.Options{
 		MountOptions:    fuse.MountOptions{FsName: "icbfs-test", Name: "icbfs-test", Options: []string{"default_permissions"}},
 		NullPermissions: true,
 	})
@@ -1382,7 +1434,7 @@ func TestMountAsOf(t *testing.T) {
 		t.Fatalf("bootstrap read-only: %v", err)
 	}
 	mnt := t.TempDir()
-	server, err := fs.Mount(mnt, Root(fsys, nil), &fs.Options{
+	server, err := Mount(mnt, Root(fsys, nil), &fs.Options{
 		MountOptions:    fuse.MountOptions{FsName: "icbfs-asof", Name: "icbfs-asof", Options: []string{"default_permissions", "ro"}},
 		NullPermissions: true,
 	})
@@ -1471,7 +1523,7 @@ func TestMountDirectoryAsRoot(t *testing.T) {
 	}
 
 	mnt := t.TempDir()
-	server, err := fs.Mount(mnt, Root(fsys, nil, WithRoot(team, "/team")), &fs.Options{
+	server, err := Mount(mnt, Root(fsys, nil, WithRoot(team, "/team")), &fs.Options{
 		MountOptions:    fuse.MountOptions{FsName: "icbfs-test", Name: "icbfs-test", Options: []string{"default_permissions"}},
 		NullPermissions: true,
 	})

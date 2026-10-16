@@ -144,10 +144,6 @@ test/minio/down.sh             # remove it; --all removes any left behind
 
 ## Known issues
 
-- **`fcntl` locks are released per file handle, not per process.**
-  Closing a different descriptor on the same file doesn't release a
-  process's locks, as POSIX says it should. The usual case, one
-  descriptor per locker, and every `flock` case are correct.
 - **Locks on Windows mounts are local to the machine** (see
   [architecture.md](architecture.md#locking)).
 - **Under a default ACL, the umask still applies on Linux mounts.** POSIX

@@ -38,6 +38,12 @@ type Node struct {
 	// the filesystem's root; see WithRoot), so a trash entry records
 	// where a deleted item was in the filesystem, not just in the mount.
 	under string
+
+	// fcntlOwners are the lock owners that have taken fcntl locks on
+	// this file through any handle, so a close by one of them releases
+	// them (FileHandle.Flush) and a close by anyone else costs nothing.
+	ownersMu    sync.Mutex
+	fcntlOwners map[uint64]bool
 }
 
 var (
@@ -542,7 +548,13 @@ func (h *FileHandle) Write(ctx context.Context, data []byte, off int64) (uint32,
 // Flush runs at every close(2) of the file, synchronously — which is
 // why a write is logged here, after the content is stored: a
 // synchronously logged close returns only once the server has the event.
+//
+// A close also releases the closing process's fcntl locks on the file,
+// whichever descriptor took them, as POSIX says.
 func (h *FileHandle) Flush(ctx context.Context) syscall.Errno {
+	if owner, ok := flushOwner(ctx); ok && h.node != nil && h.node.dropFcntlOwner(owner) {
+		defer h.releaseAllHeldBy(detach(ctx), owner)
+	}
 	ctx = detach(ctx)
 	attr, err := h.open.Flush(ctx)
 	if err != nil {
@@ -648,6 +660,9 @@ func (h *FileHandle) setlk(ctx context.Context, owner uint64, lk *fuse.FileLock,
 	}
 	start, end := lockRangeFromFileLock(lk, flags)
 	holder := lockHolderFromOwner(owner)
+	if flags&fuse.FUSE_LK_FLOCK == 0 && lk.Typ != syscall.F_UNLCK && h.node != nil {
+		h.node.addFcntlOwner(owner)
+	}
 	switch lk.Typ {
 	case syscall.F_UNLCK:
 		return errnoFromErr(h.open.ReleaseLockRange(ctx, start, end, holder))
@@ -688,6 +703,25 @@ func (h *FileHandle) setlk(ctx context.Context, owner uint64, lk *fuse.FileLock,
 	default:
 		return syscall.EINVAL
 	}
+}
+
+func (n *Node) addFcntlOwner(owner uint64) {
+	n.ownersMu.Lock()
+	defer n.ownersMu.Unlock()
+	if n.fcntlOwners == nil {
+		n.fcntlOwners = make(map[uint64]bool)
+	}
+	n.fcntlOwners[owner] = true
+}
+
+// dropFcntlOwner forgets owner, and reports whether it had taken fcntl
+// locks on n.
+func (n *Node) dropFcntlOwner(owner uint64) bool {
+	n.ownersMu.Lock()
+	defer n.ownersMu.Unlock()
+	had := n.fcntlOwners[owner]
+	delete(n.fcntlOwners, owner)
+	return had
 }
 
 // ensureRenewal starts runRenewal for owner unless it's already running on
@@ -754,11 +788,7 @@ func (h *FileHandle) stopRenewal(owner uint64) {
 // as fcntl and flock require (TestMountFcntlByteRangeLocksAcrossProcesses
 // checks this).
 //
-// It releases only what this handle's own lock calls took. POSIX says
-// closing any descriptor releases all of a process's locks on the file,
-// which would need a registry of owners across handles; a process that
-// locks through one descriptor and closes another keeps its locks until the
-// lease runs out.
+// A close through another descriptor releases them sooner (Flush).
 func (h *FileHandle) Release(ctx context.Context) syscall.Errno {
 	ctx = detach(ctx)
 	h.mu.Lock()

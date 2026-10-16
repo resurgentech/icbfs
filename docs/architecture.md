@@ -282,7 +282,10 @@ coordination service.
   lock. This is stronger than advisory, but not mandatory: a new lock can
   still slip in between the check and the write.
 - The same mechanism serves `flock`/`fcntl` from applications and the write
-  path's own escalation.
+  path's own escalation. As POSIX says, a process's `fcntl` locks on a
+  file go when it closes any descriptor for it (the kernel's FLUSH names
+  the closing process's lock owner); `flock` locks go with the last close
+  of the open file they were taken on.
 - **Windows mounts don't take part.** WinFsp has no byte-range-lock
   callback; its kernel driver keeps `LockFileEx` locks in a table local to
   the machine. So locks on a Windows mount neither see nor conflict with
