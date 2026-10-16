@@ -22,6 +22,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/testcontainers/testcontainers-go/modules/minio"
+	"golang.org/x/sys/unix"
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/notify"
@@ -100,6 +101,10 @@ func newMinIO(t *testing.T) testMinIO {
 
 // mountFS bootstraps fsName against store and mounts it, returning the
 // mountpoint.
+// testDirBlockEntries is the directory block size the mounts here are
+// made with: small, so a few dozen entries split directories.
+const testDirBlockEntries = 8
+
 func mountFS(t *testing.T, store objstore.Store, fsName string) string {
 	t.Helper()
 	return mountFSWithLocking(t, store, fsName, false)
@@ -110,6 +115,7 @@ func mountFSWithLocking(t *testing.T, store objstore.Store, fsName string, locki
 	ctx := context.Background()
 
 	fsys := icbfs.New(store, fsName)
+	fsys.SetCreationDirBlockEntries(testDirBlockEntries)
 	if err := fsys.Bootstrap(ctx, 1<<30, 0755, uint32(os.Getuid()), uint32(os.Getgid()), false); err != nil {
 		t.Fatalf("bootstrap filesystem: %v", err)
 	}
@@ -169,6 +175,7 @@ func mountTestFSWithFsys(t *testing.T) (string, *icbfs.Filesystem) {
 	ctx := context.Background()
 	store := newMountTestStore(t)
 	fsys := icbfs.New(store, "test")
+	fsys.SetCreationDirBlockEntries(testDirBlockEntries)
 	if err := fsys.Bootstrap(ctx, 1<<30, 0755, uint32(os.Getuid()), uint32(os.Getgid()), false); err != nil {
 		t.Fatalf("bootstrap filesystem: %v", err)
 	}
@@ -596,7 +603,7 @@ func TestMountLargeDirectorySharding(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	const n = 40 // forces several splits (maxEntriesPerBlock is 8)
+	const n = 40 // forces several splits (testDirBlockEntries)
 	for i := 0; i < n; i++ {
 		name := filepath.Join(dir, "f"+itoa(i))
 		if err := os.WriteFile(name, []byte(itoa(i)), 0644); err != nil {
@@ -768,6 +775,10 @@ func TestMountFlockWholeFileExclusive(t *testing.T) {
 func TestMain(m *testing.M) {
 	if os.Getenv("ICBFS_FCNTL_HELPER") == "1" {
 		runFcntlLockHolderHelper()
+		return
+	}
+	if path := os.Getenv("ICBFS_MMAP_HELPER_PATH"); path != "" {
+		runMmapAfterCloseHelper(path)
 		return
 	}
 	os.Exit(m.Run())
@@ -1754,27 +1765,19 @@ func TestMountFsync(t *testing.T) {
 
 // TestMountMmapWritesAfterCloseKept: writes through a mapping after its
 // file was closed reach the store: the kernel writes the pages back after
-// the close, before it releases the handle.
+// the close, before it releases the handle. The mapping is in a helper
+// process: munmap in the process serving the mount can deadlock, as the
+// write-back it waits for needs this process's memory map.
 func TestMountMmapWritesAfterCloseKept(t *testing.T) {
 	mnt := mountTestFS(t)
 	path := filepath.Join(mnt, "mapped.bin")
 	if err := os.WriteFile(path, make([]byte, 8192), 0644); err != nil {
 		t.Fatal(err)
 	}
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	m, err := syscall.Mmap(int(f.Fd()), 0, 8192, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatal(err)
-	}
-	copy(m[4096:], "written after close")
-	if err := syscall.Munmap(m); err != nil {
-		t.Fatal(err)
+	cmd := exec.Command(os.Args[0], "-test.run=NoSuchTest")
+	cmd.Env = append(os.Environ(), "ICBFS_MMAP_HELPER_PATH="+path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("helper: %v: %s", err, out)
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -1787,6 +1790,28 @@ func TestMountMmapWritesAfterCloseKept(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// runMmapAfterCloseHelper maps path, closes it, writes through the
+// mapping and unmaps it.
+func runMmapAfterCloseHelper(path string) {
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "helper: open:", err)
+		os.Exit(1)
+	}
+	m, err := syscall.Mmap(int(f.Fd()), 0, 8192, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "helper: mmap:", err)
+		os.Exit(1)
+	}
+	f.Close()
+	copy(m[4096:], "written after close")
+	if err := syscall.Munmap(m); err != nil {
+		fmt.Fprintln(os.Stderr, "helper: munmap:", err)
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
 
 // TestMountSmallWritesAreQuick: 4-byte writes don't each cost a store
@@ -1809,5 +1834,29 @@ func TestMountSmallWritesAreQuick(t *testing.T) {
 		t.Fatalf("5000 small writes took %v", d)
 	} else {
 		t.Logf("5000 small writes in %v", d)
+	}
+}
+
+// TestMountRenameFlags: RENAME_EXCHANGE and RENAME_WHITEOUT are refused
+// with EINVAL, and RENAME_NOREPLACE still works afterwards (an ENOSYS
+// would have made the kernel refuse every flag from then on).
+func TestMountRenameFlags(t *testing.T) {
+	mnt := mountTestFS(t)
+	a, b, c := filepath.Join(mnt, "a"), filepath.Join(mnt, "b"), filepath.Join(mnt, "c")
+	for _, p := range []string{a, b} {
+		if err := os.WriteFile(p, []byte(p), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, flags := range []uint{unix.RENAME_EXCHANGE, unix.RENAME_WHITEOUT} {
+		if err := unix.Renameat2(unix.AT_FDCWD, a, unix.AT_FDCWD, b, flags); err != unix.EINVAL {
+			t.Fatalf("renameat2 flags %#x = %v, want EINVAL", flags, err)
+		}
+	}
+	if err := unix.Renameat2(unix.AT_FDCWD, a, unix.AT_FDCWD, b, unix.RENAME_NOREPLACE); err != unix.EEXIST {
+		t.Fatalf("RENAME_NOREPLACE onto b = %v, want EEXIST", err)
+	}
+	if err := unix.Renameat2(unix.AT_FDCWD, a, unix.AT_FDCWD, c, unix.RENAME_NOREPLACE); err != nil {
+		t.Fatalf("RENAME_NOREPLACE onto nothing: %v", err)
 	}
 }

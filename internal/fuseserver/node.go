@@ -509,26 +509,26 @@ func (n *Node) Link(ctx context.Context, target fs.InodeEmbedder, name string, o
 	return n.newChild(ctx, tn.key, tn.typ, attr), 0
 }
 
-// renameExchange is renameat2(2)'s RENAME_EXCHANGE, an atomic swap of two
-// paths. It isn't supported: it would need its own core operation swapping
-// two entries under one condition, and the temp-file-then-rename pattern
-// rsync, git and sqlite use doesn't need it.
-const renameExchange = 0x2
+// renameat2(2)'s flags. Only RENAME_NOREPLACE is supported. An atomic
+// swap (RENAME_EXCHANGE) would need its own core operation swapping two
+// entries under one condition, and the temp-file-then-rename pattern rsync,
+// git and sqlite use doesn't need it; whiteouts (RENAME_WHITEOUT) are for
+// overlayfs.
+const renameNoReplace = 0x1
 
 // Rename implements fs.NodeRenamer: n is the old parent, name the entry's
-// name in it. flags carries renameat2(2)'s bits; go-fuse names only
-// RENAME_EXCHANGE, so RENAME_NOREPLACE's value (0x1, as in
-// golang.org/x/sys/unix) is written out here.
+// name in it. Other flags than RENAME_NOREPLACE are EINVAL, as on a
+// filesystem without them. Not ENOSYS: the kernel takes that to mean no
+// flags at all, and refuses RENAME_NOREPLACE too for the rest of the mount.
 func (n *Node) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
 	ctx = detach(ctx)
-	if flags&renameExchange != 0 {
-		return syscall.ENOSYS
+	if flags&^renameNoReplace != 0 {
+		return syscall.EINVAL
 	}
 	np, ok := newParent.(*Node)
 	if !ok {
 		return syscall.EINVAL
 	}
-	const renameNoReplace = 0x1
 	replace := flags&renameNoReplace == 0
 	ctx = n.deleting(ctx, np.childPath(newName)) // for what the rename replaces
 	return errnoFromErr(n.fsys.Rename(ctx, n.key, name, np.key, newName, replace))
