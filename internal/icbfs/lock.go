@@ -285,6 +285,62 @@ func (f *Filesystem) ReleaseLockRange(ctx context.Context, key string, start, en
 	return fmt.Errorf("release lock %q [%d,%d): exceeded %d retries under contention", key, start, end, maxLockCASRetries)
 }
 
+// UnlockRange is fcntl(2)'s F_UNLCK: it removes holder's claims on key
+// wherever they overlap [start, end), keeping the parts outside it, so
+// unlocking the middle of a held range leaves two. Other holders' claims
+// are untouched, and unlocking a range holder doesn't hold succeeds and
+// does nothing, as POSIX says. (ReleaseLockRange, by contrast, releases one
+// exact claim, for the holder that made it.)
+func (f *Filesystem) UnlockRange(ctx context.Context, key string, start, end int64, holder string) error {
+	if !f.lockingEnabled {
+		return ErrLockingDisabled
+	}
+	lockKey := lockObjectKey(key)
+	for attempt := 0; attempt < maxLockCASRetries; attempt++ {
+		retryPause(ctx, attempt)
+		cur, obj, err := readLockRanges(ctx, f.store, lockKey)
+		if err != nil {
+			return err
+		}
+		if cur == nil {
+			return nil
+		}
+		now := time.Now()
+		var kept []*pb.LockRange
+		changed := false
+		for _, e := range cur.Ranges {
+			if rangeExpired(e, now) {
+				changed = true
+				continue
+			}
+			if e.Holder != holder || e.EscalationOnly || !rangesOverlap(start, end, e.Start, e.End) {
+				kept = append(kept, e)
+				continue
+			}
+			changed = true
+			if e.Start < start {
+				kept = append(kept, &pb.LockRange{Start: e.Start, End: start, Holder: e.Holder, ExpiresAtUnixMs: e.ExpiresAtUnixMs, Shared: e.Shared})
+			}
+			if e.End > end {
+				kept = append(kept, &pb.LockRange{Start: end, End: e.End, Holder: e.Holder, ExpiresAtUnixMs: e.ExpiresAtUnixMs, Shared: e.Shared})
+			}
+		}
+		if !changed {
+			return nil
+		}
+		data, err := proto.Marshal(&pb.Lock{Ranges: kept})
+		if err != nil {
+			return err
+		}
+		_, err = f.store.Put(ctx, lockKey, bytes.NewReader(data), nil, obj.ETag)
+		if objstore.IsPreconditionFailed(err) {
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("unlock %q [%d,%d): exceeded %d retries under contention", key, start, end, maxLockCASRetries)
+}
+
 // RenewLockRange extends holder's exact [start, end) claim on key, only if
 // holder still holds it: renewing after the lease was taken must fail, not
 // revive the claim.
@@ -436,8 +492,10 @@ func (f *Filesystem) waitBackoffOrSignal(ctx context.Context, backoff time.Durat
 }
 
 // CheckRangeLockConflict is the write-time check: a caller about to write
-// refuses if its touched range overlaps another holder's unexpired claim.
-// selfHolder's own claims don't count.
+// refuses if its touched range overlaps another mount's unexpired claim.
+// This mount's own claims don't count, whichever process holds them: its
+// opens share the content being written, so the write is theirs too, and
+// on a local disk advisory locks don't stop writes.
 //
 // Escalation claims don't count either, whoever holds them: they are
 // another Flush making progress, not a lock an application placed, and
@@ -462,7 +520,7 @@ func (f *Filesystem) CheckRangeLockConflict(ctx context.Context, key string, sta
 	}
 	now := time.Now()
 	for _, e := range cur.Ranges {
-		if e.Holder == selfHolder || e.EscalationOnly || rangeExpired(e, now) {
+		if e.Holder == selfHolder || f.ownHolder(e.Holder) || e.EscalationOnly || rangeExpired(e, now) {
 			continue
 		}
 		if rangesOverlap(start, end, e.Start, e.End) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -707,4 +708,55 @@ func TestFindConflictingLockRangeIsTypeAware(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestUnlockRangeIsPOSIX: unlocking the middle of a held range leaves the
+// two ends; unlocking a range held by someone else, or by no one, succeeds
+// and changes nothing (xfstests' generic/131).
+func TestUnlockRangeIsPOSIX(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
+	ctx := context.Background()
+	key, _, _, err := fsys.Create(ctx, fsys.RootKey(), "f", 0o644, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fsys.TryAcquireLockRange(ctx, key, 0, 30, "a", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsys.TryAcquireLockRange(ctx, key, 40, 50, "b", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsys.UnlockRange(ctx, key, 10, 20, "a"); err != nil {
+		t.Fatalf("unlock the middle: %v", err)
+	}
+	if err := fsys.UnlockRange(ctx, key, 40, 50, "a"); err != nil {
+		t.Fatalf("unlock b's range as a: %v", err)
+	}
+	if err := fsys.UnlockRange(ctx, key, 100, 200, "c"); err != nil {
+		t.Fatalf("unlock a free range: %v", err)
+	}
+	held := func(holder string) [][2]int64 {
+		t.Helper()
+		ranges, err := fsys.LockRangesHeldBy(ctx, key, holder)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out [][2]int64
+		for _, r := range ranges {
+			out = append(out, [2]int64{r.Start, r.End})
+		}
+		slices.SortFunc(out, func(x, y [2]int64) int { return int(x[0] - y[0]) })
+		return out
+	}
+	if got := held("a"); !slices.Equal(got, [][2]int64{{0, 10}, {20, 30}}) {
+		t.Fatalf("a holds %v, want [0,10) and [20,30)", got)
+	}
+	if got := held("b"); !slices.Equal(got, [][2]int64{{40, 50}}) {
+		t.Fatalf("b holds %v, want [40,50)", got)
+	}
+	// The freed middle is free for b.
+	if err := fsys.TryAcquireLockRange(ctx, key, 12, 18, "b", time.Minute); err != nil {
+		t.Fatalf("b locks the freed middle: %v", err)
+	}
 }

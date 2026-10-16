@@ -2009,3 +2009,29 @@ func TestMountOpensSeeEachOthersWrites(t *testing.T) {
 		t.Fatalf("a buffered read got %q after a direct write through another descriptor", buf)
 	}
 }
+
+// TestMountWriteUnderOwnLock: a process that locks a range and writes
+// into it can close the file: the write check skips this mount's own locks
+// (xfstests' generic/131, test 27). Another mount's lock still stops it
+// (the core's TestFlushRefusedWhenTouchedRangeOverlapsExternalLock).
+func TestMountWriteUnderOwnLock(t *testing.T) {
+	mnt := mountTestFSWithLocking(t)
+	path := filepath.Join(mnt, "locked")
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lk := syscall.Flock_t{Type: syscall.F_WRLCK, Whence: 0, Start: 0, Len: 0}
+	if err := syscall.FcntlFlock(f.Fd(), syscall.F_SETLK, &lk); err != nil {
+		t.Fatalf("F_SETLK whole file: %v", err)
+	}
+	if _, err := f.Write([]byte("written under the lock")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close after writing under its own lock: %v", err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != "written under the lock" {
+		t.Fatalf("stored %q", got)
+	}
+}

@@ -656,10 +656,11 @@ var lockLeaseTTL = 30 * time.Second
 // tests, as lockLeaseTTL is.
 var lockRenewInterval = lockLeaseTTL / 3
 
-// lockHolderFromOwner turns a FUSE lock owner token (the kernel's, stable
-// for one process's or open file's locks) into a lock holder string.
-func lockHolderFromOwner(owner uint64) string {
-	return fmt.Sprintf("fuse-owner-%d", owner)
+// lockHolder turns a FUSE lock owner token (the kernel's, stable for one
+// process's or open file's locks, and unique only on this machine) into a
+// lock holder, qualified by this mount (icbfs.Filesystem.LockHolder).
+func (h *FileHandle) lockHolder(owner uint64) string {
+	return h.open.LockHolder(fmt.Sprintf("fuse-owner-%d", owner))
 }
 
 // lockRangeFromFileLock turns a fuse.FileLock into a [start, end) range. An
@@ -690,7 +691,7 @@ func (h *FileHandle) Getlk(ctx context.Context, owner uint64, lk *fuse.FileLock,
 	start, end := lockRangeFromFileLock(lk, flags)
 	// F_GETLK asks whether a request of this type would succeed, so a read
 	// query doesn't report another holder's shared claim.
-	info, conflict, err := h.open.FindConflictingLockRange(ctx, start, end, lockHolderFromOwner(owner), lk.Typ == syscall.F_RDLCK)
+	info, conflict, err := h.open.FindConflictingLockRange(ctx, start, end, h.lockHolder(owner), lk.Typ == syscall.F_RDLCK)
 	if err != nil {
 		return errnoFromErr(err)
 	}
@@ -734,13 +735,13 @@ func (h *FileHandle) setlk(ctx context.Context, owner uint64, lk *fuse.FileLock,
 		ctx = detach(ctx) // only a blocking wait honors an interrupt
 	}
 	start, end := lockRangeFromFileLock(lk, flags)
-	holder := lockHolderFromOwner(owner)
+	holder := h.lockHolder(owner)
 	if flags&fuse.FUSE_LK_FLOCK == 0 && lk.Typ != syscall.F_UNLCK && h.node != nil {
 		h.node.addFcntlOwner(owner)
 	}
 	switch lk.Typ {
 	case syscall.F_UNLCK:
-		return errnoFromErr(h.open.ReleaseLockRange(ctx, start, end, holder))
+		return errnoFromErr(h.open.UnlockRange(ctx, start, end, holder))
 	case syscall.F_RDLCK:
 		if blocking {
 			if err := h.open.AcquireSharedLockRange(ctx, start, end, holder, lockLeaseTTL); err != nil {
@@ -826,7 +827,7 @@ func (h *FileHandle) ensureRenewal(owner uint64) {
 // unlocking loses them within one lease.
 func (h *FileHandle) runRenewal(ctx context.Context, owner uint64) {
 	defer h.wg.Done()
-	holder := lockHolderFromOwner(owner)
+	holder := h.lockHolder(owner)
 	defer h.stopRenewal(owner)
 	ticker := time.NewTicker(lockRenewInterval)
 	defer ticker.Stop()
@@ -898,7 +899,7 @@ func (h *FileHandle) Release(ctx context.Context) syscall.Errno {
 
 // releaseAllHeldBy releases every range owner holds on this file.
 func (h *FileHandle) releaseAllHeldBy(ctx context.Context, owner uint64) {
-	holder := lockHolderFromOwner(owner)
+	holder := h.lockHolder(owner)
 	ranges, err := h.open.LockRangesHeldBy(ctx, holder)
 	if err != nil {
 		return // best-effort: the lease's own TTL is still the backstop

@@ -16,7 +16,7 @@ same tree; the last three from 2026-10-14.
 |---|---|---|
 | Go tests (`-race`) | Linux host, Docker | all 19 packages with tests pass |
 | pjdfstest | Ubuntu 24.04 VM, FUSE, root | 238 files, 8,798 assertions; 0 unexpected failures, 4 accepted |
-| xfstests `-g quick` | Ubuntu 24.04 VM, FUSE | 647 tests: 165 pass, 467 don't run, 14 fail as listed, 1 (generic/131) on fcntl lock semantics (below) |
+| xfstests `-g quick` | Ubuntu 24.04 VM, FUSE | 647 tests: 166 pass, 467 don't run, 14 fail, each listed with its reason |
 | winfsp-tests `--external`, case-insensitive | Windows Server 2025 VM | 78 / 78 pass |
 | winfsp-tests `--external`, case-sensitive | Windows Server 2025 VM | 77 / 78 pass; `getfileinfo_name_test` fails, as on WinFsp's memfs |
 | logging chain | Ubuntu 24.04 VM | 5 / 5 checks pass |
@@ -96,19 +96,14 @@ not listed, with a reason, in `test/linux/xfstests-known.txt` fail the
 run. It is slow against an object store: the quick group takes most of a
 day, as every directory operation is a few store round trips.
 
-Of the quick group's 647 tests, 165 pass and 467 don't run: reflink and
+Of the quick group's 647 tests, 166 pass and 467 don't run: reflink and
 dedupe, block-device and shutdown tests, quotas, encryption, fs-verity,
-swap files and the like. 15 fail:
-
-- 14 are listed with their reasons, all outside icbfs's reach: opening by
-  file handle (go-fuse has no FUSE export support), device nodes and
-  setuid binaries on the test mounts' default nodev and nosuid, FIBMAP,
-  the kernel FUSE side's setgid rule on writes, FUSE's asynchronous
-  release of OFD locks, `/proc/locks`, and the declared size not being
-  enforced.
-- generic/131 finds fcntl locks of different types from different
-  processes, overlapping, conflicting where they shouldn't, and one lock
-  call failing with EIO. Under investigation.
+swap files and the like. 14 fail, each listed with its reason, all
+outside icbfs's reach: opening by file handle (go-fuse has no FUSE export
+support), device nodes and setuid binaries on the test mounts' default
+nodev and nosuid, FIBMAP, the kernel FUSE side's setgid rule on writes,
+FUSE's asynchronous release of OFD locks, `/proc/locks`, and the declared
+size not being enforced.
 
 ### winfsp-tests (Windows)
 

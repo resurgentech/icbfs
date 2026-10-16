@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -89,6 +90,7 @@ type Filesystem struct {
 	newMaxFileSize     uint64 // the max file size a filesystem gets if Bootstrap creates it; see SetCreationMaxFileSize
 	dirBlockEntries    int    // from the master-block entry; see DefaultDirBlockEntries
 	newDirBlockEntries uint32 // what a filesystem gets if Bootstrap creates it; see SetCreationDirBlockEntries
+	mountID            string // this Filesystem's identity in lock holders; see LockHolder
 	lockingEnabled     bool   // off by default; see EnableLocking
 	posixACLs          bool   // new items inherit default ACLs; see EnablePosixACLs
 	atime              AtimeMode
@@ -127,7 +129,21 @@ func New(store objstore.Store, fsName string) *Filesystem {
 		// directory rather than make New fallible.
 		cacheDir = filepath.Join(os.TempDir(), "icbfs-cache-fallback")
 	}
-	return &Filesystem{store: store, fsName: fsName, cache: newDiskCache(cacheDir, defaultCacheMaxBytes)}
+	mountID, err := NewUUIDv7()
+	if err != nil {
+		mountID = fmt.Sprintf("mount-%d-%d", os.Getpid(), time.Now().UnixNano())
+	}
+	return &Filesystem{store: store, fsName: fsName, cache: newDiskCache(cacheDir, defaultCacheMaxBytes), mountID: mountID}
+}
+
+// LockHolder names a lock holder of this Filesystem's: local (a FUSE lock
+// owner, an open's escalation identity) qualified by this mount's own
+// identity, so holders on different machines never share a name.
+func (f *Filesystem) LockHolder(local string) string { return f.mountID + "/" + local }
+
+// ownHolder reports whether holder is one of this Filesystem's.
+func (f *Filesystem) ownHolder(holder string) bool {
+	return strings.HasPrefix(holder, f.mountID+"/")
 }
 
 // SetCacheOptions sets the local disk cache's directory and size budget

@@ -95,8 +95,9 @@ type OpenFile struct {
 
 // newOpenFileHolder mints a unique identity for an open's escalation
 // locks.
-func newOpenFileHolder() (string, error) {
-	return NewUUIDv7()
+func (f *Filesystem) newOpenFileHolder() (string, error) {
+	id, err := NewUUIDv7()
+	return f.LockHolder(id), err
 }
 
 // Open returns an OpenFile on key's content: the content another open in
@@ -113,7 +114,7 @@ func (f *Filesystem) Open(ctx context.Context, key string) (*OpenFile, error) {
 	if err != nil {
 		return nil, mapNotFound(err)
 	}
-	holder, err := newOpenFileHolder()
+	holder, err := f.newOpenFileHolder()
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +153,7 @@ func (f *Filesystem) Open(ctx context.Context, key string) (*OpenFile, error) {
 // NewOpenFile seeds an OpenFile from content the caller just wrote (its
 // key, ETag and data; right after Create, nothing), with no read back.
 func (f *Filesystem) NewOpenFile(key, etag string, data []byte) *OpenFile {
-	holder, err := newOpenFileHolder()
+	holder, err := f.newOpenFileHolder()
 	if err != nil {
 		// Only if the system's random source fails. A fixed holder means
 		// two such opens could share a lock identity while escalating;
@@ -658,7 +659,8 @@ func (c *content) updateSharedCacheLocked(newETag string) {
 }
 
 // TryAcquireLockRange, TryAcquireSharedLockRange, AcquireLockRange,
-// AcquireSharedLockRange, ReleaseLockRange and FindConflictingLockRange are
+// AcquireSharedLockRange, ReleaseLockRange, UnlockRange and
+// FindConflictingLockRange are
 // the Filesystem methods of the same names, on this file's key, for FUSE's
 // flock and fcntl, which work per open file.
 func (o *OpenFile) TryAcquireLockRange(ctx context.Context, start, end int64, holder string, ttl time.Duration) error {
@@ -679,6 +681,13 @@ func (o *OpenFile) AcquireSharedLockRange(ctx context.Context, start, end int64,
 
 func (o *OpenFile) ReleaseLockRange(ctx context.Context, start, end int64, holder string) error {
 	return o.fsys.ReleaseLockRange(ctx, o.key, start, end, holder)
+}
+
+// LockHolder is Filesystem.LockHolder, for the access layers' lock owners.
+func (o *OpenFile) LockHolder(local string) string { return o.fsys.LockHolder(local) }
+
+func (o *OpenFile) UnlockRange(ctx context.Context, start, end int64, holder string) error {
+	return o.fsys.UnlockRange(ctx, o.key, start, end, holder)
 }
 
 func (o *OpenFile) RenewLockRange(ctx context.Context, start, end int64, holder string, ttl time.Duration) error {
