@@ -9,13 +9,14 @@ icbfs is tested in layers:
 
 ## Latest results
 
-All runs below are from 2026-10-14, on the same tree, against a fresh
-MinIO for each run.
+Each run against a fresh MinIO. The first five are from 2026-10-16, on the
+same tree; the last three from 2026-10-14.
 
 | suite | where | result |
 |---|---|---|
-| Go tests | Linux host, Docker | 16 packages pass; `internal/fuseserver` fails only `TestMountFcntlLockSurvivesPastOriginalTTLViaRenewal` (see Known issues) |
+| Go tests (`-race`) | Linux host, Docker | all 19 packages with tests pass |
 | pjdfstest | Ubuntu 24.04 VM, FUSE, root | 238 files, 8,798 assertions; 0 unexpected failures, 4 accepted |
+| xfstests `-g quick` | Ubuntu 24.04 VM, FUSE | 647 tests: 163 pass, 467 don't run, 14 fail as listed, 3 fail on the open-files issue (below) |
 | winfsp-tests `--external`, case-insensitive | Windows Server 2025 VM | 78 / 78 pass |
 | winfsp-tests `--external`, case-sensitive | Windows Server 2025 VM | 77 / 78 pass; `getfileinfo_name_test` fails, as on WinFsp's memfs |
 | logging chain | Ubuntu 24.04 VM | 5 / 5 checks pass |
@@ -79,6 +80,36 @@ A run passes when every failing assertion is listed in
   hard-linked. pjdfstest marks the same assertions as expected failures
   on Btrfs.
 
+### xfstests (Linux)
+
+[xfstests](https://git.kernel.org/pub/scm/fs/xfs/xfstests-dev.git) (fstests)
+is the Linux filesystems' own regression suite. It runs against icbfs's
+FUSE mount on the Linux VM, through the mount helper, with a test and a
+scratch filesystem on a throwaway MinIO, mounted `-o allow_other,locking`:
+
+```
+test/linux/run-xfstests.sh <vm-ip> [check arguments]   (default: -g quick)
+```
+
+The first run builds xfstests (pinned to a commit) on the VM. Failures
+not listed, with a reason, in `test/linux/xfstests-known.txt` fail the
+run. It is slow against an object store: the quick group takes most of a
+day, as every directory operation is a few store round trips.
+
+Of the quick group's 647 tests, 163 pass and 467 don't run: reflink and
+dedupe, block-device and shutdown tests, quotas, encryption, fs-verity,
+swap files and the like. 17 fail:
+
+- 14 are listed with their reasons, all outside icbfs's reach: opening by
+  file handle (go-fuse has no FUSE export support), device nodes and
+  setuid binaries on the test mounts' default nodev and nosuid, FIBMAP,
+  the kernel FUSE side's setgid rule on writes, FUSE's asynchronous
+  release of OFD locks, `/proc/locks`, and the declared size not being
+  enforced.
+- generic/131, 451 and 571 are one issue: every open of a file has its
+  own copy, so a process doesn't see what another wrote to the file in
+  the same mount until that one closes it (see Known issues).
+
 ### winfsp-tests (Windows)
 
 [winfsp-tests](https://github.com/winfsp/winfsp/wiki/WinFsp-Testing) is
@@ -125,10 +156,12 @@ case-sensitive.
   multipart file, a one-byte edit in the middle, and the max-file-size
   limit.
 
-From the repository root, `just pjdfstest`, `just logging-test`,
-`just largefile-test`, `just winfsp-tests [icbfs-ci|icbfs-cs|cmemfs-ci]`
-and `just sync-test` run the VM suites (the Linux ones find the VM's
-address themselves), and `just vm-tests` runs all but the large-file one.
+From the repository root, `just pjdfstest`, `just xfstests [tests]`,
+`just mount-helper-test`, `just logging-test`, `just largefile-test`,
+`just winfsp-tests [icbfs-ci|icbfs-cs|cmemfs-ci]` and `just sync-test`
+run the VM suites (the Linux ones find the VM's address themselves), and
+`just vm-tests` runs all but the large-file one and xfstests, which takes
+most of a day.
 
 The VMs, and how to set them up, are described in
 [test/linux](../test/linux/README.md) and
@@ -146,6 +179,12 @@ test/minio/down.sh             # remove it; --all removes any left behind
 
 - **Locks on Windows mounts are local to the machine** (see
   [architecture.md](architecture.md#locking)).
+- **Open files don't see each other's writes.** Every open of a file has
+  its own copy, so a write through one descriptor reaches another, in
+  the same mount, only once the first is closed or fsynced (or through
+  the kernel's page cache, for buffered I/O). A local filesystem shows
+  every write to every descriptor at once. xfstests' generic/131, 451
+  and 571 fail on it.
 - **Directories don't shrink.** Blocks are split, never merged, so a
   directory that grew and then emptied keeps its height.
 - **Case-sensitive Windows mounts** fail winfsp-tests'

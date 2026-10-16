@@ -17,3 +17,4 @@ generic/478 an OFD lock goes at RELEASE, which FUSE sends asynchronously after t
 generic/504 /proc/locks lists only the kernel's own locks, not a FUSE filesystem's
 generic/633 runs a setuid binary; the test mounts are nosuid (icbfs's default: -suid opts in)
 generic/684 as generic/683, for fpunch
+generic/685 as generic/683, for fzero

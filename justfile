@@ -90,4 +90,4 @@ sync-test *args:
     test/windows/run-sync-test.sh {{args}}
 
 # Every VM suite but the large-file one
-vm-tests: pjdfstest logging-test (winfsp-tests "icbfs-ci") (winfsp-tests "icbfs-cs") sync-test
+vm-tests: pjdfstest mount-helper-test logging-test (winfsp-tests "icbfs-ci") (winfsp-tests "icbfs-cs") sync-test

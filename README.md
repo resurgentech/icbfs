@@ -100,12 +100,14 @@ flowchart LR
 ## Status
 
 The core filesystem, both mounts, the drive API, and icbfs-sync are built
-and tested against MinIO. The latest full run, on 2026-10-14:
+and tested against MinIO. The latest runs, on 2026-10-16 (the last three
+rows on 2026-10-14):
 
 | suite | where | result |
 |---|---|---|
 | Go tests (`go test -race ./...`) | Linux, MinIO in Docker, real FUSE mounts | all 19 packages with tests pass |
 | [pjdfstest](https://github.com/pjd/pjdfstest) (POSIX conformance) | FUSE mount, Ubuntu 24.04 VM | 8,798 assertions: all pass but 4 accepted (directory link count, as on Btrfs) |
+| [xfstests](https://git.kernel.org/pub/scm/fs/xfs/xfstests-dev.git) `-g quick` (Linux's own regression suite) | FUSE mount, Ubuntu 24.04 VM | 647 tests: 163 pass, 467 don't apply (reflink, block devices, quotas, ...), 14 fail for listed reasons outside icbfs, 3 on a known issue |
 | [winfsp-tests](https://github.com/winfsp/winfsp/wiki/WinFsp-Testing) `--external`, case-insensitive | WinFsp mount, Windows Server 2025 VM | 78 / 78 |
 | winfsp-tests `--external`, case-sensitive | same | 77 / 78 (`getfileinfo_name_test`, which WinFsp's memfs also fails case-sensitive) |
 | Logging chain end to end | Linux VM | 5 / 5 checks |
@@ -117,7 +119,8 @@ and tested against MinIO. The latest full run, on 2026-10-14:
 - **Real AWS S3.** The code is the same S3-API code as for MinIO, but it
   hasn't been run against AWS.
 - **Azure Blob Storage.** There is no Azure store implementation.
-- **xfstests and fsx** stress testing.
+- **The rest of xfstests** beyond the quick group, and long fsx and
+  fsstress runs.
 - **Scale:** millions of files, many concurrent machines, and performance
   generally.
 
