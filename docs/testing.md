@@ -16,7 +16,7 @@ last three from 2026-10-14.
 |---|---|---|
 | Go tests (`-race`) | Linux host, Docker | all 19 packages with tests pass |
 | pjdfstest | Ubuntu 24.04 VM, FUSE, root | 238 files, 8,798 assertions; 0 unexpected failures, 4 accepted |
-| xfstests `-g quick` | Ubuntu 24.04 VM, FUSE | 647 tests: 166 pass, 467 don't run, 14 fail, each listed with its reason |
+| xfstests `-g quick` | Ubuntu 24.04 VM, FUSE | 647 tests: 169 pass, 467 don't run, 11 fail, each listed with its reason |
 | several machines | Linux VM and two small VMs, one MinIO | 3 machines: all 6 workloads pass; `fs check` clean |
 | winfsp-tests `--external`, case-insensitive | Windows Server 2025 VM | 78 / 78 pass |
 | winfsp-tests `--external`, case-sensitive | Windows Server 2025 VM | 77 / 78 pass; `getfileinfo_name_test` fails, as on WinFsp's memfs |
@@ -86,7 +86,8 @@ A run passes when every failing assertion is listed in
 [xfstests](https://git.kernel.org/pub/scm/fs/xfs/xfstests-dev.git) (fstests)
 is the Linux filesystems' own regression suite. It runs against icbfs's
 FUSE mount on the Linux VM, through the mount helper, with a test and a
-scratch filesystem on a throwaway MinIO, mounted `-o allow_other`:
+scratch filesystem on a throwaway MinIO, mounted `-o allow_other,dev,suid`
+(the tests use device nodes and setuid binaries):
 
 ```
 test/linux/run-xfstests.sh <vm-ip> [check arguments]   (default: -g quick)
@@ -97,14 +98,13 @@ not listed, with a reason, in `test/linux/xfstests-known.txt` fail the
 run. It is slow against an object store: the quick group takes most of a
 day, as every directory operation is a few store round trips.
 
-Of the quick group's 647 tests, 166 pass and 467 don't run: reflink and
+Of the quick group's 647 tests, 169 pass and 467 don't run: reflink and
 dedupe, block-device and shutdown tests, quotas, encryption, fs-verity,
-swap files and the like. 14 fail, each listed with its reason, all
+swap files and the like. 11 fail, each listed with its reason, all
 outside icbfs's reach: opening by file handle (go-fuse has no FUSE export
-support), device nodes and setuid binaries on the test mounts' default
-nodev and nosuid, FIBMAP, the kernel FUSE side's setgid rule on writes,
-FUSE's asynchronous release of OFD locks, `/proc/locks`, and the declared
-size not being enforced.
+support), FIBMAP, the kernel FUSE side's setgid rule on writes, FUSE's
+asynchronous release of OFD locks, `/proc/locks`, and the declared size
+not being enforced.
 
 ### Several machines
 

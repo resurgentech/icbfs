@@ -63,6 +63,8 @@ printf 'ICBFS_ENDPOINT=%s\nICBFS_BUCKET=%s\nICBFS_ACCESS_KEY=%s\nICBFS_SECRET_KE
   $ICBFS_MINIO_VM_ENDPOINT $ICBFS_MINIO_BUCKET $ICBFS_MINIO_ACCESS_KEY $ICBFS_MINIO_SECRET_KEY | sudo tee /etc/icbfs.env >/dev/null
 sudo chmod 600 /etc/icbfs.env
 sudo mkdir -p $TEST_DIR $SCRATCH_MNT
+# dev,suid: the tests use device nodes and setuid binaries, and the VM
+# and its MinIO are throwaway, so icbfs's safe defaults needn't apply.
 cat > $XFSTESTS/local.config <<EOF
 export FSTYP=fuse
 export FUSE_SUBTYP=.icbfs
@@ -70,8 +72,8 @@ export TEST_DEV=$TEST_FS
 export TEST_DIR=$TEST_DIR
 export SCRATCH_DEV=$SCRATCH_FS
 export SCRATCH_MNT=$SCRATCH_MNT
-export TEST_FS_MOUNT_OPTS='-o allow_other'
-export MOUNT_OPTIONS='-o allow_other'
+export TEST_FS_MOUNT_OPTS='-o allow_other,dev,suid'
+export MOUNT_OPTIONS='-o allow_other,dev,suid'
 EOF
 sudo rm -rf $XFSTESTS/results"
 
