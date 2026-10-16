@@ -3,6 +3,7 @@ package fuseserver
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -1898,5 +1899,53 @@ func TestMountTruncateByPathWhileOpen(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(path); len(got) != 0 {
 		t.Fatalf("after the close: %q, want empty", got)
+	}
+}
+
+// TestMountListingHasDotEntries: getdents lists "." and "..", with the
+// directory's and its parent's inode numbers (xfstests' generic/401), and
+// the root's isn't 0.
+func TestMountListingHasDotEntries(t *testing.T) {
+	mnt := mountTestFS(t)
+	sub := filepath.Join(mnt, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, "f"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := os.Open(sub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	buf := make([]byte, 4096)
+	n, err := unix.Getdents(int(d.Fd()), buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inos := map[string]uint64{}
+	for off := 0; off < n; {
+		ino := binary.LittleEndian.Uint64(buf[off:])
+		reclen := int(binary.LittleEndian.Uint16(buf[off+16:]))
+		name := buf[off+19 : off+reclen]
+		inos[string(name[:bytes.IndexByte(name, 0)])] = ino
+		off += reclen
+	}
+	var subSt, mntSt syscall.Stat_t
+	if err := syscall.Stat(sub, &subSt); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Stat(mnt, &mntSt); err != nil {
+		t.Fatal(err)
+	}
+	if mntSt.Ino == 0 {
+		t.Fatal("the mount's root has inode number 0")
+	}
+	if inos["."] != subSt.Ino || inos[".."] != mntSt.Ino {
+		t.Fatalf(". = %d, .. = %d; want %d and %d", inos["."], inos[".."], subSt.Ino, mntSt.Ino)
+	}
+	if _, ok := inos["f"]; !ok || len(inos) != 3 {
+		t.Fatalf("entries %v, want ., .. and f", inos)
 	}
 }

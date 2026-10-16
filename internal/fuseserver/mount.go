@@ -6,6 +6,8 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+
+	"github.com/resurgentech/icbfs/internal/icbfs"
 )
 
 // Mount is fs.Mount, with three differences.
@@ -35,6 +37,11 @@ func Mount(dir string, root fs.InodeEmbedder, options *fs.Options) (*fuse.Server
 		opts = *options
 	}
 	opts.ExplicitDataCacheControl = true
+	if rn, ok := root.(*Node); ok && opts.RootStableAttr == nil {
+		// The root's inode number, as every other node's, is its key's;
+		// left unset, go-fuse reports it as 0.
+		opts.RootStableAttr = &fs.StableAttr{Ino: icbfs.Ino(rn.key)}
+	}
 	opts.ExtraCapabilities |= fuse.CAP_DONT_MASK
 	raw := &ownerRawFS{RawFileSystem: fs.NewNodeFS(root, &opts)}
 	server, err := fuse.NewServer(raw, dir, &opts.MountOptions)

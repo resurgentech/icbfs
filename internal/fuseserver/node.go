@@ -363,7 +363,18 @@ func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	// that has already succeeded.
 	_ = n.fsys.TouchAtime(ctx, n.key, icbfs.TypeDir)
 	n.logEvent(ctx, fslog.EventList, n.path(), 0)
-	list := make([]fuse.DirEntry, 0, len(entries))
+	// "." and "..", as getdents(2) lists them on Linux filesystems, with
+	// the inode numbers stat reports. The root is its own parent.
+	parentKey := n.key
+	if _, parent := n.Parent(); parent != nil {
+		if pn, ok := parent.Operations().(*Node); ok {
+			parentKey = pn.key
+		}
+	}
+	list := make([]fuse.DirEntry, 0, len(entries)+2)
+	list = append(list,
+		fuse.DirEntry{Name: ".", Ino: icbfs.Ino(n.key), Mode: syscall.S_IFDIR},
+		fuse.DirEntry{Name: "..", Ino: icbfs.Ino(parentKey), Mode: syscall.S_IFDIR})
 	for _, e := range entries {
 		list = append(list, fuse.DirEntry{
 			Name: e.Name,
