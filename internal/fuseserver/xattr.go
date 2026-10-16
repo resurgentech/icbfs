@@ -21,13 +21,30 @@ var (
 	_ fs.NodeListxattrer   = (*Node)(nil)
 )
 
+// capabilityXattr is the file capabilities' xattr. The kernel asks for it
+// before every write(2), to strip it when an unprivileged process changes
+// the file, and FUSE stops the kernel remembering that a file has none.
+const capabilityXattr = "security.capability"
+
 // Getxattr returns attr's value, or with a too-small dest, its size and
 // ERANGE (dest is empty when the caller only asks the size).
+//
+// security.capability is answered from the attributes this node last
+// reported, which this mount's own changes keep current, rather than with
+// a stat per write (about 1 ms each). A capability set from another
+// machine is seen at the next stat. Stripping is local anyway: no other
+// machine's kernel strips capabilities when this mount writes.
 func (n *Node) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, syscall.Errno) {
 	ctx = detach(ctx)
-	a, err := n.fsys.Stat(ctx, n.key, n.typ)
-	if err != nil {
-		return 0, errnoFromErr(err)
+	var a icbfs.Attr
+	if last := n.last.Load(); attr == capabilityXattr && last != nil {
+		a = *last
+	} else {
+		var err error
+		if a, err = n.fsys.Stat(ctx, n.key, n.typ); err != nil {
+			return 0, errnoFromErr(err)
+		}
+		n.last.Store(&a)
 	}
 	v, err := icbfs.XattrValue(a, attr)
 	if err != nil {
@@ -50,14 +67,20 @@ func (n *Node) Setxattr(ctx context.Context, attr string, data []byte, flags uin
 	case flags&2 != 0: // XATTR_REPLACE
 		how = icbfs.XattrReplace
 	}
-	_, err := n.fsys.SetXattr(ctx, n.key, n.typ, attr, data, how)
+	a, err := n.fsys.SetXattr(ctx, n.key, n.typ, attr, data, how)
+	if err == nil {
+		n.last.Store(&a)
+	}
 	return xattrErrno(err)
 }
 
 // Removexattr removes attr.
 func (n *Node) Removexattr(ctx context.Context, attr string) syscall.Errno {
 	ctx = detach(ctx)
-	_, err := n.fsys.RemoveXattr(ctx, n.key, n.typ, attr)
+	a, err := n.fsys.RemoveXattr(ctx, n.key, n.typ, attr)
+	if err == nil {
+		n.last.Store(&a)
+	}
 	return xattrErrno(err)
 }
 

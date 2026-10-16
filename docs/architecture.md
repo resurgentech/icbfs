@@ -184,6 +184,13 @@ in step with them, as Linux filesystems do:
 POSIX ACLs exist only on primary-POSIX filesystems; on primary-Windows
 ones the security descriptor is the permission.
 
+The kernel asks for `security.capability` before every write, to strip a
+file's capabilities when an unprivileged process changes it. A mount
+answers that from the attributes it last read for the file, kept current
+by its own changes, not with a stat per write; a capability set from
+another machine is seen at its next stat. Stripping is local in any case:
+no other machine's kernel strips capabilities when this mount writes.
+
 **Users' data and icbfs's state never share a field.** The extended
 attributes hold only names a user set; icbfs's state has typed fields of
 its own, and its tools' data a separate table keyed by tool. Nothing a user

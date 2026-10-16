@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/hanwen/go-fuse/v2/fuse"
+
 	"github.com/resurgentech/icbfs/internal/icbfs"
 )
 
@@ -253,4 +255,45 @@ func lookupKey(t *testing.T, fsys *icbfs.Filesystem, name string) string {
 		t.Fatalf("lookup %s: %v", name, err)
 	}
 	return e.UUID
+}
+
+// TestCapabilityXattrFromNode: security.capability comes from the node's
+// last attributes, without a stat, and this node's own setxattr and
+// removexattr are seen at once. The node is used directly: setting
+// security.* through a mount needs root.
+func TestCapabilityXattrFromNode(t *testing.T) {
+	_, fsys := mountTestFSWithFsys(t)
+	ctx := context.Background()
+	key, attr, _, err := fsys.Create(ctx, fsys.RootKey(), "cap", 0o755, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := &Node{fsys: fsys, key: key, typ: icbfs.TypeFile}
+	n.last.Store(&attr)
+	buf := make([]byte, 64)
+	if _, errno := n.Getxattr(ctx, "security.capability", buf); errno != syscall.ENODATA {
+		t.Fatalf("no capability: %v, want ENODATA", errno)
+	}
+	cap := []byte{0, 0, 0, 2, 0, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	if errno := n.Setxattr(ctx, "security.capability", cap, 0); errno != 0 {
+		t.Fatal(errno)
+	}
+	if sz, errno := n.Getxattr(ctx, "security.capability", buf); errno != 0 || !bytes.Equal(buf[:sz], cap) {
+		t.Fatalf("after setxattr: %v %v", buf[:sz], errno)
+	}
+
+	// Another client's change is seen at the next stat, not before.
+	if _, err := fsys.RemoveXattr(ctx, key, icbfs.TypeFile, "security.capability"); err != nil {
+		t.Fatal(err)
+	}
+	if _, errno := n.Getxattr(ctx, "security.capability", buf); errno != 0 {
+		t.Fatalf("answered with a stat: %v", errno)
+	}
+	var out fuse.AttrOut
+	if errno := n.Getattr(ctx, nil, &out); errno != 0 {
+		t.Fatal(errno)
+	}
+	if _, errno := n.Getxattr(ctx, "security.capability", buf); errno != syscall.ENODATA {
+		t.Fatalf("after a stat: %v, want ENODATA", errno)
+	}
 }

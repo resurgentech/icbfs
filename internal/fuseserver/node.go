@@ -47,7 +47,8 @@ type Node struct {
 
 	// last is the attributes last reported for the item, which Getattr
 	// reports, with no links, once the item is gone: an open directory
-	// that was removed, or replaced by a rename, as Linux does.
+	// that was removed, or replaced by a rename, as Linux does. Getxattr
+	// answers security.capability from it.
 	last atomic.Pointer[icbfs.Attr]
 }
 
@@ -360,6 +361,7 @@ func (n *Node) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn,
 	if err != nil {
 		return errnoFromErr(err)
 	}
+	n.last.Store(&attr)
 	fillAttr(&out.Attr, n.key, n.typ, attr)
 	return 0
 }

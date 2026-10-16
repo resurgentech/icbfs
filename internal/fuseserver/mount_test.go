@@ -1788,3 +1788,26 @@ func TestMountMmapWritesAfterCloseKept(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 }
+
+// TestMountSmallWritesAreQuick: 4-byte writes don't each cost a store
+// round trip (the kernel's security.capability check per write).
+func TestMountSmallWritesAreQuick(t *testing.T) {
+	mnt := mountTestFS(t)
+	f, err := os.Create(filepath.Join(mnt, "small"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	start := time.Now()
+	for i := 0; i < 5000; i++ {
+		if _, err := f.Write([]byte("abcd")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A stat per write took about 1 ms each, 5 s here.
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("5000 small writes took %v", d)
+	} else {
+		t.Logf("5000 small writes in %v", d)
+	}
+}
