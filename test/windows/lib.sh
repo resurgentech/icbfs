@@ -24,3 +24,11 @@ scp_vm() {
 vm_ip() {
   virsh domifaddr "$VM_NAME" 2>/dev/null | awk '/ipv4/{print $4}' | cut -d/ -f1
 }
+
+# sync_vm_clock sets the VM's clock to this host's. A snapshot saved
+# running restores the clock it was saved with, and tests comparing
+# file times with the store's would then fail.
+sync_vm_clock() {
+  local ip="$1"
+  ssh_vm "$ip" "Set-Date -Date ([DateTimeOffset]::Parse('$(date -u +%Y-%m-%dT%H:%M:%S.%NZ | cut -c1-23)Z').LocalDateTime) | Out-Null" 2>/dev/null
+}

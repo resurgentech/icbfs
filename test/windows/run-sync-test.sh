@@ -14,6 +14,7 @@ FILTER='warning\|post-quantum\|store now\|upgraded'
 
 IP=$(vm_ip)
 [ -n "$IP" ] || { echo "no IP for $VM_NAME — is it running?" >&2; exit 1; }
+sync_vm_clock "$IP"
 mkdir -p "$WORK_DIR"
 
 if [ "${1:-}" != "--no-deploy" ]; then

@@ -75,6 +75,10 @@ left.
 ./run-sync-test.sh [--no-deploy]         # icbfs-sync's Go tests on NTFS, then end to end
 ```
 
+Both runners first set the VM's clock to the host's: a snapshot saved
+running brings back the clock it was saved with, and tests that compare
+file times with the store's would fail.
+
 **winfsp-tests** runs every test in `winfsp-tests --list` through
 `run-winfsp-tests.ps1`.
 
