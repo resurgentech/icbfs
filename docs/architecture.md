@@ -182,7 +182,11 @@ in step with them, as Linux filesystems do:
   was created with, and a new directory also takes the default ACL
   itself;
 - the umask applies only where there's no default ACL, so the kernel
-  leaves it to icbfs (`FUSE_DONT_MASK`).
+  leaves it to icbfs (`FUSE_DONT_MASK`);
+- in a setgid directory, a new item takes the directory's group, and a
+  new directory the setgid bit too;
+- setting an access ACL clears the setgid bit when the caller is neither
+  in the item's group nor root.
 
 POSIX ACLs exist only on primary-POSIX filesystems; on primary-Windows
 ones the security descriptor is the permission.

@@ -229,10 +229,15 @@ func (f *Filesystem) RemoveXattr(ctx context.Context, key string, typ EntryType,
 	return attr, failed
 }
 
-// EnablePosixACLs makes new items inherit their directory's default ACL
-// (on a primary-POSIX filesystem), as Linux does. It costs a read of the
-// directory's .metadata per create, so it's for mounts that present ACLs.
+// EnablePosixACLs makes new items inherit from their directory as Linux
+// does, on a primary-POSIX filesystem: its default ACL, and a setgid
+// directory's group (and, for a directory, the setgid bit). It costs a
+// read of the directory's .metadata per create, so it's for mounts that
+// present POSIX permissions.
 func (f *Filesystem) EnablePosixACLs(enabled bool) { f.posixACLs = enabled }
+
+// setgidBit is S_ISGID.
+const setgidBit = 0o2000
 
 type umaskKey struct{}
 
@@ -261,6 +266,12 @@ func (f *Filesystem) inheritACLs(ctx context.Context, dirKey string, attr *Attr,
 	parent, err := f.Stat(ctx, dirKey, TypeDir)
 	if err != nil {
 		return err
+	}
+	if parent.Mode&setgidBit != 0 {
+		attr.Gid = parent.Gid
+		if isDir {
+			attr.Mode |= setgidBit
+		}
 	}
 	if len(parent.PosixACLDefault) == 0 {
 		umask()

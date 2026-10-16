@@ -235,3 +235,34 @@ func TestPosixACLsRefusedOnPrimaryWindows(t *testing.T) {
 }
 
 func ptrU32(v uint32) *uint32 { return &v }
+
+// TestSetgidDirectoryInheritance: in a setgid directory, new items take
+// the directory's group, and new directories its setgid bit too
+// (xfstests' generic/314).
+func TestSetgidDirectoryInheritance(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	fsys.EnablePosixACLs(true)
+	ctx := context.Background()
+	dir, _, err := fsys.Mkdir(ctx, fsys.RootKey(), "shared", 0o2775, 1000, 4242)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub, subAttr, err := fsys.Mkdir(ctx, dir, "sub", 0o755, 1001, 1001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if subAttr.Gid != 4242 || subAttr.Mode&0o2000 == 0 {
+		t.Fatalf("subdirectory: gid %d mode %o, want gid 4242 and setgid", subAttr.Gid, subAttr.Mode)
+	}
+	_, fileAttr, _, err := fsys.Create(ctx, sub, "f", 0o644, 1001, 1001)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fileAttr.Gid != 4242 || fileAttr.Mode&0o2000 != 0 {
+		t.Fatalf("file: gid %d mode %o, want gid 4242 and no setgid", fileAttr.Gid, fileAttr.Mode)
+	}
+	_, plain, err := fsys.Mkdir(ctx, fsys.RootKey(), "plain", 0o755, 1001, 1001)
+	if err != nil || plain.Gid != 1001 || plain.Mode&0o2000 != 0 {
+		t.Fatalf("outside: gid %d mode %o (%v), want the creator's group", plain.Gid, plain.Mode, err)
+	}
+}

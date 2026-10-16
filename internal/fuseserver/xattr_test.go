@@ -297,3 +297,35 @@ func TestCapabilityXattrFromNode(t *testing.T) {
 		t.Fatalf("after a stat: %v, want ENODATA", errno)
 	}
 }
+
+// TestMountACLByNonMemberClearsSetgid: setting an access ACL clears the
+// setgid bit when the caller isn't in the file's group (xfstests'
+// generic/375).
+func TestMountACLByNonMemberClearsSetgid(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root keeps the setgid bit")
+	}
+	mnt, fsys := mountTestFSWithFsys(t)
+	ctx := context.Background()
+	const otherGroup = 54321 // not one of this process's groups
+	key, _, _, err := fsys.Create(ctx, fsys.RootKey(), "sg", 0o644, uint32(os.Getuid()), otherGroup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mode := uint32(0o2755)
+	if _, err := fsys.SetAttr(ctx, key, icbfs.TypeFile, &mode, nil, nil, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(mnt, "sg")
+	acl := posixACL(aclUserObj, 7, noID, aclGroupObj, 7, noID, aclOther, 7, noID)
+	if err := syscall.Setxattr(path, "system.posix_acl_access", acl, 0); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode()&os.ModeSetgid != 0 || st.Mode().Perm() != 0o777 {
+		t.Fatalf("mode %v, want 0777 without setgid", st.Mode())
+	}
+}

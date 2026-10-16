@@ -3,9 +3,14 @@ package fuseserver
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/hanwen/go-fuse/v2/fs"
+	"github.com/hanwen/go-fuse/v2/fuse"
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
 )
@@ -58,7 +63,12 @@ func (n *Node) Getxattr(ctx context.Context, attr string, dest []byte) (uint32, 
 
 // Setxattr stores attr; flags are setxattr(2)'s XATTR_CREATE and
 // XATTR_REPLACE.
+//
+// Setting an access ACL clears the setgid bit if the caller is neither in
+// the item's group nor root, as Linux does (the kernel leaves it to FUSE
+// filesystems).
 func (n *Node) Setxattr(ctx context.Context, attr string, data []byte, flags uint32) syscall.Errno {
+	caller, hasCaller := fuse.FromContext(ctx)
 	ctx = detach(ctx)
 	how := icbfs.XattrAny
 	switch {
@@ -68,10 +78,38 @@ func (n *Node) Setxattr(ctx context.Context, attr string, data []byte, flags uin
 		how = icbfs.XattrReplace
 	}
 	a, err := n.fsys.SetXattr(ctx, n.key, n.typ, attr, data, how)
+	if err == nil && attr == "system.posix_acl_access" && a.Mode&0o2000 != 0 &&
+		hasCaller && caller.Uid != 0 && !inGroup(caller, a.Gid) {
+		mode := a.Mode &^ 0o2000 & 0o7777
+		a, err = n.fsys.SetAttr(ctx, n.key, n.typ, &mode, nil, nil, nil, nil, nil, nil)
+	}
 	if err == nil {
 		n.last.Store(&a)
 	}
 	return xattrErrno(err)
+}
+
+// inGroup reports whether the calling process is in group gid: its group,
+// or one of its supplementary groups, which FUSE doesn't pass and
+// /proc/PID/status lists.
+func inGroup(caller *fuse.Caller, gid uint32) bool {
+	if caller.Gid == gid {
+		return true
+	}
+	status, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", caller.Pid))
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(status), "\n") {
+		if groups, ok := strings.CutPrefix(line, "Groups:"); ok {
+			for _, g := range strings.Fields(groups) {
+				if g == strconv.FormatUint(uint64(gid), 10) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // Removexattr removes attr.
