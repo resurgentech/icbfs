@@ -137,10 +137,12 @@ func (f *Filesystem) SetCacheOptions(dir string, maxBytes int64) {
 	f.cache = newDiskCache(dir, maxBytes)
 }
 
-// EnableLocking turns locking on for this Filesystem; it's off by default.
-// It's a per-mount choice, not a stored setting, because locking costs an
-// extra .lock object and round trips that most mounts don't need. It can be
-// called any time after New.
+// EnableLocking turns locking on for this Filesystem; it's off by default
+// here, and on by default in icbfs mount. It's a per-mount choice, not a
+// stored setting: it costs a read of the file's .lock object per flush,
+// and the lock operations' own round trips, which a client that never
+// takes locks (the drive API, icbfs-sync) needn't pay. It can be called
+// any time after New.
 func (f *Filesystem) EnableLocking(enabled bool) {
 	f.lockingEnabled = enabled
 }

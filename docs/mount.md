@@ -59,7 +59,7 @@ docs  /mnt/docs  fuse.icbfs  allow_other,_netdev  0  0
 - The store connection comes from the `ICBFS_*` variables, or failing
   those from `/etc/icbfs.env` (`ICBFS_ENDPOINT=...` lines; keep it mode
   600).
-- Options: `ro`, `allow_other`, `locking`, `notify`, `debug`, `relatime`,
+- Options: `ro`, `allow_other`, `nolocking`, `notify`, `debug`, `relatime`,
   `strictatime`, `noatime`, `nodiratime`, `dev`, `suid`, `noexec`, `cache_dir=DIR`,
   `cache_size=BYTES` and `as_of=TIME`. Generic options such as `rw` and
   `_netdev` are accepted and ignored; anything else is refused.
@@ -76,8 +76,8 @@ Linux-only flags:
 | flag | meaning |
 |---|---|
 | `-allow-other` | let users other than the one mounting use the mount. Without it, the kernel refuses every other user, whatever the file modes say. |
-| `-locking` | `flock`/`fcntl` locks shared with other mounts (see [architecture.md](architecture.md#locking)) |
-| `-notify` | MinIO change notifications: with `-locking`, a lock wait retries as soon as the lock changes |
+| `-locking=false` | refuse `flock`/`fcntl` (ENOSYS). By default they're locks shared with every other mount (see [architecture.md](architecture.md#locking)), which costs a read of the file's `.lock` object per flush. |
+| `-notify` | MinIO change notifications: a lock wait retries as soon as the lock changes |
 | `-log-socket SOCK -drive ID` | mount a drive through the logging daemon (see [daemon.md](daemon.md)) |
 | `-log-async` | with `-log-socket`: queue events instead of waiting for the server |
 | `-read-only` | mount read-only |
@@ -171,7 +171,7 @@ icbfs mount -as-of q3-signoff … /mnt/q3                  # a named version
   time is in the future.
 - An as-of mount keeps its version cache in a fresh directory under
   `-cache-dir`, and deletes it at unmount.
-- `-locking` and `-notify` don't apply to an as-of mount.
+- An as-of mount takes no locks, and `-notify` doesn't apply to it.
 
 Named versions are made with `icbfs-cli names create` (see
 [cli.md](cli.md)). How past views work, and what they cost, is in

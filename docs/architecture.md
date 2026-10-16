@@ -275,9 +275,13 @@ so a concurrent `link()` can't revive a file that is being removed.
 
 ## Locking
 
-Locking is optional (`icbfs mount -locking`) and best-effort. It is built
-from the same object-store primitives as everything else, not from a
-coordination service.
+Linux mounts lock by default (`icbfs mount -locking=false` turns it off,
+and lock calls are then refused); the drive API and icbfs-sync don't take
+locks. Locking is best-effort, built from the same object-store
+primitives as everything else, not from a coordination service. With it
+on, every flush first reads the file's `.lock` object (a not-found for a
+file nobody locked), and each lock and unlock is a read and a conditional
+write.
 
 - A file's locks are a list of `{range, holder, shared, expires}` entries
   in its `.lock` object. Acquiring one checks for overlaps, then writes

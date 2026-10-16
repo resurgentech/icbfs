@@ -85,7 +85,7 @@ A run passes when every failing assertion is listed in
 [xfstests](https://git.kernel.org/pub/scm/fs/xfs/xfstests-dev.git) (fstests)
 is the Linux filesystems' own regression suite. It runs against icbfs's
 FUSE mount on the Linux VM, through the mount helper, with a test and a
-scratch filesystem on a throwaway MinIO, mounted `-o allow_other,locking`:
+scratch filesystem on a throwaway MinIO, mounted `-o allow_other`:
 
 ```
 test/linux/run-xfstests.sh <vm-ip> [check arguments]   (default: -g quick)

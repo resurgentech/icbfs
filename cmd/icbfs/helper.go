@@ -33,6 +33,7 @@ var mountOptionFlags = map[string]string{
 	"ro":          "-read-only",
 	"allow_other": "-allow-other",
 	"locking":     "-locking",
+	"nolocking":   "-locking=false",
 	"notify":      "-notify",
 	"debug":       "-debug",
 	"nodiratime":  "-nodiratime",

@@ -43,8 +43,8 @@ func main() {
 	driveID := fset.String("drive", "", "with -log-socket: the drive to mount (the server's id for it)")
 	logAsync := fset.Bool("log-async", false, "with -log-socket: queue events instead of waiting for the server to log each one; never slows an operation, but drops (and counts) events while the daemon is unreachable")
 	asOf := fset.String("as-of", "", "mount read-only as the filesystem was at this time: a date (2006-01-02, meaning the end of that day), a date-time (2006-01-02T15:04:05) in local time, or RFC 3339 with a zone; or a version name (icbfs-cli names). Fails if the filesystem didn't exist yet then")
-	locking := fset.Bool("locking", false, "flock/fcntl locks shared with every other mount of the filesystem (docs/architecture.md's Locking section)")
-	enableNotify := fset.Bool("notify", false, "MinIO change notifications (ListenBucketNotification): with -locking, a lock wait retries as soon as the lock changes")
+	locking := fset.Bool("locking", true, "flock/fcntl locks shared with every other mount of the filesystem (docs/architecture.md's Locking section); -locking=false refuses them (ENOSYS) and saves a round trip per flush")
+	enableNotify := fset.Bool("notify", false, "MinIO change notifications (ListenBucketNotification): a lock wait retries as soon as the lock changes")
 	readOnly := fset.Bool("read-only", false, "mount read-only")
 	devices := fset.Bool("dev", false, "honour device nodes (as root; a FUSE mount is nodev unless asked: anyone who can write the filesystem could plant one)")
 	setuid := fset.Bool("suid", false, "honour setuid and setgid bits on executables (as root; nosuid unless asked, for the same reason)")
@@ -101,9 +101,10 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		if *locking || *enableNotify {
-			log.Fatal("-as-of mounts the past read-only; -locking and -notify don't apply")
+		if *enableNotify {
+			log.Fatal("-as-of mounts the past read-only; -notify doesn't apply")
 		}
+		*locking = false // nothing can be written, so there's nothing to lock
 		view, err = objstore.NewAsOf(ctx, store, at, *cacheDir)
 		if err != nil {
 			log.Fatal(err)

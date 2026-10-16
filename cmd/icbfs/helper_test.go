@@ -28,6 +28,10 @@ func TestHelperFlags(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(flags, []string{"mount", "-fs", "docs", "-dev", "-suid", "-noexec", "/mnt"}) {
 		t.Fatalf("got %q, %v", flags, err)
 	}
+	// nolocking turns off what's on by default.
+	if _, _, flags, err = helperFlags([]string{"docs", "/mnt", "-o", "nolocking"}); err != nil || !reflect.DeepEqual(flags, []string{"mount", "-fs", "docs", "-locking=false", "/mnt"}) {
+		t.Fatalf("got %q, %v", flags, err)
+	}
 	// -n and -v (mount(8)'s own) are ignored; -oOPTS works too.
 	_, _, flags, err = helperFlags([]string{"-n", "docs", "-v", "/mnt", "-olocking"})
 	if err != nil || !reflect.DeepEqual(flags, []string{"mount", "-fs", "docs", "-locking", "/mnt"}) {

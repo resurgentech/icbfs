@@ -80,7 +80,7 @@ flowchart LR
 | **POSIX** | modes, owners, POSIX ACLs (enforced by the kernel, default ACLs inherited), extended attributes, hard links, symlinks, FIFOs, sockets, device nodes, `utimensat` |
 | **Windows** | security descriptors (SDDL), ACL inheritance, attribute bits, alternate data streams, case-insensitive lookup, share modes |
 | **Large files** | multipart uploads that send only the parts an edit changed; per-filesystem max file size (default 1 TiB) |
-| **Locking** | optional `flock`/`fcntl` byte-range locks shared between Linux mounts, with leases |
+| **Locking** | `flock`/`fcntl` byte-range locks shared between Linux mounts, with leases (on by default) |
 | **Drive API** | HTTP API and Go library: browse, read, write, versions, diffs, drafts, trash, copy between drives, permissions checked per item |
 | **Folder sync** | `icbfs-sync`: one-way or two-way sync of Windows folders, including WebDAV drives, with a tray app |
 | **Managed mounts** | mounts and CLI commands through a local daemon that gets credentials from a server and logs every access (Linux) |
