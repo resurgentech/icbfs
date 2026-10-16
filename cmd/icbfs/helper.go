@@ -62,6 +62,15 @@ var ignoredMountOptions = map[string]bool{
 }
 
 func mountHelper(args []string) int {
+	if dir, flags, ok := remountFlags(args); ok {
+		// The mount exists: only its flags change, which is the kernel's
+		// business, not a new icbfs mount's.
+		if err := syscall.Mount("", dir, "", flags, ""); err != nil {
+			fmt.Fprintf(os.Stderr, "%s: remount %s: %v\n", helperName, dir, err)
+			return 1
+		}
+		return 0
+	}
 	name, dir, flags, err := helperFlags(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", helperName, err)
@@ -144,6 +153,42 @@ func helperFlags(args []string) (name, dir string, flags []string, err error) {
 		}
 	}
 	return name, dir, append(flags, dir), nil
+}
+
+// remountFlags recognizes mount(8)'s remount (-o remount,...) and returns
+// the mount point and mount(2) flags for it: read-only or read-write, and
+// the generic options that are the kernel's (noexec, nosuid, nodev,
+// noatime, ...).
+func remountFlags(args []string) (dir string, flags uintptr, ok bool) {
+	var pos, opts []string
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; {
+		case a == "-o" && i+1 < len(args):
+			opts = append(opts, strings.Split(args[i+1], ",")...)
+			i++
+		case strings.HasPrefix(a, "-o"):
+			opts = append(opts, strings.Split(a[2:], ",")...)
+		case strings.HasPrefix(a, "-"):
+		default:
+			pos = append(pos, a)
+		}
+	}
+	bits := map[string]uintptr{
+		"ro": syscall.MS_RDONLY, "nosuid": syscall.MS_NOSUID, "nodev": syscall.MS_NODEV,
+		"noexec": syscall.MS_NOEXEC, "noatime": syscall.MS_NOATIME, "nodiratime": syscall.MS_NODIRATIME,
+		"relatime": syscall.MS_RELATIME, "strictatime": syscall.MS_STRICTATIME,
+	}
+	flags = syscall.MS_REMOUNT
+	for _, o := range opts {
+		if o == "remount" {
+			ok = true
+		}
+		flags |= bits[o]
+	}
+	if !ok || len(pos) == 0 {
+		return "", 0, false
+	}
+	return pos[len(pos)-1], flags, true
 }
 
 // mountedAt reports whether an icbfs mount is at dir.

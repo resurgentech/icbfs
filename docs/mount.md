@@ -63,6 +63,10 @@ docs  /mnt/docs  fuse.icbfs  allow_other,_netdev  0  0
   `strictatime`, `noatime`, `nodiratime`, `cache_dir=DIR`,
   `cache_size=BYTES` and `as_of=TIME`. Generic options such as `rw` and
   `_netdev` are accepted and ignored; anything else is refused.
+- `mount -o remount,ro` (or `rw`, `noexec`, `noatime` and the other
+  generic flags) changes a mount's flags in the kernel; icbfs keeps
+  running. Its own access-time recording follows the options it was
+  mounted with.
 - The mount shows its filesystem's name as its source and `fuse.icbfs` as
   its type (`findmnt`, `/proc/mounts`). The mount's log goes to
   `/tmp/icbfs-mount-*.log`.

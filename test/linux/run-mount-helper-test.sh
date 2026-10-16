@@ -34,6 +34,8 @@ check "it's writable" "vm 'echo hello | sudo tee $MNT/a.txt >/dev/null && sudo c
 check "umount unmounts it, and icbfs exits" "vm 'sudo umount $MNT && sleep 1 && ! findmnt $MNT >/dev/null && ! pgrep -f \"[i]cbfs mount -fs $FS\" >/dev/null'"
 check "mount -o ro mounts read-only" "vm 'sudo mount -t fuse.icbfs -o ro $FS $MNT && sudo cat $MNT/a.txt' | grep -q hello"
 check "and refuses writes there" "! vm 'echo x | sudo tee $MNT/b.txt' >/dev/null 2>&1"
+check "mount -o remount,rw makes it writable" "vm 'sudo mount -o remount,rw $MNT && echo x | sudo tee $MNT/b.txt >/dev/null'"
+check "mount -o remount,ro makes it read-only again" "vm 'sudo mount -o remount,ro $MNT' && ! vm 'echo y | sudo tee $MNT/c.txt' >/dev/null 2>&1"
 vm "sudo umount $MNT" || true
 check "an unknown filesystem fails to mount, with the reason" "vm 'sudo mount -t fuse.icbfs no-such-fs $MNT 2>&1; true' | grep -q 'no-such-fs'"
 check "an unknown option is refused" "! vm 'sudo mount -t fuse.icbfs -o frobnicate $FS $MNT' >/dev/null 2>&1"

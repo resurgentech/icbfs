@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"syscall"
 	"testing"
 )
 
@@ -52,5 +53,18 @@ func TestLoadHelperConfig(t *testing.T) {
 func TestUnescapeMountinfo(t *testing.T) {
 	if got := unescapeMountinfo(`/mnt/with\040space`); got != "/mnt/with space" {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestRemountFlags(t *testing.T) {
+	dir, flags, ok := remountFlags([]string{"docs", "/mnt/docs", "-o", "remount,ro,noexec"})
+	if !ok || dir != "/mnt/docs" || flags != syscall.MS_REMOUNT|syscall.MS_RDONLY|syscall.MS_NOEXEC {
+		t.Fatalf("got %q %#x %v", dir, flags, ok)
+	}
+	if _, flags, ok := remountFlags([]string{"docs", "/mnt/docs", "-o", "remount,rw"}); !ok || flags != syscall.MS_REMOUNT {
+		t.Fatalf("remount,rw: %#x %v", flags, ok)
+	}
+	if _, _, ok := remountFlags([]string{"docs", "/mnt/docs", "-o", "ro"}); ok {
+		t.Fatal("a plain mount taken as a remount")
 	}
 }
