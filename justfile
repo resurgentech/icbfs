@@ -75,6 +75,14 @@ logging-test ip=vm_ip:
 largefile-test ip=vm_ip:
     test/linux/run-largefile-test.sh {{ip}}
 
+# mount -t fuse.icbfs through the mount helper, on the Linux VM
+mount-helper-test ip=vm_ip:
+    test/linux/run-mount-helper-test.sh {{ip}}
+
+# xfstests on the Linux VM (default -g quick; e.g. just xfstests -g generic/auto)
+xfstests *args:
+    test/linux/run-xfstests.sh {{vm_ip}} {{args}}
+
 # winfsp-tests on the Windows VM: icbfs-ci, icbfs-cs or cmemfs-ci
 winfsp-tests target="icbfs-ci" *args:
     test/windows/run-winfsp-tests.sh {{target}} {{args}}

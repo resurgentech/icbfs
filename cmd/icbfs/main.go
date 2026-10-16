@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -30,6 +31,9 @@ import (
 )
 
 func main() {
+	if filepath.Base(os.Args[0]) == helperName {
+		os.Exit(mountHelper(os.Args[1:]))
+	}
 	if len(os.Args) < 2 || os.Args[1] != "mount" {
 		fmt.Fprintln(os.Stderr, "usage: icbfs mount [flags] <mountpoint>")
 		os.Exit(2)
@@ -44,6 +48,7 @@ func main() {
 	asOf := fset.String("as-of", "", "mount read-only as the filesystem was at this time: a date (2006-01-02, meaning the end of that day), a date-time (2006-01-02T15:04:05) in local time, or RFC 3339 with a zone; or a version name (icbfs-cli names). Fails if the filesystem didn't exist yet then")
 	locking := fset.Bool("locking", false, "flock/fcntl locks shared with every other mount of the filesystem (docs/architecture.md's Locking section)")
 	enableNotify := fset.Bool("notify", false, "MinIO change notifications (ListenBucketNotification): with -locking, a lock wait retries as soon as the lock changes")
+	readOnly := fset.Bool("read-only", false, "mount read-only")
 	debug := fset.Bool("debug", false, "log every FUSE operation")
 	allowOther := fset.Bool("allow-other", false, "allow users other than the one running this command (and root) to use the mount; without it the kernel refuses every other uid, whatever the file modes say. Needs user_allow_other in /etc/fuse.conf when not run as root")
 	cacheDir := fset.String("cache-dir", "", "local disk directory for open files and the read cache (default: a new directory under the system temp directory)")
@@ -120,6 +125,10 @@ func main() {
 		log.Fatalf("filesystem %q: %v", *fsName, err)
 	}
 	fsys.EnableLocking(*locking)
+	// POSIX ACLs on primary-POSIX filesystems; on primary-Windows ones
+	// the security descriptor is the permission.
+	acls := !fsys.PrimaryWindows()
+	fsys.EnablePosixACLs(acls)
 
 	var fuseSignals <-chan notify.Signal
 	if *enableNotify {
@@ -152,8 +161,12 @@ func main() {
 		rootOpts = append(rootOpts, fuseserver.WithRoot(key, driveRoot))
 	}
 	root := fuseserver.Root(fsys, fuseSignals, rootOpts...)
+	source := *fsName
+	if *driveID != "" {
+		source = *driveID
+	}
 	server, err := fs.Mount(mountpoint, root, &fs.Options{
-		MountOptions: fuseMountOptions(*debug, *allowOther, view != nil || driveReadOnly),
+		MountOptions: fuseMountOptions(source, *debug, *allowOther, view != nil || driveReadOnly || *readOnly, acls),
 		// Without it, go-fuse reports a stored mode 0000 as 0644 or
 		// 0755.
 		NullPermissions: true,
@@ -193,7 +206,10 @@ func newMinIOClient(endpoint, accessKey, secretKey string) (*minio.Client, error
 	})
 }
 
-func fuseMountOptions(debug, allowOther, readOnly bool) fuse.MountOptions {
+// fuseMountOptions: source is what /proc/mounts shows as the mount's
+// source (the filesystem's name, or the drive's), and the type is
+// fuse.icbfs.
+func fuseMountOptions(source string, debug, allowOther, readOnly, acls bool) fuse.MountOptions {
 	options := []string{"default_permissions"}
 	if allowOther {
 		options = append(options, "allow_other")
@@ -202,7 +218,7 @@ func fuseMountOptions(debug, allowOther, readOnly bool) fuse.MountOptions {
 		options = append(options, "ro")
 	}
 	return fuse.MountOptions{
-		FsName: "icbfs",
+		FsName: source,
 		Name:   "icbfs",
 		Debug:  debug,
 		// default_permissions has the kernel check permissions on every
@@ -217,6 +233,9 @@ func fuseMountOptions(debug, allowOther, readOnly bool) fuse.MountOptions {
 		// this driver, and uses its own local lock table instead, which
 		// other machines can't see.
 		EnableLocks: true,
+		// EnableAcl: the kernel enforces POSIX ACLs, kept as the
+		// system.posix_acl_* xattrs.
+		EnableAcl: acls,
 	}
 }
 

@@ -1,0 +1,5 @@
+# xfstests that fail against icbfs, each with its reason. run-xfstests.sh
+# (via xfstests-check.sh) passes when every failure is listed here, and
+# reports listed tests that have started passing.
+#
+# Format: <test> <reason>

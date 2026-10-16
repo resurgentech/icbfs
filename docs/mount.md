@@ -42,6 +42,31 @@ icbfs mount -fs docs /mnt/docs
 Unmount with `fusermount3 -u /mnt/docs`, or press Ctrl+C in the
 command.
 
+### With mount(8) and fstab
+
+The `icbfs` binary is also a mount helper. Link it as
+`/sbin/mount.fuse.icbfs`, and `mount -t fuse.icbfs NAME DIR` mounts the
+filesystem NAME, the same as `icbfs mount -fs NAME DIR`, in the
+background; `umount DIR` unmounts it.
+
+```
+sudo ln -s /usr/local/bin/icbfs /sbin/mount.fuse.icbfs
+sudo mount -t fuse.icbfs docs /mnt/docs -o allow_other
+# /etc/fstab
+docs  /mnt/docs  fuse.icbfs  allow_other,_netdev  0  0
+```
+
+- The store connection comes from the `ICBFS_*` variables, or failing
+  those from `/etc/icbfs.env` (`ICBFS_ENDPOINT=...` lines; keep it mode
+  600).
+- Options: `ro`, `allow_other`, `locking`, `notify`, `debug`,
+  `cache_dir=DIR`, `cache_size=BYTES` and `as_of=TIME`. Generic options such
+  as `rw`, `noatime` and `_netdev` are accepted and ignored; anything else
+  is refused.
+- The mount shows its filesystem's name as its source and `fuse.icbfs` as
+  its type (`findmnt`, `/proc/mounts`). The mount's log goes to
+  `/tmp/icbfs-mount-*.log`.
+
 Linux-only flags:
 
 | flag | meaning |
@@ -51,10 +76,14 @@ Linux-only flags:
 | `-notify` | MinIO change notifications: with `-locking`, a lock wait retries as soon as the lock changes |
 | `-log-socket SOCK -drive ID` | mount a drive through the logging daemon (see [daemon.md](daemon.md)) |
 | `-log-async` | with `-log-socket`: queue events instead of waiting for the server |
+| `-read-only` | mount read-only |
 | `-debug` | log every FUSE request |
 
-The mount uses `default_permissions`: the kernel checks mode bits against
-the caller.
+The mount uses `default_permissions`: the kernel checks mode bits, and on
+a primary-POSIX filesystem POSIX ACLs too (`setfacl`, `getfacl`), against
+the caller. Extended attributes work in the `user.`, `trusted.` and
+`security.` namespaces (`setfattr`, `getfattr`); see
+[architecture.md](architecture.md#metadata).
 
 ## Windows (WinFsp)
 
