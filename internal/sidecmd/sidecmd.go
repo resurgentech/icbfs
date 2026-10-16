@@ -43,7 +43,7 @@ type Described struct {
 // Storage commands act on a bucket's filesystems; drive commands on a
 // drive.
 var (
-	StorageCommands = []string{"fs create", "fs list", "fs describe", "fs resize", "fs archive", "fs prune"}
+	StorageCommands = []string{"fs create", "fs list", "fs describe", "fs check", "fs resize", "fs archive", "fs prune"}
 	DriveCommands   = []string{"names create", "names list", "names delete", "trash list", "trash restore"}
 )
 
@@ -132,6 +132,12 @@ func runStorage(ctx context.Context, store objstore.Store, r Request) (any, erro
 		}
 		_, used, err := f.StatFS(ctx)
 		return Described{info, used}, err
+	case "fs check":
+		f := icbfs.New(store, a.str("fs"))
+		if err := f.Attach(ctx); err != nil {
+			return nil, err
+		}
+		return f.Check(ctx)
 	case "fs resize":
 		size, err := a.uint("size", 0)
 		if err != nil {

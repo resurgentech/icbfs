@@ -7,6 +7,7 @@ filesystems, naming versions, and the trash.
 icbfs-cli fs create   -fs NAME [-primary-windows] [-size N] [-max-file-size N] [-dir-block-entries N] [root options]
 icbfs-cli fs list
 icbfs-cli fs describe -fs NAME
+icbfs-cli fs check    -fs NAME [-json]
 icbfs-cli fs resize   -fs NAME -size N
 icbfs-cli fs archive  -fs NAME
 icbfs-cli fs prune    -fs NAME -yes
@@ -80,6 +81,13 @@ The other `fs` commands:
 
 - `fs list` lists the bucket's filesystems.
 - `fs describe` shows one filesystem's settings, with its used space.
+- `fs check` walks a filesystem and reports inconsistencies, changing
+  nothing, and exits non-zero if it found any: directory blocks that don't
+  decode or are out of order, names leading to missing objects, link
+  counts that don't match the names, directories with two names. It also
+  counts objects nothing reaches, which some operations leave legitimately.
+  Run it on a quiet filesystem: one changing while it's walked can show
+  problems that aren't.
 - `fs archive` makes a filesystem read-only. It takes effect at the next
   mount.
 - `fs prune -yes` erases every version of everything in an **archived**

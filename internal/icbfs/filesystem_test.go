@@ -240,6 +240,7 @@ func TestConcurrentLinkRaceDoesNotLoseUpdates(t *testing.T) {
 	if _, _, _, err := fsys.ReadFile(ctx, targetUUID); err != nil {
 		t.Fatalf("original file should still exist: %v", err)
 	}
+	checkClean(t, fsys)
 }
 
 func mustReadNlinkSideObject(t *testing.T, ctx context.Context, store objstore.Store, uuid string) int {
@@ -1016,6 +1017,7 @@ func TestConcurrentCreatesAllSurvive(t *testing.T) {
 	if len(entries) != n {
 		t.Errorf("listed %d entries, want %d", len(entries), n)
 	}
+	checkClean(t, fsys)
 }
 
 // TestRightLinksAloneReachEverything: with parents never pointed at new

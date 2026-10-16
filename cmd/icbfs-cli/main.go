@@ -6,6 +6,7 @@
 //	icbfs-cli fs create   -fs NAME [-primary-windows] [-size N] [-max-file-size N] [-dir-block-entries N] [root options]
 //	icbfs-cli fs list
 //	icbfs-cli fs describe -fs NAME
+//	icbfs-cli fs check    -fs NAME [-json]
 //	icbfs-cli fs resize   -fs NAME -size N
 //	icbfs-cli fs archive  -fs NAME
 //	icbfs-cli fs prune    -fs NAME -yes
@@ -54,7 +55,7 @@ const usage = `usage: icbfs-cli fs create|list|describe|resize|archive|prune [fl
 run "icbfs-cli <group> <command> -h" for a command's flags`
 
 var commands = map[string]func([]string) error{
-	"fs create": fsCreate, "fs list": fsList, "fs describe": fsDescribe, "fs resize": fsResize,
+	"fs create": fsCreate, "fs list": fsList, "fs describe": fsDescribe, "fs check": fsCheck, "fs resize": fsResize,
 	"fs archive": fsArchive, "fs prune": fsPrune,
 	"names create": namesCreate, "names list": namesList, "names delete": namesDelete,
 	"trash list": trashList, "trash restore": trashRestore,
@@ -238,6 +239,44 @@ func fsDescribe(args []string) error {
 	}
 	printInfos([]icbfs.Info{d.Info}, false)
 	fmt.Printf("used: %d bytes\n", d.Used)
+	return nil
+}
+
+// fsCheck walks a filesystem and reports inconsistencies, changing
+// nothing; it exits non-zero if it found any. Run it on a quiet
+// filesystem: one changing while it's walked can show problems that
+// aren't.
+func fsCheck(args []string) error {
+	fset := flag.NewFlagSet("fs check", flag.ExitOnError)
+	sf := addStoreFlags(fset)
+	name := fset.String("fs", "", "filesystem (required)")
+	asJSON := fset.Bool("json", false, "JSON output")
+	if err := parse(fset, args); err != nil {
+		return err
+	}
+	if *name == "" {
+		return errors.New("-fs is required")
+	}
+	var r icbfs.CheckReport
+	if err := sf.run("fs check", map[string]string{"fs": *name}, &r); err != nil {
+		return err
+	}
+	if *asJSON {
+		if err := json.NewEncoder(os.Stdout).Encode(r); err != nil {
+			return err
+		}
+	} else {
+		fmt.Printf("%d directories, %d files, %d directory blocks; %d unreachable objects\n", r.Directories, r.Files, r.Blocks, r.Unreachable)
+		for _, k := range r.UnreachableListed {
+			fmt.Printf("  unreachable: %s\n", k)
+		}
+		for _, p := range r.Problems {
+			fmt.Printf("%s: %s %s: %s\n", p.Kind, p.Key, p.Path, p.Detail)
+		}
+	}
+	if !r.OK() {
+		return fmt.Errorf("%s: %d problems", *name, len(r.Problems))
+	}
 	return nil
 }
 

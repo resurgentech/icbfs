@@ -277,6 +277,37 @@ When two link-count changes race, the one reaching zero first writes a
 tombstone under the same conditional write before the object is deleted,
 so a concurrent `link()` can't revive a file that is being removed.
 
+## What several machines can rely on
+
+Any number of machines can mount one filesystem. With no coordinator, this
+is what holds between them (within one mount, every open of a file shares
+its content, as on a local disk):
+
+- **Names.** Adding or removing a name is one conditional write of a
+  directory block, so it is atomic, and concurrent creates, unlinks and
+  links from any number of machines all land; none is lost to another,
+  splits included.
+- **Rename is not atomic.** It removes the old name, then adds the new one
+  (after removing what it replaces). Between the two, the item has no
+  name; a client that dies there leaves it unreachable (`icbfs-cli fs
+  check` counts it).
+- **File content is close-to-open.** A close (or `fsync`) stores the file
+  as one conditional whole-object write, so another machine sees the old
+  content or the new, never a mix, and sees the new at its next open.
+  Writers to different ranges of one file both land; where their ranges
+  overlap, the later flush wins.
+- **Attributes and link counts** are each a conditional read-modify-write
+  of the item's `.metadata`: concurrent `chmod` and `chown` both land, and
+  a file whose last link is going can't be revived by a concurrent `link`.
+- **Locks** are leases (below): they hold while their holder renews them,
+  and a write that overlaps another machine's lock is refused, which is
+  stronger than advisory but not mandatory.
+- **Listing** a directory while it changes shows every name present
+  throughout, and may or may not show one added or removed during it.
+
+`icbfs-cli fs check` walks a filesystem and reports anything that breaks
+the structure these rely on.
+
 ## Locking
 
 Linux mounts lock by default (`icbfs mount -locking=false` turns it off,
