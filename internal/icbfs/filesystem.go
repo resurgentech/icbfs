@@ -964,9 +964,18 @@ func (f *Filesystem) putBlock(ctx context.Context, key string, blk *block.Block,
 // underfull nodes back together is not implemented (see the block
 // package doc) — this only ever shrinks the leaf that held name.
 func (f *Filesystem) removeEntry(ctx context.Context, rootKey, name string) (block.Entry, error) {
+	return f.removeEntryIf(ctx, rootKey, name, nil)
+}
+
+// removeEntryIf is removeEntry that first passes the entry to check, if
+// set, and removes it only if check returns nil; otherwise it returns
+// check's error. The check is on the entry the removal itself found, so a
+// caller needn't look the name up first: that walk is saved, and nothing
+// can replace the entry between the check and the removal.
+func (f *Filesystem) removeEntryIf(ctx context.Context, rootKey, name string, check func(block.Entry) error) (block.Entry, error) {
 	for attempt := 0; attempt < maxTreeRetries; attempt++ {
 		retryPause(ctx, attempt)
-		removed, err := f.tryRemove(ctx, rootKey, name)
+		removed, err := f.tryRemove(ctx, rootKey, name, check)
 		if err == nil {
 			return removed, nil
 		}
@@ -977,7 +986,7 @@ func (f *Filesystem) removeEntry(ctx context.Context, rootKey, name string) (blo
 	return block.Entry{}, fmt.Errorf("remove %q from %s: exceeded %d retries", name, rootKey, maxTreeRetries)
 }
 
-func (f *Filesystem) tryRemove(ctx context.Context, rootKey, name string) (block.Entry, error) {
+func (f *Filesystem) tryRemove(ctx context.Context, rootKey, name string, check func(block.Entry) error) (block.Entry, error) {
 	path, err := f.descendForWrite(ctx, rootKey, name)
 	if err != nil {
 		return block.Entry{}, err
@@ -989,6 +998,11 @@ func (f *Filesystem) tryRemove(ctx context.Context, rootKey, name string) (block
 			return block.Entry{}, ErrNotFound
 		}
 		return block.Entry{}, err
+	}
+	if check != nil {
+		if err := check(removed); err != nil {
+			return block.Entry{}, err // nothing written: the removal was only in this copy
+		}
 	}
 	data, err := leaf.blk.Encode()
 	if err != nil {
@@ -1595,21 +1609,16 @@ func (f *Filesystem) Unlink(ctx context.Context, dirKey, name string) error {
 	if err := f.checkNameLength(name); err != nil {
 		return err
 	}
-	entry, ok, err := f.findInTree(ctx, dirKey, name)
+	entry, err := f.removeEntryIf(ctx, dirKey, name, func(e block.Entry) error {
+		if e.Type == TypeDir {
+			return ErrIsDir
+		}
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return ErrNotFound
-	}
-	if entry.Type == TypeDir {
-		return ErrIsDir
-	}
-
 	before, _ := f.store.Head(ctx, entry.UUID) // for the trash entry, if this was the last name
-	if _, err := f.removeEntry(ctx, dirKey, name); err != nil {
-		return err
-	}
 	f.touchDir(ctx, dirKey)
 
 	deleted, err := f.adjustNlink(ctx, entry.UUID, -1)
