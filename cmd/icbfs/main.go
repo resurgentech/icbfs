@@ -134,6 +134,9 @@ func main() {
 	default:
 		log.Fatalf("-atime %q: relatime, strict or noatime", *atime)
 	}
+	if *readOnly || driveReadOnly {
+		fsys.SetAtime(icbfs.AtimeNever, false) // a read-only mount records nothing
+	}
 	// POSIX ACLs on primary-POSIX filesystems; on primary-Windows ones
 	// the security descriptor is the permission.
 	acls := !fsys.PrimaryWindows()

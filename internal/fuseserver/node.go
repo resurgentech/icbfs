@@ -109,7 +109,8 @@ func setTime(sec *uint64, nsec *uint32, t time.Time) {
 
 // fillAttr translates an icbfs.Attr into the fuse.Attr the kernel expects.
 // ctime is icbfs's status-change time, or mtime if unset. atime is the
-// recorded access time, or mtime for an item never read.
+// recorded access time, or for an item never read its creation time (as
+// a new item's atime is elsewhere), which unlike mtime doesn't move.
 func fillAttr(out *fuse.Attr, key string, typ icbfs.EntryType, a icbfs.Attr) {
 	out.Ino = icbfs.Ino(key)
 	out.Mode = typeToFuseMode(typ) | (a.Mode & 0o7777)
@@ -133,6 +134,12 @@ func fillAttr(out *fuse.Attr, key string, typ icbfs.EntryType, a icbfs.Attr) {
 	setTime(&out.Ctime, &out.Ctimensec, ctime)
 
 	atime := a.Atime
+	if atime.IsZero() {
+		atime = a.Btime
+	}
+	if atime.IsZero() {
+		atime = icbfs.Btime(key)
+	}
 	if atime.IsZero() {
 		atime = mtime
 	}

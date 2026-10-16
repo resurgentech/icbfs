@@ -73,7 +73,7 @@ export SCRATCH_MNT=$SCRATCH_MNT
 export TEST_FS_MOUNT_OPTS='-o allow_other'
 export MOUNT_OPTIONS='-o allow_other'
 EOF
-rm -rf $XFSTESTS/results"
+sudo rm -rf $XFSTESTS/results"
 
 cleanup() {
   vm "sudo umount $TEST_DIR $SCRATCH_MNT 2>/dev/null; sudo rm -f /etc/icbfs.env" >/dev/null 2>&1 || true
