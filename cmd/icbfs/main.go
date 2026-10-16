@@ -46,6 +46,9 @@ func main() {
 	locking := fset.Bool("locking", false, "flock/fcntl locks shared with every other mount of the filesystem (docs/architecture.md's Locking section)")
 	enableNotify := fset.Bool("notify", false, "MinIO change notifications (ListenBucketNotification): with -locking, a lock wait retries as soon as the lock changes")
 	readOnly := fset.Bool("read-only", false, "mount read-only")
+	devices := fset.Bool("dev", false, "honour device nodes (as root; a FUSE mount is nodev unless asked: anyone who can write the filesystem could plant one)")
+	setuid := fset.Bool("suid", false, "honour setuid and setgid bits on executables (as root; nosuid unless asked, for the same reason)")
+	noExec := fset.Bool("noexec", false, "don't allow executing files from the mount")
 	atime := fset.String("atime", "relatime", "when reads record access times: relatime (when the recorded one is no newer than the last change, or a day old), strict (every read), or noatime (never)")
 	noDirAtime := fset.Bool("nodiratime", false, "don't record access times for directories")
 	debug := fset.Bool("debug", false, "log every FUSE operation")
@@ -178,7 +181,7 @@ func main() {
 		source = *driveID
 	}
 	server, err := fuseserver.Mount(mountpoint, root, &fs.Options{
-		MountOptions: fuseMountOptions(source, *debug, *allowOther, view != nil || driveReadOnly || *readOnly, acls),
+		MountOptions: fuseMountOptions(source, *debug, *allowOther, view != nil || driveReadOnly || *readOnly, acls, kernelFlags{dev: *devices, suid: *setuid, noexec: *noExec}),
 		// Without it, go-fuse reports a stored mode 0000 as 0644 or
 		// 0755.
 		NullPermissions: true,
@@ -209,8 +212,21 @@ func main() {
 // fuseMountOptions: source is what /proc/mounts shows as the mount's
 // source (the filesystem's name, or the drive's), and the type is
 // fuse.icbfs.
-func fuseMountOptions(source string, debug, allowOther, readOnly, acls bool) fuse.MountOptions {
+// kernelFlags are mount flags the kernel applies: device nodes, setuid
+// bits, and executing files.
+type kernelFlags struct{ dev, suid, noexec bool }
+
+func fuseMountOptions(source string, debug, allowOther, readOnly, acls bool, kf kernelFlags) fuse.MountOptions {
 	options := []string{"default_permissions"}
+	if kf.dev {
+		options = append(options, "dev")
+	}
+	if kf.suid {
+		options = append(options, "suid")
+	}
+	if kf.noexec {
+		options = append(options, "noexec")
+	}
 	if allowOther {
 		options = append(options, "allow_other")
 	}

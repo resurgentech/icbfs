@@ -36,6 +36,9 @@ var mountOptionFlags = map[string]string{
 	"notify":      "-notify",
 	"debug":       "-debug",
 	"nodiratime":  "-nodiratime",
+	"dev":         "-dev",
+	"suid":        "-suid",
+	"noexec":      "-noexec",
 }
 
 // atimeOptions are the access-time options, and -atime's value for each.
@@ -56,7 +59,7 @@ var valueOptions = map[string]string{
 // nothing here.
 var ignoredMountOptions = map[string]bool{
 	"rw": true, "defaults": true, "auto": true, "noauto": true, "user": true, "nouser": true,
-	"dev": true, "nodev": true, "suid": true, "nosuid": true, "exec": true, "noexec": true,
+	"nodev": true, "nosuid": true, "exec": true,
 	"atime": true, "norelatime": true, "diratime": true,
 	"async": true, "_netdev": true, "nofail": true, "default_permissions": true,
 }

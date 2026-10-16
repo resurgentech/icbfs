@@ -23,6 +23,11 @@ func TestHelperFlags(t *testing.T) {
 	if _, _, _, err := helperFlags([]string{"docs"}); err == nil {
 		t.Fatal("a missing mount point was accepted")
 	}
+	// dev, suid and noexec reach icbfs; nodev and nosuid are the default.
+	_, _, flags, err = helperFlags([]string{"docs", "/mnt", "-o", "dev,suid,noexec,nodev,nosuid"})
+	if err != nil || !reflect.DeepEqual(flags, []string{"mount", "-fs", "docs", "-dev", "-suid", "-noexec", "/mnt"}) {
+		t.Fatalf("got %q, %v", flags, err)
+	}
 	// -n and -v (mount(8)'s own) are ignored; -oOPTS works too.
 	_, _, flags, err = helperFlags([]string{"-n", "docs", "-v", "/mnt", "-olocking"})
 	if err != nil || !reflect.DeepEqual(flags, []string{"mount", "-fs", "docs", "-locking", "/mnt"}) {

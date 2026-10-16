@@ -60,7 +60,7 @@ docs  /mnt/docs  fuse.icbfs  allow_other,_netdev  0  0
   those from `/etc/icbfs.env` (`ICBFS_ENDPOINT=...` lines; keep it mode
   600).
 - Options: `ro`, `allow_other`, `locking`, `notify`, `debug`, `relatime`,
-  `strictatime`, `noatime`, `nodiratime`, `cache_dir=DIR`,
+  `strictatime`, `noatime`, `nodiratime`, `dev`, `suid`, `noexec`, `cache_dir=DIR`,
   `cache_size=BYTES` and `as_of=TIME`. Generic options such as `rw` and
   `_netdev` are accepted and ignored; anything else is refused.
 - `mount -o remount,ro` (or `rw`, `noexec`, `noatime` and the other
@@ -81,6 +81,8 @@ Linux-only flags:
 | `-log-socket SOCK -drive ID` | mount a drive through the logging daemon (see [daemon.md](daemon.md)) |
 | `-log-async` | with `-log-socket`: queue events instead of waiting for the server |
 | `-read-only` | mount read-only |
+| `-dev`, `-suid` | honour device nodes, and setuid and setgid bits on executables (as root). Off by default, as on every FUSE mount: anyone who can write the filesystem, from any machine, could plant a device node or a setuid binary. |
+| `-noexec` | don't allow executing files from the mount |
 | `-atime MODE` | when reads record access times: `relatime` (the default, as Linux's: when the recorded one is no newer than the last change, or a day old), `strict` (every read) or `noatime` (never) |
 | `-nodiratime` | record no access times for directories |
 | `-debug` | log every FUSE request |

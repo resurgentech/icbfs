@@ -7,9 +7,13 @@
 generic/103 fallocate of all free space (~100 GiB) is past the test filesystem's 8 GiB max file size: EFBIG, correctly
 generic/426 open_by_handle needs FUSE export support (name_to_handle_at), which go-fuse doesn't provide
 generic/467 open_by_handle, as generic/426
-generic/434 opens a device node; FUSE mounts are nodev
+generic/434 opens a device node; the test mounts are nodev (icbfs's default: -dev opts in)
 generic/477 open_by_handle after a mount cycle, as generic/426
 generic/519 FIBMAP: there's no block device behind icbfs, so no physical addresses (EOPNOTSUPP)
 generic/683 FUSE's kernel side (fuse_setattr) clears setgid on an unprivileged write or fallocate only if group-executable, the pre-6.2 rule; icbfs sees only the resulting mode (HANDLE_KILLPRIV_V2 not used)
-generic/184 opens a device node; FUSE mounts are nodev
+generic/184 opens a device node; the test mounts are nodev (icbfs's default: -dev opts in)
 generic/213 the declared filesystem size isn't enforced (it's what df shows), so fallocate past it fails only at the max file size (EFBIG), not ENOSPC
+generic/478 an OFD lock goes at RELEASE, which FUSE sends asynchronously after the last close; a F_GETLK straight after can still see it
+generic/504 /proc/locks lists only the kernel's own locks, not a FUSE filesystem's
+generic/633 runs a setuid binary; the test mounts are nosuid (icbfs's default: -suid opts in)
+generic/684 as generic/683, for fpunch
