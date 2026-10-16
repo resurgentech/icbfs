@@ -15,10 +15,10 @@ import (
 // reachable through any of this.
 
 var (
-	ErrNoAttr       = errors.New("no such attribute")             // ENODATA
-	ErrNotSupported = errors.New("operation not supported")       // EOPNOTSUPP
-	ErrXattrTooBig  = errors.New("attribute value too large")     // E2BIG
-	ErrXattrNoSpace = errors.New("no room for more attributes")   // ENOSPC
+	ErrNoAttr       = errors.New("no such attribute")              // ENODATA
+	ErrNotSupported = errors.New("operation not supported")        // EOPNOTSUPP
+	ErrXattrTooBig  = errors.New("attribute value too large")      // E2BIG
+	ErrXattrNoSpace = errors.New("no room for more attributes")    // ENOSPC
 	ErrACLNotDir    = errors.New("default ACL on a non-directory") // EACCES
 )
 

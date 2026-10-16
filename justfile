@@ -2,8 +2,6 @@
 
 linux_cmds := "./cmd/icbfs ./cmd/icbfs-cli ./cmd/icbfs-logd ./cmd/icbfs-mockserver ./cmd/drive-api"
 windows_cmds := "./cmd/icbfs-winfsp ./cmd/icbfs-cli ./cmd/drive-api"
-# The flaky lease-renewal test (docs/testing.md, Known issues).
-flaky := "TestMountFcntlLockSurvivesPastOriginalTTLViaRenewal"
 vm_ip := `virsh domifaddr icbfs-fuse-test 2>/dev/null | awk '/ipv4/{print $4}' | cut -d/ -f1`
 
 [private]
@@ -28,9 +26,9 @@ test *args:
 test-short *args:
     go test -short {{args}} ./...
 
-# The Go tests CI runs: the race detector, and without the flaky test
+# The Go tests CI runs, with the race detector
 test-ci:
-    go test -race -skip '^{{flaky}}$' ./...
+    go test -race ./...
 
 # The Go tests that run on Windows (no Docker there)
 test-windows:

@@ -116,9 +116,18 @@ it**, rather than at a fixed boundary or a hash. Real names cluster by
 prefix, and the median split keeps sorted listing cheap. The parent then
 holds range pointers.
 
-- A directory's own key is always the entry point to its tree. A split
-  keeps that key for the left half, except at the top, where both halves
-  get new keys and the top becomes an internal node.
+- A directory's own key is always the entry point to its tree.
+- **The tree is a B-link tree.** Every block records the upper bound of
+  the names it covers and a link to the block to its right. A split writes
+  the right half to a new key, then turns the block into its left half,
+  bounded at the separator and linked to the right half, with one
+  conditional write. That write commits the split: a lookup for a name at
+  or past a block's bound moves right, so the right half is reachable at
+  once, whether or not the parent points at it yet. Pointing the parent at
+  it is a separate step, retried on its own. At the top, the directory's
+  own key can't move, so both halves get new keys and the top becomes an
+  internal node over them. Listing follows the right links a parent
+  doesn't know about yet.
 - Blocks hold up to 8 entries.
 - Lookup descends the tree. Listing walks it in order.
 - Underfull blocks are not merged back. A directory that grew and then
@@ -219,9 +228,10 @@ wrote first, the store rejects the write, and the client re-reads and
 retries.
 
 - Directory and metadata operations retry the whole operation, top down,
-  up to 20 times.
-- A lost race in the middle of a split can leave an unreferenced half-block
-  behind, which is harmless.
+  up to 20 times, after a short random pause (from 5 ms, doubling to at most
+  200 ms), so writers that lost the same race don't collide again at once.
+- A split that loses its race leaves its new right half unreferenced,
+  which is harmless; nothing else it wrote is referenced either.
 - Conditional writes are verified against MinIO by the test suite: a stale
   ETag is rejected with 412, and the rejected write never lands. MinIO does
   not enforce `If-Match` on `DeleteObject`, so the design never depends on

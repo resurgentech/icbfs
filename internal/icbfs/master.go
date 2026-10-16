@@ -79,6 +79,7 @@ func registerFilesystem(ctx context.Context, store objstore.Store, entry *pb.Fil
 	}
 	name := entry.Name
 	for attempt := 0; attempt < maxTreeRetries; attempt++ {
+		retryPause(ctx, attempt)
 		mb, obj, err := readMaster(ctx, store)
 		if err != nil {
 			return "", nil, false, err
@@ -137,6 +138,7 @@ func Archive(ctx context.Context, store objstore.Store, fsName string) error {
 
 func updateFilesystemEntry(ctx context.Context, store objstore.Store, fsName string, mutate func(*pb.FilesystemEntry)) error {
 	for attempt := 0; attempt < maxTreeRetries; attempt++ {
+		retryPause(ctx, attempt)
 		mb, obj, err := readMaster(ctx, store)
 		if err != nil {
 			return mapNotFound(err)

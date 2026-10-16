@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -41,6 +42,25 @@ const (
 const DefaultMaxFileSize = 1 << 40
 
 var errRetry = errors.New("icbfs: lost a race, retry the whole operation")
+
+// retryPause waits before attempt (1 and up) of a retry loop: a random
+// pause, up to 5 ms doubling each attempt to at most 200 ms, so writers
+// that lost the same race don't all retry at once and collide again.
+func retryPause(ctx context.Context, attempt int) {
+	if attempt == 0 {
+		return
+	}
+	limit := 5 * time.Millisecond << min(attempt-1, 6)
+	if limit > 200*time.Millisecond {
+		limit = 200 * time.Millisecond
+	}
+	t := time.NewTimer(time.Duration(rand.Int64N(int64(limit))))
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-ctx.Done():
+	}
+}
 
 // Filesystem is the filesystem logic every access layer shares: object-
 // store primitives and directory blocks turned into lookup, create, read,
@@ -593,6 +613,12 @@ func (f *Filesystem) descendForWrite(ctx context.Context, rootKey, name string) 
 		if err != nil {
 			return nil, err
 		}
+		for blk.Past(name) {
+			key = blk.Right
+			if blk, obj, err = f.readBlock(ctx, key); err != nil {
+				return nil, err
+			}
+		}
 		path = append(path, pathStep{key, blk, obj})
 		if blk.Kind == block.Leaf {
 			return path, nil
@@ -609,6 +635,11 @@ func (f *Filesystem) findInTree(ctx context.Context, rootKey, name string) (bloc
 		blk, _, err := f.readBlock(ctx, key)
 		if err != nil {
 			return block.Entry{}, false, err
+		}
+		for blk.Past(name) {
+			if blk, _, err = f.readBlock(ctx, blk.Right); err != nil {
+				return block.Entry{}, false, err
+			}
 		}
 		if blk.Kind == block.Leaf {
 			e, ok := blk.Find(name)
@@ -638,55 +669,110 @@ func (f *Filesystem) findFoldInTree(ctx context.Context, rootKey, name string) (
 // at key whose name matches name case-insensitively, until visit returns
 // true. Those entries are one contiguous run, so this reads only the
 // blocks on the way down to where the run starts, plus any the run
-// spills into. It returns true once the run is known to be over, so a
-// caller iterating sibling subtrees stops there.
+// spills into, following right links as walkChain does.
 func (f *Filesystem) scanFold(ctx context.Context, key, name string, visit func(block.Entry) bool) (bool, error) {
-	blk, _, err := f.readBlock(ctx, key)
-	if err != nil {
-		return false, err
-	}
-	if blk.Kind == block.Leaf {
-		for _, e := range blk.Entries[blk.SeekFold(name):] {
-			if block.CompareFold(e.Name, name) != 0 || visit(e) {
-				return true, nil
+	return f.scanFoldChain(ctx, key, "", name, visit)
+}
+
+// scanFoldChain is scanFold over the block at key and the right siblings
+// that cover names below upper ("" for no bound). It returns true once
+// the run is known to be over.
+func (f *Filesystem) scanFoldChain(ctx context.Context, key, upper, name string, visit func(block.Entry) bool) (bool, error) {
+	for {
+		blk, _, err := f.readBlock(ctx, key)
+		if err != nil {
+			return false, err
+		}
+		if blk.Kind == block.Leaf {
+			for _, e := range blk.Entries[blk.SeekFold(name):] {
+				if block.CompareFold(e.Name, name) != 0 || visit(e) {
+					return true, nil
+				}
+			}
+		} else {
+			start := blk.ChildIndexFold(name)
+			for i := start; i < len(blk.Children); i++ {
+				// A later child's MinKey bounds everything in it from
+				// below: once that sorts past name, so does the rest.
+				if i > start && block.CompareFold(blk.Children[i].MinKey, name) > 0 {
+					return true, nil
+				}
+				done, err := f.scanFoldChain(ctx, blk.Children[i].UUID, childUpper(blk, i, upper), name, visit)
+				if err != nil || done {
+					return done, err
+				}
 			}
 		}
-		return false, nil
-	}
-	start := blk.ChildIndexFold(name)
-	for i := start; i < len(blk.Children); i++ {
-		// A later child's MinKey bounds everything in it from below: once
-		// that sorts past name, so does the rest of the directory.
-		if i > start && block.CompareFold(blk.Children[i].MinKey, name) > 0 {
-			return true, nil
+		if !followRight(blk, upper) {
+			return false, nil
 		}
-		done, err := f.scanFold(ctx, blk.Children[i].UUID, name, visit)
-		if err != nil || done {
-			return done, err
+		if block.CompareFold(blk.HighKey, name) > 0 {
+			return true, nil // the next block starts past the run
 		}
+		key = blk.Right
 	}
-	return false, nil
+}
+
+// walkChain calls leaf for every leaf of the shard tree at key, in order:
+// the block at key, every block under it, and the right siblings that
+// cover names below upper ("" for no bound), which a parent may not list
+// yet after a split. leaf returning true stops the walk.
+func (f *Filesystem) walkChain(ctx context.Context, key, upper string, leaf func(*block.Block) bool) (bool, error) {
+	for {
+		blk, _, err := f.readBlock(ctx, key)
+		if err != nil {
+			return false, err
+		}
+		if blk.Kind == block.Leaf {
+			if leaf(blk) {
+				return true, nil
+			}
+		} else {
+			for i, c := range blk.Children {
+				stop, err := f.walkChain(ctx, c.UUID, childUpper(blk, i, upper), leaf)
+				if err != nil || stop {
+					return stop, err
+				}
+			}
+		}
+		if !followRight(blk, upper) {
+			return false, nil
+		}
+		key = blk.Right
+	}
+}
+
+// childUpper is the bound below which child i of blk covers names: the
+// next child's MinKey, or for the last child, blk's own bound.
+func childUpper(blk *block.Block, i int, upper string) string {
+	if i+1 < len(blk.Children) {
+		return blk.Children[i+1].MinKey
+	}
+	if blk.HighKey != "" {
+		return blk.HighKey
+	}
+	return upper
+}
+
+// followRight reports whether a walk bounded by upper goes on to blk's
+// right sibling: there is one, and it starts below upper, so the parent
+// doesn't already lead to it.
+func followRight(blk *block.Block, upper string) bool {
+	if blk.Right == "" || blk.HighKey == "" {
+		return false
+	}
+	return upper == "" || blk.Collation.Compare(blk.HighKey, upper) < 0
 }
 
 // collectEntries gathers every entry in the shard tree rooted at rootKey,
 // across however many levels it currently has.
 func (f *Filesystem) collectEntries(ctx context.Context, rootKey string) ([]block.Entry, error) {
-	blk, _, err := f.readBlock(ctx, rootKey)
-	if err != nil {
-		return nil, err
-	}
-	if blk.Kind == block.Leaf {
-		return blk.Entries, nil
-	}
 	var all []block.Entry
-	for _, c := range blk.Children {
-		sub, err := f.collectEntries(ctx, c.UUID)
-		if err != nil {
-			return nil, err
-		}
-		all = append(all, sub...)
-	}
-	return all, nil
+	_, err := f.walkChain(ctx, rootKey, "", func(blk *block.Block) bool {
+		all = append(all, blk.Entries...)
+		return false
+	})
+	return all, err
 }
 
 // insertEntry adds name -> uuid to the directory rooted at rootKey,
@@ -695,6 +781,7 @@ func (f *Filesystem) collectEntries(ctx context.Context, rootKey string) ([]bloc
 // attempt are left unreferenced, which is harmless.
 func (f *Filesystem) insertEntry(ctx context.Context, rootKey, name, uuid string, typ EntryType) error {
 	for attempt := 0; attempt < maxTreeRetries; attempt++ {
+		retryPause(ctx, attempt)
 		err := f.tryInsert(ctx, rootKey, name, uuid, typ)
 		if err == nil {
 			return nil
@@ -718,26 +805,25 @@ func (f *Filesystem) tryInsert(ctx context.Context, rootKey, name, uuid string, 
 		}
 		return err
 	}
-	return f.writeBackWithSplits(ctx, path, len(path)-1, leaf.blk)
+	return f.writeBack(ctx, rootKey, path[len(path)-1], leaf.blk)
 }
 
-// writeBackWithSplits writes path[idx].blk back (now one entry or child
-// larger), splitting it and passing the new sibling's pointer up if it
-// overflows. A split keeps the node's key for the left half and mints one
-// for the right, except at idx 0, the directory's own key, which can't
-// move: there both halves get new keys and rootKey becomes an internal node
-// over them.
-func (f *Filesystem) writeBackWithSplits(ctx context.Context, path []pathStep, idx int, blk *block.Block) error {
+// writeBack writes step's block back as blk (now one entry or child
+// larger), conditional on the version read, splitting it if it overflows.
+//
+// A split is a B-link split: the right half goes to a new key first, then
+// one conditional write turns the block into its left half, bounded at the
+// separator and linked to the right half. That write commits the split:
+// from then on a lookup for a name in the right half moves right to it.
+// Pointing the parent at the right half (linkChild) only shortens that
+// path, and can be retried on its own. The directory's own key (rootKey)
+// can't move, so it splits into two new blocks and becomes an internal
+// node over them.
+func (f *Filesystem) writeBack(ctx context.Context, rootKey string, step pathStep, blk *block.Block) error {
 	overflowing := (blk.Kind == block.Leaf && len(blk.Entries) > maxEntriesPerBlock) ||
 		(blk.Kind == block.Internal && len(blk.Children) > maxChildrenPerBlock)
-
-	step := path[idx]
 	if !overflowing {
-		data, err := blk.Encode()
-		if err != nil {
-			return err
-		}
-		_, err = f.store.Put(ctx, step.key, bytes.NewReader(data), step.obj.Metadata, step.obj.ETag)
+		err := f.putBlock(ctx, step.key, blk, step.obj.Metadata, step.obj.ETag)
 		if objstore.IsPreconditionFailed(err) {
 			return errRetry
 		}
@@ -751,53 +837,91 @@ func (f *Filesystem) writeBackWithSplits(ctx context.Context, path []pathStep, i
 	} else {
 		left, right, sep = blk.SplitInternal()
 	}
-
-	if idx == 0 {
-		leftUUID, err := f.newKey()
-		if err != nil {
-			return err
-		}
-		rightUUID, err := f.newKey()
-		if err != nil {
-			return err
-		}
-		if err := f.putBlock(ctx, leftUUID, left, step.obj.Metadata, ""); err != nil {
-			return err
-		}
-		if err := f.putBlock(ctx, rightUUID, right, step.obj.Metadata, ""); err != nil {
-			return err
-		}
-		newRoot := &block.Block{Kind: block.Internal, Collation: blk.Collation, Children: []block.Child{
-			{MinKey: "", UUID: leftUUID},
-			{MinKey: sep, UUID: rightUUID},
-		}}
-		err = f.putBlock(ctx, step.key, newRoot, step.obj.Metadata, step.obj.ETag)
-		if objstore.IsPreconditionFailed(err) {
-			return errRetry
-		}
-		return err
-	}
-
-	// Not the tree's own root: keep this node's existing key for the left
-	// half, mint a new UUID for the right half, and propagate a pointer
-	// to it into the parent.
-	if err := f.putBlock(ctx, step.key, left, step.obj.Metadata, step.obj.ETag); err != nil {
-		if objstore.IsPreconditionFailed(err) {
-			return errRetry
-		}
-		return err
-	}
-	rightUUID, err := f.newKey()
+	rightKey, err := f.newKey()
 	if err != nil {
 		return err
 	}
-	if err := f.putBlock(ctx, rightUUID, right, step.obj.Metadata, ""); err != nil {
+	if err := f.putBlock(ctx, rightKey, right, step.obj.Metadata, ""); err != nil {
+		return err
+	}
+	left.Right = rightKey
+
+	if step.key == rootKey {
+		leftKey, err := f.newKey()
+		if err != nil {
+			return err
+		}
+		if err := f.putBlock(ctx, leftKey, left, step.obj.Metadata, ""); err != nil {
+			return err
+		}
+		top := &block.Block{Kind: block.Internal, Collation: blk.Collation, Children: []block.Child{
+			{MinKey: "", UUID: leftKey},
+			{MinKey: sep, UUID: rightKey},
+		}}
+		err = f.putBlock(ctx, rootKey, top, step.obj.Metadata, step.obj.ETag)
+		if objstore.IsPreconditionFailed(err) {
+			return errRetry
+		}
 		return err
 	}
 
-	parent := path[idx-1].blk
-	parent.InsertChild(block.Child{MinKey: sep, UUID: rightUUID})
-	return f.writeBackWithSplits(ctx, path, idx-1, parent)
+	err = f.putBlock(ctx, step.key, left, step.obj.Metadata, step.obj.ETag)
+	if objstore.IsPreconditionFailed(err) {
+		return errRetry // the right half is left unreferenced, which is harmless
+	}
+	if err != nil {
+		return err
+	}
+	if linkParents {
+		f.linkChild(ctx, rootKey, step.key, block.Child{MinKey: sep, UUID: rightKey})
+	}
+	return nil
+}
+
+// linkParents is false only in tests that check blocks reachable through
+// right links alone.
+var linkParents = true
+
+// linkChild points the parent of block leftKey at its new right sibling
+// c, after a split. Best effort: the sibling is already reachable through
+// leftKey's right link, so giving up costs only a longer path.
+func (f *Filesystem) linkChild(ctx context.Context, rootKey, leftKey string, c block.Child) {
+	for attempt := 0; attempt < maxTreeRetries; attempt++ {
+		retryPause(ctx, attempt)
+		if err := f.tryLinkChild(ctx, rootKey, leftKey, c); !errors.Is(err, errRetry) {
+			return
+		}
+	}
+}
+
+// tryLinkChild descends toward c.MinKey to the internal node that leads to
+// leftKey for it, and adds c there (splitting that node if it overflows).
+func (f *Filesystem) tryLinkChild(ctx context.Context, rootKey, leftKey string, c block.Child) error {
+	key := rootKey
+	for {
+		blk, obj, err := f.readBlock(ctx, key)
+		if err != nil {
+			return err
+		}
+		for blk.Past(c.MinKey) {
+			key = blk.Right
+			if blk, obj, err = f.readBlock(ctx, key); err != nil {
+				return err
+			}
+		}
+		if blk.Kind == block.Leaf {
+			return nil // no parent leads to leftKey: reachable through right links only
+		}
+		next := blk.ChildFor(c.MinKey)
+		switch next.UUID {
+		case c.UUID:
+			return nil // already linked
+		case leftKey:
+			blk.InsertChild(c)
+			return f.writeBack(ctx, rootKey, pathStep{key, blk, obj}, blk)
+		}
+		key = next.UUID
+	}
 }
 
 func (f *Filesystem) putBlock(ctx context.Context, key string, blk *block.Block, metadata map[string]string, ifMatch string) error {
@@ -814,6 +938,7 @@ func (f *Filesystem) putBlock(ctx context.Context, key string, blk *block.Block,
 // package doc) — this only ever shrinks the leaf that held name.
 func (f *Filesystem) removeEntry(ctx context.Context, rootKey, name string) (block.Entry, error) {
 	for attempt := 0; attempt < maxTreeRetries; attempt++ {
+		retryPause(ctx, attempt)
 		removed, err := f.tryRemove(ctx, rootKey, name)
 		if err == nil {
 			return removed, nil
@@ -1140,6 +1265,7 @@ const nlinkZero = 0
 func (f *Filesystem) adjustNlink(ctx context.Context, uuid string, delta int) (deleted bool, err error) {
 	mk := metadataObjectKey(uuid)
 	for attempt := 0; attempt < maxTreeRetries; attempt++ {
+		retryPause(ctx, attempt)
 		body, obj, err := f.store.Get(ctx, mk)
 		if err != nil {
 			return false, mapNotFound(err)
@@ -1232,6 +1358,7 @@ func (f *Filesystem) updateMetadata(ctx context.Context, key string, typ EntryTy
 func (f *Filesystem) writeMetadata(ctx context.Context, key string, typ EntryType, statusChange bool, mutate func(*Attr)) error {
 	mk := metadataObjectKey(key)
 	for attempt := 0; attempt < maxTreeRetries; attempt++ {
+		retryPause(ctx, attempt)
 		body, obj, err := f.store.Get(ctx, mk)
 		if typ == TypeDir && objstore.IsNotFound(err) {
 			blockObj, herr := f.store.Head(ctx, key)

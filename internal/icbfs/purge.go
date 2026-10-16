@@ -192,13 +192,17 @@ func (f *Filesystem) eraseDirBlocks(ctx context.Context, rootKey string) error {
 				return err
 			}
 			blk, err := block.Decode(data)
-			if err != nil || blk.Kind != block.Internal {
+			if err != nil {
 				continue
 			}
+			next := []string{blk.Right}
 			for _, c := range blk.Children {
-				if !seen[c.UUID] {
-					seen[c.UUID] = true
-					queue = append(queue, c.UUID)
+				next = append(next, c.UUID)
+			}
+			for _, k := range next {
+				if k != "" && !seen[k] {
+					seen[k] = true
+					queue = append(queue, k)
 				}
 			}
 		}

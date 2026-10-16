@@ -178,6 +178,7 @@ func (f *Filesystem) tryAcquireLockRange(ctx context.Context, key string, start,
 	}
 
 	for attempt := 0; attempt < maxLockCASRetries; attempt++ {
+		retryPause(ctx, attempt)
 		cur, obj, err := readLockRanges(ctx, f.store, lockKey)
 		if err != nil {
 			return err
@@ -238,6 +239,7 @@ func (f *Filesystem) ReleaseLockRange(ctx context.Context, key string, start, en
 	}
 	lockKey := lockObjectKey(key)
 	for attempt := 0; attempt < maxLockCASRetries; attempt++ {
+		retryPause(ctx, attempt)
 		cur, obj, err := readLockRanges(ctx, f.store, lockKey)
 		if err != nil {
 			return err
@@ -301,6 +303,7 @@ func (f *Filesystem) RenewLockRange(ctx context.Context, key string, start, end 
 	}
 
 	for attempt := 0; attempt < maxLockCASRetries; attempt++ {
+		retryPause(ctx, attempt)
 		cur, obj, err := readLockRanges(ctx, f.store, lockKey)
 		if err != nil {
 			return err

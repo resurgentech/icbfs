@@ -800,7 +800,7 @@ func runFcntlLockHolderHelper() {
 		os.Exit(1)
 	}
 
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		if _, err := os.Stat(releasePath); err == nil {
 			os.Exit(0)
@@ -919,10 +919,11 @@ func TestMountFcntlByteRangeLocksAcrossProcesses(t *testing.T) {
 // live process with the file open is still held after several lease
 // periods, because renewal (ensureRenewal, runRenewal) keeps it alive.
 //
-// The lease is shrunk to 2 s, renewed every 500 ms, but not below a second:
-// leases are anchored to the store's clock, which reads in whole seconds.
-// Three lease periods also stay inside the helper's own 10-second give-up
-// deadline.
+// The lease is shrunk to 4 s, renewed every second, and checked after 10 s.
+// A lease's expiry is the store's clock, which reads in whole seconds,
+// plus the lease, so a new one can have as little as 3 s left: room for a
+// renewal (three store round trips) to stall for about 2 s on a busy host
+// without the lease lapsing. Without renewal it would lapse twice over.
 func TestMountFcntlLockSurvivesPastOriginalTTLViaRenewal(t *testing.T) {
 	origTTL, origInterval := lockLeaseTTL, lockRenewInterval
 	// Restore the lease settings in t.Cleanup, registered before the mount
@@ -930,8 +931,8 @@ func TestMountFcntlLockSurvivesPastOriginalTTLViaRenewal(t *testing.T) {
 	// close, and its renewal goroutines read these vars until the unmount
 	// has drained them (a plain defer raced, under -race).
 	t.Cleanup(func() { lockLeaseTTL, lockRenewInterval = origTTL, origInterval })
-	lockLeaseTTL = 2 * time.Second
-	lockRenewInterval = 500 * time.Millisecond
+	lockLeaseTTL = 4 * time.Second
+	lockRenewInterval = time.Second
 
 	mnt := mountTestFSWithLocking(t)
 	path := filepath.Join(mnt, "fcntl-renewal.bin")
@@ -962,9 +963,9 @@ func TestMountFcntlLockSurvivesPastOriginalTTLViaRenewal(t *testing.T) {
 	waitForFileOrFail(t, readyPath, 5*time.Second)
 
 	// The helper never renews; only this process's FileHandle serving its
-	// open can. So the lock still conflicting after three lease periods
+	// open can. So the lock still conflicting after 2.5 lease periods
 	// means renewal works.
-	time.Sleep(lockLeaseTTL * 3)
+	time.Sleep(lockLeaseTTL * 5 / 2)
 
 	f2, err := os.OpenFile(path, os.O_RDWR, 0)
 	if err != nil {
@@ -974,7 +975,7 @@ func TestMountFcntlLockSurvivesPastOriginalTTLViaRenewal(t *testing.T) {
 
 	overlapping := syscall.Flock_t{Type: syscall.F_WRLCK, Whence: 0, Start: 5, Len: 10}
 	if err := syscall.FcntlFlock(f2.Fd(), syscall.F_SETLK, &overlapping); !errors.Is(err, syscall.EAGAIN) {
-		t.Fatalf("F_SETLK f2 [5,15) after sleeping past 3 lease windows while helper stayed alive = %v, want EAGAIN (renewal should have kept the lock held)", err)
+		t.Fatalf("F_SETLK f2 [5,15) after 2.5 lease periods while the helper stayed alive = %v, want EAGAIN (renewal should have kept the lock held)", err)
 	}
 }
 

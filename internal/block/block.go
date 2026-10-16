@@ -67,6 +67,22 @@ type Block struct {
 	Collation Collation
 	Entries   []Entry
 	Children  []Child
+
+	// HighKey is the exclusive upper bound of the names this block covers,
+	// and Right the key of the next block at the same level: a B-link
+	// tree. A split commits with one write of the splitting block (its
+	// left half, linked to the new right half), so a name at or past
+	// HighKey is found by moving right (Past), whether or not the parent
+	// lists the right half yet. Both are "" for a block with nothing after
+	// it, and in blocks written before they existed.
+	HighKey string
+	Right   string
+}
+
+// Past reports whether name sorts at or after b's HighKey: the name
+// belongs to a block to the right (b.Right).
+func (b *Block) Past(name string) bool {
+	return b.HighKey != "" && b.Collation.Compare(name, b.HighKey) >= 0
 }
 
 // Decode parses a directory block body (Protobuf-encoded, per
@@ -93,7 +109,7 @@ func (b *Block) Encode() ([]byte, error) {
 }
 
 func toWire(b *Block) *pb.Block {
-	w := &pb.Block{Kind: pb.BlockKind(b.Kind)}
+	w := &pb.Block{Kind: pb.BlockKind(b.Kind), HighKey: b.HighKey, Right: b.Right}
 	for _, e := range b.Entries {
 		w.Entries = append(w.Entries, &pb.Entry{
 			Name: e.Name,
@@ -111,7 +127,7 @@ func toWire(b *Block) *pb.Block {
 }
 
 func fromWire(w *pb.Block) *Block {
-	b := &Block{Kind: Kind(w.Kind)}
+	b := &Block{Kind: Kind(w.Kind), HighKey: w.HighKey, Right: w.Right}
 	for _, e := range w.Entries {
 		b.Entries = append(b.Entries, Entry{
 			Name: e.Name,
@@ -179,13 +195,15 @@ func (b *Block) SeekFold(name string) int {
 }
 
 // SplitLeaf splits an overflowing leaf at its median key. The left half
-// keeps the keys below the median; the right half (and its MinKey, to be
-// inserted as a new Child in the parent) holds the rest.
+// keeps the keys below the median and ends at it (HighKey); the right half
+// holds the rest and takes over b's HighKey and Right. The caller links
+// left.Right to wherever it stores the right half.
 func (b *Block) SplitLeaf() (left, right *Block, rightMinKey string) {
 	mid := len(b.Entries) / 2
-	left = &Block{Kind: Leaf, Collation: b.Collation, Entries: append([]Entry{}, b.Entries[:mid]...)}
-	right = &Block{Kind: Leaf, Collation: b.Collation, Entries: append([]Entry{}, b.Entries[mid:]...)}
-	return left, right, right.Entries[0].Name
+	sep := b.Entries[mid].Name
+	left = &Block{Kind: Leaf, Collation: b.Collation, Entries: append([]Entry{}, b.Entries[:mid]...), HighKey: sep}
+	right = &Block{Kind: Leaf, Collation: b.Collation, Entries: append([]Entry{}, b.Entries[mid:]...), HighKey: b.HighKey, Right: b.Right}
+	return left, right, sep
 }
 
 // --- Internal node operations ---
@@ -222,9 +240,10 @@ func (b *Block) InsertChild(c Child) {
 // the same way SplitLeaf does for entries.
 func (b *Block) SplitInternal() (left, right *Block, rightMinKey string) {
 	mid := len(b.Children) / 2
-	left = &Block{Kind: Internal, Collation: b.Collation, Children: append([]Child{}, b.Children[:mid]...)}
-	right = &Block{Kind: Internal, Collation: b.Collation, Children: append([]Child{}, b.Children[mid:]...)}
-	return left, right, right.Children[0].MinKey
+	sep := b.Children[mid].MinKey
+	left = &Block{Kind: Internal, Collation: b.Collation, Children: append([]Child{}, b.Children[:mid]...), HighKey: sep}
+	right = &Block{Kind: Internal, Collation: b.Collation, Children: append([]Child{}, b.Children[mid:]...), HighKey: b.HighKey, Right: b.Right}
+	return left, right, sep
 }
 
 // ErrExists and ErrNotFound are the sentinel errors Insert/Remove/Find

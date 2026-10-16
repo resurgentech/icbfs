@@ -27,7 +27,7 @@ MinIO for each run.
 ```sh
 just test                     # go test ./... (needs Docker; the FUSE tests need /dev/fuse and fusermount3)
 just test-short               # skips the code-generator check
-just test-ci                  # with -race, skipping the flaky lease-renewal test, as CI does
+just test-ci                  # with -race, as CI does
 just test-windows             # the packages that run on Windows without Docker
 ```
 
@@ -144,20 +144,6 @@ test/minio/down.sh             # remove it; --all removes any left behind
 
 ## Known issues
 
-- **`TestMountFcntlLockSurvivesPastOriginalTTLViaRenewal` fails
-  intermittently**: about one run in three on 2026-10-14, alone or in the
-  full suite, and on earlier commits too. The cause hasn't been found.
-  - The test shrinks the lock lease to 2 seconds, renewed every 500 ms,
-    and checks that a lock held by a live process is still held after
-    6 seconds. Sometimes it isn't.
-  - Production leases are 30 seconds, renewed every 10.
-  - Until the cause is found, lease renewal under load should be treated
-    as unproven.
-- **`TestConcurrentLinkRaceDoesNotLoseUpdates` failed once** in four
-  runs of the whole suite under `-race` on 2026-10-14, and passed alone
-  and in the other runs. Fifteen concurrent links to one file may be
-  running out of the 20 retries a link gets under the race detector's
-  slowdown; the error wasn't captured.
 - **`fcntl` locks are released per file handle, not per process.**
   Closing a different descriptor on the same file doesn't release a
   process's locks, as POSIX says it should. The usual case, one

@@ -44,4 +44,12 @@ message Block {
   BlockKind kind = 1;
   repeated Entry entries = 2;
   repeated Child children = 3;
+  // high_key is the exclusive upper bound of the names this block covers,
+  // and right the key of the block after it at the same level (a B-link
+  // tree: a split commits with one write of the splitting block, and
+  // anything looking for a name at or past high_key moves right). Both
+  // empty for a block with nothing after it, and in blocks written before
+  // they existed.
+  string high_key = 4;
+  string right = 5;
 }

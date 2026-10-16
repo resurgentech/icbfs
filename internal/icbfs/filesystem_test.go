@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -966,5 +967,108 @@ func TestLegacyDirectoryMigratesOnFirstWrite(t *testing.T) {
 	}
 	if after.Mode != 0755 || after.Uid != 11 || after.Gid != 12 || !after.Mtime.Equal(legacyMtime) || after.Atime.IsZero() {
 		t.Fatalf("migrated attr = %+v", after)
+	}
+}
+
+// TestConcurrentCreatesAllSurvive: many writers creating different names
+// in one directory at once, so blocks split under contention, lose none of
+// them.
+func TestConcurrentCreatesAllSurvive(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	dir, _, err := fsys.Mkdir(ctx, fsys.RootKey(), "busy", 0o755, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const n = 40
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, _, _, errs[i] = fsys.Create(ctx, dir, fmt.Sprintf("f-%02d", i), 0o644, 0, 0)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+	}
+	entries, err := fsys.ReadDir(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]int{}
+	for _, e := range entries {
+		seen[e.Name]++
+	}
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("f-%02d", i)
+		if _, _, err := fsys.Lookup(ctx, dir, name); err != nil {
+			t.Errorf("lookup %s: %v", name, err)
+		}
+		if seen[name] != 1 {
+			t.Errorf("%s listed %d times", name, seen[name])
+		}
+	}
+	if len(entries) != n {
+		t.Errorf("listed %d entries, want %d", len(entries), n)
+	}
+}
+
+// TestRightLinksAloneReachEverything: with parents never pointed at new
+// right halves (as if every linkChild were lost), every name is still
+// found, listed once and in order, found case-insensitively on a
+// primary-Windows filesystem, and removable.
+func TestRightLinksAloneReachEverything(t *testing.T) {
+	linkParents = false
+	t.Cleanup(func() { linkParents = true })
+	ctx := context.Background()
+	for _, windows := range []bool{false, true} {
+		store := newTestStore(t)
+		fsys := New(store, "links")
+		if err := fsys.Bootstrap(ctx, 1<<30, 0o755, 0, 0, windows); err != nil {
+			t.Fatal(err)
+		}
+		dir, _, err := fsys.Mkdir(ctx, fsys.RootKey(), "d", 0o755, 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		const n = 60
+		for i := 0; i < n; i++ {
+			if _, _, _, err := fsys.Create(ctx, dir, fmt.Sprintf("File-%03d", i), 0o644, 0, 0); err != nil {
+				t.Fatalf("create %d: %v", i, err)
+			}
+		}
+		entries, err := fsys.ReadDir(ctx, dir)
+		if err != nil || len(entries) != n {
+			t.Fatalf("windows=%v: listed %d, %v", windows, len(entries), err)
+		}
+		for i, e := range entries {
+			if want := fmt.Sprintf("File-%03d", i); e.Name != want {
+				t.Fatalf("windows=%v: entry %d = %s, want %s", windows, i, e.Name, want)
+			}
+		}
+		for i := 0; i < n; i++ {
+			name := fmt.Sprintf("File-%03d", i)
+			if _, _, err := fsys.Lookup(ctx, dir, name); err != nil {
+				t.Fatalf("windows=%v: lookup %s: %v", windows, name, err)
+			}
+			if windows {
+				if e, _, err := fsys.LookupFold(ctx, dir, strings.ToUpper(name)); err != nil || e.Name != name {
+					t.Fatalf("lookup %s case-insensitively: %v, %v", name, e.Name, err)
+				}
+			}
+		}
+		for i := 0; i < n; i++ {
+			if err := fsys.Unlink(ctx, dir, fmt.Sprintf("File-%03d", i)); err != nil {
+				t.Fatalf("windows=%v: unlink %d: %v", windows, i, err)
+			}
+		}
+		if entries, err := fsys.ReadDir(ctx, dir); err != nil || len(entries) != 0 {
+			t.Fatalf("windows=%v: after removing all, %d listed, %v", windows, len(entries), err)
+		}
 	}
 }

@@ -251,10 +251,18 @@ func (x *Child) GetUuid() string {
 // Block is the wire representation of internal/block.Block: either a
 // Leaf (entries populated) or an Internal node (children populated).
 type Block struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Kind          BlockKind              `protobuf:"varint,1,opt,name=kind,proto3,enum=icbfs.v1.BlockKind" json:"kind,omitempty"`
-	Entries       []*Entry               `protobuf:"bytes,2,rep,name=entries,proto3" json:"entries,omitempty"`
-	Children      []*Child               `protobuf:"bytes,3,rep,name=children,proto3" json:"children,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Kind     BlockKind              `protobuf:"varint,1,opt,name=kind,proto3,enum=icbfs.v1.BlockKind" json:"kind,omitempty"`
+	Entries  []*Entry               `protobuf:"bytes,2,rep,name=entries,proto3" json:"entries,omitempty"`
+	Children []*Child               `protobuf:"bytes,3,rep,name=children,proto3" json:"children,omitempty"`
+	// high_key is the exclusive upper bound of the names this block covers,
+	// and right the key of the block after it at the same level (a B-link
+	// tree: a split commits with one write of the splitting block, and
+	// anything looking for a name at or past high_key moves right). Both
+	// empty for a block with nothing after it, and in blocks written before
+	// they existed.
+	HighKey       string `protobuf:"bytes,4,opt,name=high_key,json=highKey,proto3" json:"high_key,omitempty"`
+	Right         string `protobuf:"bytes,5,opt,name=right,proto3" json:"right,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -310,6 +318,20 @@ func (x *Block) GetChildren() []*Child {
 	return nil
 }
 
+func (x *Block) GetHighKey() string {
+	if x != nil {
+		return x.HighKey
+	}
+	return ""
+}
+
+func (x *Block) GetRight() string {
+	if x != nil {
+		return x.Right
+	}
+	return ""
+}
+
 var File_spec_proto_icbfs_v1_block_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_block_proto_rawDesc = "" +
@@ -321,11 +343,13 @@ const file_spec_proto_icbfs_v1_block_proto_rawDesc = "" +
 	"\x04type\x18\x03 \x01(\x0e2\x13.icbfs.v1.EntryTypeR\x04type\"4\n" +
 	"\x05Child\x12\x17\n" +
 	"\amin_key\x18\x01 \x01(\tR\x06minKey\x12\x12\n" +
-	"\x04uuid\x18\x02 \x01(\tR\x04uuid\"\x88\x01\n" +
+	"\x04uuid\x18\x02 \x01(\tR\x04uuid\"\xb9\x01\n" +
 	"\x05Block\x12'\n" +
 	"\x04kind\x18\x01 \x01(\x0e2\x13.icbfs.v1.BlockKindR\x04kind\x12)\n" +
 	"\aentries\x18\x02 \x03(\v2\x0f.icbfs.v1.EntryR\aentries\x12+\n" +
-	"\bchildren\x18\x03 \x03(\v2\x0f.icbfs.v1.ChildR\bchildren*\xb1\x01\n" +
+	"\bchildren\x18\x03 \x03(\v2\x0f.icbfs.v1.ChildR\bchildren\x12\x19\n" +
+	"\bhigh_key\x18\x04 \x01(\tR\ahighKey\x12\x14\n" +
+	"\x05right\x18\x05 \x01(\tR\x05right*\xb1\x01\n" +
 	"\tEntryType\x12\x13\n" +
 	"\x0fENTRY_TYPE_FILE\x10\x00\x12\x12\n" +
 	"\x0eENTRY_TYPE_DIR\x10\x01\x12\x16\n" +
