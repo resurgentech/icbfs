@@ -3,6 +3,7 @@ package objstore
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -450,5 +451,39 @@ func TestDeleteVersion(t *testing.T) {
 	versions, _ = store.ListVersions(ctx, "k")
 	if len(versions) != 1 || versions[0].VersionID == v1.VersionID {
 		t.Fatalf("history after erasing one version: %+v", versions)
+	}
+}
+
+// failingReader fails after its first n bytes, as a connection the server
+// reset would.
+type failingReader struct{ n int }
+
+func (r *failingReader) Read(p []byte) (int, error) {
+	if r.n <= 0 {
+		return 0, errors.New("connection reset by peer")
+	}
+	n := min(len(p), r.n)
+	clear(p[:n])
+	r.n -= n
+	return n, nil
+}
+
+// TestPutCutOffIsLostRaceOnlyIfChanged: a conditional Put that fails without
+// a server answer is a lost race if the object no longer matches, and an
+// ordinary failure if it still does.
+func TestPutCutOffIsLostRaceOnlyIfChanged(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	obj, err := s.Put(ctx, "k", strings.NewReader("v1"), nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.Put(ctx, "k", &failingReader{n: 1 << 10}, nil, `"stale"`)
+	if !IsPreconditionFailed(err) {
+		t.Fatalf("cut off, object changed: %v, want a precondition failure", err)
+	}
+	_, err = s.Put(ctx, "k", &failingReader{n: 1 << 10}, nil, obj.ETag)
+	if err == nil || IsPreconditionFailed(err) {
+		t.Fatalf("cut off, object unchanged: %v, want a plain failure", err)
 	}
 }

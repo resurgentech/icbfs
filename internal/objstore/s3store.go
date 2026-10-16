@@ -43,9 +43,30 @@ func (s *S3Store) Put(ctx context.Context, key string, body io.Reader, metadata 
 	}
 	out, err := s.client.PutObject(ctx, in)
 	if err != nil {
+		if ifMatch != "" && s.lostRace(ctx, key, ifMatch, err) {
+			return nil, fmt.Errorf("put %s: %w (%v)", key, errLostRace, err)
+		}
 		return nil, fmt.Errorf("put %s: %w", key, err)
 	}
 	return s.headVersion(ctx, key, out.VersionId)
+}
+
+// errLostRace is a conditional write's failure found by lostRace.
+var errLostRace = errors.New("precondition failed")
+
+// lostRace reports whether a conditional write that failed without an
+// answer (err isn't one from the server) failed because key no longer
+// matches ifMatch. A server may answer a failed precondition before reading
+// the body and close the connection; over a slow link the client is still
+// sending and sees only a reset. Treating that as a lost race lets the
+// caller rebase instead of failing every retry the same way.
+func (s *S3Store) lostRace(ctx context.Context, key, ifMatch string, err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) || ctx.Err() != nil {
+		return false
+	}
+	head, herr := s.Head(ctx, key)
+	return herr == nil && head.ETag != ifMatch
 }
 
 // partConcurrency bounds how many parts PutParts sends at once.
@@ -455,6 +476,9 @@ func (s *S3Store) ServerTime(ctx context.Context) (time.Time, error) {
 // conditional write (If-Match mismatch) — the signal a CAS retry loop
 // should watch for.
 func IsPreconditionFailed(err error) bool {
+	if errors.Is(err, errLostRace) {
+		return true
+	}
 	var respErr *smithyhttp.ResponseError
 	if errors.As(err, &respErr) {
 		return respErr.HTTPStatusCode() == 412
