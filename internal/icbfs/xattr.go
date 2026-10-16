@@ -234,13 +234,28 @@ func (f *Filesystem) RemoveXattr(ctx context.Context, key string, typ EntryType,
 // directory's .metadata per create, so it's for mounts that present ACLs.
 func (f *Filesystem) EnablePosixACLs(enabled bool) { f.posixACLs = enabled }
 
+type umaskKey struct{}
+
+// WithUmask is ctx for a create whose umask the caller left to icbfs: it
+// applies unless the directory has a default ACL, which replaces it, as
+// POSIX says. Without it, the mode is used as given.
+func WithUmask(ctx context.Context, umask uint32) context.Context {
+	return context.WithValue(ctx, umaskKey{}, umask)
+}
+
 // inheritACLs applies dirKey's default ACL, if it has one, to a new item
 // being created in it with attr: the new item's access ACL is the default
 // with each class's permissions limited by the requested mode, and the
 // mode follows the result; a new directory also gets the default ACL as
-// its own.
+// its own. Without one, ctx's umask applies (WithUmask).
 func (f *Filesystem) inheritACLs(ctx context.Context, dirKey string, attr *Attr, isDir bool) error {
+	umask := func() {
+		if u, ok := ctx.Value(umaskKey{}).(uint32); ok {
+			attr.Mode &^= u & 0o777
+		}
+	}
 	if !f.posixACLs || f.primaryWindows {
+		umask()
 		return nil
 	}
 	parent, err := f.Stat(ctx, dirKey, TypeDir)
@@ -248,10 +263,12 @@ func (f *Filesystem) inheritACLs(ctx context.Context, dirKey string, attr *Attr,
 		return err
 	}
 	if len(parent.PosixACLDefault) == 0 {
+		umask()
 		return nil
 	}
 	def, err := parsePosixACL(parent.PosixACLDefault)
 	if err != nil || def == nil {
+		umask()
 		return nil // an unreadable default is ignored, as if absent
 	}
 	acl := def.limitedBy(attr.Mode & 0o777)

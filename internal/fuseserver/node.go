@@ -234,6 +234,17 @@ func (n *Node) newChild(ctx context.Context, key string, typ icbfs.EntryType, at
 	return inode
 }
 
+// withUmask is detach for a create: the context also carries the
+// request's umask for icbfs to apply (see Mount).
+func withUmask(ctx context.Context) context.Context {
+	umask, ok := createUmask(ctx)
+	ctx = detach(ctx)
+	if ok {
+		ctx = icbfs.WithUmask(ctx, umask)
+	}
+	return ctx
+}
+
 // confirmWatch records n's inode as its key's (see watchRegistry).
 func (n *Node) confirmWatch() {
 	if n.watches != nil && n.key != "" {
@@ -374,7 +385,7 @@ func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 }
 
 func (n *Node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	ctx = detach(ctx)
+	ctx = withUmask(ctx)
 	uid, gid := callerOwner(ctx)
 	newUUID, attr, err := n.fsys.Mkdir(ctx, n.key, name, mode&0o7777, uid, gid)
 	if err != nil {
@@ -389,7 +400,7 @@ func (n *Node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.En
 // once the type is reported, so this only dispatches on the S_IFMT bits and
 // carries dev through for devices.
 func (n *Node) Mknod(ctx context.Context, name string, mode, dev uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	ctx = detach(ctx)
+	ctx = withUmask(ctx)
 	var typ icbfs.EntryType
 	switch mode & syscall.S_IFMT {
 	case syscall.S_IFIFO:
@@ -415,7 +426,7 @@ func (n *Node) Mknod(ctx context.Context, name string, mode, dev uint32, out *fu
 }
 
 func (n *Node) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
-	ctx = detach(ctx)
+	ctx = withUmask(ctx)
 	uid, gid := callerOwner(ctx)
 	newUUID, attr, etag, err := n.fsys.Create(ctx, n.key, name, mode&0o7777, uid, gid)
 	if err != nil {

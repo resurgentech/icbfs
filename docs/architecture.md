@@ -175,13 +175,12 @@ in step with them, as Linux filesystems do:
 - `chmod` updates the owner, mask (or group) and other entries;
 - a new item takes its directory's default ACL, limited by the mode it
   was created with, and a new directory also takes the default ACL
-  itself.
+  itself;
+- the umask applies only where there's no default ACL, so the kernel
+  leaves it to icbfs (`FUSE_DONT_MASK`).
 
 POSIX ACLs exist only on primary-POSIX filesystems; on primary-Windows
-ones the security descriptor is the permission. One difference from ext4:
-the kernel applies the process's umask before icbfs sees a new item's mode
-(go-fuse passes no umask), so under a default ACL the umask still narrows
-the new item's mask, where ext4 would ignore it.
+ones the security descriptor is the permission.
 
 **Users' data and icbfs's state never share a field.** The extended
 attributes hold only names a user set; icbfs's state has typed fields of

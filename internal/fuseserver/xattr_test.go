@@ -185,10 +185,19 @@ func TestMountPosixACLGrantsAccess(t *testing.T) {
 }
 
 // TestMountDefaultACLInheritedAndChmod: a directory's default ACL is set
-// through the mount, a file created in it inherits an access ACL, and
-// chmod changes that ACL's mask.
+// through the mount, a file created in it inherits an access ACL, ignoring
+// the umask, and chmod changes that ACL's mask. Outside it, the umask
+// applies.
 func TestMountDefaultACLInheritedAndChmod(t *testing.T) {
+	defer syscall.Umask(syscall.Umask(0o22))
 	mnt, _ := mountTestFSWithFsys(t)
+	plain := filepath.Join(mnt, "plain.txt")
+	if err := os.WriteFile(plain, nil, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(plain); err != nil || st.Mode().Perm() != 0o644 {
+		t.Fatalf("mode outside a default ACL = %v (%v), want 0644", st.Mode().Perm(), err)
+	}
 	dir := filepath.Join(mnt, "shared")
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -213,14 +222,9 @@ func TestMountDefaultACLInheritedAndChmod(t *testing.T) {
 	if aclPerm(got, aclUser, 31337) != 6 {
 		t.Fatalf("named entry = %d, want 6", aclPerm(got, aclUser, 31337))
 	}
-	// The kernel applies the umask before icbfs sees the mode (go-fuse
-	// passes no umask, so DONT_MASK can't be used), so the mask is the
-	// create mode's group bits after the umask, where ext4 would ignore
-	// the umask under a default ACL.
-	umask := syscall.Umask(0o22)
-	syscall.Umask(umask)
-	if want := int(0o664&^umask>>3) & 7; aclPerm(got, aclMask, 0) != want {
-		t.Fatalf("mask = %d, want %d", aclPerm(got, aclMask, 0), want)
+	// The mask is the create mode's group bits, the umask ignored.
+	if m := aclPerm(got, aclMask, 0); m != 6 {
+		t.Fatalf("mask = %d, want 6", m)
 	}
 
 	if err := os.Chmod(file, 0o600); err != nil {

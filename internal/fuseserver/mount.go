@@ -8,13 +8,18 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
-// Mount is fs.Mount, with two differences.
+// Mount is fs.Mount, with three differences.
 //
 // A close's FLUSH tells FileHandle.Flush whose close it is (flushOwner),
 // which go-fuse doesn't pass on. POSIX releases a process's fcntl locks on
 // a file when it closes any descriptor for it, and the kernel leaves that
 // to the filesystem: FLUSH carries the closing process's lock owner, the
 // same token its fcntl calls carry.
+//
+// The kernel leaves the umask to the filesystem (CAP_DONT_MASK), and each
+// create's umask reaches the Node (createUmask), which go-fuse doesn't pass
+// on either. POSIX ignores the umask for an item created in a directory
+// with a default ACL; the kernel can't tell, as the default ACL is ours.
 //
 // And the kernel keeps an open file's cached pages until the file is next
 // opened (ExplicitDataCacheControl). Otherwise, with no attribute caching,
@@ -30,6 +35,7 @@ func Mount(dir string, root fs.InodeEmbedder, options *fs.Options) (*fuse.Server
 		opts = *options
 	}
 	opts.ExplicitDataCacheControl = true
+	opts.ExtraCapabilities |= fuse.CAP_DONT_MASK
 	raw := &ownerRawFS{RawFileSystem: fs.NewNodeFS(root, &opts)}
 	server, err := fuse.NewServer(raw, dir, &opts.MountOptions)
 	if err != nil {
@@ -42,32 +48,60 @@ func Mount(dir string, root fs.InodeEmbedder, options *fs.Options) (*fuse.Server
 	return server, nil
 }
 
-// ownerRawFS records each FLUSH's lock owner under its request's cancel
-// channel while go-fuse handles it. The context go-fuse gives
-// FileHandle.Flush carries that channel, and no other request in flight
-// has the same one.
+// ownerRawFS records what go-fuse drops from a request, a FLUSH's lock
+// owner or a create's umask, under the request's cancel channel while
+// go-fuse handles it. The context go-fuse gives the handler carries that
+// channel, and no other request in flight has the same one.
 type ownerRawFS struct {
 	fuse.RawFileSystem
 }
 
-var flushOwners sync.Map // <-chan struct{} -> uint64
+var requestExtras sync.Map // <-chan struct{} -> uint64
 
 func (r *ownerRawFS) Flush(cancel <-chan struct{}, in *fuse.FlushIn) fuse.Status {
-	flushOwners.Store(cancel, in.LockOwner)
-	defer flushOwners.Delete(cancel)
+	requestExtras.Store(cancel, in.LockOwner)
+	defer requestExtras.Delete(cancel)
 	return r.RawFileSystem.Flush(cancel, in)
 }
 
-// flushOwner is the lock owner of the close ctx is for, if the mount was
-// made with Mount.
-func flushOwner(ctx context.Context) (uint64, bool) {
+func (r *ownerRawFS) Mkdir(cancel <-chan struct{}, in *fuse.MkdirIn, name string, out *fuse.EntryOut) fuse.Status {
+	requestExtras.Store(cancel, uint64(in.Umask))
+	defer requestExtras.Delete(cancel)
+	return r.RawFileSystem.Mkdir(cancel, in, name, out)
+}
+
+func (r *ownerRawFS) Mknod(cancel <-chan struct{}, in *fuse.MknodIn, name string, out *fuse.EntryOut) fuse.Status {
+	requestExtras.Store(cancel, uint64(in.Umask))
+	defer requestExtras.Delete(cancel)
+	return r.RawFileSystem.Mknod(cancel, in, name, out)
+}
+
+func (r *ownerRawFS) Create(cancel <-chan struct{}, in *fuse.CreateIn, name string, out *fuse.CreateOut) fuse.Status {
+	requestExtras.Store(cancel, uint64(in.Umask))
+	defer requestExtras.Delete(cancel)
+	return r.RawFileSystem.Create(cancel, in, name, out)
+}
+
+// requestExtra is what ownerRawFS recorded for the request ctx is for.
+func requestExtra(ctx context.Context) (uint64, bool) {
 	fc, ok := ctx.(*fuse.Context)
 	if !ok || fc.Cancel == nil {
 		return 0, false
 	}
-	v, ok := flushOwners.Load(fc.Cancel)
+	v, ok := requestExtras.Load(fc.Cancel)
 	if !ok {
 		return 0, false
 	}
 	return v.(uint64), true
+}
+
+// flushOwner is the lock owner of the close ctx is for, if the mount was
+// made with Mount.
+func flushOwner(ctx context.Context) (uint64, bool) { return requestExtra(ctx) }
+
+// createUmask is the umask of the create ctx is for, if the mount was made
+// with Mount.
+func createUmask(ctx context.Context) (uint32, bool) {
+	v, ok := requestExtra(ctx)
+	return uint32(v), ok
 }
