@@ -1669,3 +1669,47 @@ func TestMountFallocate(t *testing.T) {
 		t.Fatalf("content differs: %d bytes, want %d", len(got), len(want))
 	}
 }
+
+// TestMountCloseToOpenAcrossMounts: a file another mount changed reads
+// as changed once it's opened again, though this mount had its pages
+// cached (see Mount).
+func TestMountCloseToOpenAcrossMounts(t *testing.T) {
+	store := newMountTestStore(t)
+	mntA := mountFS(t, store, "shared")
+	fsysB := icbfs.New(store, "shared")
+	if err := fsysB.Attach(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mntB := t.TempDir()
+	server, err := Mount(mntB, Root(fsysB, nil), &fs.Options{
+		MountOptions:    fuse.MountOptions{FsName: "icbfs-test", Name: "icbfs-test", Options: []string{"default_permissions"}},
+		NullPermissions: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = server.Unmount() })
+
+	if err := os.WriteFile(filepath.Join(mntA, "f"), []byte("version 1"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(filepath.Join(mntB, "f"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := io.ReadAll(f); string(got) != "version 1" {
+		t.Fatalf("B read %q", got)
+	}
+	if err := os.WriteFile(filepath.Join(mntA, "f"), []byte("version 2"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// B still has f open, with its pages cached; a new open must not use them.
+	got, err := os.ReadFile(filepath.Join(mntB, "f"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "version 2" {
+		t.Fatalf("B reopened and read %q, want version 2", got)
+	}
+	f.Close()
+}

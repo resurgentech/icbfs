@@ -8,18 +8,30 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
-// Mount is fs.Mount, except that a close's FLUSH tells FileHandle.Flush
-// whose close it is (flushOwner), which go-fuse doesn't pass on. POSIX
-// releases a process's fcntl locks on a file when it closes any descriptor
-// for it, and the kernel leaves that to the filesystem: FLUSH carries the
-// closing process's lock owner, the same token its fcntl calls carry.
+// Mount is fs.Mount, with two differences.
+//
+// A close's FLUSH tells FileHandle.Flush whose close it is (flushOwner),
+// which go-fuse doesn't pass on. POSIX releases a process's fcntl locks on
+// a file when it closes any descriptor for it, and the kernel leaves that
+// to the filesystem: FLUSH carries the closing process's lock owner, the
+// same token its fcntl calls carry.
+//
+// And the kernel keeps an open file's cached pages until the file is next
+// opened (ExplicitDataCacheControl). Otherwise, with no attribute caching,
+// it asks for the attributes before every read to see whether its pages
+// are stale, a store round trip each: a program reading 4 bytes at a time
+// ran a thousand times slower. Those checks bought nothing, since a
+// session reads the content as it was when the file was opened, and the
+// next open still starts from the store (close-to-open, as NFS), and
+// change notifications still invalidate pages at once.
 func Mount(dir string, root fs.InodeEmbedder, options *fs.Options) (*fuse.Server, error) {
-	raw := &ownerRawFS{RawFileSystem: fs.NewNodeFS(root, options)}
-	var mountOptions *fuse.MountOptions
+	var opts fs.Options
 	if options != nil {
-		mountOptions = &options.MountOptions
+		opts = *options
 	}
-	server, err := fuse.NewServer(raw, dir, mountOptions)
+	opts.ExplicitDataCacheControl = true
+	raw := &ownerRawFS{RawFileSystem: fs.NewNodeFS(root, &opts)}
+	server, err := fuse.NewServer(raw, dir, &opts.MountOptions)
 	if err != nil {
 		return nil, err
 	}

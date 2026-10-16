@@ -298,8 +298,10 @@ is a hint to "go look". It never says authoritatively what changed.
 
 - **On a FUSE mount**, a notification for a file the kernel knows about
   is passed on to the kernel to invalidate it. The mount sets no kernel
-  cache timeouts and doesn't keep page cache across opens, so every read
-  already reaches the store, and this has no visible effect today. The
+  cache timeouts and doesn't keep page cache across opens: within one
+  open, reads come from the kernel's page cache, and each open starts
+  again from the store (close-to-open, as NFS). So a notification only
+  matters to a file open at the time it changes. The
   table of watched files holds only the inodes the kernel holds: an entry
   goes when the kernel forgets its inode.
 - **For locking**, a notification wakes a waiter early.
