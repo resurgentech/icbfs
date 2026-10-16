@@ -4,4 +4,5 @@
 *.exe
 /test/windows/work/
 /test/linux/work/
+/test/multi/work/
 /ROADMAP.md

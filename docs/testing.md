@@ -9,14 +9,15 @@ icbfs is tested in layers:
 
 ## Latest results
 
-Each run against a fresh MinIO. The first five are from 2026-10-16, on the
-same tree; the last three from 2026-10-14.
+Each run against a fresh MinIO. The first six are from 2026-10-16; the
+last three from 2026-10-14.
 
 | suite | where | result |
 |---|---|---|
 | Go tests (`-race`) | Linux host, Docker | all 19 packages with tests pass |
 | pjdfstest | Ubuntu 24.04 VM, FUSE, root | 238 files, 8,798 assertions; 0 unexpected failures, 4 accepted |
 | xfstests `-g quick` | Ubuntu 24.04 VM, FUSE | 647 tests: 166 pass, 467 don't run, 14 fail, each listed with its reason |
+| several machines | Linux VM and two small VMs, one MinIO | 3 machines: all 6 workloads pass; `fs check` clean |
 | winfsp-tests `--external`, case-insensitive | Windows Server 2025 VM | 78 / 78 pass |
 | winfsp-tests `--external`, case-sensitive | Windows Server 2025 VM | 77 / 78 pass; `getfileinfo_name_test` fails, as on WinFsp's memfs |
 | logging chain | Ubuntu 24.04 VM | 5 / 5 checks pass |
@@ -104,6 +105,28 @@ support), device nodes and setuid binaries on the test mounts' default
 nodev and nosuid, FIBMAP, the kernel FUSE side's setgid rule on writes,
 FUSE's asynchronous release of OFD locks, `/proc/locks`, and the declared
 size not being enforced.
+
+### Several machines
+
+Several Linux machines mount one filesystem on a throwaway MinIO, locking
+on, and run each workload at the same time; each workload's result is
+checked from every machine, and at the end, unmounted, `icbfs-cli fs
+check` must find nothing wrong. The machines are the Linux VM and small
+VMs (1 vCPU, 1 GiB) made for it:
+
+```
+just multi-vms [n]          # icbfs-multi-1..n, once (default 2)
+just multi-test [workload]  # test/multi/run-multi.sh
+```
+
+| workload | each machine | checked |
+|---|---|---|
+| storm | creates 300 names in one shared directory | all are there, and every machine lists the same |
+| exclusive | creates the same 100 names with `O_EXCL` | each is created exactly once |
+| counter | increments one file 40 times under `flock` | none is lost |
+| append | appends 100 lines to one file under `flock` | none is lost or torn |
+| rename | moves 50 files between two shared directories 4 times | none is lost or doubled |
+| fsstress | 2,000 random operations in a directory of its own | `fs check` |
 
 ### winfsp-tests (Windows)
 

@@ -1,0 +1,11 @@
+#cloud-config
+# The multi-machine test VMs (create-vms.sh): an SSH key, FUSE, and the
+# libraries fsstress needs. The runner copies icbfs and fsstress in.
+ssh_authorized_keys:
+  - REPLACED_BY_CREATE_VMS_SH
+package_update: true
+package_upgrade: false
+packages:
+  - fuse3
+  - libaio1t64 # for fsstress, copied from test/linux's VM
+  - liburing2

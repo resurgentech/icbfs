@@ -89,5 +89,13 @@ winfsp-tests target="icbfs-ci" *args:
 sync-test *args:
     test/windows/run-sync-test.sh {{args}}
 
-# Every VM suite but the large-file one
-vm-tests: pjdfstest mount-helper-test logging-test (winfsp-tests "icbfs-ci") (winfsp-tests "icbfs-cs") sync-test
+# The small VMs the multi-machine tests add to the Linux VM (default 2)
+multi-vms n="2":
+    test/multi/create-vms.sh {{n}}
+
+# Several machines on one filesystem at once, the Linux VM and the multi VMs (e.g. just multi-test counter)
+multi-test *args:
+    test/multi/run-multi.sh {{args}}
+
+# Every VM suite but the large-file one and xfstests
+vm-tests: pjdfstest mount-helper-test logging-test multi-test (winfsp-tests "icbfs-ci") (winfsp-tests "icbfs-cs") sync-test
