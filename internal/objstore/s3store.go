@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,8 +21,9 @@ import (
 // S3Store is a Store backed by any S3-API-compatible endpoint (MinIO is the
 // target here; AWS S3 itself works the same way).
 type S3Store struct {
-	client *s3.Client
-	bucket string
+	client    *s3.Client
+	bucket    string
+	keyPrefix string // see WithKeyPrefix
 }
 
 var _ Store = (*S3Store)(nil)
@@ -31,10 +33,22 @@ func NewS3Store(client *s3.Client, bucket string) *S3Store {
 	return &S3Store{client: client, bucket: bucket}
 }
 
+// WithKeyPrefix returns a store on the same bucket that keeps every key
+// under prefix, invisibly to its callers: several stores can share one
+// bucket, as test runs against a real S3 bucket do.
+func (s *S3Store) WithKeyPrefix(prefix string) *S3Store {
+	c := *s
+	c.keyPrefix = prefix
+	return &c
+}
+
+// k is key as stored: under keyPrefix.
+func (s *S3Store) k(key string) string { return s.keyPrefix + key }
+
 func (s *S3Store) Put(ctx context.Context, key string, body io.Reader, metadata map[string]string, ifMatch string) (*Object, error) {
 	in := &s3.PutObjectInput{
 		Bucket:   aws.String(s.bucket),
-		Key:      aws.String(key),
+		Key:      aws.String(s.k(key)),
 		Body:     body,
 		Metadata: metadata,
 	}
@@ -75,7 +89,7 @@ const partConcurrency = 4
 func (s *S3Store) PutParts(ctx context.Context, key string, parts []Part, metadata map[string]string, ifMatch string) (*Object, error) {
 	up, err := s.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
 		Bucket:   aws.String(s.bucket),
-		Key:      aws.String(key),
+		Key:      aws.String(s.k(key)),
 		Metadata: metadata,
 	})
 	if err != nil {
@@ -88,7 +102,7 @@ func (s *S3Store) PutParts(ctx context.Context, key string, parts []Part, metada
 		actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 		defer cancel()
 		_, _ = s.client.AbortMultipartUpload(actx, &s3.AbortMultipartUploadInput{
-			Bucket: aws.String(s.bucket), Key: aws.String(key), UploadId: up.UploadId,
+			Bucket: aws.String(s.bucket), Key: aws.String(s.k(key)), UploadId: up.UploadId,
 		})
 	}
 
@@ -108,7 +122,7 @@ func (s *S3Store) PutParts(ctx context.Context, key string, parts []Part, metada
 			var etag *string
 			if p.Body != nil {
 				out, err := s.client.UploadPart(pctx, &s3.UploadPartInput{
-					Bucket: aws.String(s.bucket), Key: aws.String(key), UploadId: up.UploadId,
+					Bucket: aws.String(s.bucket), Key: aws.String(s.k(key)), UploadId: up.UploadId,
 					PartNumber: num, Body: p.Body, ContentLength: aws.Int64(p.Size),
 				})
 				if err != nil {
@@ -119,9 +133,9 @@ func (s *S3Store) PutParts(ctx context.Context, key string, parts []Part, metada
 				etag = out.ETag
 			} else {
 				out, err := s.client.UploadPartCopy(pctx, &s3.UploadPartCopyInput{
-					Bucket: aws.String(s.bucket), Key: aws.String(key), UploadId: up.UploadId,
+					Bucket: aws.String(s.bucket), Key: aws.String(s.k(key)), UploadId: up.UploadId,
 					PartNumber:      num,
-					CopySource:      aws.String(s.bucket + "/" + key + "?versionId=" + p.CopyVersion),
+					CopySource:      aws.String(s.bucket + "/" + s.k(key) + "?versionId=" + p.CopyVersion),
 					CopySourceRange: aws.String(fmt.Sprintf("bytes=%d-%d", p.CopyOffset, p.CopyOffset+p.Size-1)),
 				})
 				if err != nil {
@@ -141,7 +155,7 @@ func (s *S3Store) PutParts(ctx context.Context, key string, parts []Part, metada
 	}
 
 	in := &s3.CompleteMultipartUploadInput{
-		Bucket: aws.String(s.bucket), Key: aws.String(key), UploadId: up.UploadId,
+		Bucket: aws.String(s.bucket), Key: aws.String(s.k(key)), UploadId: up.UploadId,
 		MultipartUpload: &types.CompletedMultipartUpload{Parts: completed},
 	}
 	if ifMatch != "" {
@@ -179,7 +193,7 @@ func firstRealError(errs []error) error {
 func (s *S3Store) PutIfAbsent(ctx context.Context, key string, body io.Reader, metadata map[string]string) (*Object, error) {
 	out, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:      aws.String(s.bucket),
-		Key:         aws.String(key),
+		Key:         aws.String(s.k(key)),
 		Body:        body,
 		Metadata:    metadata,
 		IfNoneMatch: aws.String("*"),
@@ -193,7 +207,7 @@ func (s *S3Store) PutIfAbsent(ctx context.Context, key string, body io.Reader, m
 func (s *S3Store) Get(ctx context.Context, key string) (io.ReadCloser, *Object, error) {
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
+		Key:    aws.String(s.k(key)),
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get %s: %w", key, err)
@@ -218,7 +232,7 @@ func (s *S3Store) Head(ctx context.Context, key string) (*Object, error) {
 func (s *S3Store) headVersion(ctx context.Context, key string, versionID *string) (*Object, error) {
 	out, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
 		Bucket:    aws.String(s.bucket),
-		Key:       aws.String(key),
+		Key:       aws.String(s.k(key)),
 		VersionId: versionID,
 	})
 	if err != nil {
@@ -241,8 +255,8 @@ func (s *S3Store) headVersion(ctx context.Context, key string, versionID *string
 func (s *S3Store) UpdateMetadata(ctx context.Context, key string, metadata map[string]string, ifMatch string) (*Object, error) {
 	in := &s3.CopyObjectInput{
 		Bucket:            aws.String(s.bucket),
-		Key:               aws.String(key),
-		CopySource:        aws.String(s.bucket + "/" + key),
+		Key:               aws.String(s.k(key)),
+		CopySource:        aws.String(s.bucket + "/" + s.k(key)),
 		Metadata:          metadata,
 		MetadataDirective: types.MetadataDirectiveReplace,
 	}
@@ -306,7 +320,7 @@ func (s *S3Store) listVersions(ctx context.Context, prefix string) ([]Object, er
 	for {
 		out, err := s.client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
 			Bucket:          aws.String(s.bucket),
-			Prefix:          aws.String(prefix),
+			Prefix:          aws.String(s.k(prefix)),
 			KeyMarker:       keyMarker,
 			VersionIdMarker: versionMarker,
 			MaxKeys:         aws.Int32(listVersionsPageSize),
@@ -317,7 +331,7 @@ func (s *S3Store) listVersions(ctx context.Context, prefix string) ([]Object, er
 		for _, v := range out.Versions {
 			seq++
 			add(entry{obj: Object{
-				Key:          aws.ToString(v.Key),
+				Key:          strings.TrimPrefix(aws.ToString(v.Key), s.keyPrefix),
 				VersionID:    aws.ToString(v.VersionId),
 				ETag:         aws.ToString(v.ETag),
 				Size:         aws.ToInt64(v.Size),
@@ -327,7 +341,7 @@ func (s *S3Store) listVersions(ctx context.Context, prefix string) ([]Object, er
 		for _, m := range out.DeleteMarkers {
 			seq++
 			add(entry{obj: Object{
-				Key:          aws.ToString(m.Key),
+				Key:          strings.TrimPrefix(aws.ToString(m.Key), s.keyPrefix),
 				VersionID:    aws.ToString(m.VersionId),
 				LastModified: aws.ToTime(m.LastModified),
 				DeleteMarker: true,
@@ -362,7 +376,7 @@ func (s *S3Store) listVersions(ctx context.Context, prefix string) ([]Object, er
 func (s *S3Store) GetVersion(ctx context.Context, key, versionID string) (io.ReadCloser, *Object, error) {
 	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket:    aws.String(s.bucket),
-		Key:       aws.String(key),
+		Key:       aws.String(s.k(key)),
 		VersionId: aws.String(versionID),
 	})
 	if err != nil {
@@ -385,7 +399,7 @@ func (s *S3Store) HeadVersion(ctx context.Context, key, versionID string) (*Obje
 func (s *S3Store) DeleteVersion(ctx context.Context, key, versionID string) error {
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket:    aws.String(s.bucket),
-		Key:       aws.String(key),
+		Key:       aws.String(s.k(key)),
 		VersionId: aws.String(versionID),
 	})
 	if err != nil {
@@ -397,7 +411,7 @@ func (s *S3Store) DeleteVersion(ctx context.Context, key, versionID string) erro
 func (s *S3Store) Delete(ctx context.Context, key string, ifMatch string) error {
 	in := &s3.DeleteObjectInput{
 		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key),
+		Key:    aws.String(s.k(key)),
 	}
 	if ifMatch != "" {
 		in.IfMatch = aws.String(ifMatch)
@@ -417,7 +431,7 @@ func (s *S3Store) ListByPrefix(ctx context.Context, prefix string) ([]Object, er
 	for {
 		out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket:            aws.String(s.bucket),
-			Prefix:            aws.String(prefix),
+			Prefix:            aws.String(s.k(prefix)),
 			ContinuationToken: token,
 		})
 		if err != nil {
@@ -425,7 +439,7 @@ func (s *S3Store) ListByPrefix(ctx context.Context, prefix string) ([]Object, er
 		}
 		for _, o := range out.Contents {
 			all = append(all, Object{
-				Key:  aws.ToString(o.Key),
+				Key:  strings.TrimPrefix(aws.ToString(o.Key), s.keyPrefix),
 				Size: aws.ToInt64(o.Size),
 			})
 		}

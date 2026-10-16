@@ -6,3 +6,5 @@
 /test/linux/work/
 /test/multi/work/
 /ROADMAP.md
+/.env.aws
+/.env.azure

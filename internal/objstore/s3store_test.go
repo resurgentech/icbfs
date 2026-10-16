@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +27,9 @@ import (
 func newTestStore(t *testing.T) *S3Store {
 	t.Helper()
 	ctx := context.Background()
+	if bucket := os.Getenv("ICBFS_TEST_S3_BUCKET"); bucket != "" {
+		return externalTestStore(t, bucket)
+	}
 
 	container, err := minio.Run(ctx, minioimage.Image())
 	if err != nil {
@@ -224,7 +229,7 @@ func mustGetVersion(t *testing.T, store *S3Store, key, versionID string) []byte 
 	ctx := context.Background()
 	out, err := store.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket:    aws.String(store.bucket),
-		Key:       aws.String(key),
+		Key:       aws.String(store.k(key)),
 		VersionId: aws.String(versionID),
 	})
 	if err != nil {
@@ -313,10 +318,11 @@ func TestConditionalUpdateMetadataIgnoresUnchangedETag(t *testing.T) {
 	}
 }
 
-// TestConditionalDeleteIgnoresIfMatch records another: MinIO ignores
-// If-Match on DeleteObject, so icbfs never relies on a conditional delete
+// TestConditionalDeleteIfMatchVaries records another: stores differ on
+// If-Match for DeleteObject. MinIO ignores it; AWS S3 enforces it (412).
+// So icbfs never relies on a conditional delete, and passes none
 // (adjustNlink writes a tombstone with a conditional Put instead).
-func TestConditionalDeleteIgnoresIfMatch(t *testing.T) {
+func TestConditionalDeleteIfMatchVaries(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -324,21 +330,21 @@ func TestConditionalDeleteIgnoresIfMatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("put: %v", err)
 	}
-
-	// Someone else updates the object after we observed v1, which (per
-	// the finding above) may not even move the ETag if it's metadata-only
-	// — so use a real content change to guarantee a different ETag.
+	// Someone else updates the object after we observed v1, with a real
+	// content change, so the ETag certainly moves.
 	if _, err := store.Put(ctx, "file-1", strings.NewReader("different content"), nil, ""); err != nil {
 		t.Fatalf("concurrent update: %v", err)
 	}
 
 	err = store.Delete(ctx, "file-1", v1.ETag)
-	if err != nil {
-		t.Fatalf("expected delete with a stale If-Match to succeed unprotected (MinIO does not enforce it), got: %v", err)
-	}
-
-	if _, err := store.Head(ctx, "file-1"); !IsNotFound(err) {
-		t.Fatalf("expected object to be gone after the unprotected delete, head error: %v", err)
+	_, headErr := store.Head(ctx, "file-1")
+	switch {
+	case err == nil && IsNotFound(headErr):
+		t.Log("If-Match on delete is ignored (MinIO)")
+	case IsPreconditionFailed(err) && headErr == nil:
+		t.Log("If-Match on delete is enforced (AWS S3)")
+	default:
+		t.Fatalf("delete with a stale If-Match: %v, then head: %v; want ignored or enforced", err, headErr)
 	}
 }
 
@@ -488,4 +494,32 @@ func TestPutCutOffIsLostRaceOnlyIfChanged(t *testing.T) {
 	if err == nil || IsPreconditionFailed(err) {
 		t.Fatalf("cut off, object unchanged: %v, want a plain failure", err)
 	}
+}
+
+// externalTestStore is newTestStore on a real S3 bucket instead of a MinIO
+// container: ICBFS_TEST_S3_BUCKET names it (versioned), ICBFS_TEST_S3_REGION
+// its region (default us-east-1), ICBFS_TEST_S3_ENDPOINT its endpoint
+// (default AWS's for the region), and the AWS_* variables the credentials.
+// Each test gets keys of its own, under a prefix, as the tests expect an
+// empty bucket. icbfs addresses buckets path-style, so these do too.
+func externalTestStore(t *testing.T, bucket string) *S3Store {
+	t.Helper()
+	region := os.Getenv("ICBFS_TEST_S3_REGION")
+	if region == "" {
+		region = "us-east-1"
+	}
+	endpoint := os.Getenv("ICBFS_TEST_S3_ENDPOINT")
+	if endpoint == "" {
+		endpoint = "https://s3." + region + ".amazonaws.com"
+	}
+	client := s3.New(s3.Options{
+		Region:       region,
+		BaseEndpoint: aws.String(endpoint),
+		UsePathStyle: true,
+		Credentials: awscreds.NewStaticCredentialsProvider(
+			os.Getenv("AWS_ACCESS_KEY_ID"), os.Getenv("AWS_SECRET_ACCESS_KEY"), os.Getenv("AWS_SESSION_TOKEN"),
+		),
+	})
+	prefix := fmt.Sprintf("objstore-test/%s/%s/", time.Now().UTC().Format("20060102T150405.000"), t.Name())
+	return NewS3Store(client, bucket).WithKeyPrefix(prefix)
 }
