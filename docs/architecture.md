@@ -466,4 +466,7 @@ See [api.md](api.md).
   best-effort by design.
 - **Quotas** for users or groups within a filesystem. Only the
   per-filesystem declared size exists.
-- **Sparse files:** a hole is stored as zero bytes.
+- **Sparse files:** a hole is stored as zero bytes. `fallocate` grows a
+  file, punches holes and zeroes ranges, by writing zeros; it reserves
+  nothing, and collapsing or inserting a range isn't supported (the
+  kernel doesn't pass those to FUSE filesystems).

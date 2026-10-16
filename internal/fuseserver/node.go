@@ -543,14 +543,15 @@ func newFileHandle(open *icbfs.OpenFile) *FileHandle {
 }
 
 var (
-	_ fs.FileHandle   = (*FileHandle)(nil)
-	_ fs.FileReader   = (*FileHandle)(nil)
-	_ fs.FileWriter   = (*FileHandle)(nil)
-	_ fs.FileFlusher  = (*FileHandle)(nil)
-	_ fs.FileReleaser = (*FileHandle)(nil)
-	_ fs.FileGetlker  = (*FileHandle)(nil)
-	_ fs.FileSetlker  = (*FileHandle)(nil)
-	_ fs.FileSetlkwer = (*FileHandle)(nil)
+	_ fs.FileHandle    = (*FileHandle)(nil)
+	_ fs.FileReader    = (*FileHandle)(nil)
+	_ fs.FileWriter    = (*FileHandle)(nil)
+	_ fs.FileFlusher   = (*FileHandle)(nil)
+	_ fs.FileReleaser  = (*FileHandle)(nil)
+	_ fs.FileGetlker   = (*FileHandle)(nil)
+	_ fs.FileSetlker   = (*FileHandle)(nil)
+	_ fs.FileSetlkwer  = (*FileHandle)(nil)
+	_ fs.FileAllocater = (*FileHandle)(nil)
 )
 
 func (h *FileHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
@@ -570,6 +571,22 @@ func (h *FileHandle) Write(ctx context.Context, data []byte, off int64) (uint32,
 	}
 	h.wrote.Store(true)
 	return uint32(len(data)), 0
+}
+
+// Allocate is fallocate(2); see icbfs.OpenFile.Allocate.
+func (h *FileHandle) Allocate(ctx context.Context, off uint64, size uint64, mode uint32) syscall.Errno {
+	if off > math.MaxInt64 || size > math.MaxInt64 {
+		return syscall.EFBIG
+	}
+	err := h.open.Allocate(int64(off), int64(size), mode)
+	if errors.Is(err, icbfs.ErrNotSupported) {
+		return syscall.EOPNOTSUPP
+	}
+	if err != nil {
+		return errnoFromErr(err)
+	}
+	h.wrote.Store(true)
+	return 0
 }
 
 // Flush runs at every close(2) of the file, synchronously — which is

@@ -259,11 +259,91 @@ func (o *OpenFile) Truncate(size int64) error {
 	if size == o.size {
 		return nil
 	}
+	return o.resizeLocked(size)
+}
+
+// fallocate(2)'s modes. FUSE passes on only these; the kernel refuses
+// collapsing and inserting ranges itself.
+const (
+	FallocKeepSize  = 0x01
+	FallocPunchHole = 0x02
+	FallocZeroRange = 0x10
+)
+
+// Allocate is fallocate(2) on this session's content, flushed as a write
+// is. Content is stored whole, zeros included, so there's no space to
+// reserve: a plain allocation only grows the size (unless FallocKeepSize),
+// and punching a hole and zeroing a range write zeros. Any other mode is
+// ErrNotSupported.
+func (o *OpenFile) Allocate(off, length int64, mode uint32) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if off < 0 || length <= 0 || o.file == nil {
+		return ErrInvalidArgument
+	}
+	end := off + length
+	if end < off {
+		return ErrFileTooLarge
+	}
+	keep := mode&FallocKeepSize != 0
+	grow := func(size int64) error {
+		if size > o.fsys.maxFileSize {
+			return ErrFileTooLarge
+		}
+		if keep || size <= o.size {
+			return nil
+		}
+		return o.resizeLocked(size)
+	}
+	switch mode &^ FallocKeepSize {
+	case 0:
+		return grow(end)
+	case FallocPunchHole:
+		if !keep {
+			return ErrInvalidArgument // as Linux: a hole never changes the size
+		}
+		return o.zeroLocked(off, min(end, o.size))
+	case FallocZeroRange:
+		if err := grow(end); err != nil {
+			return err
+		}
+		return o.zeroLocked(off, min(end, o.size))
+	default:
+		return ErrNotSupported
+	}
+}
+
+// resizeLocked sets the scratch file's size, as Truncate does.
+func (o *OpenFile) resizeLocked(size int64) error {
 	if err := o.file.Truncate(size); err != nil {
 		return err
 	}
-	lo, hi := min(size, o.size), max(size, o.size)
+	o.touchLocked(min(size, o.size), max(size, o.size))
 	o.size = size
+	o.truncated = true
+	return nil
+}
+
+// zeroLocked writes zeros over [lo, hi).
+func (o *OpenFile) zeroLocked(lo, hi int64) error {
+	if lo >= hi {
+		return nil
+	}
+	zeros := make([]byte, min(hi-lo, 1<<20))
+	for at := lo; at < hi; {
+		n := min(hi-at, int64(len(zeros)))
+		if _, err := o.file.WriteAt(zeros[:n], at); err != nil {
+			return err
+		}
+		at += n
+	}
+	o.touchLocked(lo, hi)
+	return nil
+}
+
+// touchLocked widens the touched range to cover [lo, hi) and marks the
+// session dirty, as WriteAt does.
+func (o *OpenFile) touchLocked(lo, hi int64) {
 	if o.touchedStart == noTouch || lo < o.touchedStart {
 		o.touchedStart = lo
 	}
@@ -271,9 +351,7 @@ func (o *OpenFile) Truncate(size int64) error {
 		o.touchedEnd = hi
 	}
 	o.dirty = true
-	o.truncated = true
 	o.lastWrite = time.Now()
-	return nil
 }
 
 // applyLocked extends the local scratch file to cover off+len(data) if

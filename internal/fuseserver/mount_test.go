@@ -1,6 +1,7 @@
 package fuseserver
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1625,5 +1626,46 @@ func TestMountOpenItemReplacedHasNoLinks(t *testing.T) {
 			t.Errorf("%s: nlink %d, want 0", c.name, st.Nlink)
 		}
 		f.Close()
+	}
+}
+
+// TestMountFallocate: fallocate grows a file, punches holes and zeroes
+// ranges through the mount, and the kernel refuses the modes FUSE doesn't
+// pass on.
+func TestMountFallocate(t *testing.T) {
+	mnt := mountTestFS(t)
+	path := filepath.Join(mnt, "falloc.bin")
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Write(slices.Repeat([]byte{'x'}, 8192)); err != nil {
+		t.Fatal(err)
+	}
+	fd := int(f.Fd())
+	if err := syscall.Fallocate(fd, 0, 8192, 4096); err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	if st, _ := f.Stat(); st.Size() != 12288 {
+		t.Fatalf("size after allocating %d, want 12288", st.Size())
+	}
+	const keepSize, punchHole = 0x01, 0x02
+	if err := syscall.Fallocate(fd, keepSize|punchHole, 1000, 2000); err != nil {
+		t.Fatalf("punch hole: %v", err)
+	}
+	if err := syscall.Fallocate(fd, 0x08, 0, 4096); err != syscall.EOPNOTSUPP { // collapse range
+		t.Fatalf("collapse range = %v, want EOPNOTSUPP", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := slices.Concat(slices.Repeat([]byte{'x'}, 1000), make([]byte, 2000), slices.Repeat([]byte{'x'}, 8192-3000), make([]byte, 4096))
+	if !bytes.Equal(got, want) {
+		t.Fatalf("content differs: %d bytes, want %d", len(got), len(want))
 	}
 }
