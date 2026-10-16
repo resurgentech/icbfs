@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -84,8 +85,21 @@ func TestXattrNamespacesAndLimits(t *testing.T) {
 	if _, err := fsys.SetXattr(ctx, key, TypeFile, "user.big", make([]byte, maxXattrValue+1), XattrAny); !errors.Is(err, ErrXattrTooBig) {
 		t.Errorf("oversized value = %v, want ErrXattrTooBig", err)
 	}
-	if _, err := fsys.SetXattr(ctx, key, TypeFile, "user.fill", make([]byte, maxXattrValue), XattrAny); !errors.Is(err, ErrXattrNoSpace) {
-		t.Errorf("past the total = %v, want ErrXattrNoSpace", err)
+	// A full-size value fits beside others; enough of them don't.
+	for i := 0; ; i++ {
+		_, err := fsys.SetXattr(ctx, key, TypeFile, fmt.Sprintf("user.fill%d", i), make([]byte, maxXattrValue), XattrAny)
+		if errors.Is(err, ErrXattrNoSpace) {
+			if i < 3 {
+				t.Errorf("only %d full-size values fit", i)
+			}
+			break
+		}
+		if err != nil {
+			t.Fatalf("full-size value %d: %v", i, err)
+		}
+	}
+	for i := 0; i < 4; i++ {
+		_, _ = fsys.RemoveXattr(ctx, key, TypeFile, fmt.Sprintf("user.fill%d", i))
 	}
 
 	if _, err := fsys.SetXattr(ctx, key, TypeFile, "user.a", []byte("again"), XattrCreate); !errors.Is(err, ErrExists) {

@@ -44,6 +44,11 @@ type Node struct {
 	// them (FileHandle.Flush) and a close by anyone else costs nothing.
 	ownersMu    sync.Mutex
 	fcntlOwners map[uint64]bool
+
+	// last is the attributes last reported for the item, which Getattr
+	// reports, with no links, once the item is gone: an open directory
+	// that was removed, or replaced by a rename, as Linux does.
+	last atomic.Pointer[icbfs.Attr]
 }
 
 var (
@@ -211,9 +216,10 @@ func errnoFromErr(err error) syscall.Errno {
 	}
 }
 
-func (n *Node) newChild(ctx context.Context, key string, typ icbfs.EntryType) *fs.Inode {
+func (n *Node) newChild(ctx context.Context, key string, typ icbfs.EntryType, attr icbfs.Attr) *fs.Inode {
 	ctx = detach(ctx)
 	child := &Node{fsys: n.fsys, key: key, typ: typ, watches: n.watches, logger: n.logger, under: n.under}
+	child.last.Store(&attr)
 	stable := fs.StableAttr{Ino: icbfs.Ino(key), Mode: typeToFuseMode(typ)}
 	// StableAttr.Ino dedups against any already-known inode with the same
 	// number — this is exactly how hardlinks (Link, below) end up sharing
@@ -249,16 +255,24 @@ func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 		return nil, errnoFromErr(err)
 	}
 	fillAttr(&out.Attr, entry.UUID, entry.Type, attr)
-	return n.newChild(ctx, entry.UUID, entry.Type), 0
+	return n.newChild(ctx, entry.UUID, entry.Type, attr), 0
 }
 
 func (n *Node) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	ctx = detach(ctx)
 	n.confirmWatch()
 	attr, err := n.fsys.Stat(ctx, n.key, n.typ)
+	if errors.Is(err, icbfs.ErrNotFound) {
+		if last := n.last.Load(); last != nil {
+			fillAttr(&out.Attr, n.key, n.typ, *last)
+			out.Nlink = 0
+			return 0
+		}
+	}
 	if err != nil {
 		return errnoFromErr(err)
 	}
+	n.last.Store(&attr)
 	fillAttr(&out.Attr, n.key, n.typ, attr)
 	return 0
 }
@@ -317,6 +331,19 @@ func (n *Node) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn,
 		mtimeP = &m
 	}
 
+	// ftruncate(2), or open(2) with O_TRUNC, names the handle: truncate
+	// its session, or its copy keeps the old bytes and its next flush
+	// re-applies its earlier writes over the truncation.
+	if h, ok := f.(*FileHandle); ok && h != nil && sizeP != nil {
+		if err := h.open.Truncate(*sizeP); err != nil {
+			return errnoFromErr(err)
+		}
+		if _, err := h.open.Flush(ctx); err != nil {
+			return errnoFromErr(err)
+		}
+		sizeP = nil
+	}
+
 	attr, err := n.fsys.SetAttr(ctx, n.key, n.typ, modeP, uidP, gidP, sizeP, atimeP, mtimeP, nil)
 	if err != nil {
 		return errnoFromErr(err)
@@ -354,7 +381,7 @@ func (n *Node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.En
 		return nil, errnoFromErr(err)
 	}
 	fillAttr(&out.Attr, newUUID, icbfs.TypeDir, attr)
-	return n.newChild(ctx, newUUID, icbfs.TypeDir), 0
+	return n.newChild(ctx, newUUID, icbfs.TypeDir, attr), 0
 }
 
 // Mknod creates a FIFO, a Unix socket (bind(2) makes its entry through
@@ -384,7 +411,7 @@ func (n *Node) Mknod(ctx context.Context, name string, mode, dev uint32, out *fu
 		return nil, errnoFromErr(err)
 	}
 	fillAttr(&out.Attr, newUUID, typ, attr)
-	return n.newChild(ctx, newUUID, typ), 0
+	return n.newChild(ctx, newUUID, typ, attr), 0
 }
 
 func (n *Node) Create(ctx context.Context, name string, flags uint32, mode uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
@@ -395,7 +422,7 @@ func (n *Node) Create(ctx context.Context, name string, flags uint32, mode uint3
 		return nil, nil, 0, errnoFromErr(err)
 	}
 	fillAttr(&out.Attr, newUUID, icbfs.TypeFile, attr)
-	inode := n.newChild(ctx, newUUID, icbfs.TypeFile)
+	inode := n.newChild(ctx, newUUID, icbfs.TypeFile, attr)
 	fh := newFileHandle(n.fsys.NewOpenFile(newUUID, etag, nil))
 	fh.node = inode.Operations().(*Node)
 	return inode, fh, 0, 0
@@ -442,7 +469,7 @@ func (n *Node) Symlink(ctx context.Context, target, name string, out *fuse.Entry
 		return nil, errnoFromErr(err)
 	}
 	fillAttr(&out.Attr, newUUID, icbfs.TypeSymlink, attr)
-	return n.newChild(ctx, newUUID, icbfs.TypeSymlink), 0
+	return n.newChild(ctx, newUUID, icbfs.TypeSymlink, attr), 0
 }
 
 func (n *Node) Readlink(ctx context.Context) ([]byte, syscall.Errno) {
@@ -465,7 +492,7 @@ func (n *Node) Link(ctx context.Context, target fs.InodeEmbedder, name string, o
 		return nil, errnoFromErr(err)
 	}
 	fillAttr(&out.Attr, tn.key, tn.typ, attr)
-	return n.newChild(ctx, tn.key, tn.typ), 0
+	return n.newChild(ctx, tn.key, tn.typ, attr), 0
 }
 
 // renameExchange is renameat2(2)'s RENAME_EXCHANGE, an atomic swap of two

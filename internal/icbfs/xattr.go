@@ -24,11 +24,12 @@ var (
 
 // Linux's limits: XATTR_NAME_MAX and XATTR_SIZE_MAX. maxXattrTotal bounds
 // all of one item's names and values together, since .metadata is read on
-// every stat.
+// every stat; it leaves room for a full-size value beside many small ones,
+// as XFS does and xfstests expects of FUSE filesystems (generic/020).
 const (
 	maxXattrName  = 255
 	maxXattrValue = 64 << 10
-	maxXattrTotal = 64 << 10
+	maxXattrTotal = 256 << 10
 )
 
 // XattrHow is setxattr(2)'s flags: XattrCreate fails with ErrExists if the

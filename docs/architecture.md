@@ -164,7 +164,7 @@ content:
 
 **Extended attributes and POSIX ACLs.** A Linux mount offers the `user.`,
 `trusted.` and `security.` namespaces, with Linux's limits (names up to 255
-bytes, values up to 64 KiB, and at most 64 KiB in all per item), and the
+bytes, values up to 64 KiB, and at most 256 KiB in all per item), and the
 POSIX ACLs as `system.posix_acl_access` and `system.posix_acl_default`.
 The kernel enforces the ACLs (FUSE's POSIX ACL mode); icbfs keeps the mode
 in step with them, as Linux filesystems do:

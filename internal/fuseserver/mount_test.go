@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -1542,5 +1544,86 @@ func TestMountDirectoryAsRoot(t *testing.T) {
 	trash, err := fsys.ListTrash(ctx, icbfs.TrashOptions{})
 	if err != nil || len(trash) != 1 || trash[0].Path != "/team/inside" {
 		t.Fatalf("trash = %+v, %v; want /team/inside", trash, err)
+	}
+}
+
+// TestMountFtruncateDownAndUpZeroes: ftruncate on an open descriptor
+// drops the tail for that descriptor too, so growing it back reads zeros,
+// before and after the close (xfstests' generic/029).
+func TestMountFtruncateDownAndUpZeroes(t *testing.T) {
+	mnt := mountTestFS(t)
+	path := filepath.Join(mnt, "trunc.bin")
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteAt(slices.Repeat([]byte{'X'}, 5120), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(2048); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(5120); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 5120)
+	if _, err := f.ReadAt(buf, 0); err != nil {
+		t.Fatal(err)
+	}
+	for i := 2048; i < 5120; i++ {
+		if buf[i] != 0 {
+			t.Fatalf("byte %d = %q after truncate down and up", i, buf[i])
+		}
+	}
+	f.Close()
+	data, _ := os.ReadFile(path)
+	for i := 2048; i < 5120; i++ {
+		if data[i] != 0 {
+			t.Fatalf("after close: byte %d = %q", i, data[i])
+		}
+	}
+}
+
+// TestMountOpenItemReplacedHasNoLinks: an open file or directory that a
+// rename replaces, or that is removed, still answers fstat, with no links
+// (xfstests' generic/035).
+func TestMountOpenItemReplacedHasNoLinks(t *testing.T) {
+	mnt := mountTestFS(t)
+	for _, c := range []struct {
+		name string
+		make func(string) error
+		gone func(a, b string) error
+	}{
+		{"file renamed over", func(p string) error { return os.WriteFile(p, nil, 0644) }, os.Rename},
+		{"file removed", func(p string) error { return os.WriteFile(p, nil, 0644) }, func(_, b string) error { return os.Remove(b) }},
+		{"dir renamed over", func(p string) error { return os.Mkdir(p, 0755) }, syscall.Rename}, // os.Rename refuses to replace a directory
+		{"dir removed", func(p string) error { return os.Mkdir(p, 0755) }, func(_, b string) error { return os.Remove(b) }},
+	} {
+		dir := filepath.Join(mnt, strings.ReplaceAll(c.name, " ", "-"))
+		if err := os.Mkdir(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		a, b := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+		if err := c.make(a); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.make(b); err != nil {
+			t.Fatal(err)
+		}
+		f, err := os.Open(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := c.gone(a, b); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		var st syscall.Stat_t
+		if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
+			t.Errorf("%s: fstat: %v", c.name, err)
+		} else if st.Nlink != 0 {
+			t.Errorf("%s: nlink %d, want 0", c.name, st.Nlink)
+		}
+		f.Close()
 	}
 }
