@@ -34,6 +34,11 @@ type Standalone struct {
 	// that bucket (bucket id → filesystem name), so its drives' drafts
 	// stay in the same storage as their documents.
 	BucketSideStores map[string]string `json:"bucketSideStores,omitempty"`
+	// Notify names, per bucket id, the change notifications that feed its
+	// drives' event streams with changes made elsewhere (mounts): "minio",
+	// MinIO's bucket notifications. Without one, events carry only the
+	// API's own changes.
+	Notify map[string]string `json:"notify,omitempty"`
 	// Profiles by actor, for every drive...
 	Profiles map[string]drive.Profile `json:"profiles"`
 	// ... unless a drive has its own (drive id → actor → profile).
@@ -67,6 +72,7 @@ func (st *Standalone) Config(ctx context.Context) (Config, func(), error) {
 	}
 	var mu sync.Mutex
 	open := map[string]*icbfsdrive.Drive{}
+	watchCtx, stopWatching := context.WithCancel(context.Background())
 	cfg := Config{
 		Bucket: func(_ context.Context, id string) (pkgicbfs.Store, error) {
 			s, ok := stores[id]
@@ -93,6 +99,19 @@ func (st *Standalone) Config(ctx context.Context) (Config, func(), error) {
 			d, err := icbfsdrive.New(ctx, icbfsdrive.Config{Store: store, Filesystem: sd.Filesystem, Root: sd.Root, ID: id, CacheDir: st.CacheDir})
 			if err != nil {
 				return nil, DriveEntry{}, err
+			}
+			switch kind := st.Notify[sd.Bucket]; kind {
+			case "":
+			case "minio":
+				signals, err := pkgicbfs.WatchMinIO(watchCtx, st.Buckets[sd.Bucket], sd.Filesystem)
+				if err != nil {
+					d.Close()
+					return nil, DriveEntry{}, fmt.Errorf("drive %s: notifications: %w", id, err)
+				}
+				d.Notify(signals)
+			default:
+				d.Close()
+				return nil, DriveEntry{}, fmt.Errorf("bucket %s: notify %q: only \"minio\" is supported", sd.Bucket, kind)
 			}
 			open[id] = d
 			return d, entry, nil
@@ -145,11 +164,13 @@ func (st *Standalone) Config(ctx context.Context) (Config, func(), error) {
 	}
 	for b := range st.BucketSideStores {
 		if _, ok := stores[b]; !ok {
+			stopWatching()
 			return Config{}, nil, fmt.Errorf("bucketSideStores: bucket %s isn't configured", b)
 		}
 	}
 	if st.SideStore != nil {
 		if _, ok := stores[st.SideStore.Bucket]; !ok {
+			stopWatching()
 			return Config{}, nil, fmt.Errorf("side store bucket %s isn't configured", st.SideStore.Bucket)
 		}
 	}
@@ -167,6 +188,7 @@ func (st *Standalone) Config(ctx context.Context) (Config, func(), error) {
 		return nil, nil
 	}
 	cleanup := func() {
+		stopWatching()
 		mu.Lock()
 		defer mu.Unlock()
 		for _, d := range open {

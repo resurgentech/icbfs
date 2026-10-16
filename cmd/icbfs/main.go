@@ -17,9 +17,6 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
-	"github.com/minio/minio-go/v7"
-	miniocreds "github.com/minio/minio-go/v7/pkg/credentials"
-
 	"github.com/resurgentech/icbfs/internal/fslog"
 	"github.com/resurgentech/icbfs/internal/fuseserver"
 	"github.com/resurgentech/icbfs/internal/icbfs"
@@ -132,7 +129,7 @@ func main() {
 
 	var fuseSignals <-chan notify.Signal
 	if *enableNotify {
-		minioClient, err := newMinIOClient(conn.Endpoint, conn.AccessKey, conn.SecretKey)
+		minioClient, err := pkgicbfs.NewMinIOClient(conn.Endpoint, conn.AccessKey, conn.SecretKey)
 		if err != nil {
 			log.Fatalf("set up notify backend: %v", err)
 		}
@@ -192,18 +189,6 @@ func main() {
 		_ = server.Unmount()
 	}()
 	server.Wait()
-}
-
-// newMinIOClient builds the minio-go client the MinIO notification source
-// needs (see internal/notify/miniosrc). endpoint has a scheme, as -endpoint
-// does; minio.New wants the bare host and a Secure flag.
-func newMinIOClient(endpoint, accessKey, secretKey string) (*minio.Client, error) {
-	secure := strings.HasPrefix(endpoint, "https://")
-	host := strings.TrimPrefix(strings.TrimPrefix(endpoint, "https://"), "http://")
-	return minio.New(host, &minio.Options{
-		Creds:  miniocreds.NewStaticV4(accessKey, secretKey, ""),
-		Secure: secure,
-	})
 }
 
 // fuseMountOptions: source is what /proc/mounts shows as the mount's

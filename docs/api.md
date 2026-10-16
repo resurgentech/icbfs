@@ -323,8 +323,13 @@ Every other drive uses the deployment's side store.
 - Each `changed` event carries the directory (path and ID) that changed,
   where known; otherwise it is a bare `changed`.
 - It carries the API's own writes.
-- `icbfsdrive.Drive.Notify` takes change-notification signals, so that a
-  host can feed in writes from mounts as well.
+- It can also carry changes made elsewhere, such as through mounts, as
+  bare `changed` events: `pkg/icbfs.WatchMinIO` turns MinIO's bucket
+  notifications for a filesystem into wake-ups (a burst of writes is one),
+  and `icbfsdrive.Drive.Notify` takes them. The standalone server does this
+  for a bucket with `"notify": {"<bucket>": "minio"}` in its
+  configuration. A drive on a directory gets wake-ups for its whole
+  filesystem.
 
 ### Storage administration
 
@@ -397,6 +402,8 @@ The configuration (`driveapi.Standalone`) stands in for a host:
 - An actor not listed in `permissions` has every permission.
 - `driveProfiles` gives a drive its own profiles, and `bucketSideStores`
   gives a bucket its own side store.
+- `notify` feeds a bucket's drives' event streams with changes made
+  elsewhere (`"minio"`).
 - `-audit` writes every operation to stdout as one JSON line.
 
 ## Not supported

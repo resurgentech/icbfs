@@ -286,8 +286,9 @@ is a hint to "go look". It never says authoritatively what changed.
   table of watched files is never pruned, so it grows with the number of
   distinct files a long-running mount touches.
 - **For locking**, a notification wakes a waiter early.
-- **In the drive API**, `icbfsdrive.Drive.Notify` takes signals for its
-  event stream.
+- **In the drive API**, MinIO notifications become bare `changed` events
+  on a drive's event stream (`pkg/icbfs.WatchMinIO` into
+  `icbfsdrive.Drive.Notify`; the standalone server's `notify` setting).
 
 The sources are behind one interface (`internal/notify`):
 
@@ -297,7 +298,7 @@ The sources are behind one interface (`internal/notify`):
 | latency | near real time | seconds, sometimes a minute | minutes |
 | can drop events | yes, in async mode under overload | no (at least once) | no |
 | server-side prefix filter | yes | yes | no |
-| status | wired to `icbfs mount -notify` | adapter built, not wired to a command | filter logic only, no client |
+| status | wired to `icbfs mount -notify` and the drive API | adapter built, not wired to a command | filter logic only, no client |
 
 A mount with no notification source behaves exactly as one that never had
 the feature.
