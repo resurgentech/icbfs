@@ -79,7 +79,7 @@ func CreateFilesystem(ctx context.Context, store objstore.Store, s Settings) (In
 	}
 	attr := Attr{Mode: s.RootMode, Uid: s.RootUid, Gid: s.RootGid}
 	if s.PrimaryWindows && s.RootSDDL != "" {
-		attr.Xattrs = map[string][]byte{WindowsACLXattrKey: []byte(s.RootSDDL)}
+		attr.WindowsSDDL = []byte(s.RootSDDL)
 	}
 	if err := f.createRoot(ctx, attr); err != nil {
 		return Info{}, err

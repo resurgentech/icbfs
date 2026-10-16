@@ -71,7 +71,7 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 				return drive.Item{}, mapErr(err)
 			}
 			if opts.ContentType != "" {
-				_, _ = d.fs.SetXattr(ctx, n.key, icbfs.TypeFile, xattrContentType, []byte(opts.ContentType))
+				_, _ = d.fs.SetAppData(ctx, n.key, icbfs.TypeFile, icbfs.AppDriveContentType, []byte(opts.ContentType))
 			}
 			d.changed(parent)
 			return d.statItem(ctx, n.path)
@@ -102,7 +102,7 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 			}
 		}
 		if opts.ContentType != "" {
-			_, _ = d.fs.SetXattr(ctx, key, icbfs.TypeFile, xattrContentType, []byte(opts.ContentType))
+			_, _ = d.fs.SetAppData(ctx, key, icbfs.TypeFile, icbfs.AppDriveContentType, []byte(opts.ContentType))
 		}
 		created, _ := d.fs.Store().Head(ctx, key)
 		if err := d.writeContent(ctx, key, data, spool, etag); err != nil {
@@ -432,7 +432,7 @@ func (d *Drive) SetOrigin(ctx context.Context, ref drive.ItemRef, o drive.Origin
 	if err != nil {
 		return err
 	}
-	_, err = d.fs.SetXattr(ctx, n.key, n.typ, xattrOrigin, data)
+	_, err = d.fs.SetAppData(ctx, n.key, n.typ, icbfs.AppDriveOrigin, data)
 	return mapErr(err)
 }
 

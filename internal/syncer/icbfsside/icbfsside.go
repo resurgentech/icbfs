@@ -22,9 +22,6 @@ import (
 	"github.com/resurgentech/icbfs/pkg/drive/icbfsdrive"
 )
 
-// HashXattr is the extended attribute a file's SHA-256 is kept in.
-const HashXattr = "user.sync.sha256"
-
 // Side is a drive as a sync side.
 type Side struct {
 	d       *icbfsdrive.Drive
@@ -196,7 +193,7 @@ func (s *Side) StoredHash(ctx context.Context, p string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	h, ok := attr.Xattrs[HashXattr]
+	h, ok := attr.App[icbfs.AppSyncHash]
 	return string(h), ok && len(h) > 0
 }
 
@@ -205,7 +202,7 @@ func (s *Side) StoreHash(ctx context.Context, p, hash string) error {
 	if err != nil {
 		return notExist(err)
 	}
-	_, err = s.fs.SetXattr(ctx, it.ID, icbfs.TypeFile, HashXattr, []byte(hash))
+	_, err = s.fs.SetAppData(ctx, it.ID, icbfs.TypeFile, icbfs.AppSyncHash, []byte(hash))
 	return err
 }
 

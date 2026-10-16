@@ -126,7 +126,7 @@ func (d *driver) GetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 	if err != nil {
 		return 0, toWinError(err)
 	}
-	if raw, ok := icbfs.GenericReparseFromXattrs(attr.Xattrs); ok {
+	if raw, ok := attr.GenericReparse(); ok {
 		return copyReparseBuffer(buffer, raw)
 	}
 	return 0, windows.STATUS_NOT_A_REPARSE_POINT

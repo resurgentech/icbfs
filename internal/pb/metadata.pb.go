@@ -22,23 +22,22 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// Metadata is the body of a file/symlink's dedicated <uuid>.metadata
-// object — see docs/architecture.md's Metadata section. mode/uid/gid/
-// nlink live here, as does xattrs, a generic name -> bytes map covering
-// POSIX ACLs (under the well-known key "system.posix_acl_access",
-// exactly mirroring Linux's own xattr-based ACL representation), future
-// Windows ACLs (under "windows.acl"), and ordinary user xattrs — all
-// just named entries, with no special-casing at the storage layer.
+// Metadata is the body of an item's <uuid>.metadata object (files,
+// symlinks and directories alike): everything about it but its content.
+// See docs/architecture.md's Metadata section.
 //
-// Directories have one too, <uuid>.metadata beside their root block
-// (see internal/icbfs/attr.go).
+// Users' extended attributes and icbfs's own state are kept apart:
+// xattrs holds only what users set, and icbfs's state has fields of its
+// own (windows, posix_acl_*, app), so no xattr call can see or change it.
 type Metadata struct {
-	state  protoimpl.MessageState `protogen:"open.v1"`
-	Mode   uint32                 `protobuf:"varint,1,opt,name=mode,proto3" json:"mode,omitempty"`
-	Uid    uint32                 `protobuf:"varint,2,opt,name=uid,proto3" json:"uid,omitempty"`
-	Gid    uint32                 `protobuf:"varint,3,opt,name=gid,proto3" json:"gid,omitempty"`
-	Nlink  uint32                 `protobuf:"varint,4,opt,name=nlink,proto3" json:"nlink,omitempty"`
-	Xattrs map[string][]byte      `protobuf:"bytes,5,rep,name=xattrs,proto3" json:"xattrs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Mode  uint32                 `protobuf:"varint,1,opt,name=mode,proto3" json:"mode,omitempty"`
+	Uid   uint32                 `protobuf:"varint,2,opt,name=uid,proto3" json:"uid,omitempty"`
+	Gid   uint32                 `protobuf:"varint,3,opt,name=gid,proto3" json:"gid,omitempty"`
+	Nlink uint32                 `protobuf:"varint,4,opt,name=nlink,proto3" json:"nlink,omitempty"`
+	// The item's extended attributes, as a mount's getxattr and setxattr
+	// see them: only names users set (user.*, trusted.*, security.*).
+	Xattrs map[string][]byte `protobuf:"bytes,5,rep,name=xattrs,proto3" json:"xattrs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// Legacy last-access time, nanoseconds since the Unix epoch. Superseded by atime (field 13), which also covers
 	// dates int64 nanoseconds can't (before 1678); still read when atime is
 	// unset, never written.
@@ -82,7 +81,23 @@ type Metadata struct {
 	// entry is added to or removed from it. For a file the reported ctime
 	// is the later of this and the content's last write. Unset (objects
 	// written before this field) = this object's own LastModified.
-	Ctime         *timestamppb.Timestamp `protobuf:"bytes,16,opt,name=ctime,proto3" json:"ctime,omitempty"`
+	Ctime *timestamppb.Timestamp `protobuf:"bytes,16,opt,name=ctime,proto3" json:"ctime,omitempty"`
+	// The item's Windows state; unset when it has none.
+	Windows *Windows `protobuf:"bytes,17,opt,name=windows,proto3" json:"windows,omitempty"`
+	// The item's POSIX ACLs, in Linux's xattr encoding (what
+	// system.posix_acl_access and system.posix_acl_default carry); empty
+	// for none.
+	PosixAclAccess  []byte `protobuf:"bytes,18,opt,name=posix_acl_access,json=posixAclAccess,proto3" json:"posix_acl_access,omitempty"`
+	PosixAclDefault []byte `protobuf:"bytes,19,opt,name=posix_acl_default,json=posixAclDefault,proto3" json:"posix_acl_default,omitempty"`
+	// Data icbfs's own tools keep about the item, keyed "<tool>.<name>":
+	// icbfs-sync's content hash, the drive API's content type and copy
+	// origin, the side store's metadata. No mount shows it.
+	App map[string][]byte `protobuf:"bytes,20,rep,name=app,proto3" json:"app,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// layout is 1 for a record written with the fields above. Records
+	// with 0 kept the Windows state, POSIX ACLs and tools' data in xattrs,
+	// under fixed names; decoding moves them out (internal/icbfs's
+	// fromLegacyXattrs).
+	Layout        uint32 `protobuf:"varint,21,opt,name=layout,proto3" json:"layout,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -215,11 +230,120 @@ func (x *Metadata) GetCtime() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *Metadata) GetWindows() *Windows {
+	if x != nil {
+		return x.Windows
+	}
+	return nil
+}
+
+func (x *Metadata) GetPosixAclAccess() []byte {
+	if x != nil {
+		return x.PosixAclAccess
+	}
+	return nil
+}
+
+func (x *Metadata) GetPosixAclDefault() []byte {
+	if x != nil {
+		return x.PosixAclDefault
+	}
+	return nil
+}
+
+func (x *Metadata) GetApp() map[string][]byte {
+	if x != nil {
+		return x.App
+	}
+	return nil
+}
+
+func (x *Metadata) GetLayout() uint32 {
+	if x != nil {
+		return x.Layout
+	}
+	return 0
+}
+
+// Windows is an item's Windows state.
+type Windows struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The security descriptor, as SDDL ("O:...G:...D:...").
+	Sddl string `protobuf:"bytes,1,opt,name=sddl,proto3" json:"sddl,omitempty"`
+	// The ReadOnly, Hidden, System and Archive bits, when they were set.
+	Attributes *uint32 `protobuf:"varint,2,opt,name=attributes,proto3,oneof" json:"attributes,omitempty"`
+	// A non-symlink reparse point's buffer, exactly as given.
+	Reparse []byte `protobuf:"bytes,3,opt,name=reparse,proto3" json:"reparse,omitempty"`
+	// A symlink made as a Windows directory symlink
+	// (SYMBOLIC_LINK_FLAG_DIRECTORY), which Windows treats as a directory.
+	DirSymlink    bool `protobuf:"varint,4,opt,name=dir_symlink,json=dirSymlink,proto3" json:"dir_symlink,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Windows) Reset() {
+	*x = Windows{}
+	mi := &file_spec_proto_icbfs_v1_metadata_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Windows) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Windows) ProtoMessage() {}
+
+func (x *Windows) ProtoReflect() protoreflect.Message {
+	mi := &file_spec_proto_icbfs_v1_metadata_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Windows.ProtoReflect.Descriptor instead.
+func (*Windows) Descriptor() ([]byte, []int) {
+	return file_spec_proto_icbfs_v1_metadata_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *Windows) GetSddl() string {
+	if x != nil {
+		return x.Sddl
+	}
+	return ""
+}
+
+func (x *Windows) GetAttributes() uint32 {
+	if x != nil && x.Attributes != nil {
+		return *x.Attributes
+	}
+	return 0
+}
+
+func (x *Windows) GetReparse() []byte {
+	if x != nil {
+		return x.Reparse
+	}
+	return nil
+}
+
+func (x *Windows) GetDirSymlink() bool {
+	if x != nil {
+		return x.DirSymlink
+	}
+	return false
+}
+
 var File_spec_proto_icbfs_v1_metadata_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\n" +
-	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xca\x05\n" +
+	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xcc\a\n" +
 	"\bMetadata\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\rR\x04mode\x12\x10\n" +
 	"\x03uid\x18\x02 \x01(\rR\x03uid\x12\x10\n" +
@@ -235,14 +359,31 @@ const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\x05atime\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\x05atime\x12A\n" +
 	"\x0emtime_override\x18\x0e \x01(\v2\x1a.google.protobuf.TimestampR\rmtimeOverride\x12A\n" +
 	"\x0ebtime_override\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\rbtimeOverride\x120\n" +
-	"\x05ctime\x18\x10 \x01(\v2\x1a.google.protobuf.TimestampR\x05ctime\x1a9\n" +
+	"\x05ctime\x18\x10 \x01(\v2\x1a.google.protobuf.TimestampR\x05ctime\x12+\n" +
+	"\awindows\x18\x11 \x01(\v2\x11.icbfs.v1.WindowsR\awindows\x12(\n" +
+	"\x10posix_acl_access\x18\x12 \x01(\fR\x0eposixAclAccess\x12*\n" +
+	"\x11posix_acl_default\x18\x13 \x01(\fR\x0fposixAclDefault\x12-\n" +
+	"\x03app\x18\x14 \x03(\v2\x1b.icbfs.v1.Metadata.AppEntryR\x03app\x12\x16\n" +
+	"\x06layout\x18\x15 \x01(\rR\x06layout\x1a9\n" +
 	"\vXattrsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\x1a:\n" +
 	"\fStreamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01J\x04\b\b\x10\tJ\x04\b\t\x10\n" +
-	"B+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
+	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\x1a6\n" +
+	"\bAppEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01J\x04\b\b\x10\tJ\x04\b\t\x10\n" +
+	"\"\x8c\x01\n" +
+	"\aWindows\x12\x12\n" +
+	"\x04sddl\x18\x01 \x01(\tR\x04sddl\x12#\n" +
+	"\n" +
+	"attributes\x18\x02 \x01(\rH\x00R\n" +
+	"attributes\x88\x01\x01\x12\x18\n" +
+	"\areparse\x18\x03 \x01(\fR\areparse\x12\x1f\n" +
+	"\vdir_symlink\x18\x04 \x01(\bR\n" +
+	"dirSymlinkB\r\n" +
+	"\v_attributesB+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
 
 var (
 	file_spec_proto_icbfs_v1_metadata_proto_rawDescOnce sync.Once
@@ -256,25 +397,29 @@ func file_spec_proto_icbfs_v1_metadata_proto_rawDescGZIP() []byte {
 	return file_spec_proto_icbfs_v1_metadata_proto_rawDescData
 }
 
-var file_spec_proto_icbfs_v1_metadata_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_spec_proto_icbfs_v1_metadata_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_spec_proto_icbfs_v1_metadata_proto_goTypes = []any{
 	(*Metadata)(nil),              // 0: icbfs.v1.Metadata
-	nil,                           // 1: icbfs.v1.Metadata.XattrsEntry
-	nil,                           // 2: icbfs.v1.Metadata.StreamsEntry
-	(*timestamppb.Timestamp)(nil), // 3: google.protobuf.Timestamp
+	(*Windows)(nil),               // 1: icbfs.v1.Windows
+	nil,                           // 2: icbfs.v1.Metadata.XattrsEntry
+	nil,                           // 3: icbfs.v1.Metadata.StreamsEntry
+	nil,                           // 4: icbfs.v1.Metadata.AppEntry
+	(*timestamppb.Timestamp)(nil), // 5: google.protobuf.Timestamp
 }
 var file_spec_proto_icbfs_v1_metadata_proto_depIdxs = []int32{
-	1, // 0: icbfs.v1.Metadata.xattrs:type_name -> icbfs.v1.Metadata.XattrsEntry
-	2, // 1: icbfs.v1.Metadata.streams:type_name -> icbfs.v1.Metadata.StreamsEntry
-	3, // 2: icbfs.v1.Metadata.atime:type_name -> google.protobuf.Timestamp
-	3, // 3: icbfs.v1.Metadata.mtime_override:type_name -> google.protobuf.Timestamp
-	3, // 4: icbfs.v1.Metadata.btime_override:type_name -> google.protobuf.Timestamp
-	3, // 5: icbfs.v1.Metadata.ctime:type_name -> google.protobuf.Timestamp
-	6, // [6:6] is the sub-list for method output_type
-	6, // [6:6] is the sub-list for method input_type
-	6, // [6:6] is the sub-list for extension type_name
-	6, // [6:6] is the sub-list for extension extendee
-	0, // [0:6] is the sub-list for field type_name
+	2, // 0: icbfs.v1.Metadata.xattrs:type_name -> icbfs.v1.Metadata.XattrsEntry
+	3, // 1: icbfs.v1.Metadata.streams:type_name -> icbfs.v1.Metadata.StreamsEntry
+	5, // 2: icbfs.v1.Metadata.atime:type_name -> google.protobuf.Timestamp
+	5, // 3: icbfs.v1.Metadata.mtime_override:type_name -> google.protobuf.Timestamp
+	5, // 4: icbfs.v1.Metadata.btime_override:type_name -> google.protobuf.Timestamp
+	5, // 5: icbfs.v1.Metadata.ctime:type_name -> google.protobuf.Timestamp
+	1, // 6: icbfs.v1.Metadata.windows:type_name -> icbfs.v1.Windows
+	4, // 7: icbfs.v1.Metadata.app:type_name -> icbfs.v1.Metadata.AppEntry
+	8, // [8:8] is the sub-list for method output_type
+	8, // [8:8] is the sub-list for method input_type
+	8, // [8:8] is the sub-list for extension type_name
+	8, // [8:8] is the sub-list for extension extendee
+	0, // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_spec_proto_icbfs_v1_metadata_proto_init() }
@@ -282,13 +427,14 @@ func file_spec_proto_icbfs_v1_metadata_proto_init() {
 	if File_spec_proto_icbfs_v1_metadata_proto != nil {
 		return
 	}
+	file_spec_proto_icbfs_v1_metadata_proto_msgTypes[1].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_spec_proto_icbfs_v1_metadata_proto_rawDesc), len(file_spec_proto_icbfs_v1_metadata_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   3,
+			NumMessages:   5,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

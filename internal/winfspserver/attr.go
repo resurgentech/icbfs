@@ -31,7 +31,7 @@ func (d *driver) fillFileInfo(info *winfsp.FSP_FSCTL_FILE_INFO, key string, typ 
 		// A non-symlink reparse point: its tag is the stored buffer's first
 		// 4 bytes. FILE_ATTRIBUTE_REPARSE_POINT is added to the other
 		// attribute bits, as on NTFS.
-		if raw, ok := icbfs.GenericReparseFromXattrs(a.Xattrs); ok && len(raw) >= 4 {
+		if raw, ok := a.GenericReparse(); ok && len(raw) >= 4 {
 			info.ReparseTag = binary.LittleEndian.Uint32(raw[0:4])
 			info.FileAttributes |= windows.FILE_ATTRIBUTE_REPARSE_POINT
 		} else {
@@ -113,7 +113,7 @@ func (d *driver) attributesFromAttr(typ icbfs.EntryType, a icbfs.Attr) uint32 {
 	case icbfs.TypeDir:
 		attrs := uint32(windows.FILE_ATTRIBUTE_DIRECTORY)
 		if d.fsys.PrimaryWindows() {
-			if bits, ok := icbfs.WindowsAttributesFromXattrs(a.Xattrs); ok {
+			if bits, ok := a.WindowsAttributes(); ok {
 				attrs |= bits
 			}
 		}
@@ -121,13 +121,13 @@ func (d *driver) attributesFromAttr(typ icbfs.EntryType, a icbfs.Attr) uint32 {
 	case icbfs.TypeSymlink:
 		// A directory symlink: the reparse point attribute tells clients to
 		// resolve it through GetReparsePoint.
-		if _, ok := a.Xattrs[icbfs.WindowsDirSymlinkXattrKey]; ok {
+		if a.WindowsDirSymlink {
 			return windows.FILE_ATTRIBUTE_REPARSE_POINT | windows.FILE_ATTRIBUTE_DIRECTORY
 		}
 		return windows.FILE_ATTRIBUTE_REPARSE_POINT
 	default:
 		if d.fsys.PrimaryWindows() {
-			if bits, ok := icbfs.WindowsAttributesFromXattrs(a.Xattrs); ok {
+			if bits, ok := a.WindowsAttributes(); ok {
 				if bits == 0 {
 					return windows.FILE_ATTRIBUTE_NORMAL
 				}
@@ -287,7 +287,7 @@ func (d *driver) securityDescriptorFor(typ icbfs.EntryType, attr icbfs.Attr) (*w
 	// is always derived from the mode; a descriptor set there is kept but
 	// not read back.
 	if d.fsys.PrimaryWindows() {
-		if raw, ok := icbfs.WindowsACLFromXattrs(attr.Xattrs); ok {
+		if raw, ok := attr.WindowsACL(); ok {
 			if sd, err := windows.SecurityDescriptorFromString(string(raw)); err == nil {
 				return sd, nil
 			}

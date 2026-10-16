@@ -263,7 +263,7 @@ func (d *driver) Open(fs *winfsp.FileSystemRef, name string, createOptions, gran
 	// reparse_nfs_test), opening one without FILE_FLAG_OPEN_REPARSE_POINT
 	// is refused. Symlinks were already followed above.
 	if createOptions&fileOpenReparsePoint == 0 && r.Type != icbfs.TypeSymlink {
-		if _, ok := icbfs.GenericReparseFromXattrs(r.Attr.Xattrs); ok {
+		if _, ok := r.Attr.GenericReparse(); ok {
 			return 0, windows.STATUS_IO_REPARSE_TAG_NOT_HANDLED
 		}
 	}
@@ -406,7 +406,7 @@ func (d *driver) Overwrite(fs *winfsp.FileSystemRef, file uintptr, attributes ui
 	// NTFS (winfsp-tests' create_fileattr_test).
 	bits := attributes
 	if !replaceAttributes {
-		if old, ok := icbfs.WindowsAttributesFromXattrs(attr.Xattrs); ok {
+		if old, ok := attr.WindowsAttributes(); ok {
 			bits |= old
 		} else {
 			bits |= d.attributesFromAttr(h.typ, attr)

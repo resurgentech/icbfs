@@ -40,13 +40,13 @@ func profile(ctx context.Context) (drive.Profile, error) {
 // drive-relative path it came from ("" for its own; "(above)" above
 // the drive's root).
 func sdOf(n *node) (*acl.SecurityDescriptor, string) {
-	if sddl, ok := icbfs.WindowsACLFromXattrs(n.attr.Xattrs); ok {
+	if sddl, ok := n.attr.WindowsACL(); ok {
 		if sd, err := acl.Parse(string(sddl)); err == nil {
 			return sd, ""
 		}
 	}
 	for i := len(n.chain) - 1; i >= 0; i-- {
-		if sddl, ok := icbfs.WindowsACLFromXattrs(n.chain[i].attr.Xattrs); ok {
+		if sddl, ok := n.chain[i].attr.WindowsACL(); ok {
 			if sd, err := acl.Parse(string(sddl)); err == nil {
 				from := n.chain[i].path
 				if from == "" {
@@ -307,7 +307,7 @@ func (d *Drive) Identities(ctx context.Context, progress func(int)) ([]drive.Ide
 			progress(scanned)
 		}
 		if d.windows {
-			if sddl, ok := icbfs.WindowsACLFromXattrs(attr.Xattrs); ok {
+			if sddl, ok := attr.WindowsACL(); ok {
 				if sd, err := acl.Parse(string(sddl)); err == nil {
 					seen := map[string]bool{}
 					for _, sid := range append([]string{sd.Owner, sd.Group}, aceSIDs(sd)...) {
@@ -342,7 +342,7 @@ func (d *Drive) Identities(ctx context.Context, progress func(int)) ([]drive.Ide
 			}
 			scanned++
 			if d.windows {
-				if sddl, ok := icbfs.WindowsACLFromXattrs(a.Xattrs); ok {
+				if sddl, ok := a.WindowsACL(); ok {
 					if sd, err := acl.Parse(string(sddl)); err == nil {
 						seen := map[string]bool{}
 						for _, sid := range append([]string{sd.Owner, sd.Group}, aceSIDs(sd)...) {

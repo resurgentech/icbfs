@@ -15,9 +15,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/testcontainers/testcontainers-go/modules/minio"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/resurgentech/icbfs/internal/block"
 	"github.com/resurgentech/icbfs/internal/objstore"
+	"github.com/resurgentech/icbfs/internal/pb"
 	"github.com/resurgentech/icbfs/internal/testutil"
 )
 
@@ -315,63 +317,114 @@ func TestXattrsRoundTripArbitraryBinaryValues(t *testing.T) {
 	}
 }
 
-// TestXattrsPosixAndWindowsACLsCoexist: a POSIX ACL entry (Linux's key) and
-// a Windows ACL entry share the xattr map without interfering.
-func TestXattrsPosixAndWindowsACLsCoexist(t *testing.T) {
-	fsys, store := newTestFilesystem(t)
+// TestInternalStateIsNotXattrs: an item's Windows state, POSIX ACLs and
+// tools' data are kept apart from its xattrs, so Xattrs holds only what a
+// user set.
+func TestInternalStateIsNotXattrs(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
 	ctx := context.Background()
-	root := fsys.RootKey()
-
-	uuid, _, _, err := fsys.Create(ctx, root, "has-acls.txt", 0644, 0, 0)
+	uuid, _, _, err := fsys.Create(ctx, fsys.RootKey(), "kept-apart.txt", 0644, 0, 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-
-	posixACL := []byte{0x02, 0x00, 0x00, 0x00 /* a plausible posix_acl binary header shape */}
-	windowsACL := []byte("\x01\x00\x04\x80fake-security-descriptor-bytes")
-
-	mk := metadataObjectKey(uuid)
-	body, obj, err := store.Get(ctx, mk)
-	if err != nil {
-		t.Fatalf("get .metadata: %v", err)
+	if _, err := fsys.SetXattr(ctx, uuid, TypeFile, "user.tag", []byte("mine")); err != nil {
+		t.Fatal(err)
 	}
-	data, err := io.ReadAll(body)
-	body.Close()
-	if err != nil {
-		t.Fatalf("read .metadata: %v", err)
+	if _, err := fsys.SetWindowsCreateMetadata(ctx, uuid, TypeFile, WindowsAttrHidden, []byte("O:BAG:BAD:(A;;FA;;;WD)")); err != nil {
+		t.Fatal(err)
 	}
-	attr, err := decodeFileMetadata(data)
-	if err != nil {
-		t.Fatalf("decode .metadata: %v", err)
+	if _, err := fsys.SetAppData(ctx, uuid, TypeFile, AppSyncHash, []byte("abc123")); err != nil {
+		t.Fatal(err)
 	}
-	attr.Xattrs = map[string][]byte{
-		"system.posix_acl_access": posixACL,
-		"windows.acl":             windowsACL,
-		"user.unrelated-tag":      []byte("just a tag"),
-	}
-	newData, err := encodeFileMetadata(attr)
-	if err != nil {
-		t.Fatalf("encode .metadata: %v", err)
-	}
-	if _, err := store.Put(ctx, mk, bytes.NewReader(newData), nil, obj.ETag); err != nil {
-		t.Fatalf("put .metadata: %v", err)
-	}
-
 	got, err := fsys.Stat(ctx, uuid, TypeFile)
 	if err != nil {
-		t.Fatalf("stat: %v", err)
+		t.Fatal(err)
 	}
-	if !bytes.Equal(got.Xattrs["system.posix_acl_access"], posixACL) {
-		t.Fatalf("posix ACL corrupted or missing: %v", got.Xattrs["system.posix_acl_access"])
+	if len(got.Xattrs) != 1 || string(got.Xattrs["user.tag"]) != "mine" {
+		t.Fatalf("xattrs = %v, want only user.tag", got.Xattrs)
 	}
-	if !bytes.Equal(got.Xattrs["windows.acl"], windowsACL) {
-		t.Fatalf("windows ACL corrupted or missing: %v", got.Xattrs["windows.acl"])
+	if sddl, ok := got.WindowsACL(); !ok || string(sddl) != "O:BAG:BAD:(A;;FA;;;WD)" {
+		t.Fatalf("Windows ACL = %q, %v", sddl, ok)
 	}
-	if string(got.Xattrs["user.unrelated-tag"]) != "just a tag" {
-		t.Fatalf("unrelated tag disturbed: %v", got.Xattrs["user.unrelated-tag"])
+	if bits, ok := got.WindowsAttributes(); !ok || bits != WindowsAttrHidden {
+		t.Fatalf("Windows attributes = %#x, %v", bits, ok)
 	}
-	if len(got.Xattrs) != 3 {
-		t.Fatalf("got %d xattrs entries, want exactly 3 (no cross-contamination): %v", len(got.Xattrs), got.Xattrs)
+	if string(got.App[AppSyncHash]) != "abc123" {
+		t.Fatalf("app data = %v", got.App)
+	}
+}
+
+// TestLegacyXattrLayoutIsSplitOnRead: a .metadata record written before
+// the split (layout 0) kept icbfs's state in xattrs under fixed names;
+// reading it puts each in its own field, leaving only users' xattrs, and
+// the next write stores the new layout.
+func TestLegacyXattrLayoutIsSplitOnRead(t *testing.T) {
+	fsys, store := newTestFilesystem(t)
+	ctx := context.Background()
+	uuid, _, _, err := fsys.Create(ctx, fsys.RootKey(), "legacy.txt", 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	legacy, err := proto.Marshal(&pb.Metadata{Mode: 0644, Nlink: 1, Xattrs: map[string][]byte{
+		"user.tag":                []byte("mine"),
+		"windows.acl":             []byte("O:BAG:BA"),
+		"windows.attributes":      {byte(WindowsAttrReadOnly)},
+		"windows.reparse":         []byte("\x01\x02\x03\x04"),
+		"system.posix_acl_access": []byte("acl"),
+		"user.sync.sha256":        []byte("abc123"),
+		"user.drive.contentType":  []byte("text/plain"),
+		"user.side.base":          []byte("v1"),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(ctx, metadataObjectKey(uuid), bytes.NewReader(legacy), nil, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	check := func(what string) {
+		t.Helper()
+		got, err := fsys.Stat(ctx, uuid, TypeFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Xattrs) != 1 || string(got.Xattrs["user.tag"]) != "mine" {
+			t.Fatalf("%s: xattrs = %v, want only user.tag", what, got.Xattrs)
+		}
+		if sddl, _ := got.WindowsACL(); string(sddl) != "O:BAG:BA" {
+			t.Fatalf("%s: Windows ACL = %q", what, sddl)
+		}
+		if bits, ok := got.WindowsAttributes(); !ok || bits != WindowsAttrReadOnly {
+			t.Fatalf("%s: Windows attributes = %#x, %v", what, bits, ok)
+		}
+		if buf, _ := got.GenericReparse(); len(buf) != 4 {
+			t.Fatalf("%s: reparse = %v", what, buf)
+		}
+		if string(got.PosixACLAccess) != "acl" {
+			t.Fatalf("%s: POSIX ACL = %q", what, got.PosixACLAccess)
+		}
+		if string(got.App[AppSyncHash]) != "abc123" || string(got.App[AppDriveContentType]) != "text/plain" || string(got.App[AppSidePrefix+"base"]) != "v1" {
+			t.Fatalf("%s: app data = %v", what, got.App)
+		}
+	}
+	check("read")
+	// A write stores the new layout; reading it gives the same.
+	if _, err := fsys.SetXattr(ctx, uuid, TypeFile, "user.more", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fsys.SetXattr(ctx, uuid, TypeFile, "user.more", nil); err != nil {
+		t.Fatal(err)
+	}
+	check("after a write")
+	body, _, err := store.Get(ctx, metadataObjectKey(uuid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := io.ReadAll(body)
+	body.Close()
+	var m pb.Metadata
+	if err := proto.Unmarshal(data, &m); err != nil || m.Layout != metadataLayout {
+		t.Fatalf("stored layout = %d, %v", m.Layout, err)
 	}
 }
 
@@ -697,17 +750,17 @@ func TestSetWindowsAttributesRoundTripsAndMasksUnrelatedBits(t *testing.T) {
 		t.Fatalf("SetWindowsAttributes: %v", err)
 	}
 	want := WindowsAttrHidden | WindowsAttrArchive
-	bits, ok := WindowsAttributesFromXattrs(attr.Xattrs)
+	bits, ok := attr.WindowsAttributes()
 	if !ok {
-		t.Fatal("WindowsAttributesFromXattrs: ok = false immediately after SetWindowsAttributes")
+		t.Fatal("WindowsAttributes: ok = false immediately after SetWindowsAttributes")
 	}
 	if bits != want {
 		t.Fatalf("stored bits = %#x, want %#x (Directory/Normal should be masked out)", bits, want)
 	}
 	// The raw stored byte, bypassing the reader's mask: masking happens at
 	// write time.
-	if raw := attr.Xattrs[WindowsAttributesXattrKey]; len(raw) != 1 || raw[0] != byte(want) {
-		t.Fatalf("raw stored byte = %v, want [%#x] (Directory/Normal must not reach storage at all)", raw, byte(want))
+	if attr.WindowsAttrs != want {
+		t.Fatalf("stored bits = %#x, want %#x (Directory/Normal must not reach storage at all)", attr.WindowsAttrs, want)
 	}
 
 	// Re-read via Stat, not just the return value, to prove this is
@@ -716,9 +769,9 @@ func TestSetWindowsAttributesRoundTripsAndMasksUnrelatedBits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	bits, ok = WindowsAttributesFromXattrs(got.Xattrs)
+	bits, ok = got.WindowsAttributes()
 	if !ok {
-		t.Fatal("WindowsAttributesFromXattrs: ok = false after Stat")
+		t.Fatal("WindowsAttributes: ok = false after Stat")
 	}
 	if want := WindowsAttrHidden | WindowsAttrArchive; bits != want {
 		t.Fatalf("stat-read bits = %#x, want %#x", bits, want)
@@ -737,8 +790,8 @@ func TestSetWindowsAttributesRoundTripsAndMasksUnrelatedBits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	if _, ok := WindowsAttributesFromXattrs(otherAttr.Xattrs); ok {
-		t.Fatalf("WindowsAttributesFromXattrs: ok = true for an entry never touched, xattrs = %v", otherAttr.Xattrs)
+	if _, ok := otherAttr.WindowsAttributes(); ok {
+		t.Fatalf("WindowsAttributes: ok = true for an entry never touched, attrs = %+v", otherAttr)
 	}
 }
 
@@ -760,9 +813,9 @@ func TestSetWindowsACLRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SetWindowsACL: %v", err)
 	}
-	got, ok := WindowsACLFromXattrs(attr.Xattrs)
+	got, ok := attr.WindowsACL()
 	if !ok {
-		t.Fatal("WindowsACLFromXattrs: ok = false immediately after SetWindowsACL")
+		t.Fatal("WindowsACL: ok = false immediately after SetWindowsACL")
 	}
 	if !bytes.Equal(got, sddl) {
 		t.Fatalf("stored SDDL = %q, want %q", got, sddl)
@@ -774,9 +827,9 @@ func TestSetWindowsACLRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	got, ok = WindowsACLFromXattrs(statAttr.Xattrs)
+	got, ok = statAttr.WindowsACL()
 	if !ok {
-		t.Fatal("WindowsACLFromXattrs: ok = false after Stat")
+		t.Fatal("WindowsACL: ok = false after Stat")
 	}
 	if !bytes.Equal(got, sddl) {
 		t.Fatalf("stat-read SDDL = %q, want %q", got, sddl)
@@ -793,8 +846,8 @@ func TestSetWindowsACLRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	if _, ok := WindowsACLFromXattrs(otherAttr.Xattrs); ok {
-		t.Fatalf("WindowsACLFromXattrs: ok = true for an entry never touched, xattrs = %v", otherAttr.Xattrs)
+	if _, ok := otherAttr.WindowsACL(); ok {
+		t.Fatalf("WindowsACL: ok = true for an entry never touched, attrs = %+v", otherAttr)
 	}
 }
 
@@ -847,8 +900,8 @@ func TestDirectoryMetadataObject(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
-	bits, _ := WindowsAttributesFromXattrs(attr.Xattrs)
-	acl, _ := WindowsACLFromXattrs(attr.Xattrs)
+	bits, _ := attr.WindowsAttributes()
+	acl, _ := attr.WindowsACL()
 	if attr.Mode != 0700 || !attr.Mtime.After(mtime) || bits != WindowsAttrReadOnly || string(acl) != "D:P(A;;FA;;;WD)" {
 		t.Fatalf("dir attr after updates = %+v", attr)
 	}

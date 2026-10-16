@@ -366,23 +366,25 @@ func dirAttrFromObject(key string, obj *objstore.Object) Attr {
 	if mtime.IsZero() {
 		mtime = obj.LastModified // fallback for objects written before mtime tracking existed
 	}
-	var xattrs map[string][]byte
+	var winAttrs uint32
+	hasWinAttrs := false
 	if v, ok := obj.Metadata[dirMetaWinAttr]; ok {
 		if bits, err := strconv.ParseUint(v, 10, 32); err == nil {
-			xattrs = map[string][]byte{WindowsAttributesXattrKey: {byte(uint32(bits) & windowsAttrMask)}}
+			winAttrs, hasWinAttrs = uint32(bits)&windowsAttrMask, true
 		}
 	}
 	return Attr{
-		Xattrs: xattrs,
-		Mode:   parseMetaUint(obj.Metadata, dirMetaMode),
-		Uid:    parseMetaUint(obj.Metadata, dirMetaUid),
-		Gid:    parseMetaUint(obj.Metadata, dirMetaGid),
-		Nlink:  parseMetaUint(obj.Metadata, dirMetaNlink),
-		Size:   obj.Size,
-		Atime:  parseMetaTime(obj.Metadata, dirMetaAtime), // zero if never read (no fallback — unlike mtime, "never accessed" is a real, honest value here)
-		Mtime:  mtime,
-		Ctime:  obj.LastModified,
-		Btime:  Btime(key),
+		WindowsAttrs:    winAttrs,
+		HasWindowsAttrs: hasWinAttrs,
+		Mode:            parseMetaUint(obj.Metadata, dirMetaMode),
+		Uid:             parseMetaUint(obj.Metadata, dirMetaUid),
+		Gid:             parseMetaUint(obj.Metadata, dirMetaGid),
+		Nlink:           parseMetaUint(obj.Metadata, dirMetaNlink),
+		Size:            obj.Size,
+		Atime:           parseMetaTime(obj.Metadata, dirMetaAtime), // zero if never read (no fallback — unlike mtime, "never accessed" is a real, honest value here)
+		Mtime:           mtime,
+		Ctime:           obj.LastModified,
+		Btime:           Btime(key),
 	}
 }
 
@@ -1228,7 +1230,8 @@ func (f *Filesystem) writeMetadata(ctx context.Context, key string, typ EntryTyp
 			// Only stored fields go into .metadata; the rest are derived
 			// at read time.
 			initial := Attr{Mode: legacy.Mode, Uid: legacy.Uid, Gid: legacy.Gid, Nlink: legacy.Nlink,
-				Atime: legacy.Atime, Mtime: legacy.Mtime, Ctime: legacy.Ctime, Xattrs: legacy.Xattrs}
+				Atime: legacy.Atime, Mtime: legacy.Mtime, Ctime: legacy.Ctime,
+				WindowsAttrs: legacy.WindowsAttrs, HasWindowsAttrs: legacy.HasWindowsAttrs}
 			data, eerr := encodeFileMetadata(initial)
 			if eerr != nil {
 				return eerr
@@ -1298,24 +1301,18 @@ func (f *Filesystem) SetWindowsAttributes(ctx context.Context, uuid string, typ 
 		return Attr{}, err
 	}
 	return f.updateMetadata(ctx, uuid, typ, func(a *Attr) {
-		if a.Xattrs == nil {
-			a.Xattrs = make(map[string][]byte)
-		}
-		a.Xattrs[WindowsAttributesXattrKey] = []byte{byte(bits & windowsAttrMask)}
+		a.WindowsAttrs, a.HasWindowsAttrs = bits&windowsAttrMask, true
 	})
 }
 
 // MarkWindowsDirSymlink records that symlink uuid is a Windows directory
-// symlink (see WindowsDirSymlinkXattrKey).
+// symlink (see Attr.WindowsDirSymlink).
 func (f *Filesystem) MarkWindowsDirSymlink(ctx context.Context, uuid string) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
 	}
 	return f.updateFileMetadata(ctx, uuid, func(a *Attr) {
-		if a.Xattrs == nil {
-			a.Xattrs = make(map[string][]byte)
-		}
-		a.Xattrs[WindowsDirSymlinkXattrKey] = []byte{1}
+		a.WindowsDirSymlink = true
 	})
 }
 
@@ -1328,33 +1325,45 @@ func (f *Filesystem) SetWindowsCreateMetadata(ctx context.Context, uuid string, 
 		return Attr{}, err
 	}
 	return f.updateMetadata(ctx, uuid, typ, func(a *Attr) {
-		if a.Xattrs == nil {
-			a.Xattrs = make(map[string][]byte)
-		}
-		a.Xattrs[WindowsAttributesXattrKey] = []byte{byte(bits & windowsAttrMask)}
+		a.WindowsAttrs, a.HasWindowsAttrs = bits&windowsAttrMask, true
 		if sddl != nil {
-			a.Xattrs[WindowsACLXattrKey] = sddl
+			a.WindowsSDDL = sddl
 		}
 	})
 }
 
-// SetWindowsACL persists a file's, symlink's or directory's native
-// Windows security descriptor, given as its SDDL string representation
-// (WindowsACLXattrKey's own doc comment explains the SDDL choice).
+// SetWindowsACL stores a file's, symlink's or directory's Windows
+// security descriptor, as SDDL (see Attr.WindowsACL).
 func (f *Filesystem) SetWindowsACL(ctx context.Context, uuid string, typ EntryType, sddl []byte) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
 	}
 	return f.updateMetadata(ctx, uuid, typ, func(a *Attr) {
-		if a.Xattrs == nil {
-			a.Xattrs = make(map[string][]byte)
-		}
-		a.Xattrs[WindowsACLXattrKey] = sddl
+		a.WindowsSDDL = sddl
 	})
 }
 
-// SetXattr sets (or, with a nil value, removes) one extended attribute
-// of a file, symlink or directory.
+// SetAppData sets (or, with a nil value, removes) one entry of the data
+// icbfs's own tools keep about an item (Attr.App), never visible through
+// a mount.
+func (f *Filesystem) SetAppData(ctx context.Context, uuid string, typ EntryType, key string, value []byte) (Attr, error) {
+	if err := f.checkWritable(); err != nil {
+		return Attr{}, err
+	}
+	return f.updateMetadata(ctx, uuid, typ, func(a *Attr) {
+		if value == nil {
+			delete(a.App, key)
+			return
+		}
+		if a.App == nil {
+			a.App = make(map[string][]byte)
+		}
+		a.App[key] = value
+	})
+}
+
+// SetXattr sets (or, with a nil value, removes) one of a file's,
+// symlink's or directory's extended attributes, as a user sets them.
 func (f *Filesystem) SetXattr(ctx context.Context, uuid string, typ EntryType, name string, value []byte) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
@@ -1372,16 +1381,13 @@ func (f *Filesystem) SetXattr(ctx context.Context, uuid string, typ EntryType, n
 }
 
 // SetGenericReparseData stores a file's raw, non-symlink reparse point
-// buffer as is (see GenericReparseXattrKey).
+// buffer as is (see Attr.GenericReparse).
 func (f *Filesystem) SetGenericReparseData(ctx context.Context, uuid string, buf []byte) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
 	}
 	return f.updateFileMetadata(ctx, uuid, func(a *Attr) {
-		if a.Xattrs == nil {
-			a.Xattrs = make(map[string][]byte)
-		}
-		a.Xattrs[GenericReparseXattrKey] = buf
+		a.Reparse = buf
 	})
 }
 
@@ -1393,7 +1399,7 @@ func (f *Filesystem) DeleteGenericReparseData(ctx context.Context, uuid string) 
 		return Attr{}, err
 	}
 	return f.updateFileMetadata(ctx, uuid, func(a *Attr) {
-		delete(a.Xattrs, GenericReparseXattrKey)
+		a.Reparse = nil
 	})
 }
 

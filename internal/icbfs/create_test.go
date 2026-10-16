@@ -47,7 +47,7 @@ func TestCreateAttachListDescribe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat root: %v", err)
 	}
-	got, _ := WindowsACLFromXattrs(root.Xattrs)
+	got, _ := root.WindowsACL()
 	if root.Uid != 1000 || root.Mode != 0755 || string(got) != sddl {
 		t.Fatalf("root = uid %d mode %o acl %q", root.Uid, root.Mode, got)
 	}

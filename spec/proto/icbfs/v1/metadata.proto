@@ -6,21 +6,21 @@ import "google/protobuf/timestamp.proto";
 
 option go_package = "github.com/resurgentech/icbfs/internal/pb";
 
-// Metadata is the body of a file/symlink's dedicated <uuid>.metadata
-// object — see docs/architecture.md's Metadata section. mode/uid/gid/
-// nlink live here, as does xattrs, a generic name -> bytes map covering
-// POSIX ACLs (under the well-known key "system.posix_acl_access",
-// exactly mirroring Linux's own xattr-based ACL representation), future
-// Windows ACLs (under "windows.acl"), and ordinary user xattrs — all
-// just named entries, with no special-casing at the storage layer.
+// Metadata is the body of an item's <uuid>.metadata object (files,
+// symlinks and directories alike): everything about it but its content.
+// See docs/architecture.md's Metadata section.
 //
-// Directories have one too, <uuid>.metadata beside their root block
-// (see internal/icbfs/attr.go).
+// Users' extended attributes and icbfs's own state are kept apart:
+// xattrs holds only what users set, and icbfs's state has fields of its
+// own (windows, posix_acl_*, app), so no xattr call can see or change it.
 message Metadata {
   uint32 mode = 1;
   uint32 uid = 2;
   uint32 gid = 3;
   uint32 nlink = 4;
+
+  // The item's extended attributes, as a mount's getxattr and setxattr
+  // see them: only names users set (user.*, trusted.*, security.*).
   map<string, bytes> xattrs = 5;
 
   // Legacy last-access time, nanoseconds since the Unix epoch. Superseded by atime (field 13), which also covers
@@ -76,4 +76,37 @@ message Metadata {
   // is the later of this and the content's last write. Unset (objects
   // written before this field) = this object's own LastModified.
   google.protobuf.Timestamp ctime = 16;
+
+  // The item's Windows state; unset when it has none.
+  Windows windows = 17;
+
+  // The item's POSIX ACLs, in Linux's xattr encoding (what
+  // system.posix_acl_access and system.posix_acl_default carry); empty
+  // for none.
+  bytes posix_acl_access = 18;
+  bytes posix_acl_default = 19;
+
+  // Data icbfs's own tools keep about the item, keyed "<tool>.<name>":
+  // icbfs-sync's content hash, the drive API's content type and copy
+  // origin, the side store's metadata. No mount shows it.
+  map<string, bytes> app = 20;
+
+  // layout is 1 for a record written with the fields above. Records
+  // with 0 kept the Windows state, POSIX ACLs and tools' data in xattrs,
+  // under fixed names; decoding moves them out (internal/icbfs's
+  // fromLegacyXattrs).
+  uint32 layout = 21;
+}
+
+// Windows is an item's Windows state.
+message Windows {
+  // The security descriptor, as SDDL ("O:...G:...D:...").
+  string sddl = 1;
+  // The ReadOnly, Hidden, System and Archive bits, when they were set.
+  optional uint32 attributes = 2;
+  // A non-symlink reparse point's buffer, exactly as given.
+  bytes reparse = 3;
+  // A symlink made as a Windows directory symlink
+  // (SYMBOLIC_LINK_FLAG_DIRECTORY), which Windows treats as a directory.
+  bool dir_symlink = 4;
 }

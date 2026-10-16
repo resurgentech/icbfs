@@ -179,7 +179,7 @@ func TestACLsCarryFromAFolderThatHasThem(t *testing.T) {
 		t.Fatal(err)
 	}
 	attr, _ := fs.Stat(ctx, st.ID, icbfs.TypeFile)
-	if got, _ := icbfs.WindowsACLFromXattrs(attr.Xattrs); string(got) != it.ACL {
+	if got, _ := attr.WindowsACL(); string(got) != it.ACL {
 		t.Fatalf("ACL %q", got)
 	}
 	// Changed later: copied again, without re-uploading.
@@ -188,7 +188,7 @@ func TestACLsCarryFromAFolderThatHasThem(t *testing.T) {
 		t.Fatalf("%+v", rep)
 	}
 	attr, _ = fs.Stat(ctx, st.ID, icbfs.TypeFile)
-	if got, _ := icbfs.WindowsACLFromXattrs(attr.Xattrs); string(got) != it.ACL {
+	if got, _ := attr.WindowsACL(); string(got) != it.ACL {
 		t.Fatalf("ACL after change %q", got)
 	}
 	if n := countVersions(t, fs, st.ID); n != 1 {

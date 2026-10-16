@@ -6,6 +6,7 @@ package icbfs
 import (
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/cespare/xxhash/v2"
@@ -44,57 +45,27 @@ const (
 	windowsAttrMask = WindowsAttrReadOnly | WindowsAttrHidden | WindowsAttrSystem | WindowsAttrArchive
 )
 
-// WindowsAttributesXattrKey is the xattr key of an item's stored Windows
-// attribute bits.
-const WindowsAttributesXattrKey = "windows.attributes"
-
-// WindowsAttributesFromXattrs returns an item's stored Windows attribute
-// bits; ok is false if none were ever stored, and the caller derives them
-// instead (winfspserver takes ReadOnly from the mode).
-func WindowsAttributesFromXattrs(xattrs map[string][]byte) (bits uint32, ok bool) {
-	v, present := xattrs[WindowsAttributesXattrKey]
-	if !present || len(v) == 0 {
-		return 0, false
-	}
-	return uint32(v[0]) & windowsAttrMask, true
+// WindowsACL returns the item's Windows security descriptor, as SDDL
+// ("O:...G:...D:..."), which golang.org/x/sys/windows parses and prints;
+// ok is false if it has none, and the caller (winfspserver) falls back to
+// a default.
+func (a Attr) WindowsACL() (sddl []byte, ok bool) {
+	return a.WindowsSDDL, len(a.WindowsSDDL) > 0
 }
 
-// WindowsACLXattrKey is the xattr key of an item's Windows security
-// descriptor, stored as SDDL ("O:...G:...D:..."), which
-// golang.org/x/sys/windows parses and prints, rather than as the binary
-// self-relative layout.
-const WindowsACLXattrKey = "windows.acl"
-
-// WindowsACLFromXattrs returns an item's stored SDDL; ok is false if none
-// was stored, and the caller (winfspserver) falls back to a default.
-func WindowsACLFromXattrs(xattrs map[string][]byte) (sddl []byte, ok bool) {
-	v, present := xattrs[WindowsACLXattrKey]
-	if !present || len(v) == 0 {
-		return nil, false
-	}
-	return v, true
+// WindowsAttributes returns the item's stored Windows attribute bits; ok
+// is false if none were ever stored, and the caller derives them instead
+// (winfspserver takes ReadOnly from the mode).
+func (a Attr) WindowsAttributes() (bits uint32, ok bool) {
+	return a.WindowsAttrs & windowsAttrMask, a.HasWindowsAttrs
 }
 
-// WindowsDirSymlinkXattrKey marks a symlink created as a Windows
-// *directory* symlink (CreateSymbolicLinkW's SYMBOLIC_LINK_FLAG_DIRECTORY):
-// Windows reports and opens those as directories (RemoveDirectory, not
-// DeleteFile, removes one), whereas POSIX has no such distinction.
-const WindowsDirSymlinkXattrKey = "windows.symlinkd"
-
-// GenericReparseXattrKey is the xattr key of a file's non-symlink reparse
-// point data (winfsp-tests' reparse_guid_test and reparse_nfs_test set such
-// tags with FSCTL_SET_REPARSE_POINT). Unlike a symlink, which is an icbfs
-// entry type, its buffer is stored and returned exactly as given.
-const GenericReparseXattrKey = "windows.reparse"
-
-// GenericReparseFromXattrs returns a file's stored non-symlink reparse
-// buffer; ok is false if it has none.
-func GenericReparseFromXattrs(xattrs map[string][]byte) (buf []byte, ok bool) {
-	v, present := xattrs[GenericReparseXattrKey]
-	if !present || len(v) == 0 {
-		return nil, false
-	}
-	return v, true
+// GenericReparse returns a file's non-symlink reparse point buffer, as
+// given (winfsp-tests' reparse_guid_test and reparse_nfs_test set such
+// tags with FSCTL_SET_REPARSE_POINT); ok is false if it has none. A
+// symlink is an icbfs entry type, not this.
+func (a Attr) GenericReparse() (buf []byte, ok bool) {
+	return a.Reparse, len(a.Reparse) > 0
 }
 
 // Attr is one item's attributes (docs/architecture.md's Metadata section):
@@ -110,16 +81,39 @@ func GenericReparseFromXattrs(xattrs map[string][]byte) (buf []byte, ok bool) {
 //     them in its block's native metadata (dirAttrFromObject) until its
 //     first attribute write migrates them.
 type Attr struct {
-	Mode   uint32 // permission bits only (e.g. 0644) — type bits are not stored here
-	Uid    uint32
-	Gid    uint32
-	Nlink  uint32
-	Size   int64
-	Atime  time.Time
-	Mtime  time.Time
-	Ctime  time.Time
-	Btime  time.Time // derived from the UUIDv7 key; zero if the key isn't a UUIDv7
+	Mode  uint32 // permission bits only (e.g. 0644) — type bits are not stored here
+	Uid   uint32
+	Gid   uint32
+	Nlink uint32
+	Size  int64
+	Atime time.Time
+	Mtime time.Time
+	Ctime time.Time
+	Btime time.Time // derived from the UUIDv7 key; zero if the key isn't a UUIDv7
+
+	// Xattrs are the item's extended attributes: only what users set,
+	// which is all a mount's getxattr and setxattr see. icbfs's own state
+	// is in the fields below.
 	Xattrs map[string][]byte
+
+	// The item's Windows state: its security descriptor (SDDL), its
+	// ReadOnly, Hidden, System and Archive bits (when HasWindowsAttrs), a
+	// non-symlink reparse point's buffer, and whether a symlink was made
+	// as a Windows directory symlink, which Windows treats as a directory.
+	WindowsSDDL       []byte
+	WindowsAttrs      uint32
+	HasWindowsAttrs   bool
+	Reparse           []byte
+	WindowsDirSymlink bool
+
+	// PosixACLAccess and PosixACLDefault are the item's POSIX ACLs, in
+	// Linux's xattr encoding; nil for none.
+	PosixACLAccess  []byte
+	PosixACLDefault []byte
+
+	// App is data icbfs's own tools keep about the item, keyed
+	// "<tool>.<name>" (AppSyncHash and the like). No mount shows it.
+	App map[string][]byte
 
 	// Streams maps a named data stream's name to its id (see StreamKey)
 	// — Windows alternate data streams; nil when there are none.
@@ -179,12 +173,25 @@ func encodeFileMetadata(a Attr) ([]byte, error) {
 	// a.Mtime/a.Btime here are only ever overrides (see combineFileAttr):
 	// a real content write's mtime comes from the content object and is
 	// never passed through this struct. Zero times stay unset.
+	var win *pb.Windows
+	if len(a.WindowsSDDL) > 0 || a.HasWindowsAttrs || len(a.Reparse) > 0 || a.WindowsDirSymlink {
+		win = &pb.Windows{Sddl: string(a.WindowsSDDL), Reparse: a.Reparse, DirSymlink: a.WindowsDirSymlink}
+		if a.HasWindowsAttrs {
+			bits := a.WindowsAttrs & windowsAttrMask
+			win.Attributes = &bits
+		}
+	}
 	return proto.Marshal(&pb.Metadata{
+		Layout:            metadataLayout,
 		Mode:              a.Mode,
 		Uid:               a.Uid,
 		Gid:               a.Gid,
 		Nlink:             a.Nlink,
 		Xattrs:            a.Xattrs,
+		Windows:           win,
+		PosixAclAccess:    a.PosixACLAccess,
+		PosixAclDefault:   a.PosixACLDefault,
+		App:               a.App,
 		Rdev:              a.Rdev,
 		Atime:             timestampOrNil(a.Atime),
 		MtimeOverride:     timestampOrNil(a.Mtime),
@@ -226,13 +233,16 @@ func decodeFileMetadata(data []byte) (Attr, error) {
 	}
 	mtimeOverride := timeOrZero(m.MtimeOverride)
 	btimeOverride := timeOrZero(m.BtimeOverride)
-	return Attr{
-		Mode:   m.Mode,
-		Uid:    m.Uid,
-		Gid:    m.Gid,
-		Nlink:  m.Nlink,
-		Xattrs: m.Xattrs,
-		Atime:  atime,
+	a := Attr{
+		Mode:            m.Mode,
+		Uid:             m.Uid,
+		Gid:             m.Gid,
+		Nlink:           m.Nlink,
+		Xattrs:          m.Xattrs,
+		PosixACLAccess:  m.PosixAclAccess,
+		PosixACLDefault: m.PosixAclDefault,
+		App:             m.App,
+		Atime:           atime,
 		// Only the explicit override, if any; combineFileAttr falls back to
 		// the content's time.
 		Mtime:             mtimeOverride,
@@ -242,8 +252,86 @@ func decodeFileMetadata(data []byte) (Attr, error) {
 		Btime:             btimeOverride,       // same: override only; see combineFileAttr
 		Ctime:             timeOrZero(m.Ctime), // the stored status-change time only; see combineFileAttr
 		Rdev:              m.Rdev,
-	}, nil
+	}
+	if w := m.Windows; w != nil {
+		a.WindowsSDDL = []byte(w.Sddl)
+		a.Reparse = w.Reparse
+		a.WindowsDirSymlink = w.DirSymlink
+		if w.Attributes != nil {
+			a.WindowsAttrs, a.HasWindowsAttrs = *w.Attributes&windowsAttrMask, true
+		}
+	}
+	if m.Layout == 0 {
+		fromLegacyXattrs(&a)
+	}
+	return a, nil
 }
+
+// metadataLayout is the .metadata layout this package writes: users'
+// xattrs apart from icbfs's own state.
+const metadataLayout = 1
+
+// legacyAppXattrs are the xattr names icbfs's tools used in layout-0
+// records, and the App keys they are now.
+var legacyAppXattrs = map[string]string{
+	"user.sync.sha256":       AppSyncHash,
+	"user.drive.contentType": AppDriveContentType,
+	"user.drive.origin":      AppDriveOrigin,
+}
+
+// fromLegacyXattrs moves a layout-0 record's internal entries out of
+// Xattrs into their own fields, leaving only users' xattrs.
+func fromLegacyXattrs(a *Attr) {
+	take := func(name string) ([]byte, bool) {
+		v, ok := a.Xattrs[name]
+		if ok {
+			delete(a.Xattrs, name)
+		}
+		return v, ok
+	}
+	if v, ok := take("windows.acl"); ok && len(v) > 0 {
+		a.WindowsSDDL = v
+	}
+	if v, ok := take("windows.attributes"); ok && len(v) > 0 {
+		a.WindowsAttrs, a.HasWindowsAttrs = uint32(v[0])&windowsAttrMask, true
+	}
+	if v, ok := take("windows.reparse"); ok && len(v) > 0 {
+		a.Reparse = v
+	}
+	if _, ok := take("windows.symlinkd"); ok {
+		a.WindowsDirSymlink = true
+	}
+	if v, ok := take("system.posix_acl_access"); ok {
+		a.PosixACLAccess = v
+	}
+	if v, ok := take("system.posix_acl_default"); ok {
+		a.PosixACLDefault = v
+	}
+	for name := range a.Xattrs {
+		key, ok := legacyAppXattrs[name]
+		if !ok && strings.HasPrefix(name, "user.side.") {
+			key, ok = AppSidePrefix+strings.TrimPrefix(name, "user.side."), true
+		}
+		if ok {
+			if a.App == nil {
+				a.App = map[string][]byte{}
+			}
+			a.App[key] = a.Xattrs[name]
+			delete(a.Xattrs, name)
+		}
+	}
+	if len(a.Xattrs) == 0 {
+		a.Xattrs = nil
+	}
+}
+
+// App keys of icbfs's own tools.
+const (
+	AppSyncHash         = "sync.sha256"       // icbfs-sync: the content's SHA-256, hex
+	AppDriveContentType = "drive.contentType" // the drive API: the content type a write gave
+	AppDriveOrigin      = "drive.origin"      // the drive API: where a copy came from
+	AppSidePrefix       = "side."             // the drive API's side store: an object's metadata
+)
 
 // NewUUIDv7 generates a new blob identifier. Using UUIDv7 means every new
 // object's creation time (Btime) is embedded in its key for free.

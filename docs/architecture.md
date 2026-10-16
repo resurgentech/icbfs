@@ -47,7 +47,7 @@ with its four-hex-digit ID, so one prefix listing finds all of it.
 | `_master` | the bucket's list of filesystems (one per bucket) |
 | `<id>-root-<name>` | the filesystem's root directory block |
 | `<id>-<uuid>` | a file's content, or a directory's top block |
-| `<id>-<uuid>.metadata` | the item's attributes (mode, owner, times, xattrs, ACL, stream table) |
+| `<id>-<uuid>.metadata` | the item's attributes (mode, owner, times, ACLs, Windows state, xattrs, stream table) |
 | `<id>-<uuid>.ads.<n>` | an alternate data stream's bytes |
 | `<id>-<uuid>.lock` | byte-range and whole-file locks, when locking is on |
 | `<id>-trash-<inverted time>-<entry>` | one trash entry |
@@ -144,13 +144,23 @@ content:
 - mode, uid, gid, link count, device number;
 - access time, an explicit modification-time override, a creation-time
   override, and the change time;
-- an xattr map, holding:
-  - the Windows security descriptor as SDDL (`windows.acl`);
-  - the Windows attribute bits (`windows.attributes`);
-  - a non-symlink reparse point's data (`windows.reparse`);
-  - values tools keep, such as icbfs-sync's content hash
-    (`user.sync.sha256`);
-- the alternate-stream table.
+- the alternate-stream table;
+- the Windows state: the security descriptor as SDDL, the attribute bits,
+  a non-symlink reparse point's data, and whether a symlink is a Windows
+  directory symlink;
+- the POSIX ACLs (access and default);
+- the user's extended attributes;
+- data icbfs's own tools keep about the item, such as icbfs-sync's
+  content hash and the drive API's content type.
+
+**Users' data and icbfs's state never share a field.** The extended
+attributes hold only names a user set; icbfs's state has typed fields of
+its own, and its tools' data a separate table keyed by tool. Nothing a user
+does through an xattr call can read or change icbfs's state, and nothing
+icbfs keeps shows up as an xattr. Records written before this split, which
+kept that state in the xattr table under fixed names, are sorted into the
+new fields when read (they are marked by a layout number), and the next
+write stores the new layout.
 
 **Why a separate object.** An S3 ETag is a hash of the object's body. A
 change to an object's native metadata doesn't change its ETag, so a
@@ -408,7 +418,7 @@ See [api.md](api.md).
 
 - **Extended attributes and POSIX ACLs on Linux mounts.** The FUSE driver
   doesn't implement `getxattr` or `setxattr`, so `setfacl` and user xattrs
-  fail there, though the core stores xattrs.
+  fail there, though the core stores both.
 - **Object stores:**
   - Azure Blob Storage has no store implementation, only the change-feed
     filter.

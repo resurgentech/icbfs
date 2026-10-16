@@ -12,14 +12,14 @@ import (
 )
 
 // SideStore is a drive.SideStore on an icbfs filesystem of its own: each
-// key a file (its '/'-separated parts directories), metadata in xattrs.
+// key a file (its '/'-separated parts directories), metadata in its app data.
 type SideStore struct {
 	fs *icbfs.Filesystem
 }
 
 var _ drive.SideStore = (*SideStore)(nil)
 
-const sideMetaPrefix = "user.side."
+const sideMetaPrefix = icbfs.AppSidePrefix
 
 // OpenSideStore attaches to the side store's filesystem, creating it (a
 // primary-POSIX filesystem nobody mounts) the first time.
@@ -92,17 +92,17 @@ func (s *SideStore) Put(ctx context.Context, key string, body []byte, meta map[s
 	if err != nil {
 		return mapErr(err)
 	}
-	for k := range attr.Xattrs {
+	for k := range attr.App {
 		if strings.HasPrefix(k, sideMetaPrefix) {
 			if _, ok := meta[strings.TrimPrefix(k, sideMetaPrefix)]; !ok {
-				if _, err := s.fs.SetXattr(ctx, fileKey, icbfs.TypeFile, k, nil); err != nil {
+				if _, err := s.fs.SetAppData(ctx, fileKey, icbfs.TypeFile, k, nil); err != nil {
 					return mapErr(err)
 				}
 			}
 		}
 	}
 	for k, v := range meta {
-		if _, err := s.fs.SetXattr(ctx, fileKey, icbfs.TypeFile, sideMetaPrefix+k, []byte(v)); err != nil {
+		if _, err := s.fs.SetAppData(ctx, fileKey, icbfs.TypeFile, sideMetaPrefix+k, []byte(v)); err != nil {
 			return mapErr(err)
 		}
 	}
@@ -124,7 +124,7 @@ func (s *SideStore) Get(ctx context.Context, key string) ([]byte, map[string]str
 		return nil, nil, mapErr(err)
 	}
 	meta := map[string]string{}
-	for k, v := range attr.Xattrs {
+	for k, v := range attr.App {
 		if strings.HasPrefix(k, sideMetaPrefix) {
 			meta[strings.TrimPrefix(k, sideMetaPrefix)] = string(v)
 		}

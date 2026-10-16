@@ -301,13 +301,8 @@ func typeName(t icbfs.EntryType) string {
 	return ""
 }
 
-const (
-	xattrContentType = "user.drive.contentType"
-	xattrOrigin      = "user.drive.origin"
-)
-
 func contentType(name string, attr icbfs.Attr) string {
-	if ct, ok := attr.Xattrs[xattrContentType]; ok {
+	if ct, ok := attr.App[icbfs.AppDriveContentType]; ok {
 		return string(ct)
 	}
 	if ct := mime.TypeByExtension(path.Ext(name)); ct != "" {
@@ -336,7 +331,7 @@ func (d *Drive) item(ctx context.Context, n *node, withVersion bool) drive.Item 
 			it.Target = t
 		}
 	}
-	if o, ok := n.attr.Xattrs[xattrOrigin]; ok {
+	if o, ok := n.attr.App[icbfs.AppDriveOrigin]; ok {
 		it.Origin = decodeOrigin(o)
 	}
 	return it
