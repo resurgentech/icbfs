@@ -4,7 +4,7 @@
 filesystems, naming versions, and the trash.
 
 ```
-icbfs-cli fs create   -fs NAME [-primary-windows] [-size N] [-max-file-size N] [root options]
+icbfs-cli fs create   -fs NAME [-primary-windows] [-size N] [-max-file-size N] [-dir-block-entries N] [root options]
 icbfs-cli fs list
 icbfs-cli fs describe -fs NAME
 icbfs-cli fs resize   -fs NAME -size N
@@ -57,6 +57,9 @@ These settings are fixed at creation:
   Windows ACLs as the authority. The default is primary-POSIX.
 - `-max-file-size`: the largest file the filesystem holds, in bytes.
   Default 1 TiB.
+- `-dir-block-entries`: how many entries a directory block holds before it
+  splits, 4 to 4096. More favours lookups and listings, fewer the cost of
+  each change. Default 128.
 
 This setting can change later with `fs resize`:
 

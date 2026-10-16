@@ -109,6 +109,11 @@ func runStorage(ctx context.Context, store objstore.Store, r Request) (any, erro
 			}
 		}
 		s.RootMode, s.RootUid, s.RootGid, s.RootSDDL = uint32(mode), uint32(uid), uint32(gid), a.str("root-sddl")
+		entries, err := a.uint("dir-block-entries", 0)
+		if err != nil {
+			return nil, err
+		}
+		s.DirBlockEntries = uint32(min(entries, 1<<32-1))
 		return icbfs.CreateFilesystem(ctx, store, s)
 	case "fs list":
 		all, err := icbfs.ListFilesystems(ctx, store)

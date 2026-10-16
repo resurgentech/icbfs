@@ -132,7 +132,7 @@ func TestStatusChangeTimes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mkdir big: %v", err)
 	}
-	for i := 0; i < 4*maxEntriesPerBlock; i++ {
+	for i := 0; i < 4*testDirBlockEntries; i++ {
 		if _, _, _, err := fsys.Create(ctx, big, fmt.Sprintf("n%03d", i), 0644, 0, 0); err != nil {
 			t.Fatalf("create: %v", err)
 		}

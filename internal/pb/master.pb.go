@@ -42,9 +42,15 @@ type FilesystemEntry struct {
 	MaxFileSize uint64 `protobuf:"varint,5,opt,name=max_file_size,json=maxFileSize,proto3" json:"max_file_size,omitempty"`
 	// created: when the filesystem was created (unset for filesystems
 	// created before this field).
-	Created       *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=created,proto3" json:"created,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Created *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=created,proto3" json:"created,omitempty"`
+	// dir_block_entries: how many entries a directory block holds (or, for
+	// a block over others, how many blocks it points to) before it splits;
+	// set once at creation. More means fewer requests per lookup and
+	// listing, and larger blocks rewritten per change. 0 (filesystems
+	// created before this field) means the default, 128.
+	DirBlockEntries uint32 `protobuf:"varint,7,opt,name=dir_block_entries,json=dirBlockEntries,proto3" json:"dir_block_entries,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *FilesystemEntry) Reset() {
@@ -119,6 +125,13 @@ func (x *FilesystemEntry) GetCreated() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *FilesystemEntry) GetDirBlockEntries() uint32 {
+	if x != nil {
+		return x.DirBlockEntries
+	}
+	return 0
+}
+
 // MasterBlock is the body of the one, fixed, well-known master-block
 // object per bucket. The list can only ever grow in length, never
 // shrink or reorder — a deleted filesystem's entry is blanked in place
@@ -173,14 +186,15 @@ var File_spec_proto_icbfs_v1_master_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_master_proto_rawDesc = "" +
 	"\n" +
-	" spec/proto/icbfs/v1/master.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd8\x01\n" +
+	" spec/proto/icbfs/v1/master.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x84\x02\n" +
 	"\x0fFilesystemEntry\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x1a\n" +
 	"\barchived\x18\x03 \x01(\bR\barchived\x12'\n" +
 	"\x0fprimary_windows\x18\x04 \x01(\bR\x0eprimaryWindows\x12\"\n" +
 	"\rmax_file_size\x18\x05 \x01(\x04R\vmaxFileSize\x124\n" +
-	"\acreated\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\acreated\"J\n" +
+	"\acreated\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\acreated\x12*\n" +
+	"\x11dir_block_entries\x18\a \x01(\rR\x0fdirBlockEntries\"J\n" +
 	"\vMasterBlock\x12;\n" +
 	"\vfilesystems\x18\x01 \x03(\v2\x19.icbfs.v1.FilesystemEntryR\vfilesystemsB+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
 

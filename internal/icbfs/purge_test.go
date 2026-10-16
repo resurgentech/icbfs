@@ -78,7 +78,7 @@ func TestPurgeLiveTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	var keys []string
-	for i := 0; i < 3*maxEntriesPerBlock; i++ { // enough to split d
+	for i := 0; i < 3*testDirBlockEntries; i++ { // enough to split d
 		keys = append(keys, writeNew(t, ctx, f, d, fmt.Sprintf("f%02d", i), "x"))
 	}
 	inner := writeNew(t, ctx, f, sub, "inner", "y")

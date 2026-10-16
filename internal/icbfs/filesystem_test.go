@@ -85,7 +85,7 @@ func newTestFilesystem(t *testing.T) (*Filesystem, objstore.Store) {
 }
 
 // TestDirectorySplitsAndStaysConsistent creates enough entries to split
-// several leaves (maxEntriesPerBlock is 8), and checks that the directory's
+// several leaves (testDirBlockEntries is 8), and checks that the directory's
 // top block becomes an internal node, that every entry is found by Lookup
 // and by ReadDir, and that removal works across both subtrees of a
 // top-level split.
@@ -94,7 +94,7 @@ func TestDirectorySplitsAndStaysConsistent(t *testing.T) {
 	ctx := context.Background()
 	root := fsys.RootKey()
 
-	const n = 40 // several multiples of maxEntriesPerBlock (8)
+	const n = 40 // several multiples of testDirBlockEntries (8)
 	names := make([]string, n)
 	for i := 0; i < n; i++ {
 		name := fmt.Sprintf("file-%03d", i)
@@ -117,7 +117,7 @@ func TestDirectorySplitsAndStaysConsistent(t *testing.T) {
 		t.Fatalf("decode root: %v", err)
 	}
 	if rootBlock.Kind != block.Internal {
-		t.Fatalf("root is still a flat Leaf after creating %d entries (maxEntriesPerBlock=%d) — sharding did not kick in", n, maxEntriesPerBlock)
+		t.Fatalf("root is still a flat Leaf after creating %d entries (testDirBlockEntries=%d) — sharding did not kick in", n, testDirBlockEntries)
 	}
 	if len(rootBlock.Children) < 2 {
 		t.Fatalf("root has %d children, want at least 2", len(rootBlock.Children))

@@ -26,6 +26,12 @@ message FilesystemEntry {
   // created: when the filesystem was created (unset for filesystems
   // created before this field).
   google.protobuf.Timestamp created = 6;
+  // dir_block_entries: how many entries a directory block holds (or, for
+  // a block over others, how many blocks it points to) before it splits;
+  // set once at creation. More means fewer requests per lookup and
+  // listing, and larger blocks rewritten per change. 0 (filesystems
+  // created before this field) means the default, 128.
+  uint32 dir_block_entries = 7;
 }
 
 // MasterBlock is the body of the one, fixed, well-known master-block

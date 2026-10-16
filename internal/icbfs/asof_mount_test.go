@@ -55,7 +55,7 @@ func TestAsOfFilesystem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 3*maxEntriesPerBlock; i++ {
+	for i := 0; i < 3*testDirBlockEntries; i++ {
 		if _, _, _, err := live.Create(ctx, big, fmt.Sprintf("n%02d", i), 0644, 0, 0); err != nil {
 			t.Fatal(err)
 		}
@@ -116,7 +116,7 @@ func TestAsOfFilesystem(t *testing.T) {
 	if err := live.Rename(ctx, dir, "a", dir, "b", true); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 2*maxEntriesPerBlock; i++ {
+	for i := 0; i < 2*testDirBlockEntries; i++ {
 		if err := live.Unlink(ctx, big, fmt.Sprintf("n%02d", i)); err != nil {
 			t.Fatal(err)
 		}

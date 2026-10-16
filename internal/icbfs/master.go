@@ -102,7 +102,7 @@ func registerFilesystem(ctx context.Context, store objstore.Store, entry *pb.Fil
 			idx = len(mb.Filesystems)
 			mb.Filesystems = append(mb.Filesystems, &pb.FilesystemEntry{})
 		}
-		created := &pb.FilesystemEntry{Name: name, Size: entry.Size, PrimaryWindows: entry.PrimaryWindows, MaxFileSize: entry.MaxFileSize, Created: entry.Created}
+		created := &pb.FilesystemEntry{Name: name, Size: entry.Size, PrimaryWindows: entry.PrimaryWindows, MaxFileSize: entry.MaxFileSize, DirBlockEntries: entry.DirBlockEntries, Created: entry.Created}
 		mb.Filesystems[idx] = created
 
 		data, err := proto.Marshal(mb)

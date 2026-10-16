@@ -3,7 +3,7 @@
 // and the trash (trash). Mounts never create a filesystem; this does, or
 // the drive API.
 //
-//	icbfs-cli fs create   -fs NAME [-primary-windows] [-size N] [-max-file-size N] [root options]
+//	icbfs-cli fs create   -fs NAME [-primary-windows] [-size N] [-max-file-size N] [-dir-block-entries N] [root options]
 //	icbfs-cli fs list
 //	icbfs-cli fs describe -fs NAME
 //	icbfs-cli fs resize   -fs NAME -size N
@@ -148,6 +148,7 @@ func fsCreate(args []string) error {
 	primaryWindows := fset.Bool("primary-windows", false, "primary-Windows (NTFS naming, case-insensitive order, Windows ACLs authoritative) rather than primary-POSIX; fixed at creation")
 	size := fset.Uint64("size", 100<<30, "declared capacity in bytes, what df shows (changeable later with resize)")
 	maxFileSize := fset.Uint64("max-file-size", icbfs.DefaultMaxFileSize, "largest file it holds, in bytes; fixed at creation")
+	dirBlockEntries := fset.Uint("dir-block-entries", icbfs.DefaultDirBlockEntries, "entries a directory block holds before it splits: more favours lookups and listings, fewer the cost of each change; fixed at creation")
 	rootUid := fset.Int("root-uid", max(os.Getuid(), 0), "the root folder's owner uid (default: yours; 0 on Windows, which has none)")
 	rootGid := fset.Int("root-gid", max(os.Getgid(), 0), "the root folder's group gid (default: yours; 0 on Windows)")
 	rootMode := fset.Uint("root-mode", 0o755, "the root folder's permission bits")
@@ -175,7 +176,8 @@ func fsCreate(args []string) error {
 	if err := sf.run("fs create", map[string]string{
 		"fs": *name, "primary-windows": strconv.FormatBool(*primaryWindows),
 		"size": strconv.FormatUint(*size, 10), "max-file-size": strconv.FormatUint(*maxFileSize, 10),
-		"root-mode": "0" + strconv.FormatUint(uint64(*rootMode), 8), "root-uid": strconv.Itoa(*rootUid), "root-gid": strconv.Itoa(*rootGid),
+		"dir-block-entries": strconv.FormatUint(uint64(*dirBlockEntries), 10),
+		"root-mode":         "0" + strconv.FormatUint(uint64(*rootMode), 8), "root-uid": strconv.Itoa(*rootUid), "root-gid": strconv.Itoa(*rootGid),
 		"root-sddl": sddl,
 	}, &info); err != nil {
 		return err

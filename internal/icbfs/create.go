@@ -22,6 +22,9 @@ type Settings struct {
 	Size           uint64 // declared capacity: what df shows as the total
 	PrimaryWindows bool
 	MaxFileSize    uint64 // the largest file it holds; 0 means DefaultMaxFileSize
+	// DirBlockEntries is how many entries a directory block holds before
+	// it splits; 0 means DefaultDirBlockEntries.
+	DirBlockEntries uint32
 
 	// The root folder's owner and permissions: mode, uid and gid on any
 	// filesystem, and on a primary-Windows one RootSDDL, the root's
@@ -34,13 +37,14 @@ type Settings struct {
 
 // Info describes one filesystem in a bucket.
 type Info struct {
-	Name           string
-	ID             string
-	Size           uint64
-	PrimaryWindows bool
-	MaxFileSize    int64
-	Archived       bool
-	Created        time.Time // zero for filesystems created before it was recorded
+	Name            string
+	ID              string
+	Size            uint64
+	PrimaryWindows  bool
+	MaxFileSize     int64
+	DirBlockEntries int
+	Archived        bool
+	Created         time.Time // zero for filesystems created before it was recorded
 }
 
 // filesystemName is what a filesystem may be called: it's part of the
@@ -62,9 +66,13 @@ func CreateFilesystem(ctx context.Context, store objstore.Store, s Settings) (In
 	if s.MaxFileSize > DefaultMaxFileSize {
 		return Info{}, fmt.Errorf("max file size %d is past the largest supported, %d", s.MaxFileSize, int64(DefaultMaxFileSize))
 	}
+	if n := s.DirBlockEntries; n != 0 && (n < minDirBlockEntries || n > maxDirBlockEntries) {
+		return Info{}, fmt.Errorf("directory block entries %d: %d to %d", n, minDirBlockEntries, maxDirBlockEntries)
+	}
 	id, entry, existed, err := registerFilesystem(ctx, store, &pb.FilesystemEntry{
 		Name: s.Name, Size: s.Size, PrimaryWindows: s.PrimaryWindows, MaxFileSize: s.MaxFileSize,
-		Created: timestamppb.Now(),
+		DirBlockEntries: s.DirBlockEntries,
+		Created:         timestamppb.Now(),
 	})
 	if err != nil {
 		return Info{}, err
@@ -163,7 +171,8 @@ func DescribeFilesystem(ctx context.Context, store objstore.Store, name string) 
 }
 
 func infoOf(id string, e *pb.FilesystemEntry) Info {
-	info := Info{Name: e.Name, ID: id, Size: e.Size, PrimaryWindows: e.PrimaryWindows, Archived: e.Archived, MaxFileSize: DefaultMaxFileSize}
+	info := Info{Name: e.Name, ID: id, Size: e.Size, PrimaryWindows: e.PrimaryWindows, Archived: e.Archived, MaxFileSize: DefaultMaxFileSize,
+		DirBlockEntries: dirBlockEntries(e)}
 	if e.MaxFileSize != 0 && e.MaxFileSize <= DefaultMaxFileSize {
 		info.MaxFileSize = int64(e.MaxFileSize)
 	}

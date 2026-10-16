@@ -3,7 +3,11 @@ package icbfs
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"testing"
+
+	"github.com/resurgentech/icbfs/internal/block"
 )
 
 func TestCreateAttachListDescribe(t *testing.T) {
@@ -68,4 +72,64 @@ func TestCreateAttachListDescribe(t *testing.T) {
 	if _, err := DescribeFilesystem(ctx, store, "nope"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("describe a missing filesystem: %v", err)
 	}
+}
+
+// TestDirBlockEntriesSetting: a filesystem's directory block size is set at
+// creation, kept in the master block, and used by every client that
+// attaches; out of range is refused, and unset is the default.
+func TestDirBlockEntriesSetting(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if _, err := CreateFilesystem(ctx, store, Settings{Name: "tiny", DirBlockEntries: 2}); err == nil {
+		t.Fatal("2 entries per block was accepted")
+	}
+	info, err := CreateFilesystem(ctx, store, Settings{Name: "wide", DirBlockEntries: 16})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.DirBlockEntries != 16 {
+		t.Fatalf("created with %d, want 16", info.DirBlockEntries)
+	}
+	if info, err := CreateFilesystem(ctx, store, Settings{Name: "plain"}); err != nil || info.DirBlockEntries != testDirBlockEntries {
+		t.Fatalf("unset: %d (%v), want the default", info.DirBlockEntries, err)
+	}
+
+	f := New(store, "wide")
+	if err := f.Attach(ctx); err != nil {
+		t.Fatal(err)
+	}
+	root := f.RootKey()
+	for i := 0; i < 16; i++ {
+		if _, _, _, err := f.Create(ctx, root, fmt.Sprintf("f%02d", i), 0o644, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if blk := readBlock(t, f, root); blk.Kind != block.Leaf {
+		t.Fatal("split at 16 entries, want a split only past 16")
+	}
+	if _, _, _, err := f.Create(ctx, root, "f16", 0o644, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if blk := readBlock(t, f, root); blk.Kind != block.Internal {
+		t.Fatal("no split at 17 entries")
+	}
+}
+
+// readBlock reads and decodes the directory block at key.
+func readBlock(t *testing.T, f *Filesystem, key string) *block.Block {
+	t.Helper()
+	body, _, err := f.store.Get(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer body.Close()
+	data, err := io.ReadAll(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blk, err := block.Decode(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return blk
 }

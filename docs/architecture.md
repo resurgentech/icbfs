@@ -130,7 +130,10 @@ holds range pointers.
   own key can't move, so both halves get new keys and the top becomes an
   internal node over them. Listing follows the right links a parent
   doesn't know about yet.
-- Blocks hold up to 8 entries.
+- Blocks hold up to 128 entries by default, set per filesystem at creation
+  (`icbfs-cli fs create -dir-block-entries`). More entries per block mean
+  fewer requests per lookup and listing, and a larger block rewritten per
+  change; the default favours reads.
 - Lookup descends the tree. Listing walks it in order.
 - Underfull blocks are not merged back. A directory that grew and then
   shrank stays as tall as it grew; this costs nothing in correctness.

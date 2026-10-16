@@ -41,7 +41,7 @@ func caseVariants(s string) []string {
 
 // TestLookupFold checks case-insensitive lookup on both collations, in
 // a directory big enough to be several levels deep, with 16 names that
-// differ only in case — more than one leaf holds (maxEntriesPerBlock),
+// differ only in case — more than one leaf holds (testDirBlockEntries),
 // so their run crosses leaf boundaries.
 func TestLookupFold(t *testing.T) {
 	for _, primaryWindows := range []bool{true, false} {
