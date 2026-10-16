@@ -15,6 +15,7 @@ import (
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/internal/testutil"
+	"github.com/resurgentech/icbfs/internal/testutil/minioimage"
 )
 
 // newTestFilesystem starts a MinIO container with a versioned bucket and
@@ -23,7 +24,7 @@ func newTestFilesystem(t *testing.T) *icbfs.Filesystem {
 	t.Helper()
 	ctx := context.Background()
 
-	container, err := minio.Run(ctx, "minio/minio:latest")
+	container, err := minio.Run(ctx, minioimage.Image())
 	if err != nil {
 		t.Fatalf("start minio container: %v", err)
 	}

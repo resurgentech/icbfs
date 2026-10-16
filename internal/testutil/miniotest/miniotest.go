@@ -13,6 +13,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/testcontainers/testcontainers-go/modules/minio"
 
+	"github.com/resurgentech/icbfs/internal/testutil/minioimage"
+
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/internal/testutil"
 )
@@ -33,7 +35,7 @@ func Store(t *testing.T) objstore.Store {
 func Start(t *testing.T) (objstore.Store, Server) {
 	t.Helper()
 	ctx := context.Background()
-	container, err := minio.Run(ctx, "minio/minio:latest")
+	container, err := minio.Run(ctx, minioimage.Image())
 	if err != nil {
 		t.Fatalf("start minio container: %v", err)
 	}

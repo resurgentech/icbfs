@@ -7,7 +7,9 @@
 # don't collide and nothing survives a run. The Go unit tests don't use
 # this: they start their own MinIO through testcontainers.
 
-ICBFS_MINIO_IMAGE="${ICBFS_MINIO_IMAGE:-minio/minio:latest}"
+# MinIO no longer publishes minio/minio for free use; Chainguard's build is
+# free, as its latest tag only (internal/testutil/minioimage says the same).
+ICBFS_MINIO_IMAGE="${ICBFS_MINIO_IMAGE:-cgr.dev/chainguard/minio:latest}"
 ICBFS_MINIO_ACCESS_KEY="${ICBFS_MINIO_ACCESS_KEY:-minioadmin}"
 ICBFS_MINIO_SECRET_KEY="${ICBFS_MINIO_SECRET_KEY:-minioadmin}"
 ICBFS_MINIO_BUCKET="${ICBFS_MINIO_BUCKET:-icbfs-test}"

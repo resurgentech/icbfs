@@ -23,6 +23,8 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/testcontainers/testcontainers-go/modules/minio"
+
+	"github.com/resurgentech/icbfs/internal/testutil/minioimage"
 	"golang.org/x/sys/unix"
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
@@ -59,7 +61,7 @@ func newMinIO(t *testing.T) testMinIO {
 	t.Helper()
 	ctx := context.Background()
 
-	container, err := minio.Run(ctx, "minio/minio:latest")
+	container, err := minio.Run(ctx, minioimage.Image())
 	if err != nil {
 		t.Fatalf("start minio container: %v", err)
 	}

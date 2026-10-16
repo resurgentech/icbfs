@@ -11,6 +11,7 @@ import (
 	testminio "github.com/testcontainers/testcontainers-go/modules/minio"
 
 	"github.com/resurgentech/icbfs/internal/testutil"
+	"github.com/resurgentech/icbfs/internal/testutil/minioimage"
 )
 
 // TestMinIOSourceReceivesRealNotification: against a MinIO container, a
@@ -18,7 +19,7 @@ import (
 func TestMinIOSourceReceivesRealNotification(t *testing.T) {
 	ctx := context.Background()
 
-	container, err := testminio.Run(ctx, "minio/minio:latest")
+	container, err := testminio.Run(ctx, minioimage.Image())
 	if err != nil {
 		t.Fatalf("start minio container: %v", err)
 	}

@@ -172,9 +172,9 @@ Protobuf code from `spec/proto` (needs `protoc`; see
 Start a MinIO with a versioned bucket, create a filesystem, and mount it:
 
 ```sh
-docker run -d --name minio -p 9000:9000 minio/minio server /data
-docker run --rm --network host --entrypoint sh minio/mc -c \
-  'mc alias set local http://127.0.0.1:9000 minioadmin minioadmin && mc mb --with-versioning local/icbfs'
+docker run -d --name minio -p 9000:9000 cgr.dev/chainguard/minio server /data
+docker run --rm --network host -e MC_HOST_local=http://minioadmin:minioadmin@127.0.0.1:9000 \
+  cgr.dev/chainguard/minio-client mb --with-versioning local/icbfs
 
 export ICBFS_ENDPOINT=http://127.0.0.1:9000 ICBFS_BUCKET=icbfs \
        ICBFS_ACCESS_KEY=minioadmin ICBFS_SECRET_KEY=minioadmin

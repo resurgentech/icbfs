@@ -49,7 +49,7 @@ SERVER_CONTAINER="icbfs-test-mockserver-$$"
 # host firewall, which drops it from a container).
 MINIO_BRIDGE_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$ICBFS_MINIO_CONTAINER")
 docker run -d --rm --name "$SERVER_CONTAINER" --user "$(id -u):$(id -g)" \
-  -v "$WORK_DIR:/work" -p 0.0.0.0::8090 --entrypoint /work/icbfs-mockserver "${ICBFS_MINIO_IMAGE:-minio/minio:latest}" \
+  -v "$WORK_DIR:/work" -p 0.0.0.0::8090 --entrypoint /work/icbfs-mockserver "${ICBFS_MINIO_IMAGE:-cgr.dev/chainguard/minio:latest}" \
   -addr :8090 -secret "$SECRET" -log "/work/$LOG_NAME" \
   -drives "logged-sync=logged-sync,logged-async=logged-async,setup=logged-sync,team=logged-sync:/team:ro" \
   -endpoint "$ICBFS_MINIO_VM_ENDPOINT" -bucket "$ICBFS_MINIO_BUCKET" \
