@@ -104,7 +104,8 @@ uploads only what changed, but the result is still one object.
 file copies it from a shared on-disk read cache into a private scratch
 file, fetching it from the store if the cache doesn't have it. Reads and
 writes go to the scratch file, and flush writes it back: at every close,
-and at `fsync` (and `msync` with `MS_SYNC`).
+at `fsync` (and `msync` with `MS_SYNC`), and when the kernel releases the
+file, for a mapping's pages written back after the close.
 
 - The read cache is LRU-bounded, 512 MiB by default (`-cache-dir`,
   `-cache-size`).

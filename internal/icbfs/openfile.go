@@ -177,6 +177,12 @@ func (o *OpenFile) pending() (size int64, lastWrite time.Time, dirty bool) {
 	return o.size, o.lastWrite, o.dirty
 }
 
+// Dirty reports whether the session has writes Flush hasn't stored.
+func (o *OpenFile) Dirty() bool {
+	_, _, dirty := o.pending()
+	return dirty
+}
+
 // Size returns the current (post-edit, pre-flush) content length.
 func (o *OpenFile) Size() int64 {
 	o.mu.Lock()

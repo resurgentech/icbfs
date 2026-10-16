@@ -873,6 +873,16 @@ func (h *FileHandle) Release(ctx context.Context) syscall.Errno {
 	for owner := range renewers {
 		h.releaseAllHeldBy(ctx, owner)
 	}
+	// Writes since the last close's flush: a mapping's pages, which the
+	// kernel writes back after the file is closed. Nothing waits for a
+	// release, so a failure can only be logged.
+	if h.open.Dirty() {
+		if attr, err := h.open.Flush(ctx); err != nil {
+			log.Printf("icbfs: storing writes made after the close: %v", err)
+		} else if h.node != nil && h.wrote.Swap(false) {
+			h.node.logEvent(ctx, fslog.EventWrite, h.node.path(), attr.Size)
+		}
+	}
 	// Releases this session's private local scratch file — without this, every real close(2) would leak
 	// a file on local disk for the life of the mount process.
 	_ = h.open.Close()

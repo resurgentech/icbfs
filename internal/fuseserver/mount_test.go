@@ -1751,3 +1751,40 @@ func TestMountFsync(t *testing.T) {
 		t.Fatalf("fsync on a directory: %v", err)
 	}
 }
+
+// TestMountMmapWritesAfterCloseKept: writes through a mapping after its
+// file was closed reach the store: the kernel writes the pages back after
+// the close, before it releases the handle.
+func TestMountMmapWritesAfterCloseKept(t *testing.T) {
+	mnt := mountTestFS(t)
+	path := filepath.Join(mnt, "mapped.bin")
+	if err := os.WriteFile(path, make([]byte, 8192), 0644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := syscall.Mmap(int(f.Fd()), 0, 8192, syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	copy(m[4096:], "written after close")
+	if err := syscall.Munmap(m); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		got, err := os.ReadFile(path)
+		if err == nil && bytes.HasPrefix(got[4096:], []byte("written after close")) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the mapping's write was lost: %q, %v", got[4096:4120], err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
