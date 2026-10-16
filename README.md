@@ -22,7 +22,8 @@ a drive.
   trash, kept forever, and a restored item comes back with its whole
   history.
 - **Full metadata on both platforms.**
-  - POSIX: permissions, owners, hard links, symlinks, special files.
+  - POSIX: permissions, owners, POSIX ACLs, extended attributes, hard
+    links, symlinks, special files.
   - Windows: security descriptors, attribute bits, alternate data streams,
     case-insensitive lookup.
 - **No other infrastructure.** Concurrency is compare-and-swap on the
@@ -76,7 +77,7 @@ flowchart LR
 | **Past views** | mount read-only as of any time (`-as-of 2026-10-12T15:04`) or a named version |
 | **Named versions** | a name for a moment: a snapshot that copies nothing |
 | **Trash** | every delete recorded forever; restore with full history; permanent purge |
-| **POSIX** | modes, owners, hard links, symlinks, FIFOs, sockets, device nodes, `utimensat` |
+| **POSIX** | modes, owners, POSIX ACLs (enforced by the kernel, default ACLs inherited), extended attributes, hard links, symlinks, FIFOs, sockets, device nodes, `utimensat` |
 | **Windows** | security descriptors (SDDL), ACL inheritance, attribute bits, alternate data streams, case-insensitive lookup, share modes |
 | **Large files** | multipart uploads that send only the parts an edit changed; per-filesystem max file size (default 1 TiB) |
 | **Locking** | optional `flock`/`fcntl` byte-range locks shared between Linux mounts, with leases |

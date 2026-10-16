@@ -50,7 +50,7 @@ What they cover:
 | `internal/block` | block encoding, splits, case-folded order |
 | `internal/objstore` | conditional writes, versions, delete markers, as-of views, the server clock |
 | `internal/icbfs` | the filesystem core: directories, links, rename, CAS races, retry and escalation, locks and leases, the master block, names, trash, purge, streams, max file size, multipart edits, the disk cache |
-| `internal/fuseserver` | real mounts: permissions, rename, `flock`/`fcntl` across processes, lease renewal, notifications, logging |
+| `internal/fuseserver` | real mounts: permissions, POSIX ACLs (enforcement, inheritance, `chmod`), extended attributes, rename, `flock`/`fcntl` across processes, lease renewal, notifications, logging |
 | `internal/winfspserver` | path resolution and case folding (portable parts); the driver itself is tested by winfsp-tests |
 | `internal/acl` | the Windows access check and inheritance |
 | `internal/notify/...` | MinIO notifications for real; SQS and Azure against fakes |

@@ -327,7 +327,7 @@ func TestInternalStateIsNotXattrs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := fsys.SetXattr(ctx, uuid, TypeFile, "user.tag", []byte("mine")); err != nil {
+	if _, err := fsys.SetXattr(ctx, uuid, TypeFile, "user.tag", []byte("mine"), XattrAny); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fsys.SetWindowsCreateMetadata(ctx, uuid, TypeFile, WindowsAttrHidden, []byte("O:BAG:BAD:(A;;FA;;;WD)")); err != nil {
@@ -409,10 +409,10 @@ func TestLegacyXattrLayoutIsSplitOnRead(t *testing.T) {
 	}
 	check("read")
 	// A write stores the new layout; reading it gives the same.
-	if _, err := fsys.SetXattr(ctx, uuid, TypeFile, "user.more", []byte("x")); err != nil {
+	if _, err := fsys.SetXattr(ctx, uuid, TypeFile, "user.more", []byte("x"), XattrAny); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fsys.SetXattr(ctx, uuid, TypeFile, "user.more", nil); err != nil {
+	if _, err := fsys.RemoveXattr(ctx, uuid, TypeFile, "user.more"); err != nil {
 		t.Fatal(err)
 	}
 	check("after a write")

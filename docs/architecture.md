@@ -153,6 +153,27 @@ content:
 - data icbfs's own tools keep about the item, such as icbfs-sync's
   content hash and the drive API's content type.
 
+**Extended attributes and POSIX ACLs.** A Linux mount offers the `user.`,
+`trusted.` and `security.` namespaces, with Linux's limits (names up to 255
+bytes, values up to 64 KiB, and at most 64 KiB in all per item), and the
+POSIX ACLs as `system.posix_acl_access` and `system.posix_acl_default`.
+The kernel enforces the ACLs (FUSE's POSIX ACL mode); icbfs keeps the mode
+in step with them, as Linux filesystems do:
+
+- setting an access ACL sets the mode's bits (its mask entry as the group
+  bits), and an ACL that says no more than a mode is stored as just the
+  mode;
+- `chmod` updates the owner, mask (or group) and other entries;
+- a new item takes its directory's default ACL, limited by the mode it
+  was created with, and a new directory also takes the default ACL
+  itself.
+
+POSIX ACLs exist only on primary-POSIX filesystems; on primary-Windows
+ones the security descriptor is the permission. One difference from ext4:
+the kernel applies the process's umask before icbfs sees a new item's mode
+(go-fuse passes no umask), so under a default ACL the umask still narrows
+the new item's mask, where ext4 would ignore it.
+
 **Users' data and icbfs's state never share a field.** The extended
 attributes hold only names a user set; icbfs's state has typed fields of
 its own, and its tools' data a separate table keyed by tool. Nothing a user
@@ -416,9 +437,6 @@ See [api.md](api.md).
 
 ## Not supported
 
-- **Extended attributes and POSIX ACLs on Linux mounts.** The FUSE driver
-  doesn't implement `getxattr` or `setxattr`, so `setfacl` and user xattrs
-  fail there, though the core stores both.
 - **Object stores:**
   - Azure Blob Storage has no store implementation, only the change-feed
     filter.

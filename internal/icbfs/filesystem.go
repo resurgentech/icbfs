@@ -59,6 +59,7 @@ type Filesystem struct {
 	maxFileSize    int64  // set by Bootstrap from the stored master-block value; see MaxFileSize
 	newMaxFileSize uint64 // the max file size a filesystem gets if Bootstrap creates it; see SetCreationMaxFileSize
 	lockingEnabled bool   // off by default; see EnableLocking
+	posixACLs      bool   // new items inherit default ACLs; see EnablePosixACLs
 
 	// lockNotify is nil unless EnableChangeNotifications was called. It's
 	// set once before concurrent use and only read after, as lockingEnabled
@@ -943,6 +944,9 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 	}
 	now := time.Now()
 	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1, Mtime: now, Ctime: now}
+	if err := f.inheritACLs(ctx, dirKey, &attr, true); err != nil {
+		return "", Attr{}, err
+	}
 	metaData, err := encodeFileMetadata(attr)
 	if err != nil {
 		return "", Attr{}, err
@@ -986,6 +990,10 @@ func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid,
 	}
 
 	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1}
+	if err := f.inheritACLs(ctx, dirKey, &attr, false); err != nil {
+		_ = f.store.Delete(ctx, newUUID, "")
+		return "", Attr{}, "", err
+	}
 	metaData, err := encodeFileMetadata(attr)
 	if err != nil {
 		_ = f.store.Delete(ctx, newUUID, "")
@@ -1036,6 +1044,10 @@ func (f *Filesystem) Mknod(ctx context.Context, dirKey, name string, mode uint32
 	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1}
 	if typ == TypeCharDevice || typ == TypeBlockDevice {
 		attr.Rdev = rdev
+	}
+	if err := f.inheritACLs(ctx, dirKey, &attr, false); err != nil {
+		_ = f.store.Delete(ctx, newUUID, "")
+		return "", Attr{}, err
 	}
 	metaData, err := encodeFileMetadata(attr)
 	if err != nil {
@@ -1359,24 +1371,6 @@ func (f *Filesystem) SetAppData(ctx context.Context, uuid string, typ EntryType,
 			a.App = make(map[string][]byte)
 		}
 		a.App[key] = value
-	})
-}
-
-// SetXattr sets (or, with a nil value, removes) one of a file's,
-// symlink's or directory's extended attributes, as a user sets them.
-func (f *Filesystem) SetXattr(ctx context.Context, uuid string, typ EntryType, name string, value []byte) (Attr, error) {
-	if err := f.checkWritable(); err != nil {
-		return Attr{}, err
-	}
-	return f.updateMetadata(ctx, uuid, typ, func(a *Attr) {
-		if value == nil {
-			delete(a.Xattrs, name)
-			return
-		}
-		if a.Xattrs == nil {
-			a.Xattrs = make(map[string][]byte)
-		}
-		a.Xattrs[name] = value
 	})
 }
 
@@ -1784,6 +1778,7 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 		return f.updateDirMetadata(ctx, key, func(a *Attr) {
 			if mode != nil {
 				a.Mode = *mode
+				chmodACL(a, *mode)
 			}
 			if uid != nil {
 				a.Uid = *uid
@@ -1835,6 +1830,7 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 		return f.updateFileMetadata(ctx, key, func(a *Attr) {
 			if mode != nil {
 				a.Mode = *mode
+				chmodACL(a, *mode)
 			}
 			if uid != nil {
 				a.Uid = *uid

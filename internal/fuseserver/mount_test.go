@@ -111,6 +111,7 @@ func mountFSWithLocking(t *testing.T, store objstore.Store, fsName string, locki
 		t.Fatalf("bootstrap filesystem: %v", err)
 	}
 	fsys.EnableLocking(locking)
+	fsys.EnablePosixACLs(true)
 
 	mountDir := t.TempDir()
 	server, err := fs.Mount(mountDir, Root(fsys, nil), &fs.Options{
@@ -122,6 +123,7 @@ func mountFSWithLocking(t *testing.T, store objstore.Store, fsName string, locki
 			// which passes same-host tests without exercising the
 			// .lock-object logic at all.
 			EnableLocks: true,
+			EnableAcl:   true,
 			Options:     []string{"default_permissions"},
 		},
 		NullPermissions: true,
@@ -167,13 +169,15 @@ func mountTestFSWithFsys(t *testing.T) (string, *icbfs.Filesystem) {
 	if err := fsys.Bootstrap(ctx, 1<<30, 0755, uint32(os.Getuid()), uint32(os.Getgid()), false); err != nil {
 		t.Fatalf("bootstrap filesystem: %v", err)
 	}
+	fsys.EnablePosixACLs(true)
 
 	mountDir := t.TempDir()
 	server, err := fs.Mount(mountDir, Root(fsys, nil), &fs.Options{
 		MountOptions: fuse.MountOptions{
-			FsName:  "icbfs-test",
-			Name:    "icbfs-test",
-			Options: []string{"default_permissions"},
+			FsName:    "icbfs-test",
+			Name:      "icbfs-test",
+			EnableAcl: true,
+			Options:   []string{"default_permissions"},
 		},
 		NullPermissions: true,
 	})
