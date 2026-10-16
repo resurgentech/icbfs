@@ -344,19 +344,6 @@ func (n *Node) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn,
 		mtimeP = &m
 	}
 
-	// ftruncate(2), or open(2) with O_TRUNC, names the handle: truncate
-	// its session, or its copy keeps the old bytes and its next flush
-	// re-applies its earlier writes over the truncation.
-	if h, ok := f.(*FileHandle); ok && h != nil && sizeP != nil {
-		if err := h.open.Truncate(*sizeP); err != nil {
-			return errnoFromErr(err)
-		}
-		if _, err := h.open.Flush(ctx); err != nil {
-			return errnoFromErr(err)
-		}
-		sizeP = nil
-	}
-
 	attr, err := n.fsys.SetAttr(ctx, n.key, n.typ, modeP, uidP, gidP, sizeP, atimeP, mtimeP, nil)
 	if err != nil {
 		return errnoFromErr(err)

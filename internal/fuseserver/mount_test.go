@@ -1860,3 +1860,43 @@ func TestMountRenameFlags(t *testing.T) {
 		t.Fatalf("RENAME_NOREPLACE onto nothing: %v", err)
 	}
 }
+
+// TestMountTruncateByPathWhileOpen: truncate(2) by path applies to a
+// descriptor already open with unstored writes: its size, mtime and ctime
+// change at once, and its writes don't come back at the close
+// (xfstests' generic/313).
+func TestMountTruncateByPathWhileOpen(t *testing.T) {
+	mnt := mountTestFS(t)
+	path := filepath.Join(mnt, "t")
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Write([]byte("not yet stored")); err != nil {
+		t.Fatal(err)
+	}
+	var before, after syscall.Stat_t
+	if err := syscall.Fstat(int(f.Fd()), &before); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond) // past the store's one-second times
+	if err := os.Truncate(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Fstat(int(f.Fd()), &after); err != nil {
+		t.Fatal(err)
+	}
+	if after.Size != 0 {
+		t.Errorf("size %d after truncating to 0", after.Size)
+	}
+	if after.Mtim == before.Mtim || after.Ctim == before.Ctim {
+		t.Errorf("mtime %v -> %v, ctime %v -> %v: want both changed", before.Mtim, after.Mtim, before.Ctim, after.Ctim)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(path); len(got) != 0 {
+		t.Fatalf("after the close: %q, want empty", got)
+	}
+}

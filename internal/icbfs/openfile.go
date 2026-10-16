@@ -250,6 +250,25 @@ func (o *OpenFile) WriteAt(data []byte, off int64) error {
 	return nil
 }
 
+// errSessionClosed is Flush on a session that has been closed.
+var errSessionClosed = errors.New("icbfs: session closed")
+
+// truncateIfOpen is Truncate, reporting false and doing nothing if the
+// session has been closed.
+func (o *OpenFile) truncateIfOpen(size int64) (bool, error) {
+	o.mu.Lock()
+	closed := o.file == nil
+	o.mu.Unlock()
+	if closed {
+		return false, nil
+	}
+	err := o.Truncate(size)
+	if errors.Is(err, ErrInvalidArgument) && size >= 0 {
+		return false, nil // closed in between
+	}
+	return err == nil, err
+}
+
 // Truncate sets this session's content length, as ftruncate(2) does: a
 // shrink drops the tail, a grow extends with zeros (sparsely, on the
 // local scratch file). Like WriteAt, it's flushed by Flush.
@@ -480,6 +499,9 @@ func (o *OpenFile) Flush(ctx context.Context) (Attr, error) {
 	defer o.mu.Unlock()
 	if !o.dirty {
 		return o.fsys.statFile(ctx, o.key)
+	}
+	if o.file == nil {
+		return Attr{}, errSessionClosed
 	}
 	if o.fsys.isOrphan(o.key) {
 		// Unlinked while open: nothing can see this content any more,

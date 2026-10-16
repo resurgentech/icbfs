@@ -1974,19 +1974,7 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 	}
 
 	if size != nil {
-		// Through an OpenFile session, so the content is staged on local
-		// disk (a grow is a sparse extend there), and the write is the
-		// same CAS-retried flush as any other edit.
-		o, err := f.Open(ctx, key)
-		if err != nil {
-			return Attr{}, err
-		}
-		err = o.Truncate(*size)
-		if err == nil {
-			_, err = o.Flush(ctx)
-		}
-		o.Close()
-		if err != nil {
+		if err := f.truncate(ctx, key, *size); err != nil {
 			return Attr{}, err
 		}
 	}
@@ -2060,6 +2048,45 @@ func (f *Filesystem) TouchAtime(ctx context.Context, key string, typ EntryType) 
 		a.Atime = now
 		return true
 	})
+}
+
+// truncate sets a file's size, through an OpenFile session, so the content
+// is staged on local disk (a grow is a sparse extend there) and stored by
+// the same CAS-retried flush as any other edit. The sessions this process
+// has open on the file are the ones truncated, every one: a session left
+// alone would go on showing the old bytes, and its next flush would put
+// them back. With none open, a session is opened for it.
+func (f *Filesystem) truncate(ctx context.Context, key string, size int64) error {
+	f.openMu.Lock()
+	sessions := make([]*OpenFile, 0, len(f.opens.sessions[key]))
+	for o := range f.opens.sessions[key] {
+		sessions = append(sessions, o)
+	}
+	f.openMu.Unlock()
+	if len(sessions) == 0 {
+		o, err := f.Open(ctx, key)
+		if err != nil {
+			return err
+		}
+		defer o.Close()
+		sessions = append(sessions, o)
+	}
+	var truncated []*OpenFile
+	for _, o := range sessions {
+		open, err := o.truncateIfOpen(size)
+		if err != nil {
+			return err
+		}
+		if open { // one closed since the list was taken has nothing to keep
+			truncated = append(truncated, o)
+		}
+	}
+	for _, o := range truncated {
+		if _, err := o.Flush(ctx); err != nil && !errors.Is(err, errSessionClosed) {
+			return err
+		}
+	}
+	return nil
 }
 
 // AtimeMode is when reads record an access time, as Linux's mount
