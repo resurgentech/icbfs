@@ -50,6 +50,10 @@ if [ \"\$(git -C $XFSTESTS rev-parse HEAD 2>/dev/null)\" != $XFSTESTS_REV ] || [
   git -C $XFSTESTS checkout -q $XFSTESTS_REV
   make -C $XFSTESTS -j\$(nproc) >/dev/null
 fi
+# xfstests compares a mount's type with FSTYP; map fuse.icbfs to fuse, as
+# it already maps fuse.glusterfs and fuse.ceph-fuse.
+grep -q fuse.icbfs $XFSTESTS/common/rc || sed -i \"s|-e 's/fuse.ceph-fuse/ceph-fuse/'|-e 's/fuse.ceph-fuse/ceph-fuse/' -e 's/fuse.icbfs/fuse/'|\" $XFSTESTS/common/rc
+grep -q fuse.icbfs $XFSTESTS/common/rc
 id fsgqa >/dev/null 2>&1 || sudo useradd -m fsgqa
 id 123456-fsgqa >/dev/null 2>&1 || sudo useradd 123456-fsgqa
 id fsgqa2 >/dev/null 2>&1 || sudo useradd fsgqa2

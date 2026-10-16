@@ -80,6 +80,8 @@ type Filesystem struct {
 	newMaxFileSize uint64 // the max file size a filesystem gets if Bootstrap creates it; see SetCreationMaxFileSize
 	lockingEnabled bool   // off by default; see EnableLocking
 	posixACLs      bool   // new items inherit default ACLs; see EnablePosixACLs
+	atime          AtimeMode
+	noDirAtime     bool // see SetAtime
 
 	// lockNotify is nil unless EnableChangeNotifications was called. It's
 	// set once before concurrent use and only read after, as lockingEnabled
@@ -1114,7 +1116,7 @@ func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid,
 		return "", Attr{}, "", err
 	}
 
-	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1}
+	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1, Ctime: time.Now()}
 	if err := f.inheritACLs(ctx, dirKey, &attr, false); err != nil {
 		_ = f.store.Delete(ctx, newUUID, "")
 		return "", Attr{}, "", err
@@ -1166,7 +1168,7 @@ func (f *Filesystem) Mknod(ctx context.Context, dirKey, name string, mode uint32
 		return "", Attr{}, err
 	}
 
-	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1}
+	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1, Ctime: time.Now()}
 	if typ == TypeCharDevice || typ == TypeBlockDevice {
 		attr.Rdev = rdev
 	}
@@ -1216,7 +1218,7 @@ func (f *Filesystem) Symlink(ctx context.Context, dirKey, name, target string, u
 		return "", Attr{}, err
 	}
 
-	attr := Attr{Mode: 0777, Uid: uid, Gid: gid, Nlink: 1}
+	attr := Attr{Mode: 0777, Uid: uid, Gid: gid, Nlink: 1, Ctime: time.Now()}
 	metaData, err := encodeFileMetadata(attr)
 	if err != nil {
 		_ = f.store.Delete(ctx, newUUID, "")
@@ -1356,6 +1358,14 @@ func (f *Filesystem) updateMetadata(ctx context.Context, key string, typ EntryTy
 // (created only if still absent, so a concurrent migration can't be
 // overwritten).
 func (f *Filesystem) writeMetadata(ctx context.Context, key string, typ EntryType, statusChange bool, mutate func(*Attr)) error {
+	return f.writeMetadataIf(ctx, key, typ, statusChange, func(a *Attr) bool { mutate(a); return true })
+}
+
+// writeMetadataIf is writeMetadata whose mutate can decline (false), and
+// then nothing is written. A write that isn't a status change keeps the
+// record's ctime: one with none stored gets its current one, the
+// record's own LastModified, so the write can't move it.
+func (f *Filesystem) writeMetadataIf(ctx context.Context, key string, typ EntryType, statusChange bool, mutate func(*Attr) bool) error {
 	mk := metadataObjectKey(key)
 	for attempt := 0; attempt < maxTreeRetries; attempt++ {
 		retryPause(ctx, attempt)
@@ -1392,9 +1402,13 @@ func (f *Filesystem) writeMetadata(ctx context.Context, key string, typ EntryTyp
 		if err != nil {
 			return err
 		}
-		mutate(&attr)
+		if !mutate(&attr) {
+			return nil
+		}
 		if statusChange {
 			attr.Ctime = time.Now()
+		} else if attr.Ctime.IsZero() {
+			attr.Ctime = obj.LastModified
 		}
 		newData, err := encodeFileMetadata(attr)
 		if err != nil {
@@ -1995,10 +2009,48 @@ func (f *Filesystem) TouchAtime(ctx context.Context, key string, typ EntryType) 
 	if isStreamKey(key) || f.readOnly {
 		return nil // a stream has no .metadata of its own; a read-only view records nothing
 	}
+	if f.atime == AtimeNever || (typ == TypeDir && f.noDirAtime) {
+		return nil
+	}
 	now := time.Now()
-	return f.writeMetadata(ctx, key, typ, false, func(a *Attr) {
+	if f.atime == AtimeRelative {
+		a, err := f.Stat(ctx, key, typ)
+		if err != nil {
+			return err
+		}
+		if !relatimeDue(a, now) {
+			return nil
+		}
+	}
+	return f.writeMetadataIf(ctx, key, typ, false, func(a *Attr) bool {
 		a.Atime = now
+		return true
 	})
+}
+
+// AtimeMode is when reads record an access time, as Linux's mount
+// options: AtimeStrict on every read (strictatime), AtimeRelative only
+// when the recorded one is no newer than the last change or a day old
+// (relatime, Linux's default), AtimeNever not at all (noatime).
+type AtimeMode int
+
+const (
+	AtimeStrict AtimeMode = iota
+	AtimeRelative
+	AtimeNever
+)
+
+// SetAtime sets when reads record access times; dirs false records none
+// for directories (nodiratime). The default is AtimeStrict, with dirs.
+func (f *Filesystem) SetAtime(mode AtimeMode, dirs bool) {
+	f.atime, f.noDirAtime = mode, !dirs
+}
+
+// relatimeDue is relatime's rule: record an access if the item was never
+// read, or its access time is no newer than its last modification or
+// status change, or a day old.
+func relatimeDue(a Attr, now time.Time) bool {
+	return a.Atime.IsZero() || !a.Atime.After(a.Mtime) || !a.Atime.After(a.Ctime) || now.Sub(a.Atime) >= 24*time.Hour
 }
 
 func mapNotFound(err error) error {

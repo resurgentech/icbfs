@@ -46,6 +46,8 @@ func main() {
 	locking := fset.Bool("locking", false, "flock/fcntl locks shared with every other mount of the filesystem (docs/architecture.md's Locking section)")
 	enableNotify := fset.Bool("notify", false, "MinIO change notifications (ListenBucketNotification): with -locking, a lock wait retries as soon as the lock changes")
 	readOnly := fset.Bool("read-only", false, "mount read-only")
+	atime := fset.String("atime", "relatime", "when reads record access times: relatime (when the recorded one is no newer than the last change, or a day old), strict (every read), or noatime (never)")
+	noDirAtime := fset.Bool("nodiratime", false, "don't record access times for directories")
 	debug := fset.Bool("debug", false, "log every FUSE operation")
 	allowOther := fset.Bool("allow-other", false, "allow users other than the one running this command (and root) to use the mount; without it the kernel refuses every other uid, whatever the file modes say. Needs user_allow_other in /etc/fuse.conf when not run as root")
 	cacheDir := fset.String("cache-dir", "", "local disk directory for open files and the read cache (default: a new directory under the system temp directory)")
@@ -122,6 +124,16 @@ func main() {
 		log.Fatalf("filesystem %q: %v", *fsName, err)
 	}
 	fsys.EnableLocking(*locking)
+	switch *atime {
+	case "relatime":
+		fsys.SetAtime(icbfs.AtimeRelative, !*noDirAtime)
+	case "strict":
+		fsys.SetAtime(icbfs.AtimeStrict, !*noDirAtime)
+	case "noatime":
+		fsys.SetAtime(icbfs.AtimeNever, false)
+	default:
+		log.Fatalf("-atime %q: relatime, strict or noatime", *atime)
+	}
 	// POSIX ACLs on primary-POSIX filesystems; on primary-Windows ones
 	// the security descriptor is the permission.
 	acls := !fsys.PrimaryWindows()

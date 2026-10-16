@@ -35,6 +35,14 @@ var mountOptionFlags = map[string]string{
 	"locking":     "-locking",
 	"notify":      "-notify",
 	"debug":       "-debug",
+	"nodiratime":  "-nodiratime",
+}
+
+// atimeOptions are the access-time options, and -atime's value for each.
+var atimeOptions = map[string]string{
+	"relatime":    "relatime",
+	"strictatime": "strict",
+	"noatime":     "noatime",
 }
 
 // valueOptions are mount -o options with a value, and their flags.
@@ -49,7 +57,7 @@ var valueOptions = map[string]string{
 var ignoredMountOptions = map[string]bool{
 	"rw": true, "defaults": true, "auto": true, "noauto": true, "user": true, "nouser": true,
 	"dev": true, "nodev": true, "suid": true, "nosuid": true, "exec": true, "noexec": true,
-	"atime": true, "noatime": true, "relatime": true, "strictatime": true, "nodiratime": true,
+	"atime": true, "norelatime": true, "diratime": true,
 	"async": true, "_netdev": true, "nofail": true, "default_permissions": true,
 }
 
@@ -126,6 +134,8 @@ func helperFlags(args []string) (name, dir string, flags []string, err error) {
 		case o == "":
 		case mountOptionFlags[key] != "" && !hasValue:
 			flags = append(flags, mountOptionFlags[key])
+		case atimeOptions[key] != "" && !hasValue:
+			flags = append(flags, "-atime", atimeOptions[key])
 		case valueOptions[key] != "" && hasValue:
 			flags = append(flags, valueOptions[key], value)
 		case ignoredMountOptions[key]:

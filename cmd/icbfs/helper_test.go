@@ -12,7 +12,7 @@ func TestHelperFlags(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"mount", "-fs", "docs", "-read-only", "-allow-other", "-cache-dir", "/var/cache/icbfs", "/mnt/docs"}
+	want := []string{"mount", "-fs", "docs", "-read-only", "-allow-other", "-atime", "noatime", "-cache-dir", "/var/cache/icbfs", "/mnt/docs"}
 	if name != "docs" || dir != "/mnt/docs" || !reflect.DeepEqual(flags, want) {
 		t.Fatalf("got %q %q %q", name, dir, flags)
 	}

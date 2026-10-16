@@ -213,7 +213,11 @@ object.
   write.
 - **Creation time** is the time in the UUIDv7 key, unless overridden.
 - **Access time** is recorded in `.metadata` on a file's first read in each
-  open, and on a directory listing. It is best-effort: a lost race never
+  open, and on a directory listing, subject to the access-time mode:
+  Linux mounts default to relatime, which skips the write unless the
+  recorded access is no newer than the last change or a day old; strict
+  and never are the other modes, and directories can be left out. It is
+  best-effort: a lost race never
   fails the read, and it doesn't count as a change for ctime. As-of mounts
   record nothing.
 
