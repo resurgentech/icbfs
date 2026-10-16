@@ -297,8 +297,8 @@ is a hint to "go look". It never says authoritatively what changed.
   is passed on to the kernel to invalidate it. The mount sets no kernel
   cache timeouts and doesn't keep page cache across opens, so every read
   already reaches the store, and this has no visible effect today. The
-  table of watched files is never pruned, so it grows with the number of
-  distinct files a long-running mount touches.
+  table of watched files holds only the inodes the kernel holds: an entry
+  goes when the kernel forgets its inode.
 - **For locking**, a notification wakes a waiter early.
 - **In the drive API**, MinIO notifications become bare `changed` events
   on a drive's event stream (`pkg/icbfs.WatchMinIO` into

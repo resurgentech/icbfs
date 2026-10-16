@@ -13,15 +13,15 @@ import (
 // watchRegistry maps the keys this mount has looked up to their live
 // go-fuse inodes, so a signal naming a key can be passed to the kernel.
 //
-// register keeps the first entry for a key and never overwrites it.
 // NewInode with an explicit Ino always makes a new Inode; go-fuse decides
-// later (bridge.addNewChild) which one is canonical, keeping the first.
-// Overwriting would point the registry at an inode the kernel never heard
-// of (NotifyContent then gets ENOENT).
+// later (bridge.addNewChild) which one is canonical, keeping the first. So
+// register, from newChild, keeps the first entry for a key, and confirm,
+// from operations on the node (which go-fuse only calls on the canonical
+// inode), overwrites it. Pointing the registry at an inode the kernel
+// never heard of makes NotifyContent fail with ENOENT.
 //
-// Entries are never removed, so the map grows with the number of distinct
-// items the mount touches, and go-fuse can't release those inodes. Fixing
-// that means hooking go-fuse's FORGET handling.
+// forget, from OnForget, removes an entry when the kernel drops its inode,
+// so the map holds only what the kernel holds.
 type watchRegistry struct {
 	mu    sync.Mutex
 	byKey map[string]*fs.Inode
@@ -38,6 +38,26 @@ func (w *watchRegistry) register(key string, inode *fs.Inode) {
 		return
 	}
 	w.byKey[key] = inode
+}
+
+func (w *watchRegistry) confirm(key string, inode *fs.Inode) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.byKey[key] = inode
+}
+
+func (w *watchRegistry) forget(key string, inode *fs.Inode) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.byKey[key] == inode {
+		delete(w.byKey, key)
+	}
+}
+
+func (w *watchRegistry) len() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.byKey)
 }
 
 func (w *watchRegistry) lookup(key string) (*fs.Inode, bool) {

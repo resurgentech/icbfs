@@ -150,9 +150,12 @@ test/minio/down.sh             # remove it; --all removes any left behind
   descriptor per locker, and every `flock` case are correct.
 - **Locks on Windows mounts are local to the machine** (see
   [architecture.md](architecture.md#locking)).
-- **With `-notify`, the FUSE mount's table of watched files is never
-  pruned.** On a long-running mount it grows with the number of distinct
-  files touched.
+- **Under a default ACL, the umask still applies on Linux mounts.** POSIX
+  says a new item in a directory with a default ACL ignores the umask;
+  the kernel applies it anyway unless the filesystem asks for the umask
+  (`FUSE_DONT_MASK`), which go-fuse doesn't support. With the usual 022
+  umask, a default ACL granting group or other write doesn't take effect
+  on new items.
 - **Directories don't shrink.** Blocks are split, never merged, so a
   directory that grew and then emptied keeps its height.
 - **Case-sensitive Windows mounts** fail winfsp-tests'

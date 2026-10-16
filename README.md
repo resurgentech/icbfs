@@ -104,7 +104,7 @@ and tested against MinIO. The latest full run, on 2026-10-14:
 
 | suite | where | result |
 |---|---|---|
-| Go tests (`go test ./...`) | Linux, MinIO in Docker, real FUSE mounts | all 16 packages pass, except one flaky lock-renewal test (see [known issues](docs/testing.md#known-issues)) |
+| Go tests (`go test -race ./...`) | Linux, MinIO in Docker, real FUSE mounts | all 19 packages with tests pass |
 | [pjdfstest](https://github.com/pjd/pjdfstest) (POSIX conformance) | FUSE mount, Ubuntu 24.04 VM | 8,798 assertions: all pass but 4 accepted (directory link count, as on Btrfs) |
 | [winfsp-tests](https://github.com/winfsp/winfsp/wiki/WinFsp-Testing) `--external`, case-insensitive | WinFsp mount, Windows Server 2025 VM | 78 / 78 |
 | winfsp-tests `--external`, case-sensitive | same | 77 / 78 (`getfileinfo_name_test`, which WinFsp's memfs also fails case-sensitive) |

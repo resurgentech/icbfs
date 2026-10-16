@@ -1104,6 +1104,55 @@ func TestMountNotifyDispatchesSignalToCorrectInode(t *testing.T) {
 	}
 }
 
+// TestMountNotifyRegistryForgets: once the kernel forgets an item's inode
+// (here: unlinked and closed), its watch entry goes, so a long-running
+// mount's registry doesn't grow with every item it has ever touched.
+func TestMountNotifyRegistryForgets(t *testing.T) {
+	ctx := context.Background()
+	store := newMountTestStore(t)
+	fsys := icbfs.New(store, "test")
+	if err := fsys.Bootstrap(ctx, 1<<30, 0755, uint32(os.Getuid()), uint32(os.Getgid()), false); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	source := notify.NewFakeSource(4)
+	root := Root(fsys, source.Signals())
+	mountDir := t.TempDir()
+	server, err := fs.Mount(mountDir, root, &fs.Options{
+		MountOptions:    fuse.MountOptions{FsName: "icbfs-test", Name: "icbfs-test", Options: []string{"default_permissions"}},
+		NullPermissions: true,
+	})
+	if err != nil {
+		t.Fatalf("mount: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Unmount() })
+
+	base := root.watches.len()
+	for i := 0; i < 5; i++ {
+		path := filepath.Join(mountDir, fmt.Sprintf("f%d", i))
+		if err := os.WriteFile(path, []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.ReadFile(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := root.watches.len(); got < base+5 {
+		t.Fatalf("registry has %d entries after touching 5 files, want at least %d", got, base+5)
+	}
+	for i := 0; i < 5; i++ {
+		if err := os.Remove(filepath.Join(mountDir, fmt.Sprintf("f%d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for root.watches.len() > base {
+		if time.Now().After(deadline) {
+			t.Fatalf("registry still has %d entries after the files were removed, want %d", root.watches.len(), base)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // TestMountFcntlSharedLocksCoexistAcrossProcesses, with a second process:
 // its F_RDLCK doesn't block this process's F_RDLCK on the same range, but
 // does block an F_WRLCK, which succeeds once the helper releases.

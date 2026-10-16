@@ -41,22 +41,23 @@ type Node struct {
 }
 
 var (
-	_ fs.InodeEmbedder  = (*Node)(nil)
-	_ fs.NodeLookuper   = (*Node)(nil)
-	_ fs.NodeGetattrer  = (*Node)(nil)
-	_ fs.NodeSetattrer  = (*Node)(nil)
-	_ fs.NodeReaddirer  = (*Node)(nil)
-	_ fs.NodeMkdirer    = (*Node)(nil)
-	_ fs.NodeMknoder    = (*Node)(nil)
-	_ fs.NodeCreater    = (*Node)(nil)
-	_ fs.NodeOpener     = (*Node)(nil)
-	_ fs.NodeUnlinker   = (*Node)(nil)
-	_ fs.NodeRmdirer    = (*Node)(nil)
-	_ fs.NodeSymlinker  = (*Node)(nil)
-	_ fs.NodeReadlinker = (*Node)(nil)
-	_ fs.NodeLinker     = (*Node)(nil)
-	_ fs.NodeRenamer    = (*Node)(nil)
-	_ fs.NodeStatfser   = (*Node)(nil)
+	_ fs.InodeEmbedder   = (*Node)(nil)
+	_ fs.NodeLookuper    = (*Node)(nil)
+	_ fs.NodeGetattrer   = (*Node)(nil)
+	_ fs.NodeSetattrer   = (*Node)(nil)
+	_ fs.NodeReaddirer   = (*Node)(nil)
+	_ fs.NodeMkdirer     = (*Node)(nil)
+	_ fs.NodeMknoder     = (*Node)(nil)
+	_ fs.NodeCreater     = (*Node)(nil)
+	_ fs.NodeOpener      = (*Node)(nil)
+	_ fs.NodeUnlinker    = (*Node)(nil)
+	_ fs.NodeRmdirer     = (*Node)(nil)
+	_ fs.NodeSymlinker   = (*Node)(nil)
+	_ fs.NodeReadlinker  = (*Node)(nil)
+	_ fs.NodeLinker      = (*Node)(nil)
+	_ fs.NodeRenamer     = (*Node)(nil)
+	_ fs.NodeStatfser    = (*Node)(nil)
+	_ fs.NodeOnForgetter = (*Node)(nil)
 )
 
 // statfsBlockSize is the unit statfs reports sizes in. There are no real
@@ -221,6 +222,20 @@ func (n *Node) newChild(ctx context.Context, key string, typ icbfs.EntryType) *f
 	return inode
 }
 
+// confirmWatch records n's inode as its key's (see watchRegistry).
+func (n *Node) confirmWatch() {
+	if n.watches != nil && n.key != "" {
+		n.watches.confirm(n.key, n.EmbeddedInode())
+	}
+}
+
+// OnForget: the kernel has dropped n's inode.
+func (n *Node) OnForget() {
+	if n.watches != nil {
+		n.watches.forget(n.key, n.EmbeddedInode())
+	}
+}
+
 func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	ctx = detach(ctx)
 	entry, attr, err := n.fsys.Lookup(ctx, n.key, name)
@@ -233,6 +248,7 @@ func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 
 func (n *Node) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
 	ctx = detach(ctx)
+	n.confirmWatch()
 	attr, err := n.fsys.Stat(ctx, n.key, n.typ)
 	if err != nil {
 		return errnoFromErr(err)
@@ -381,6 +397,7 @@ func (n *Node) Create(ctx context.Context, name string, flags uint32, mode uint3
 
 func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	ctx = detach(ctx)
+	n.confirmWatch()
 	open, err := n.fsys.Open(ctx, n.key)
 	if err != nil {
 		return nil, 0, errnoFromErr(err)
