@@ -404,6 +404,15 @@ func (n *Node) Mknod(ctx context.Context, name string, mode, dev uint32, out *fu
 	ctx = withUmask(ctx)
 	var typ icbfs.EntryType
 	switch mode & syscall.S_IFMT {
+	case syscall.S_IFREG, 0:
+		// mknod(2) makes regular files too (0 means S_IFREG).
+		uid, gid := callerOwner(ctx)
+		newUUID, attr, _, err := n.fsys.Create(ctx, n.key, name, mode&0o7777, uid, gid)
+		if err != nil {
+			return nil, errnoFromErr(err)
+		}
+		fillAttr(&out.Attr, newUUID, icbfs.TypeFile, attr)
+		return n.newChild(ctx, newUUID, icbfs.TypeFile, attr), 0
 	case syscall.S_IFIFO:
 		typ = icbfs.TypeFifo
 	case syscall.S_IFSOCK:
@@ -413,8 +422,6 @@ func (n *Node) Mknod(ctx context.Context, name string, mode, dev uint32, out *fu
 	case syscall.S_IFBLK:
 		typ = icbfs.TypeBlockDevice
 	default:
-		// Anything else (a regular file is Create's) isn't a valid mknod
-		// target.
 		return nil, syscall.EINVAL
 	}
 	uid, gid := callerOwner(ctx)

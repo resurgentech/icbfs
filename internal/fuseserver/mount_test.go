@@ -1949,3 +1949,23 @@ func TestMountListingHasDotEntries(t *testing.T) {
 		t.Fatalf("entries %v, want ., .. and f", inos)
 	}
 }
+
+// TestMountMknodRegularFile: mknod(2) with S_IFREG makes a regular file
+// (xfstests' generic/633).
+func TestMountMknodRegularFile(t *testing.T) {
+	mnt := mountTestFS(t)
+	path := filepath.Join(mnt, "made-by-mknod")
+	if err := syscall.Mknod(path, syscall.S_IFREG|0o640, 0); err != nil {
+		t.Fatalf("mknod S_IFREG: %v", err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.Mode().IsRegular() || st.Size() != 0 {
+		t.Fatalf("mode %v size %d, want an empty regular file", st.Mode(), st.Size())
+	}
+	if err := os.WriteFile(path, []byte("data"), 0); err != nil {
+		t.Fatal(err)
+	}
+}
