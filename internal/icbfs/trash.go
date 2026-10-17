@@ -33,6 +33,10 @@ type TrashEntry struct {
 	// Batch is shared by everything one recursive delete removed; the
 	// directory it started from has Batch == EntryID.
 	Batch string `json:"batch,omitempty"`
+	// Origin is where the item had been copied from (its AppDriveOrigin
+	// app data, as the drive API encodes it) when it was deleted, so a
+	// mirror can find its entry when the source brings the item back.
+	Origin []byte `json:"origin,omitempty"`
 }
 
 // DeleteInfo is what the core can't know about a delete: who made it,
@@ -71,7 +75,7 @@ func (f *Filesystem) trashKey(e TrashEntry) string {
 
 // recordTrash writes a trash entry for an item just deleted from dirKey
 // under name. Best effort, like touchDir: the delete itself has happened.
-func (f *Filesystem) recordTrash(ctx context.Context, itemID string, typ EntryType, dirKey, name string, size int64, version string) {
+func (f *Filesystem) recordTrash(ctx context.Context, itemID string, typ EntryType, dirKey, name string, size int64, version string, origin []byte) {
 	info := deleteInfoFrom(ctx)
 	if info.NoTrash {
 		return
@@ -86,7 +90,7 @@ func (f *Filesystem) recordTrash(ctx context.Context, itemID string, typ EntryTy
 	e := TrashEntry{
 		EntryID: id, ItemID: itemID, Type: typ, Name: name, ParentID: dirKey,
 		Path: info.Path, DeletedAt: time.Now().UTC(), DeletedBy: info.By,
-		Size: size, Version: version, Batch: info.Batch,
+		Size: size, Version: version, Batch: info.Batch, Origin: origin,
 	}
 	data, err := json.Marshal(e)
 	if err != nil {

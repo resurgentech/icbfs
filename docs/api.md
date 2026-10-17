@@ -255,16 +255,22 @@ host's drive ID.
 
 A delete from the API or from any mount records a trash entry when a file's
 last name goes or a directory is removed. An entry holds the ID, name,
-original parent and path, when, by whom, and the last version and size.
-Entries are kept forever.
+original parent and path, when, by whom, the last version and size, and
+the item's origin (where it had been copied from: `origin`, as on an item)
+if it had one. Entries are kept forever.
 
 - `GET …/trash?path=` lists deleted items, newest first, optionally only
   those from under a directory. A trashed item's versions and content can
   be read before restoring it (`versions?id=`, `content?id=&version=`).
+- `originDrive=` keeps only entries whose item had been copied from that
+  drive, and `originId=` only from that item there. A mirror finds this
+  way what it trashed when its source brings an item back with the same
+  id, restores it, and copies only the versions after its origin's.
 - `POST …/trash/{entry}/restore` takes `{"to", "parents", "replace"}`.
   - Without `to`, the item goes back to its original path.
   - A taken name answers 409.
   - Restoring a directory restores its whole batch.
+  - A restored item keeps its origin and every version.
 - A file that still has another name (a hard link) was never deleted, so it
   isn't in the trash.
 

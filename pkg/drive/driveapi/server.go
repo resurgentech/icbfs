@@ -664,7 +664,8 @@ func (s *server) deleteName(r *req) error {
 
 func (s *server) trash(r *req) error {
 	limit, _ := strconv.Atoi(r.query("limit"))
-	page, err := r.d.Trash(r.ctx, drive.TrashOptions{Path: r.query("path"), Limit: limit, Cursor: r.query("cursor")})
+	page, err := r.d.Trash(r.ctx, drive.TrashOptions{Path: r.query("path"), Limit: limit, Cursor: r.query("cursor"),
+		OriginDrive: r.query("originDrive"), OriginID: r.query("originId")})
 	if err != nil {
 		return writeErr(r.c, err)
 	}

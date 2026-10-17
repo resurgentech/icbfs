@@ -218,11 +218,13 @@ paths:
       operationId: listTrash
       tags: [drive]
       x-permission: drive.read
-      summary: Deleted items, newest first, optionally only from under a directory.
+      summary: Deleted items, newest first, optionally only from under a directory, or only those copied from a drive (and item) elsewhere.
       parameters:
         - {$ref: '#/components/parameters/PathParam'}
         - {name: limit, in: query, schema: {type: integer, minimum: 0}}
         - {name: cursor, in: query, schema: {type: string}}
+        - {name: originDrive, in: query, schema: {type: string}, description: Only entries whose item had been copied from this drive.}
+        - {name: originId, in: query, schema: {type: string}, description: Only entries whose item had been copied from this item (its origin's id).}
       responses:
         '200': {description: A page of the trash., content: {application/json: {schema: {$ref: '#/components/schemas/TrashPage'}}}}
         default: {$ref: '#/components/responses/Error'}
@@ -592,6 +594,7 @@ components:
         size: {type: integer, format: int64}
         version: {type: string}
         batch: {type: string}
+        origin: {$ref: '#/components/schemas/Origin'}
     TrashPage:
       type: object
       required: [entries]

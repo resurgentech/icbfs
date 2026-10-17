@@ -105,6 +105,9 @@ func (d *Drive) DeleteName(ctx context.Context, name string) error {
 func (d *Drive) toTrash(e icbfs.TrashEntry) (drive.TrashEntry, bool) {
 	out := drive.TrashEntry{ID: e.EntryID, ItemID: e.ItemID, Name: e.Name, Type: typeName(e.Type),
 		DeletedAt: e.DeletedAt, DeletedBy: e.DeletedBy, Size: e.Size, Version: e.Version, Batch: e.Batch}
+	if len(e.Origin) > 0 {
+		out.Origin = decodeOrigin(e.Origin)
+	}
 	if e.Path == "" {
 		// Deleted where no path was known: only the whole filesystem's
 		// drive can claim it.
@@ -138,7 +141,7 @@ func (d *Drive) Trash(ctx context.Context, opts drive.TrashOptions) (drive.Trash
 	page := drive.TrashPage{Entries: []drive.TrashEntry{}}
 	for _, e := range entries {
 		te, ok := d.toTrash(e)
-		if !ok {
+		if !ok || !originMatches(te.Origin, opts) {
 			continue
 		}
 		if opts.Limit > 0 && len(page.Entries) == opts.Limit {
@@ -148,6 +151,18 @@ func (d *Drive) Trash(ctx context.Context, opts drive.TrashOptions) (drive.Trash
 		page.Entries = append(page.Entries, te)
 	}
 	return page, nil
+}
+
+// originMatches reports whether an entry with origin o passes opts' origin
+// filter (none set: every entry does).
+func originMatches(o *drive.Origin, opts drive.TrashOptions) bool {
+	if opts.OriginDrive == "" && opts.OriginID == "" {
+		return true
+	}
+	if o == nil {
+		return false
+	}
+	return (opts.OriginDrive == "" || o.Drive == opts.OriginDrive) && (opts.OriginID == "" || o.ID == opts.OriginID)
 }
 
 // trashEntry finds a trash entry of this drive by its id.
