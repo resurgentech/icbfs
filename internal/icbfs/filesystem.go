@@ -552,12 +552,18 @@ func combineDirAttr(key string, metaData []byte, metaLastModified time.Time, blo
 	}
 	// Stored ctime as for a file (see combineFileAttr); entry changes
 	// set it explicitly (touchDir), since in a multi-level directory they
-	// needn't rewrite the root block.
+	// needn't rewrite the root block. Only a directory with none stored
+	// (from before) takes its objects' times instead. A stored ctime is
+	// this machine's clock and the block's Last-Modified the store's, in
+	// whole seconds, so letting the block's override it made a fresh
+	// directory's ctime a second past its mtime whenever the block was
+	// written just after a second ticked over at the store (pjdfstest
+	// link/00.t on S3, whose clock runs ahead of a VM's).
 	if attr.Ctime.IsZero() {
 		attr.Ctime = metaLastModified
-	}
-	if blockObj.LastModified.After(attr.Ctime) {
-		attr.Ctime = blockObj.LastModified
+		if blockObj.LastModified.After(attr.Ctime) {
+			attr.Ctime = blockObj.LastModified
+		}
 	}
 	return attr, nil
 }
@@ -1524,9 +1530,14 @@ func (f *Filesystem) writeMetadataIf(ctx context.Context, key string, typ EntryT
 // already happened, and failing that operation over a timestamp would
 // misreport it.
 func (f *Filesystem) touchDir(ctx context.Context, key string) {
+	// One instant for both: a status-change write stamps ctime when it
+	// writes, after reading the .metadata, a round trip later than this,
+	// so the two fell in different seconds whenever one ticked over in
+	// between (pjdfstest link/00.t on S3, where the round trip is long).
 	now := time.Now()
-	_ = f.writeMetadata(ctx, key, TypeDir, true, func(a *Attr) {
+	_ = f.writeMetadata(ctx, key, TypeDir, false, func(a *Attr) {
 		a.Mtime = now
+		a.Ctime = now
 	})
 }
 
