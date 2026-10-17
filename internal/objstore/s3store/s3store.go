@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/ratelimit"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	smithy "github.com/aws/smithy-go"
@@ -56,7 +58,7 @@ func (s *Store) Put(ctx context.Context, key string, body io.Reader, metadata ma
 	if ifMatch != "" {
 		in.IfMatch = aws.String(ifMatch)
 	}
-	out, err := s.client.PutObject(ctx, in)
+	out, err := s.client.PutObject(ctx, in, retryConflicts)
 	if err != nil {
 		if ifMatch != "" && s.lostRace(ctx, key, ifMatch, err) {
 			return nil, fmt.Errorf("put %s: %w (%v)", key, objstore.ErrPreconditionFailed, err)
@@ -80,6 +82,33 @@ func (s *Store) lostRace(ctx context.Context, key, ifMatch string, err error) bo
 	head, herr := s.Head(ctx, key)
 	return herr == nil && head.ETag != ifMatch
 }
+
+// retryConflicts is for conditional writes. AWS S3 answers one that
+// arrives while another conditional write to the same key is in flight
+// with 409 ConditionalRequestConflict, neither success nor a failed
+// precondition, and says to retry; once the other write has finished, the
+// retry succeeds or gets its 412. Without this, three machines creating
+// names in one directory saw EIO. MinIO never answers it.
+func retryConflicts(o *s3.Options) { o.Retryer = conflictRetryer }
+
+// conflictRetryer is the standard retryer (throttling, 5xx, resets), also
+// retrying a conflict, tried up to 8 times with its jittered backoff:
+// enough to outlast the other writers on a contended key. It has no retry
+// quota: a storm of conflicts is the case it's for, and a quota spent on
+// them would fail the writes it exists to save.
+var conflictRetryer = newConflictRetryer()
+
+func newConflictRetryer(more ...func(*retry.StandardOptions)) aws.Retryer {
+	return retry.NewStandard(append([]func(*retry.StandardOptions){func(o *retry.StandardOptions) {
+		o.MaxAttempts = conflictAttempts
+		o.RateLimiter = ratelimit.None
+		o.Retryables = append(o.Retryables, retry.RetryableErrorCode{
+			Codes: map[string]struct{}{"ConditionalRequestConflict": {}},
+		})
+	}}, more...)...)
+}
+
+const conflictAttempts = 8
 
 // partConcurrency bounds how many parts PutParts sends at once.
 const partConcurrency = 4
@@ -159,7 +188,7 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 	if ifMatch != "" {
 		in.IfMatch = aws.String(ifMatch)
 	}
-	out, err := s.client.CompleteMultipartUpload(ctx, in)
+	out, err := s.client.CompleteMultipartUpload(ctx, in, retryConflicts)
 	if err != nil {
 		abort()
 		return nil, s3Error(fmt.Errorf("put parts %s: %w", key, err))
@@ -195,7 +224,7 @@ func (s *Store) PutIfAbsent(ctx context.Context, key string, body io.Reader, met
 		Body:        body,
 		Metadata:    metadata,
 		IfNoneMatch: aws.String("*"),
-	})
+	}, retryConflicts)
 	if err != nil {
 		return nil, s3Error(fmt.Errorf("put if absent %s: %w", key, err))
 	}
