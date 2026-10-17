@@ -228,8 +228,10 @@ for w in "${WORKLOADS[@]}"; do
     fi
     # fsstress on every machine at once, each in a directory of its own,
     # which shares the filesystem's root and blocks with the others.
+    # fsstress exits 0 even when its workers fail or are killed, so what
+    # it says counts too: its errors go to stderr, the machine's log.
     check "fsstress: $N machines, 2000 operations each" \
-      "everywhere fsstress '\$BIN/fsstress -d \$MNT/stress-\$i -n 2000 -p 2 -s \$i >/dev/null'"
+      "everywhere fsstress '\$BIN/fsstress -d \$MNT/stress-\$i -n 2000 -p 2 -s \$i >/dev/null' && ! grep -q . \"\$OUT\"/fsstress-*.log"
     ;;
   *)
     echo "unknown workload $w" >&2
