@@ -96,7 +96,7 @@ type Filesystem struct {
 	atime              AtimeMode
 	atimeMu            sync.Mutex
 	atimeKnown         map[string]time.Time // AtimeHourly: access times this mount knows, by key
-	noDirAtime         bool // see SetAtime
+	noDirAtime         bool                 // see SetAtime
 
 	// lockNotify is nil unless EnableChangeNotifications was called. It's
 	// set once before concurrent use and only read after, as lockingEnabled
