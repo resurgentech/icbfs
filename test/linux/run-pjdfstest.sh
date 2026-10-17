@@ -19,13 +19,15 @@
 #
 # Storage is a throwaway MinIO (test/minio/with-minio.sh) that exists
 # only for this run: started here, removed when the script exits however
-# it exits. Nothing is left running between runs.
+# it exits. Nothing is left running between runs. ICBFS_TEST_STORE=s3 or
+# azure runs on the real bucket or container instead (test/store.sh).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -z "${ICBFS_MINIO_VM_ENDPOINT:-}" ]; then
+source "$HERE/lib.sh"
+if store_needs_minio; then
   exec "$HERE/../minio/with-minio.sh" "$HERE/run-pjdfstest.sh" "$@"
 fi
-source "$HERE/lib.sh"
+store_setup
 
 IP="${1:?usage: run-pjdfstest.sh <vm-ip>}"
 FS_NAME="pjdfstest-$(date +%Y%m%d%H%M%S)"
@@ -38,7 +40,7 @@ deploy_icbfs "$IP"
 
 echo "Mounting ${FS_NAME} at ${MNT}..." >&2
 # Unmount before the MinIO underneath goes away, even on failure.
-trap 'ssh_vm "$IP" "sudo umount -l $MNT 2>/dev/null; sudo pkill -x icbfs; true" || true' EXIT
+trap 'ssh_vm "$IP" "sudo umount -l $MNT 2>/dev/null; sudo pkill -x icbfs; rm -f /tmp/icbfs-mount-*.env; true" || true' EXIT
 create_fs "$FS_NAME" -max-file-size "$MAX_FILE_SIZE"
 mount_icbfs "$IP" "$MNT" "$FS_NAME"
 

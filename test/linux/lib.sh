@@ -6,6 +6,8 @@ set -uo pipefail
 VM_NAME="icbfs-fuse-test"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="$HERE/work"
+# shellcheck disable=SC1091
+source "$HERE/../store.sh"
 
 ssh_vm() {
   local ip="$1"; shift
@@ -33,7 +35,7 @@ vm_ip() {
 VM_SRC=/home/ubuntu/icbfs-test
 
 # create_fs <fs name> [icbfs-cli fs create flags...] creates a filesystem
-# on the throwaway MinIO from this host (mounts never create one), its
+# on the test store (test/store.sh) from this host (mounts never create one), its
 # root owned by root (the tests run as root on the VM).
 create_fs() {
   local fs="$1" repo
@@ -43,9 +45,9 @@ create_fs() {
   if [ ! -x "$WORK_DIR/icbfs-cli" ] || [ -n "$(find "$repo/cmd" "$repo/internal" -newer "$WORK_DIR/icbfs-cli" -name '*.go' -print -quit)" ]; then
     (cd "$repo" && go build -o "$WORK_DIR/icbfs-cli" ./cmd/icbfs-cli) || return 1
   fi
-  "$WORK_DIR/icbfs-cli" fs create -endpoint "$ICBFS_MINIO_ENDPOINT" -bucket "$ICBFS_MINIO_BUCKET" \
-    -access-key "$ICBFS_MINIO_ACCESS_KEY" -secret-key "$ICBFS_MINIO_SECRET_KEY" \
-    -fs "$fs" -root-uid 0 -root-gid 0 "$@" >/dev/null
+  [ -n "${STORE_ARGS:-}" ] || store_setup || return 1
+  # shellcheck disable=SC2086 # STORE_ARGS is words
+  "$WORK_DIR/icbfs-cli" fs create $STORE_ARGS -fs "$fs" -root-uid 0 -root-gid 0 "$@" >/dev/null
 }
 
 # deploy_icbfs <ip> copies this working tree (tracked plus
@@ -65,8 +67,8 @@ deploy_icbfs() {
 }
 
 # mount_icbfs <ip> <mountpoint> <fs name> [mount flags...] mounts that
-# (existing — see create_fs) filesystem on the throwaway MinIO (test/minio's ICBFS_MINIO_*
-# variables) in the background on the VM, as root with -allow-other, and
+# (existing — see create_fs) filesystem on the test store (test/store.sh)
+# in the background on the VM, as root with -allow-other, and
 # waits until it really is a FUSE mount — never let a test run against
 # whatever is under the mountpoint without it (the VM's own disk, which
 # passes everything). On failure it prints the mount log and returns 1.
@@ -74,7 +76,10 @@ deploy_icbfs() {
 mount_icbfs() {
   local ip="$1" mnt="$2" fs="$3"
   shift 3
-  ssh_vm "$ip" "sudo mkdir -p $mnt; sudo chmod 0755 /mnt; sudo $VM_SRC/icbfs mount -endpoint $ICBFS_MINIO_VM_ENDPOINT -bucket $ICBFS_MINIO_BUCKET -fs $fs -access-key $ICBFS_MINIO_ACCESS_KEY -secret-key $ICBFS_MINIO_SECRET_KEY $* -allow-other $mnt > /tmp/icbfs-mount-${fs}.log 2>&1 &"
+  [ -n "${STORE_VM_ARGS:-}" ] || store_setup || return 1
+  # The keys reach the VM on ssh's stdin, into a file only its owner reads.
+  printf '%s\n' "$STORE_ENV" | ssh_vm "$ip" "umask 077; cat > /tmp/icbfs-mount-${fs}.env"
+  ssh_vm "$ip" "sudo mkdir -p $mnt; sudo chmod 0755 /mnt; sudo sh -c 'set -a; . /tmp/icbfs-mount-${fs}.env; set +a; exec $VM_SRC/icbfs mount $STORE_VM_ARGS -fs $fs $* -allow-other $mnt' < /dev/null > /tmp/icbfs-mount-${fs}.log 2>&1 &"
   if ! ssh_vm "$ip" "for i in \$(seq 1 30); do findmnt -n -o FSTYPE $mnt | grep -q fuse && exit 0; sleep 0.5; done; exit 1"; then
     echo "icbfs mount at $mnt never came up — mount log:" >&2
     ssh_vm "$ip" "cat /tmp/icbfs-mount-${fs}.log" >&2

@@ -18,17 +18,18 @@
 # Needs ~13 GB free on the VM for the scratch file and read-back.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -z "${ICBFS_MINIO_VM_ENDPOINT:-}" ]; then
+source "$HERE/lib.sh"
+if store_needs_minio; then
   exec "$HERE/../minio/with-minio.sh" "$HERE/run-largefile-test.sh" "$@"
 fi
-source "$HERE/lib.sh"
+store_setup
 
 IP="${1:?usage: run-largefile-test.sh <vm-ip>}"
 FS_NAME="largefile-$(date +%Y%m%d%H%M%S)"
 MNT=/mnt/icbfs-largefile
 
 deploy_icbfs "$IP"
-trap 'ssh_vm "$IP" "sudo umount -l $MNT 2>/dev/null; sudo pkill -x icbfs; true" || true' EXIT
+trap 'ssh_vm "$IP" "sudo umount -l $MNT 2>/dev/null; sudo pkill -x icbfs; rm -f /tmp/icbfs-mount-*.env; true" || true' EXIT
 create_fs "$FS_NAME" -max-file-size $((8 << 30))
 mount_icbfs "$IP" "$MNT" "$FS_NAME"
 
