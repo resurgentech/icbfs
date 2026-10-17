@@ -50,6 +50,24 @@ addition to the read cache.
 Requirements: FUSE 3 (`fuse3`), and `user_allow_other` in `/etc/fuse.conf`
 if you use `-allow-other`.
 
+**The metadata cache** (`-meta-cache`, as NFS's attribute cache). The
+kernel trusts names, including "no such name", and attributes for this
+long before asking icbfs again, which would ask the store: without it,
+every path walk asks for every directory in the path, each a round trip
+to the store. This mount's own changes show at once; another machine's
+rename, create, delete or `chmod` can take up to the timeout to show here.
+What doesn't wait:
+
+- An open checks the store: the file's newest content, and that the name
+  it was opened by still leads to it (if not, the open follows the name as
+  it is now).
+- Locks: taking one brings an open file up to what the last holder wrote,
+  and releasing one stores what was written under it.
+- An `O_EXCL` create is always decided by the store.
+
+`-meta-cache 0` trusts nothing, as before 2026-10-17: slower, with every
+change elsewhere visible at once.
+
 ```
 export ICBFS_ENDPOINT=http://minio:9000 ICBFS_ACCESS_KEY=… ICBFS_SECRET_KEY=…
 icbfs mount -fs docs /mnt/docs
@@ -77,8 +95,9 @@ docs  /mnt/docs  fuse.icbfs  allow_other,_netdev  0  0
   600).
 - Options: `ro`, `allow_other`, `nolocking`, `notify`, `debug`, `relatime`,
   `strictatime`, `noatime`, `nodiratime`, `dev`, `suid`, `noexec`, `cache_dir=DIR`,
-  `cache_size=BYTES` and `as_of=TIME`. Generic options such as `rw` and
-  `_netdev` are accepted and ignored; anything else is refused.
+  `cache_size=BYTES`, `meta_cache=DURATION` and `as_of=TIME`. Generic
+  options such as `rw` and `_netdev` are accepted and ignored; anything
+  else is refused.
 - `mount -o remount,ro` (or `rw`, `noexec`, `noatime` and the other
   generic flags) changes a mount's flags in the kernel; icbfs keeps
   running. Its own access-time recording follows the options it was
@@ -93,6 +112,7 @@ Linux-only flags:
 |---|---|
 | `-allow-other` | let users other than the one mounting use the mount. Without it, the kernel refuses every other user, whatever the file modes say. |
 | `-locking=false` | refuse `flock`/`fcntl` (ENOSYS). By default they're locks shared with every other mount (see [architecture.md](architecture.md#locking)), which costs a read of the file's `.lock` object per flush. |
+| `-meta-cache D` | how long the kernel trusts names and attributes (above): `1s` by default, a day for `-as-of`, `0` for not at all |
 | `-notify` | MinIO change notifications: a lock wait retries as soon as the lock changes |
 | `-log-socket SOCK -drive ID` | mount a drive through the logging daemon (see [daemon.md](daemon.md)) |
 | `-log-async` | with `-log-socket`: queue events instead of waiting for the server |

@@ -45,6 +45,10 @@ type Node struct {
 	ownersMu    sync.Mutex
 	fcntlOwners map[uint64]bool
 
+	// metaCache is how long the kernel trusts names and attributes (see
+	// WithMetaCache); 0 when it trusts nothing.
+	metaCache time.Duration
+
 	// last is the attributes last reported for the item, which Getattr
 	// reports, with no links, once the item is gone: an open directory
 	// that was removed, or replaced by a rename, as Linux does. Getxattr
@@ -220,7 +224,7 @@ func errnoFromErr(err error) syscall.Errno {
 
 func (n *Node) newChild(ctx context.Context, key string, typ icbfs.EntryType, attr icbfs.Attr) *fs.Inode {
 	ctx = detach(ctx)
-	child := &Node{fsys: n.fsys, key: key, typ: typ, watches: n.watches, logger: n.logger, under: n.under}
+	child := &Node{fsys: n.fsys, key: key, typ: typ, watches: n.watches, logger: n.logger, under: n.under, metaCache: n.metaCache}
 	child.last.Store(&attr)
 	stable := fs.StableAttr{Ino: icbfs.Ino(key), Mode: typeToFuseMode(typ)}
 	// StableAttr.Ino dedups against any already-known inode with the same
@@ -284,6 +288,13 @@ func (n *Node) Getattr(ctx context.Context, f fs.FileHandle, out *fuse.AttrOut) 
 	}
 	if err != nil {
 		return errnoFromErr(err)
+	}
+	if h, ok := f.(*FileHandle); ok && h != nil {
+		// An open file reads the version it opened (or was brought up to
+		// under a lock), which may not be the newest stored: its size is
+		// what it can read, so the kernel doesn't end its reads early or
+		// late.
+		attr.Size = h.open.Size()
 	}
 	n.last.Store(&attr)
 	fillAttr(&out.Attr, n.key, n.typ, attr)
@@ -450,6 +461,9 @@ func (n *Node) Create(ctx context.Context, name string, flags uint32, mode uint3
 func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	ctx = detach(ctx)
 	n.confirmWatch()
+	if errno := n.revalidateOpen(ctx); errno != 0 {
+		return nil, 0, errno
+	}
 	open, err := n.fsys.Open(ctx, n.key)
 	if err != nil {
 		return nil, 0, errnoFromErr(err)

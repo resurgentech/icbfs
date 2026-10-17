@@ -55,6 +55,7 @@ func main() {
 	allowOther := fset.Bool("allow-other", false, "allow users other than the one running this command (and root) to use the mount; without it the kernel refuses every other uid, whatever the file modes say. Needs user_allow_other in /etc/fuse.conf when not run as root")
 	cacheDir := fset.String("cache-dir", "", "local disk directory for open files and the read cache (default: a new directory under the system temp directory)")
 	cacheSize := fset.Uint64("cache-size", 512<<20, "maximum total bytes the local disk cache (-cache-dir) may hold before evicting the least-recently-used cached file")
+	metaCache := fset.Duration("meta-cache", time.Second, "how long the kernel trusts names and attributes, as NFS's attribute cache: other machines' renames, creates and chmods can take this long to show here; opens and locks still check the store (0: trust nothing; as-of mounts default to a day)")
 	if err := fset.Parse(os.Args[2:]); err != nil {
 		os.Exit(2)
 	}
@@ -62,6 +63,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "usage: icbfs mount [flags] <mountpoint>")
 		os.Exit(2)
 	}
+	if *metaCache < 0 {
+		fmt.Fprintln(os.Stderr, "icbfs mount: -meta-cache can't be negative")
+		os.Exit(2)
+	}
+	metaCacheSet := false
+	fset.Visit(func(f *flag.Flag) { metaCacheSet = metaCacheSet || f.Name == "meta-cache" })
 	mountpoint := fset.Arg(0)
 
 	ctx := context.Background()
@@ -179,17 +186,30 @@ func main() {
 		}
 		rootOpts = append(rootOpts, fuseserver.WithRoot(key, driveRoot))
 	}
+	// Nothing an as-of mount shows can change, so its names and
+	// attributes can be trusted as long as it's mounted, and an open has
+	// nothing to revalidate.
+	cacheFor := *metaCache
+	if view != nil {
+		if !metaCacheSet {
+			cacheFor = 24 * time.Hour
+		}
+	} else {
+		rootOpts = append(rootOpts, fuseserver.WithMetaCache(cacheFor))
+	}
 	root := fuseserver.Root(fsys, fuseSignals, rootOpts...)
 	source := *fsName
 	if *driveID != "" {
 		source = *driveID
 	}
-	server, err := fuseserver.Mount(mountpoint, root, &fs.Options{
+	mountOpts := &fs.Options{
 		MountOptions: fuseMountOptions(source, *debug, *allowOther, view != nil || driveReadOnly || *readOnly, acls, kernelFlags{dev: *devices, suid: *setuid, noexec: *noExec}),
 		// Without it, go-fuse reports a stored mode 0000 as 0644 or
 		// 0755.
 		NullPermissions: true,
-	})
+	}
+	fuseserver.MetaCacheTimeouts(mountOpts, cacheFor)
+	server, err := fuseserver.Mount(mountpoint, root, mountOpts)
 	if err != nil {
 		if view != nil {
 			view.Close()

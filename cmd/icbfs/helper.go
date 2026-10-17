@@ -53,6 +53,7 @@ var atimeOptions = map[string]string{
 var valueOptions = map[string]string{
 	"cache_dir":  "-cache-dir",
 	"cache_size": "-cache-size",
+	"meta_cache": "-meta-cache",
 	"as_of":      "-as-of",
 }
 

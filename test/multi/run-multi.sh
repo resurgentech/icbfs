@@ -140,8 +140,11 @@ everywhere() {
   return $status
 }
 
-# on IP SCRIPT runs SCRIPT as root on one machine.
-on() { ssh_vm "$1" "sudo env N=$N MNT=$MNT bash -c $(printf %q "$2")"; }
+# on IP SCRIPT runs SCRIPT as root on one machine, after dropping the
+# kernel's cached names and attributes: the mounts trust them for a while
+# (-meta-cache), and a check reading another machine's results must see the
+# store's answer, not this machine's cache.
+on() { ssh_vm "$1" "sudo sh -c 'echo 2 > /proc/sys/vm/drop_caches'; sudo env N=$N MNT=$MNT bash -c $(printf %q "$2")"; }
 
 # same_everywhere CMD: CMD prints the same thing on every machine.
 same_everywhere() {
