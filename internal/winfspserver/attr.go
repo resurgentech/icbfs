@@ -176,6 +176,7 @@ func (d *driver) SetBasicInfo(fs *winfsp.FileSystemRef, file uintptr, flags winf
 	if !ok {
 		return os.ErrNotExist
 	}
+	defer d.changedItem(h)
 	// A stream's attributes and times are its owner's.
 	key, typ := h.owner()
 	var modeP *uint32
@@ -219,6 +220,7 @@ func (d *driver) SetFileSize(fs *winfsp.FileSystemRef, file uintptr, newSize uin
 	if !ok {
 		return os.ErrNotExist
 	}
+	defer d.changedItem(h)
 	if setAllocationSize {
 		// Allocation has no counterpart in an object store, so it's kept in
 		// memory while the file is open and reported, as NTFS does.
@@ -329,14 +331,14 @@ func (d *driver) GetSecurityByName(fs *winfsp.FileSystemRef, name string, flags 
 	if !ok {
 		return 0, nil, windows.STATUS_OBJECT_NAME_INVALID
 	}
-	r, err := resolvePath(ctx(), d.fsys, path, d.caseInsensitive)
+	r, err := resolvePath(ctx(), d.res(), path)
 	if err != nil {
 		// A symlink partway along the path: let WinFsp's reparse resolver
 		// walk it (see hasIntermediateSymlink). go-winfsp passes no reparse
 		// index back on an error, so WinFsp starts from the beginning; it
 		// skips plain components (STATUS_NOT_A_REPARSE_POINT), at one extra
 		// lookup each.
-		if hasIntermediateSymlink(ctx(), d.fsys, path, d.caseInsensitive) {
+		if hasIntermediateSymlink(ctx(), d.res(), path) {
 			return 0, nil, windows.STATUS_REPARSE
 		}
 		return 0, nil, toWinError(err)
@@ -490,6 +492,7 @@ func (d *driver) SetSecurity(fs *winfsp.FileSystemRef, file uintptr, info window
 	if !ok {
 		return os.ErrNotExist
 	}
+	defer d.changedItem(h)
 	key, typ := h.owner()
 	attr, err := d.fsys.Stat(ctx(), key, typ)
 	if err != nil {

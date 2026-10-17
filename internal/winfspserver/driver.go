@@ -12,11 +12,14 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	winfsp "github.com/winfsp/go-winfsp"
 	"golang.org/x/sys/windows"
 
+	"github.com/resurgentech/icbfs/internal/block"
 	"github.com/resurgentech/icbfs/internal/icbfs"
+	"github.com/resurgentech/icbfs/internal/namecache"
 )
 
 // driver implements winfsp.BehaviourBase plus every optional Behaviour*
@@ -25,6 +28,7 @@ import (
 type driver struct {
 	fsys            *icbfs.Filesystem
 	caseInsensitive bool
+	names           *namecache.Cache // nil: no name cache (see WithMetaCache)
 
 	mu      sync.Mutex
 	handles map[uintptr]*fileHandle
@@ -91,9 +95,48 @@ type fileHandle struct {
 // resolvePath tolerates a case mismatch against icbfs's case-sensitive
 // storage. Mismatched, either the fallback never runs or the kernel's
 // folded names never match.
-func Root(fsys *icbfs.Filesystem, caseInsensitive bool) winfsp.BehaviourBase {
-	return &driver{fsys: fsys, caseInsensitive: caseInsensitive, handles: make(map[uintptr]*fileHandle), opens: make(map[string]*sharedOpen),
+func Root(fsys *icbfs.Filesystem, caseInsensitive bool, opts ...Option) winfsp.BehaviourBase {
+	d := &driver{fsys: fsys, caseInsensitive: caseInsensitive, handles: make(map[uintptr]*fileHandle), opens: make(map[string]*sharedOpen),
 		keyOpens: make(map[string]int), allocs: make(map[string]uint64)}
+	for _, o := range opts {
+		o(d)
+	}
+	return d
+}
+
+// Option configures Root.
+type Option func(*driver)
+
+// nameCacheBytes bounds the name cache's memory. At a short time to live
+// it holds about what was touched in the last moment, far less.
+const nameCacheBytes = 32 << 20
+
+// WithMetaCache keeps a name cache (internal/namecache) for ttl, the
+// mount's -meta-cache: what a directory's names lead to, with their
+// attributes, so an open doesn't walk the whole path from the store again.
+// Another machine's renames, creates, deletes and attribute changes can
+// take up to ttl to show; an open still reads its last component, and its
+// content, from the store. 0 caches nothing.
+func WithMetaCache(ttl time.Duration) Option {
+	return func(d *driver) {
+		var fold func(string) string
+		if d.caseInsensitive {
+			fold = block.FoldKey
+		}
+		d.names = namecache.New(ttl, nameCacheBytes, fold)
+	}
+}
+
+// res is how the driver looks names up; resFresh the same with a path's
+// last component always from the store.
+func (d *driver) res() resolver {
+	return resolver{fsys: d.fsys, ci: d.caseInsensitive, names: d.names}
+}
+
+func (d *driver) resFresh() resolver {
+	r := d.res()
+	r.freshLast = true
+	return r
 }
 
 var (
@@ -251,7 +294,10 @@ func (d *driver) Open(fs *winfsp.FileSystemRef, name string, createOptions, gran
 	if createOptions&fileOpenReparsePoint != 0 {
 		resolve = resolvePath
 	}
-	r, err := resolve(ctx(), d.fsys, path, d.caseInsensitive)
+	// Close-to-open: the last component from the store, whatever the
+	// name cache says, so an open never reaches an item its name no
+	// longer leads to.
+	r, err := resolve(ctx(), d.resFresh(), path)
 	if err != nil {
 		return 0, toWinError(err)
 	}
@@ -295,7 +341,7 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 		return d.createStream(path, stream, allocationSize, info)
 	}
 	dir, base := splitParent(name)
-	parent, err := resolvePath(ctx(), d.fsys, dir, d.caseInsensitive)
+	parent, err := resolvePath(ctx(), d.res(), dir)
 	if err != nil {
 		return 0, toWinError(err)
 	}
@@ -312,6 +358,7 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 		if err != nil {
 			return 0, toWinError(err)
 		}
+		d.names.Forget(parent.Key, base)
 		// A directory's security descriptor and attribute bits are stored
 		// as a file's are (without Archive, as on NTFS), so a restrictive
 		// ACL given at creation is enforced (winfsp-tests'
@@ -335,6 +382,7 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 	if err != nil {
 		return 0, toWinError(err)
 	}
+	d.names.Forget(parent.Key, base)
 	// Store the attribute bits and the security descriptor from the create
 	// itself, in one metadata write, so a file created hidden reports it at
 	// once, and one created with a restrictive descriptor enforces it
@@ -368,6 +416,7 @@ func (d *driver) Overwrite(fs *winfsp.FileSystemRef, file uintptr, attributes ui
 	if !ok {
 		return os.ErrNotExist
 	}
+	defer d.changedItem(h)
 	var zero int64
 	attr, err := d.fsys.SetAttr(ctx(), h.key, h.typ, nil, nil, nil, &zero, nil, nil, nil)
 	if err != nil {
@@ -437,21 +486,34 @@ func (d *driver) Cleanup(fs *winfsp.FileSystemRef, file uintptr, name string, cl
 	}
 	if h.stream != "" {
 		_ = d.fsys.DeleteStream(ctx(), h.ownerKey, h.ownerTyp, h.stream)
+		d.names.ForgetItem(h.ownerKey)
 		return
 	}
 	dir, base := splitParent(name)
-	parent, err := resolvePath(ctx(), d.fsys, dir, d.caseInsensitive)
+	parent, err := resolvePath(ctx(), d.res(), dir)
 	if err != nil {
 		return
 	}
 	// The kernel can pass a name in different case from the stored one (see
 	// realStoredName).
-	base = realStoredName(ctx(), d.fsys, parent.Key, base, d.caseInsensitive)
+	base = realStoredName(ctx(), d.res(), parent.Key, base)
 	dctx := icbfs.WithDeleteInfo(ctx(), icbfs.DeleteInfo{Path: strings.ReplaceAll(name, `\`, "/")})
 	if h.typ == icbfs.TypeDir {
 		_ = d.fsys.Rmdir(dctx, parent.Key, base)
 	} else {
 		_ = d.fsys.Unlink(dctx, parent.Key, base)
+	}
+	d.names.Forget(parent.Key, base)
+	d.names.ForgetItem(h.key)
+}
+
+// changedItem drops what the name cache holds for h's item (its owner's,
+// for a stream), after this mount changed it: its attributes, its size,
+// its streams.
+func (d *driver) changedItem(h *fileHandle) {
+	d.names.ForgetItem(h.key)
+	if h.ownerKey != "" {
+		d.names.ForgetItem(h.ownerKey)
 	}
 }
 
@@ -484,8 +546,8 @@ func (d *driver) CanDelete(fs *winfsp.FileSystemRef, file uintptr, name string) 
 // "old.txt". resolvePath already handles this for directories
 // (lookupCaseAware); callers that pass a bare name to icbfs.Filesystem need
 // this.
-func realStoredName(ctx context.Context, fsys *icbfs.Filesystem, dirKey, name string, caseInsensitive bool) string {
-	entry, _, err := lookupCaseAware(ctx, fsys, dirKey, name, caseInsensitive)
+func realStoredName(ctx context.Context, res resolver, dirKey, name string) string {
+	entry, _, err := res.lookup(ctx, dirKey, name, false)
 	if err != nil {
 		return name
 	}
@@ -510,7 +572,7 @@ func (d *driver) Rename(fs *winfsp.FileSystemRef, file uintptr, source, target s
 		if srcStream == "" || dstStream == "" || h.stream == "" {
 			return windows.STATUS_INVALID_PARAMETER
 		}
-		dst, err := resolvePath(ctx(), d.fsys, dstPath, d.caseInsensitive)
+		dst, err := resolvePath(ctx(), d.res(), dstPath)
 		if err != nil {
 			return toWinError(err)
 		}
@@ -526,7 +588,9 @@ func (d *driver) Rename(fs *winfsp.FileSystemRef, file uintptr, source, target s
 			}
 			dstStream = real
 		}
-		if err := d.fsys.RenameStream(ctx(), h.ownerKey, h.ownerTyp, h.stream, dstStream, replaceIfExist); err != nil {
+		err = d.fsys.RenameStream(ctx(), h.ownerKey, h.ownerTyp, h.stream, dstStream, replaceIfExist)
+		d.names.ForgetItem(h.ownerKey)
+		if err != nil {
 			return toWinError(err)
 		}
 		h.mu.Lock()
@@ -535,18 +599,18 @@ func (d *driver) Rename(fs *winfsp.FileSystemRef, file uintptr, source, target s
 		return nil
 	}
 	oldDir, oldBase := splitParent(source)
-	oldParent, err := resolvePath(ctx(), d.fsys, oldDir, d.caseInsensitive)
+	oldParent, err := resolvePath(ctx(), d.res(), oldDir)
 	if err != nil {
 		return toWinError(err)
 	}
-	oldBase = realStoredName(ctx(), d.fsys, oldParent.Key, oldBase, d.caseInsensitive)
+	oldBase = realStoredName(ctx(), d.res(), oldParent.Key, oldBase)
 
 	newDir, newBase := splitParent(target)
-	newParent, err := resolvePath(ctx(), d.fsys, newDir, d.caseInsensitive)
+	newParent, err := resolvePath(ctx(), d.res(), newDir)
 	if err != nil {
 		return toWinError(err)
 	}
-	newBase = realStoredName(ctx(), d.fsys, newParent.Key, newBase, d.caseInsensitive)
+	newBase = realStoredName(ctx(), d.res(), newParent.Key, newBase)
 
 	// Windows never lets a rename replace an existing directory, even
 	// with MOVEFILE_REPLACE_EXISTING — STATUS_ACCESS_DENIED, as on NTFS
@@ -559,7 +623,10 @@ func (d *driver) Rename(fs *winfsp.FileSystemRef, file uintptr, source, target s
 		}
 	}
 
-	return toWinError(d.fsys.Rename(ctx(), oldParent.Key, oldBase, newParent.Key, newBase, replaceIfExist))
+	err = d.fsys.Rename(ctx(), oldParent.Key, oldBase, newParent.Key, newBase, replaceIfExist)
+	d.names.Forget(oldParent.Key, oldBase)
+	d.names.Forget(newParent.Key, newBase)
+	return toWinError(err)
 }
 
 // openFile returns the OpenFile shared by every handle on h's file,

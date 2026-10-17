@@ -40,6 +40,7 @@ func (d *driver) Write(fs *winfsp.FileSystemRef, file uintptr, buf []byte, offse
 	if !ok {
 		return 0, os.ErrNotExist
 	}
+	defer d.changedItem(h)
 	open, err := d.openFile(h)
 	if err != nil {
 		return 0, toWinError(err)
@@ -87,6 +88,7 @@ func (d *driver) Flush(fs *winfsp.FileSystemRef, file uintptr, info *winfsp.FSP_
 	if !ok {
 		return os.ErrNotExist
 	}
+	defer d.changedItem(h)
 	open := d.currentOpen(h.key)
 	if open == nil {
 		attr, err := d.fsys.Stat(ctx(), h.key, h.typ)

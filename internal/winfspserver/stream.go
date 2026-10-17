@@ -94,7 +94,7 @@ func (d *driver) openStream(r resolved, path, stream string, info *winfsp.FSP_FS
 // driver opens (or creates) the main file before passing a stream
 // create down, so the owner always exists by now.
 func (d *driver) createStream(path, stream string, allocationSize uint64, info *winfsp.FSP_FSCTL_FILE_INFO) (uintptr, error) {
-	r, err := resolvePath(ctx(), d.fsys, path, d.caseInsensitive)
+	r, err := resolvePath(ctx(), d.res(), path)
 	if err != nil {
 		return 0, toWinError(err)
 	}
@@ -102,6 +102,7 @@ func (d *driver) createStream(path, stream string, allocationSize uint64, info *
 		return 0, windows.STATUS_OBJECT_NAME_COLLISION
 	}
 	key, etag, err := d.fsys.CreateStream(ctx(), r.Key, r.Type, stream)
+	d.names.ForgetItem(r.Key)
 	if err != nil {
 		return 0, toWinError(err)
 	}

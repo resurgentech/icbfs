@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"syscall"
@@ -44,6 +45,7 @@ func main() {
 	caseInsensitive := fset.Bool("case-insensitive", true, "look names up case-insensitively, as NTFS does; names are always stored as given")
 	cacheDir := fset.String("cache-dir", "", "local disk directory for open files and the read cache (default: a new directory under the system temp directory)")
 	cacheSize := fset.Uint64("cache-size", 512<<20, "maximum total bytes the local disk cache (-cache-dir) may hold before evicting the least-recently-used cached file")
+	metaCache := fset.Duration("meta-cache", time.Second, "how long Windows trusts file and directory information, as the Linux mount's -meta-cache: other machines' changes can take this long to show in a listing or a file's details; an open still checks the store (0: trust nothing; as-of mounts default to without limit)")
 	if err := fset.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
@@ -51,6 +53,11 @@ func main() {
 		fset.Usage()
 		os.Exit(2)
 	}
+	if *metaCache < 0 || *metaCache > time.Duration(math.MaxUint32-1)*time.Millisecond {
+		log.Fatalf("-meta-cache %v: from 0 to %v", *metaCache, time.Duration(math.MaxUint32-1)*time.Millisecond)
+	}
+	metaCacheSet := false
+	fset.Visit(func(f *flag.Flag) { metaCacheSet = metaCacheSet || f.Name == "meta-cache" })
 	mountpoint := fset.Arg(0)
 
 	ctx := context.Background()
@@ -93,10 +100,30 @@ func main() {
 		log.Fatalf("filesystem %q: %v", *fsName, err)
 	}
 
+	// The metadata cache. WinFsp keeps no names of its own (every open
+	// passes the path, which the driver resolves, through its name cache
+	// below), so WinFsp's timeout covers file and directory information,
+	// and with it the kernel's caching of file data. Flushing and purging that at the last handle's cleanup
+	// keeps content close-to-open: what was written reaches the driver
+	// before the close stores it, and the next open reads again.
+	fileInfoTimeout := uint32(*metaCache / time.Millisecond)
+	if view != nil && !metaCacheSet {
+		fileInfoTimeout = math.MaxUint32 // nothing an as-of mount shows changes
+	}
+	if fileInfoTimeout != 0 {
+		attrs |= winfsp.FspFSAttributeFlushAndPurgeOnCleanup
+	}
+	// The driver's own name cache, for the same time: WinFsp passes whole
+	// paths, so without it every open walks its path from the store.
+	nameCache := *metaCache
+	if view != nil && !metaCacheSet {
+		nameCache = 24 * time.Hour
+	}
+
 	// winfsp.CaseSensitive and winfspserver.Root's caseInsensitive must
 	// agree; see Root's doc comment.
 	server, err := winfsp.Mount(
-		winfspserver.Root(fsys, *caseInsensitive),
+		winfspserver.Root(fsys, *caseInsensitive, winfspserver.WithMetaCache(nameCache)),
 		mountpoint,
 		winfsp.FileSystemName("icbfs"),
 		winfsp.CaseSensitive(!*caseInsensitive),
@@ -108,6 +135,7 @@ func main() {
 		// A read-only volume for an as-of mount, so Windows itself
 		// refuses writes before they reach the driver.
 		winfsp.Attributes(attrs),
+		winfsp.FileInfoTimeout(fileInfoTimeout),
 	)
 	if err != nil {
 		if view != nil {

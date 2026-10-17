@@ -78,7 +78,7 @@ func TestResolvePathRoot(t *testing.T) {
 	ctx := context.Background()
 
 	for _, path := range []string{`\`, ``} {
-		got, err := resolvePath(ctx, fsys, path, false)
+		got, err := resolvePath(ctx, resolver{fsys: fsys}, path)
 		if err != nil {
 			t.Fatalf("resolvePath(%q): %v", path, err)
 		}
@@ -120,7 +120,7 @@ func TestResolvePathNestedDirectories(t *testing.T) {
 		{`\dir1\dir2\file.txt`, fileUUID, icbfs.TypeFile},
 	}
 	for _, c := range cases {
-		got, err := resolvePath(ctx, fsys, c.path, false)
+		got, err := resolvePath(ctx, resolver{fsys: fsys}, c.path)
 		if err != nil {
 			t.Fatalf("resolvePath(%q): %v", c.path, err)
 		}
@@ -151,11 +151,11 @@ func TestResolvePathHardlinkedNamesShareUUID(t *testing.T) {
 		t.Fatalf("link dir/linked.txt -> original.txt: %v", err)
 	}
 
-	original, err := resolvePath(ctx, fsys, `\original.txt`, false)
+	original, err := resolvePath(ctx, resolver{fsys: fsys}, `\original.txt`)
 	if err != nil {
 		t.Fatalf("resolvePath(original.txt): %v", err)
 	}
-	linked, err := resolvePath(ctx, fsys, `\dir\linked.txt`, false)
+	linked, err := resolvePath(ctx, resolver{fsys: fsys}, `\dir\linked.txt`)
 	if err != nil {
 		t.Fatalf("resolvePath(dir/linked.txt): %v", err)
 	}
@@ -184,12 +184,12 @@ func TestResolvePathCaseInsensitiveMatchesDifferentCase(t *testing.T) {
 
 	// caseInsensitive=false: a differently-cased request must still
 	// fail — case folding is opt-in.
-	if _, err := resolvePath(ctx, fsys, `\mixedcase\file.txt`, false); !errors.Is(err, icbfs.ErrNotFound) {
+	if _, err := resolvePath(ctx, resolver{fsys: fsys}, `\mixedcase\file.txt`); !errors.Is(err, icbfs.ErrNotFound) {
 		t.Fatalf("case-sensitive resolvePath(wrong case) = %v, want ErrNotFound", err)
 	}
 
 	for _, path := range []string{`\MixedCase\File.TXT`, `\mixedcase\file.txt`, `\MIXEDCASE\FILE.TXT`} {
-		got, err := resolvePath(ctx, fsys, path, true)
+		got, err := resolvePath(ctx, resolver{fsys: fsys, ci: true}, path)
 		if err != nil {
 			t.Fatalf("case-insensitive resolvePath(%q): %v", path, err)
 		}
@@ -210,10 +210,10 @@ func TestResolvePathNotFound(t *testing.T) {
 	fsys := newTestFilesystem(t)
 	ctx := context.Background()
 
-	if _, err := resolvePath(ctx, fsys, `\does-not-exist.txt`, false); !errors.Is(err, icbfs.ErrNotFound) {
+	if _, err := resolvePath(ctx, resolver{fsys: fsys}, `\does-not-exist.txt`); !errors.Is(err, icbfs.ErrNotFound) {
 		t.Fatalf("resolvePath(missing) = %v, want ErrNotFound", err)
 	}
-	if _, err := resolvePath(ctx, fsys, `\does\not\exist\either`, false); !errors.Is(err, icbfs.ErrNotFound) {
+	if _, err := resolvePath(ctx, resolver{fsys: fsys}, `\does\not\exist\either`); !errors.Is(err, icbfs.ErrNotFound) {
 		t.Fatalf("resolvePath(missing, nested) = %v, want ErrNotFound", err)
 	}
 }
@@ -228,7 +228,7 @@ func TestResolvePathThroughNonDirectoryFails(t *testing.T) {
 		t.Fatalf("create file.txt: %v", err)
 	}
 
-	if _, err := resolvePath(ctx, fsys, `\file.txt\sub`, false); !errors.Is(err, icbfs.ErrNotDir) {
+	if _, err := resolvePath(ctx, resolver{fsys: fsys}, `\file.txt\sub`); !errors.Is(err, icbfs.ErrNotDir) {
 		t.Fatalf("resolvePath(through a file) = %v, want ErrNotDir", err)
 	}
 }
@@ -272,7 +272,7 @@ func TestHasIntermediateSymlink(t *testing.T) {
 		{`\`, false},
 	}
 	for _, c := range cases {
-		if got := hasIntermediateSymlink(ctx, fsys, c.path, false); got != c.want {
+		if got := hasIntermediateSymlink(ctx, resolver{fsys: fsys}, c.path); got != c.want {
 			t.Errorf("hasIntermediateSymlink(%q) = %v, want %v", c.path, got, c.want)
 		}
 	}

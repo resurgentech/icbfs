@@ -356,9 +356,10 @@ its content, as on a local disk):
 - **Names and attributes, as seen through a mount, can lag** another
   machine's changes by up to the mount's metadata cache timeout
   (`-meta-cache`, 1 s by default), as with NFS's attribute cache: the
-  kernel trusts what it last heard. An open still goes to the store, for
-  the content and for whether its name still leads to it, so content
-  stays close-to-open.
+  kernel (on Windows, the driver's name cache, `internal/namecache`)
+  trusts what it last heard. An open still goes to the store, for the
+  content and for whether its name still leads to it, so content stays
+  close-to-open.
 - **Attributes and link counts** are each a conditional read-modify-write
   of the item's `.metadata`: concurrent `chmod` and `chown` both land, and
   a file whose last link is going can't be revived by a concurrent `link`.

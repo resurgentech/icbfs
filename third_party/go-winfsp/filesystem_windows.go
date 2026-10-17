@@ -1404,6 +1404,7 @@ type option struct {
 	debug                    bool
 	sectorSize               uint16
 	sectorsPerAllocationUnit uint16
+	fileInfoTimeout          uint32
 }
 
 func newOption() *option {
@@ -1425,6 +1426,16 @@ type Option func(*option)
 func Attributes(value uint32) Option {
 	return func(o *option) {
 		o.attributes |= value
+	}
+}
+
+// FileInfoTimeout sets how long, in milliseconds, the kernel may cache
+// file and directory information before asking the filesystem again
+// (FSP_FSCTL_VOLUME_PARAMS.FileInfoTimeout); 0, the default, caches
+// nothing, and 0xFFFFFFFF caches without limit.
+func FileInfoTimeout(ms uint32) Option {
+	return func(o *option) {
+		o.fileInfoTimeout = ms
 	}
 }
 
@@ -1758,6 +1769,7 @@ func Mount(
 	volumeParams.VolumeCreationTime =
 		*(*uint64)(unsafe.Pointer(&nowFiletime))
 	volumeParams.FileSystemAttribute = attributes
+	volumeParams.FileInfoTimeout = option.fileInfoTimeout
 	copy(volumeParams.Prefix[:], utf16Prefix)
 	copy(volumeParams.FileSystemName[:], utf16Name)
 

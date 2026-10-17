@@ -77,6 +77,22 @@ func CompareFold(a, b string) int {
 // (CompareFold(a, b) == 0).
 func EqualFold(a, b string) bool { return CompareFold(a, b) == 0 }
 
+// FoldKey is a name's case-folded form, for keying a map: FoldKey(a) ==
+// FoldKey(b) exactly when EqualFold(a, b). It isn't a readable name.
+func FoldKey(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) * 2)
+	for i := 0; i < len(s); {
+		r, n := foldedUnit(s[i:])
+		b.WriteByte(byte(r >> 24))
+		b.WriteByte(byte(r >> 16))
+		b.WriteByte(byte(r >> 8))
+		b.WriteByte(byte(r))
+		i += n
+	}
+	return b.String()
+}
+
 // Collation is the order a directory's entries are kept in.
 type Collation uint8
 

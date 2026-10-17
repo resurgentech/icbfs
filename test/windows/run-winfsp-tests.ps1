@@ -9,6 +9,8 @@ param(
     [string]$Extra = "",
     [string]$Only = "",
     [string]$Out = "C:\Windows\Temp\winfsp-tests-result.txt",
+    # More icbfs-winfsp flags, space-separated (e.g. "-meta-cache 0").
+    [string]$MountExtra = "",
     # Test filesystems hold files up to 8 GiB, not the 1 TiB default:
     # testable, and big enough to need multipart uploads.
     [uint64]$MaxFileSize = 8GB
@@ -58,7 +60,8 @@ function Start-Fs([string]$t) {
             # Mounts never create a filesystem. Created here, on Windows,
             # the root gets this account's default security descriptor.
             & $Cli fs create @store -fs $fs -primary-windows -max-file-size $MaxFileSize *> C:\Windows\Temp\fs-create.log
-            Start-Process $Exe -WindowStyle Hidden @log -ArgumentList ($store + @("-fs",$fs,"-case-insensitive=$ci",$drive)) | Out-Null
+            $extra = @($MountExtra -split " " | Where-Object { $_ -ne "" })
+            Start-Process $Exe -WindowStyle Hidden @log -ArgumentList ($store + $extra + @("-fs",$fs,"-case-insensitive=$ci",$drive)) | Out-Null
         }
     }
     for ($i = 0; $i -lt 40 -and -not (Test-Path "$drive\"); $i++) { Start-Sleep -Milliseconds 250 }

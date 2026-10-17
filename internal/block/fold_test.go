@@ -156,3 +156,14 @@ func TestFoldedSplitsKeepTheirCollation(t *testing.T) {
 		t.Fatal("SplitInternal dropped the collation")
 	}
 }
+
+func TestFoldKeyMatchesEqualFold(t *testing.T) {
+	names := append(foldedNames(), "Report.docx", "REPORT.DOCX", "report.docx", "Résumé", "RÉSUMÉ", "a\xffb", "A\xffB", "straße", "STRASSE", "")
+	for _, a := range names {
+		for _, b := range names {
+			if (FoldKey(a) == FoldKey(b)) != EqualFold(a, b) {
+				t.Errorf("FoldKey(%q) == FoldKey(%q) is %v, EqualFold %v", a, b, FoldKey(a) == FoldKey(b), EqualFold(a, b))
+			}
+		}
+	}
+}

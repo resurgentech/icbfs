@@ -142,7 +142,7 @@ func (d *driver) GetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 // opaque data is reachable only through GetReparsePoint, on a handle opened
 // with FILE_FLAG_OPEN_REPARSE_POINT.
 func (d *driver) GetReparsePointByName(fs *winfsp.FileSystemRef, name string, isDirectory bool, buffer []byte) (int, error) {
-	r, err := resolvePath(ctx(), d.fsys, name, d.caseInsensitive)
+	r, err := resolvePath(ctx(), d.res(), name)
 	if err != nil {
 		return 0, toWinError(err)
 	}
@@ -190,6 +190,7 @@ func (d *driver) SetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 	if !ok {
 		return os.ErrNotExist
 	}
+	defer d.changedItem(h)
 	if len(buffer) >= 4 && binary.LittleEndian.Uint32(buffer[0:4]) != windows.IO_REPARSE_TAG_SYMLINK {
 		_, err := d.fsys.SetGenericReparseData(ctx(), h.key, buffer)
 		return toWinError(err)
@@ -200,14 +201,14 @@ func (d *driver) SetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 		return err
 	}
 	dir, base := splitParent(name)
-	parent, err := resolvePath(ctx(), d.fsys, dir, d.caseInsensitive)
+	parent, err := resolvePath(ctx(), d.res(), dir)
 	if err != nil {
 		return toWinError(err)
 	}
 	// The kernel passes the name uppercased under -case-insensitive (see
 	// realStoredName); with the exact-match Unlink, every symlink creation
 	// failed.
-	base = realStoredName(ctx(), d.fsys, parent.Key, base, d.caseInsensitive)
+	base = realStoredName(ctx(), d.res(), parent.Key, base)
 
 	// A directory symlink (SYMBOLIC_LINK_FLAG_DIRECTORY) arrives as a
 	// directory, because Create can't tell it from a mkdir (see Create). So
@@ -237,6 +238,11 @@ func (d *driver) SetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 			return toWinError(err)
 		}
 	}
+	// The name now leads to a new item: the cache's entry for it (the
+	// placeholder's, a plain file or directory) must go, or the next
+	// lookup would report no reparse point and Windows wouldn't follow it.
+	d.names.Forget(parent.Key, base)
+	d.names.ForgetItem(h.key)
 	h.key = newUUID
 	h.typ = icbfs.TypeSymlink
 	return nil
@@ -250,6 +256,7 @@ func (d *driver) DeleteReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name
 	if !ok {
 		return os.ErrNotExist
 	}
+	defer d.changedItem(h)
 	if h.typ == icbfs.TypeSymlink {
 		return windows.STATUS_NOT_A_REPARSE_POINT
 	}

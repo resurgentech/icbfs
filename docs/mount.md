@@ -167,6 +167,14 @@ unmount.
 | flag | default | meaning |
 |---|---|---|
 | `-case-insensitive` | `true` | look names up case-insensitively, as NTFS does. Names are always stored as given. |
+| `-meta-cache D` | `1s` (unlimited for `-as-of`) | how long names and file and folder details are trusted, as on Linux (above): another machine's renames, creates, deletes and attribute changes can take this long to show in a listing or a file's properties; an open still reads its name and content from the store. `0` trusts nothing. |
+
+WinFsp keeps no names of its own: every open hands the driver a whole
+path. So the driver keeps a small name cache (at most 32 MB; at the
+default timeout, about what was touched in the last second), fed by
+directory listings, which also stat their entries 16 at a time. Opening
+what a listing just showed, or probing for a name it didn't (Explorer's
+`desktop.ini`), then needs no request.
 
 Boolean flags take `-flag=false`. A bare `-flag false` reads `false` as the
 mount point.
