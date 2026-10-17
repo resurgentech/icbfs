@@ -16,6 +16,7 @@ import (
 	"github.com/resurgentech/icbfs/internal/testutil/minioimage"
 
 	"github.com/resurgentech/icbfs/internal/objstore"
+	"github.com/resurgentech/icbfs/internal/objstore/s3store"
 	"github.com/resurgentech/icbfs/internal/testutil"
 )
 
@@ -65,5 +66,5 @@ func Start(t *testing.T) (objstore.Store, Server) {
 	}); err != nil {
 		t.Fatalf("enable bucket versioning: %v", err)
 	}
-	return objstore.NewS3Store(client, bucket), Server{Endpoint: "http://" + endpoint, AccessKey: container.Username, SecretKey: container.Password, Bucket: bucket}
+	return s3store.New(client, bucket), Server{Endpoint: "http://" + endpoint, AccessKey: container.Username, SecretKey: container.Password, Bucket: bucket}
 }

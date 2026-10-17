@@ -30,6 +30,7 @@ import (
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/notify"
 	"github.com/resurgentech/icbfs/internal/objstore"
+	"github.com/resurgentech/icbfs/internal/objstore/s3store"
 	"github.com/resurgentech/icbfs/internal/testutil"
 )
 
@@ -53,7 +54,7 @@ func newS3Store(m testMinIO) objstore.Store {
 		UsePathStyle: true,
 		Credentials:  awscreds.NewStaticCredentialsProvider(m.accessKey, m.secretKey, ""),
 	})
-	return objstore.NewS3Store(client, m.bucket)
+	return s3store.New(client, m.bucket)
 }
 
 // newMinIO starts a MinIO container with a versioned bucket.

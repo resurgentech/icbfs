@@ -197,7 +197,7 @@ func (f *Filesystem) checkTree(ctx context.Context, key, lower, upper string, bl
 // name leads to or one of its objects (.metadata, .lock, streams), not a
 // trash entry or named version.
 func (f *Filesystem) checkUnreachable(ctx context.Context, items map[string]*checkedItem, blocks map[string]bool, r *CheckReport) error {
-	versions, err := f.store.ListAllVersions(ctx, f.id+"-")
+	versions, err := f.store.HistoryUnder(ctx, f.id+"-")
 	if err != nil {
 		return err
 	}
@@ -207,7 +207,7 @@ func (f *Filesystem) checkUnreachable(ctx context.Context, items map[string]*che
 			continue // only the newest version says whether it's current
 		}
 		seen[v.Key] = true
-		if v.DeleteMarker {
+		if v.Deleted {
 			continue
 		}
 		k := v.Key

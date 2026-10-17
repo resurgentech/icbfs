@@ -21,4 +21,4 @@ ICBFS_TEST_AZURE_KEY=$(az storage account keys list --subscription "$ICBFS_TEST_
   -g "$ICBFS_TEST_AZURE_RESOURCE_GROUP" -n "$ICBFS_TEST_AZURE_ACCOUNT" --query '[0].value' -o tsv)
 export ICBFS_TEST_AZURE_KEY
 cd "$REPO"
-exec go test -count=1 "$@" ./internal/objstore
+exec go test -count=1 "$@" ./internal/objstore/azurestore

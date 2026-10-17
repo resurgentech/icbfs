@@ -66,7 +66,7 @@ func TestCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A file whose .metadata is gone.
-	if err := store.Delete(ctx, metadataObjectKey(files[2]), ""); err != nil {
+	if err := store.Delete(ctx, metadataObjectKey(files[2])); err != nil {
 		t.Fatal(err)
 	}
 	got := kinds()

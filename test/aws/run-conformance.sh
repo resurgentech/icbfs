@@ -20,4 +20,4 @@ source "$REPO/.env.aws"
 set +a
 eval "$(aws configure export-credentials --format env)"
 cd "$REPO"
-exec go test -count=1 "$@" ./internal/objstore
+exec go test -count=1 "$@" ./internal/objstore/s3store

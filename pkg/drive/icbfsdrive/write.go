@@ -111,7 +111,7 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 		// Creating made an empty version before the content's; a file the
 		// API makes starts with just its content.
 		if created != nil && created.Size == 0 {
-			_ = d.fs.Store().DeleteVersion(ctx, key, created.VersionID)
+			_ = d.fs.Store().Erase(ctx, key, created.VersionID)
 		}
 		d.changed(parent)
 		return d.statItem(ctx, joinPath(parent.path, name))

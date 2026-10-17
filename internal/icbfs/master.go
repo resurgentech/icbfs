@@ -198,7 +198,7 @@ func Prune(ctx context.Context, store objstore.Store, fsName string) error {
 
 	// Every version, not just the current objects: a filesystem that
 	// later reuses this slot (and ID prefix) must start with no past.
-	if err := eraseAllVersions(ctx, store, prefix); err != nil {
+	if err := store.EraseAll(ctx, prefix); err != nil {
 		return fmt.Errorf("prune %s: %w", fsName, err)
 	}
 

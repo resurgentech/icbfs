@@ -14,6 +14,8 @@ import (
 
 	core "github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore"
+	"github.com/resurgentech/icbfs/internal/objstore/azurestore"
+	"github.com/resurgentech/icbfs/internal/objstore/s3store"
 )
 
 // Store is a versioned bucket.
@@ -54,7 +56,7 @@ func Open(c S3) (Store, error) {
 	case "", "s3":
 		return OpenS3(c), nil
 	case "azure":
-		return objstore.NewAzureStore(c.Endpoint, c.AccessKey, c.SecretKey, c.Bucket)
+		return azurestore.New(c.Endpoint, c.AccessKey, c.SecretKey, c.Bucket)
 	}
 	return nil, fmt.Errorf("store type %q: s3 or azure", c.Type)
 }
@@ -71,7 +73,7 @@ func OpenS3(c S3) Store {
 		UsePathStyle: true,
 		Credentials:  awscreds.NewStaticCredentialsProvider(c.AccessKey, c.SecretKey, ""),
 	})
-	return objstore.NewS3Store(client, c.Bucket)
+	return s3store.New(client, c.Bucket)
 }
 
 // CreateFilesystem creates a filesystem with every setting given.

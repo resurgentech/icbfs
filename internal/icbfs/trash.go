@@ -105,7 +105,7 @@ type TrashOptions struct {
 
 // ListTrash lists deleted items, newest first.
 func (f *Filesystem) ListTrash(ctx context.Context, opts TrashOptions) ([]TrashEntry, error) {
-	objs, err := f.store.ListByPrefix(ctx, f.trashPrefix())
+	objs, err := f.store.List(ctx, f.trashPrefix())
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +158,7 @@ func (f *Filesystem) readTrash(ctx context.Context, key string) (TrashEntry, err
 
 // trashEntry finds an entry by its id, with its key.
 func (f *Filesystem) trashEntry(ctx context.Context, entryID string) (TrashEntry, string, error) {
-	objs, err := f.store.ListByPrefix(ctx, f.trashPrefix())
+	objs, err := f.store.List(ctx, f.trashPrefix())
 	if err != nil {
 		return TrashEntry{}, "", err
 	}
@@ -226,7 +226,7 @@ func (f *Filesystem) Restore(ctx context.Context, entryID string, opts RestoreOp
 		return TrashEntry{}, err
 	}
 	f.touchDir(ctx, dir)
-	_ = f.store.Delete(ctx, key, "")
+	_ = f.store.Delete(ctx, key)
 
 	// A directory that started a recursive delete brings its batch back,
 	// newest first: the reverse of the order the delete removed them,
@@ -257,7 +257,7 @@ func (f *Filesystem) undelete(ctx context.Context, e TrashEntry) error {
 
 	keys := []string{e.ItemID, metadataObjectKey(e.ItemID)}
 	for _, k := range keys {
-		if err := f.removeDeleteMarker(ctx, k); err != nil {
+		if err := f.store.Undelete(ctx, k); err != nil {
 			return err
 		}
 	}
@@ -266,25 +266,13 @@ func (f *Filesystem) undelete(ctx context.Context, e TrashEntry) error {
 		return fmt.Errorf("restore %s: %w", e.Name, err)
 	}
 	for _, id := range attr.Streams {
-		if err := f.removeDeleteMarker(ctx, StreamKey(e.ItemID, id)); err != nil {
+		if err := f.store.Undelete(ctx, StreamKey(e.ItemID, id)); err != nil {
 			return err
 		}
 	}
 	if e.Type != TypeDir {
 		// The last unlink left nlink 0 in .metadata; it has a name again.
 		return f.writeMetadata(ctx, e.ItemID, e.Type, true, func(a *Attr) { a.Nlink = 1 })
-	}
-	return nil
-}
-
-// removeDeleteMarker deletes key's newest version if it's a delete marker.
-func (f *Filesystem) removeDeleteMarker(ctx context.Context, key string) error {
-	versions, err := f.store.ListVersions(ctx, key)
-	if err != nil {
-		return err
-	}
-	if len(versions) > 0 && versions[0].DeleteMarker {
-		return f.store.DeleteVersion(ctx, key, versions[0].VersionID)
 	}
 	return nil
 }

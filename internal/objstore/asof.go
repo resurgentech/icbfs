@@ -11,9 +11,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3/types"
-
 	_ "modernc.org/sqlite" // the "sqlite" database/sql driver, pure Go
 )
 
@@ -128,6 +125,10 @@ func removeStaleAsOfCaches(parent string) {
 // At is the moment this view shows.
 func (a *AsOf) At() time.Time { return a.at }
 
+// CacheDir is the directory of this view's version cache, which Close
+// removes.
+func (a *AsOf) CacheDir() string { return a.dir }
+
 // Close removes the version cache.
 func (a *AsOf) Close() error {
 	err := a.db.Close()
@@ -142,7 +143,7 @@ func (a *AsOf) Close() error {
 func asOfVersion(history []Object, at time.Time) (Object, bool) {
 	for _, v := range history {
 		if !v.LastModified.After(at) {
-			return v, !v.DeleteMarker
+			return v, !v.Deleted
 		}
 	}
 	return Object{}, false
@@ -168,7 +169,7 @@ func (a *AsOf) resolve(ctx context.Context, key string) (Object, bool, error) {
 	if !errors.Is(err, sql.ErrNoRows) {
 		return Object{}, false, err
 	}
-	history, err := a.store.ListVersions(ctx, key)
+	history, err := a.store.History(ctx, key)
 	if err != nil {
 		return Object{}, false, err
 	}
@@ -182,7 +183,7 @@ func (a *AsOf) resolve(ctx context.Context, key string) (Object, bool, error) {
 // notAt is the not-found error (satisfying IsNotFound) for a key that
 // didn't exist at a.at.
 func (a *AsOf) notAt(key string) error {
-	return fmt.Errorf("%s as of %s: %w", key, a.at.Format(time.RFC3339), &types.NoSuchKey{Message: aws.String("did not exist at that time")})
+	return fmt.Errorf("%s as of %s: %w (it didn't exist then)", key, a.at.Format(time.RFC3339), ErrNotFound)
 }
 
 func (a *AsOf) Get(ctx context.Context, key string) (io.ReadCloser, *Object, error) {
@@ -215,18 +216,18 @@ func (a *AsOf) HeadVersion(ctx context.Context, key, versionID string) (*Object,
 	return a.store.HeadVersion(ctx, key, versionID)
 }
 
-// ListVersions lists key's versions up to a.at.
-func (a *AsOf) ListVersions(ctx context.Context, key string) ([]Object, error) {
-	all, err := a.store.ListVersions(ctx, key)
+// History is key's history up to a.at.
+func (a *AsOf) History(ctx context.Context, key string) ([]Object, error) {
+	all, err := a.store.History(ctx, key)
 	if err != nil {
 		return nil, err
 	}
 	return upTo(all, a.at), nil
 }
 
-// ListAllVersions lists the versions under prefix up to a.at.
-func (a *AsOf) ListAllVersions(ctx context.Context, prefix string) ([]Object, error) {
-	all, err := a.store.ListAllVersions(ctx, prefix)
+// HistoryUnder is the history under prefix up to a.at.
+func (a *AsOf) HistoryUnder(ctx context.Context, prefix string) ([]Object, error) {
+	all, err := a.store.HistoryUnder(ctx, prefix)
 	if err != nil {
 		return nil, err
 	}
@@ -243,12 +244,12 @@ func upTo(versions []Object, at time.Time) []Object {
 	return out
 }
 
-// ListByPrefix lists every key under prefix that existed at a.at, with
+// List lists every key under prefix that existed at a.at, with
 // its size then — every version under the prefix has to be listed for
 // that, so it's as slow as the prefix's whole history is long. The
 // answers go into the version cache too.
-func (a *AsOf) ListByPrefix(ctx context.Context, prefix string) ([]Object, error) {
-	all, err := a.store.ListAllVersions(ctx, prefix)
+func (a *AsOf) List(ctx context.Context, prefix string) ([]Object, error) {
+	all, err := a.store.HistoryUnder(ctx, prefix)
 	if err != nil {
 		return nil, err
 	}
@@ -300,14 +301,13 @@ func (a *AsOf) PutParts(context.Context, string, []Part, map[string]string, stri
 	return nil, ErrReadOnly
 }
 
-func (a *AsOf) UpdateMetadata(context.Context, string, map[string]string, string) (*Object, error) {
-	return nil, ErrReadOnly
-}
+// PartLimits are the store's, though an AsOf view writes nothing.
+func (a *AsOf) PartLimits() PartLimits { return a.store.PartLimits() }
 
-func (a *AsOf) Delete(context.Context, string, string) error {
-	return ErrReadOnly
-}
+func (a *AsOf) Delete(context.Context, string) error { return ErrReadOnly }
 
-func (a *AsOf) DeleteVersion(context.Context, string, string) error {
-	return ErrReadOnly
-}
+func (a *AsOf) Undelete(context.Context, string) error { return ErrReadOnly }
+
+func (a *AsOf) Erase(context.Context, string, string) error { return ErrReadOnly }
+
+func (a *AsOf) EraseAll(context.Context, string) error { return ErrReadOnly }

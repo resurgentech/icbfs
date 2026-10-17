@@ -155,8 +155,8 @@ func (f *Filesystem) deleteUnlessOpen(ctx context.Context, key string, streams m
 
 // deleteFileObjects removes a file's .metadata, content and streams.
 func (f *Filesystem) deleteFileObjects(ctx context.Context, key string, streams map[string]uint64) {
-	_ = f.store.Delete(ctx, metadataObjectKey(key), "")
-	_ = f.store.Delete(ctx, key, "")
+	_ = f.store.Delete(ctx, metadataObjectKey(key))
+	_ = f.store.Delete(ctx, key)
 	f.deleteStreamObjects(ctx, key, streams)
 }
 

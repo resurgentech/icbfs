@@ -12,7 +12,7 @@ import (
 // starting with prefix have.
 func countVersions(t *testing.T, ctx context.Context, f *Filesystem, prefix string) int {
 	t.Helper()
-	vs, err := f.store.ListAllVersions(ctx, prefix)
+	vs, err := f.store.HistoryUnder(ctx, prefix)
 	if err != nil {
 		t.Fatal(err)
 	}

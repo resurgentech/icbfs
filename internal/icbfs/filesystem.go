@@ -181,17 +181,20 @@ func (f *Filesystem) EnableChangeNotifications(signals <-chan notify.Signal) {
 func (f *Filesystem) PrimaryWindows() bool { return f.primaryWindows }
 
 // partSize is the part size of a multipart content write (see
-// OpenFile.uploadLocked): the smallest power-of-two MiB, at least 8 MiB,
-// that fits a file of this filesystem's max size in objstore.MaxParts
-// parts — 8 MiB for an 8 GiB limit, 128 MiB for the 1 TiB default. A
-// file no bigger than one part is written with a single Put.
+// OpenFile.uploadLocked): the smallest power-of-two MiB, at least 8 MiB
+// and the store's minimum, that fits a file of this filesystem's max size
+// in the store's most parts. On S3 (10,000 parts) that's 8 MiB for an
+// 8 GiB limit and 128 MiB for the 1 TiB default; on Azure (50,000 blocks),
+// 32 MiB for the default. A file no bigger than one part is written with a
+// single Put.
 func (f *Filesystem) partSize() int64 {
-	need := (f.maxFileSize + objstore.MaxParts - 1) / objstore.MaxParts
-	p := int64(8 << 20)
+	lim := f.store.PartLimits()
+	need := (f.maxFileSize + lim.Count - 1) / lim.Count
+	p := max(int64(8<<20), lim.Min)
 	for p < need {
 		p <<= 1
 	}
-	return p
+	return min(p, lim.Max)
 }
 
 // SetCreationMaxFileSize sets the largest file a new filesystem will
@@ -353,7 +356,7 @@ func (f *Filesystem) DiskUsage(ctx context.Context) (int64, error) {
 }
 
 func (f *Filesystem) diskUsage(ctx context.Context) (int64, error) {
-	objs, err := f.store.ListByPrefix(ctx, f.prefix())
+	objs, err := f.store.List(ctx, f.prefix())
 	if err != nil {
 		return 0, err
 	}
@@ -1139,13 +1142,13 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 		return "", Attr{}, err
 	}
 	if _, err := f.store.Put(ctx, newUUID, bytes.NewReader(empty), nil, ""); err != nil {
-		_ = f.store.Delete(ctx, metadataObjectKey(newUUID), "")
+		_ = f.store.Delete(ctx, metadataObjectKey(newUUID))
 		return "", Attr{}, err
 	}
 
 	if err := f.insertEntry(ctx, dirKey, name, newUUID, TypeDir); err != nil {
-		_ = f.store.Delete(ctx, newUUID, "") // best-effort cleanup of the orphaned objects
-		_ = f.store.Delete(ctx, metadataObjectKey(newUUID), "")
+		_ = f.store.Delete(ctx, newUUID) // best-effort cleanup of the orphaned objects
+		_ = f.store.Delete(ctx, metadataObjectKey(newUUID))
 		return "", Attr{}, err
 	}
 	f.touchDir(ctx, dirKey)
@@ -1175,23 +1178,23 @@ func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid,
 
 	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1, Ctime: time.Now()}
 	if err := f.inheritACLs(ctx, dirKey, &attr, false); err != nil {
-		_ = f.store.Delete(ctx, newUUID, "")
+		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, "", err
 	}
 	metaData, err := encodeFileMetadata(attr)
 	if err != nil {
-		_ = f.store.Delete(ctx, newUUID, "")
+		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, "", err
 	}
 	metaObj, err := f.store.Put(ctx, metadataObjectKey(newUUID), bytes.NewReader(metaData), nil, "")
 	if err != nil {
-		_ = f.store.Delete(ctx, newUUID, "")
+		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, "", err
 	}
 
 	if err := f.insertEntry(ctx, dirKey, name, newUUID, TypeFile); err != nil {
-		_ = f.store.Delete(ctx, newUUID, "")
-		_ = f.store.Delete(ctx, metadataObjectKey(newUUID), "")
+		_ = f.store.Delete(ctx, newUUID)
+		_ = f.store.Delete(ctx, metadataObjectKey(newUUID))
 		return "", Attr{}, "", err
 	}
 	f.touchDir(ctx, dirKey)
@@ -1230,23 +1233,23 @@ func (f *Filesystem) Mknod(ctx context.Context, dirKey, name string, mode uint32
 		attr.Rdev = rdev
 	}
 	if err := f.inheritACLs(ctx, dirKey, &attr, false); err != nil {
-		_ = f.store.Delete(ctx, newUUID, "")
+		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, err
 	}
 	metaData, err := encodeFileMetadata(attr)
 	if err != nil {
-		_ = f.store.Delete(ctx, newUUID, "")
+		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, err
 	}
 	metaObj, err := f.store.Put(ctx, metadataObjectKey(newUUID), bytes.NewReader(metaData), nil, "")
 	if err != nil {
-		_ = f.store.Delete(ctx, newUUID, "")
+		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, err
 	}
 
 	if err := f.insertEntry(ctx, dirKey, name, newUUID, typ); err != nil {
-		_ = f.store.Delete(ctx, newUUID, "")
-		_ = f.store.Delete(ctx, metadataObjectKey(newUUID), "")
+		_ = f.store.Delete(ctx, newUUID)
+		_ = f.store.Delete(ctx, metadataObjectKey(newUUID))
 		return "", Attr{}, err
 	}
 	f.touchDir(ctx, dirKey)
@@ -1278,18 +1281,18 @@ func (f *Filesystem) Symlink(ctx context.Context, dirKey, name, target string, u
 	attr := Attr{Mode: 0777, Uid: uid, Gid: gid, Nlink: 1, Ctime: time.Now()}
 	metaData, err := encodeFileMetadata(attr)
 	if err != nil {
-		_ = f.store.Delete(ctx, newUUID, "")
+		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, err
 	}
 	metaObj, err := f.store.Put(ctx, metadataObjectKey(newUUID), bytes.NewReader(metaData), nil, "")
 	if err != nil {
-		_ = f.store.Delete(ctx, newUUID, "")
+		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, err
 	}
 
 	if err := f.insertEntry(ctx, dirKey, name, newUUID, TypeSymlink); err != nil {
-		_ = f.store.Delete(ctx, newUUID, "")
-		_ = f.store.Delete(ctx, metadataObjectKey(newUUID), "")
+		_ = f.store.Delete(ctx, newUUID)
+		_ = f.store.Delete(ctx, metadataObjectKey(newUUID))
 		return "", Attr{}, err
 	}
 	f.touchDir(ctx, dirKey)
@@ -1689,12 +1692,12 @@ func (f *Filesystem) Rmdir(ctx context.Context, dirKey, name string) error {
 		return err
 	}
 	f.touchDir(ctx, dirKey)
-	if err := f.store.Delete(ctx, entry.UUID, ""); err != nil {
+	if err := f.store.Delete(ctx, entry.UUID); err != nil {
 		return err
 	}
 	f.deleteStreamObjects(ctx, entry.UUID, dirAttr.Streams)
 	// Absent for a directory created before directories had .metadata.
-	if err := f.store.Delete(ctx, metadataObjectKey(entry.UUID), ""); err != nil && !objstore.IsNotFound(err) {
+	if err := f.store.Delete(ctx, metadataObjectKey(entry.UUID)); err != nil && !objstore.IsNotFound(err) {
 		return err
 	}
 	f.recordTrash(ctx, entry.UUID, TypeDir, dirKey, name, 0, "")
@@ -1797,10 +1800,10 @@ func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, 
 			if _, err := f.removeEntry(ctx, newDirKey, newName); err != nil {
 				return err
 			}
-			if err := f.store.Delete(ctx, existing.UUID, ""); err != nil {
+			if err := f.store.Delete(ctx, existing.UUID); err != nil {
 				return err
 			}
-			if err := f.store.Delete(ctx, metadataObjectKey(existing.UUID), ""); err != nil && !objstore.IsNotFound(err) {
+			if err := f.store.Delete(ctx, metadataObjectKey(existing.UUID)); err != nil && !objstore.IsNotFound(err) {
 				return err
 			}
 			f.recordTrash(ctx, existing.UUID, TypeDir, newDirKey, newName, 0, "")

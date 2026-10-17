@@ -149,13 +149,13 @@ func TestSyncToICBFS(t *testing.T) {
 
 func countVersions(t *testing.T, fs *icbfs.Filesystem, id string) int {
 	t.Helper()
-	vs, err := fs.Store().ListVersions(context.Background(), id)
+	vs, err := fs.Store().History(context.Background(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
 	n := 0
 	for _, v := range vs {
-		if !v.DeleteMarker {
+		if !v.Deleted {
 			n++
 		}
 	}

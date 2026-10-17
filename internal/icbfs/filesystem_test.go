@@ -22,6 +22,7 @@ import (
 
 	"github.com/resurgentech/icbfs/internal/block"
 	"github.com/resurgentech/icbfs/internal/objstore"
+	"github.com/resurgentech/icbfs/internal/objstore/s3store"
 	"github.com/resurgentech/icbfs/internal/pb"
 	"github.com/resurgentech/icbfs/internal/testutil"
 )
@@ -71,7 +72,7 @@ func newTestStore(t *testing.T) objstore.Store {
 		t.Fatalf("enable bucket versioning: %v", err)
 	}
 
-	return objstore.NewS3Store(client, bucket)
+	return s3store.New(client, bucket)
 }
 
 // newTestFilesystem spins up a real MinIO container and a versioned

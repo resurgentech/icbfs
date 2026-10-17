@@ -159,6 +159,6 @@ func (f *Filesystem) RenameStream(ctx context.Context, owner string, typ EntryTy
 // is unreachable once no .metadata maps to it.
 func (f *Filesystem) deleteStreamObjects(ctx context.Context, owner string, streams map[string]uint64) {
 	for _, id := range streams {
-		_ = f.store.Delete(ctx, StreamKey(owner, id), "")
+		_ = f.store.Delete(ctx, StreamKey(owner, id))
 	}
 }

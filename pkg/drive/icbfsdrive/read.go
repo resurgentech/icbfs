@@ -286,14 +286,14 @@ func (d *Drive) Versions(ctx context.Context, ref drive.ItemRef) ([]drive.Versio
 	default:
 		return nil, err
 	}
-	objs, err := d.fs.Store().ListVersions(ctx, id)
+	objs, err := d.fs.Store().History(ctx, id)
 	if err != nil {
 		return nil, mapErr(err)
 	}
 	names, _ := d.Names(ctx)
 	var out []drive.Version
 	for i, o := range objs {
-		if o.DeleteMarker {
+		if o.Deleted {
 			continue
 		}
 		v := drive.Version{ID: o.VersionID, Time: o.LastModified, Size: o.Size, Current: i == 0}

@@ -101,11 +101,11 @@ func readVersionName(ctx context.Context, store objstore.Store, key string) (Nam
 		return NamedVersion{}, err
 	}
 	if nv.Time.IsZero() {
-		versions, err := store.ListVersions(ctx, key)
+		versions, err := store.History(ctx, key)
 		if err != nil {
 			return NamedVersion{}, err
 		}
-		if len(versions) == 0 || versions[0].DeleteMarker {
+		if len(versions) == 0 || versions[0].Deleted {
 			return NamedVersion{}, fmt.Errorf("version name %q: %w", nv.Name, ErrNotFound)
 		}
 		nv.Time = versions[0].LastModified.UTC()
@@ -132,7 +132,7 @@ func ListNames(ctx context.Context, store objstore.Store, fsName string) ([]Name
 	if err != nil {
 		return nil, err
 	}
-	objs, err := store.ListByPrefix(ctx, nameKey(info.ID, ""))
+	objs, err := store.List(ctx, nameKey(info.ID, ""))
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +158,7 @@ func DeleteName(ctx context.Context, store objstore.Store, fsName, name string) 
 	if _, err := store.Head(ctx, key); err != nil {
 		return fmt.Errorf("version name %q: %w", name, mapNotFound(err))
 	}
-	return store.Delete(ctx, key, "")
+	return store.Delete(ctx, key)
 }
 
 // ResolveAsOf turns an -as-of argument into a time: a time ParseAsOf

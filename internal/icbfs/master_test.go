@@ -147,7 +147,7 @@ func TestPruneFreesSlotForReuse(t *testing.T) {
 		t.Fatalf("prune: %v", err)
 	}
 
-	objs, err := store.ListByPrefix(ctx, idA+"-")
+	objs, err := store.List(ctx, idA+"-")
 	if err != nil {
 		t.Fatalf("list by prefix after prune: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestIDPrefixingIsPresentOnDisk(t *testing.T) {
 		t.Fatalf("dir key %q does not carry prefix %q", dirUUID, wantPrefix)
 	}
 
-	objs, err := store.ListByPrefix(ctx, wantPrefix)
+	objs, err := store.List(ctx, wantPrefix)
 	if err != nil {
 		t.Fatalf("list by prefix: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestPruneRemovesEveryObjectUnderPrefix(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 
-	before, err := store.ListByPrefix(ctx, id+"-")
+	before, err := store.List(ctx, id+"-")
 	if err != nil {
 		t.Fatalf("list before prune: %v", err)
 	}
@@ -451,7 +451,7 @@ func TestPruneRemovesEveryObjectUnderPrefix(t *testing.T) {
 		t.Fatalf("prune: %v", err)
 	}
 
-	after, err := store.ListByPrefix(ctx, id+"-")
+	after, err := store.List(ctx, id+"-")
 	if err != nil {
 		t.Fatalf("list after prune: %v", err)
 	}

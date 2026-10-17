@@ -42,18 +42,34 @@ func (s *partsStore) last(t *testing.T) (copied, uploaded int) {
 	return c[0], c[1]
 }
 
+// limitsStore is a store that only answers PartLimits.
+type limitsStore struct {
+	objstore.Store
+	limits objstore.PartLimits
+}
+
+func (s limitsStore) PartLimits() objstore.PartLimits { return s.limits }
+
 func TestPartSize(t *testing.T) {
-	for _, tc := range []struct{ max, want int64 }{
-		{8 << 30, 8 << 20},
-		{DefaultMaxFileSize, 128 << 20},
-		{1 << 20, 8 << 20},
+	s3 := objstore.PartLimits{Min: 5 << 20, Max: 5 << 30, Count: 10000}
+	azure := objstore.PartLimits{Min: 1, Max: 4000 << 20, Count: 50000}
+	for _, tc := range []struct {
+		limits    objstore.PartLimits
+		max, want int64
+	}{
+		{s3, 8 << 30, 8 << 20},
+		{s3, DefaultMaxFileSize, 128 << 20},
+		{s3, 1 << 20, 8 << 20},
+		{azure, DefaultMaxFileSize, 32 << 20},
+		{azure, 8 << 30, 8 << 20},
 	} {
-		f := &Filesystem{maxFileSize: tc.max}
-		if got := f.partSize(); got != tc.want {
-			t.Errorf("partSize for max %d = %d, want %d", tc.max, got, tc.want)
+		f := &Filesystem{maxFileSize: tc.max, store: limitsStore{limits: tc.limits}}
+		got := f.partSize()
+		if got != tc.want {
+			t.Errorf("partSize for max %d, %d parts = %d, want %d", tc.max, tc.limits.Count, got, tc.want)
 		}
-		if got := f.partSize(); tc.max/got > objstore.MaxParts {
-			t.Errorf("max %d needs %d parts of %d", tc.max, tc.max/got, got)
+		if tc.max/got > tc.limits.Count || got < tc.limits.Min || got > tc.limits.Max {
+			t.Errorf("max %d: %d parts of %d, outside %+v", tc.max, tc.max/got, got, tc.limits)
 		}
 	}
 }

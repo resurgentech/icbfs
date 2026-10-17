@@ -13,7 +13,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/minio"
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
-	"github.com/resurgentech/icbfs/internal/objstore"
+	"github.com/resurgentech/icbfs/internal/objstore/s3store"
 	"github.com/resurgentech/icbfs/internal/testutil"
 	"github.com/resurgentech/icbfs/internal/testutil/minioimage"
 )
@@ -62,7 +62,7 @@ func newTestFilesystem(t *testing.T) *icbfs.Filesystem {
 		t.Fatalf("enable bucket versioning: %v", err)
 	}
 
-	store := objstore.NewS3Store(client, bucket)
+	store := s3store.New(client, bucket)
 	fsys := icbfs.New(store, "test")
 	if err := fsys.Bootstrap(ctx, 1<<30, 0755, 0, 0, false); err != nil {
 		t.Fatalf("bootstrap: %v", err)

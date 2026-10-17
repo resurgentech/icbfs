@@ -5,10 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/resurgentech/icbfs/internal/block"
-	"github.com/resurgentech/icbfs/internal/objstore"
 )
 
 // ErrHasLinks: a permanent delete of a file that still has other names.
@@ -144,12 +142,12 @@ func (f *Filesystem) eraseItems(ctx context.Context, items []block.Entry) error 
 		}
 		// The item's key, its .metadata and its streams all start with it
 		// (its id is fixed-length, so nothing else does).
-		if err := eraseAllVersions(ctx, f.store, it.UUID); err != nil {
+		if err := f.store.EraseAll(ctx, it.UUID); err != nil {
 			return fmt.Errorf("purge %s: %w", it.Name, err)
 		}
 		erased[it.UUID] = true
 	}
-	objs, err := f.store.ListByPrefix(ctx, f.trashPrefix())
+	objs, err := f.store.List(ctx, f.trashPrefix())
 	if err != nil {
 		return err
 	}
@@ -158,7 +156,7 @@ func (f *Filesystem) eraseItems(ctx context.Context, items []block.Entry) error 
 		if err != nil || !erased[te.ItemID] {
 			continue
 		}
-		if err := eraseAllVersions(ctx, f.store, o.Key); err != nil {
+		if err := f.store.EraseAll(ctx, o.Key); err != nil {
 			return err
 		}
 	}
@@ -174,12 +172,12 @@ func (f *Filesystem) eraseDirBlocks(ctx context.Context, rootKey string) error {
 	for len(queue) > 0 {
 		key := queue[0]
 		queue = queue[1:]
-		versions, err := f.store.ListVersions(ctx, key)
+		versions, err := f.store.History(ctx, key)
 		if err != nil {
 			return err
 		}
 		for _, v := range versions {
-			if v.DeleteMarker {
+			if v.Deleted {
 				continue
 			}
 			body, _, err := f.store.GetVersion(ctx, key, v.VersionID)
@@ -207,27 +205,9 @@ func (f *Filesystem) eraseDirBlocks(ctx context.Context, rootKey string) error {
 			}
 		}
 		if key != rootKey {
-			if err := eraseAllVersions(ctx, f.store, key); err != nil {
+			if err := f.store.EraseAll(ctx, key); err != nil {
 				return err
 			}
-		}
-	}
-	return nil
-}
-
-// eraseAllVersions deletes every version, delete markers included, of
-// every key starting with prefix.
-func eraseAllVersions(ctx context.Context, store objstore.Store, prefix string) error {
-	versions, err := store.ListAllVersions(ctx, prefix)
-	if err != nil {
-		return err
-	}
-	for _, v := range versions {
-		if !strings.HasPrefix(v.Key, prefix) {
-			continue
-		}
-		if err := store.DeleteVersion(ctx, v.Key, v.VersionID); err != nil && !objstore.IsNotFound(err) {
-			return fmt.Errorf("erase %s@%s: %w", v.Key, v.VersionID, err)
 		}
 	}
 	return nil

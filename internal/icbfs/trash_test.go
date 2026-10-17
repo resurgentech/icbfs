@@ -44,7 +44,7 @@ func TestTrashRestoreKeepsHistory(t *testing.T) {
 	if _, _, err := f.WriteFile(ctx, key, []byte("two"), ""); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := store.ListVersions(ctx, key)
+	before, _ := store.History(ctx, key)
 
 	dctx := WithDeleteInfo(ctx, DeleteInfo{By: "uid:7", Path: "/a.txt"})
 	if err := f.Unlink(dctx, root, "a.txt"); err != nil {
@@ -69,7 +69,7 @@ func TestTrashRestoreKeepsHistory(t *testing.T) {
 	if e2.UUID != e.UUID || attr.Nlink != 1 {
 		t.Fatalf("restored id %s nlink %d; want %s, 1", e2.UUID, attr.Nlink, e.UUID)
 	}
-	after, _ := store.ListVersions(ctx, key)
+	after, _ := store.History(ctx, key)
 	if len(after) != len(before) {
 		t.Fatalf("history: %d versions after restore, %d before", len(after), len(before))
 	}
