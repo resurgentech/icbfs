@@ -1138,10 +1138,12 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 	if err != nil {
 		return "", Attr{}, err
 	}
-	if _, err := f.store.Put(ctx, metadataObjectKey(newUUID), bytes.NewReader(metaData), nil, ""); err != nil {
+	metaObj, err := f.store.Put(ctx, metadataObjectKey(newUUID), bytes.NewReader(metaData), nil, "")
+	if err != nil {
 		return "", Attr{}, err
 	}
-	if _, err := f.store.Put(ctx, newUUID, bytes.NewReader(empty), nil, ""); err != nil {
+	blockObj, err := f.store.Put(ctx, newUUID, bytes.NewReader(empty), nil, "")
+	if err != nil {
 		_ = f.store.Delete(ctx, metadataObjectKey(newUUID))
 		return "", Attr{}, err
 	}
@@ -1152,8 +1154,12 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 		return "", Attr{}, err
 	}
 	f.touchDir(ctx, dirKey)
-	attr.Btime = Btime(newUUID)
-	return newUUID, attr, nil
+	// Exactly what a Stat of the new directory will say (see Create).
+	created, err := combineDirAttr(newUUID, metaData, metaObj.LastModified, blockObj)
+	if err != nil {
+		return "", Attr{}, err
+	}
+	return newUUID, created, nil
 }
 
 // Create makes a new, empty regular file named name in dirKey. Its
@@ -1198,10 +1204,13 @@ func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid,
 		return "", Attr{}, "", err
 	}
 	f.touchDir(ctx, dirKey)
-	attr.Btime = Btime(newUUID)
-	attr.Mtime = contentObj.LastModified
-	attr.Ctime = metaObj.LastModified
-	return newUUID, attr, contentObj.ETag, nil
+	// Exactly what a Stat of the new item will say: the kernel may cache
+	// this reply, then ask again, and the two must agree.
+	created, err := combineFileAttr(newUUID, metaData, metaObj.LastModified, contentObj)
+	if err != nil {
+		return "", Attr{}, "", err
+	}
+	return newUUID, created, contentObj.ETag, nil
 }
 
 // Mknod creates a FIFO, a Unix socket, or a character or block device (typ
@@ -1253,10 +1262,12 @@ func (f *Filesystem) Mknod(ctx context.Context, dirKey, name string, mode uint32
 		return "", Attr{}, err
 	}
 	f.touchDir(ctx, dirKey)
-	attr.Btime = Btime(newUUID)
-	attr.Mtime = contentObj.LastModified
-	attr.Ctime = metaObj.LastModified
-	return newUUID, attr, nil
+	// Exactly what a Stat of the new item will say (see Create).
+	created, err := combineFileAttr(newUUID, metaData, metaObj.LastModified, contentObj)
+	if err != nil {
+		return "", Attr{}, err
+	}
+	return newUUID, created, nil
 }
 
 // Symlink creates a new symlink named name inside dirKey, pointing at
@@ -1296,11 +1307,12 @@ func (f *Filesystem) Symlink(ctx context.Context, dirKey, name, target string, u
 		return "", Attr{}, err
 	}
 	f.touchDir(ctx, dirKey)
-	attr.Size = int64(len(target))
-	attr.Btime = Btime(newUUID)
-	attr.Mtime = contentObj.LastModified
-	attr.Ctime = metaObj.LastModified
-	return newUUID, attr, nil
+	// Exactly what a Stat of the new item will say (see Create).
+	created, err := combineFileAttr(newUUID, metaData, metaObj.LastModified, contentObj)
+	if err != nil {
+		return "", Attr{}, err
+	}
+	return newUUID, created, nil
 }
 
 // Readlink returns a symlink's target.

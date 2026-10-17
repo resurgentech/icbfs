@@ -1077,3 +1077,52 @@ func TestRightLinksAloneReachEverything(t *testing.T) {
 		}
 	}
 }
+
+// TestCreateRepliesMatchStat: what each kind of create returns is exactly
+// what a Stat of the new item says. A mount caches the reply (the kernel's
+// attribute cache), then asks again once it expires; replies built from a
+// different clock or object than Stat's made ctime change by itself across
+// that boundary (pjdfstest chmod/00.t, with the cache on).
+func TestCreateRepliesMatchStat(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+	type made struct {
+		key  string
+		typ  EntryType
+		attr Attr
+	}
+	var all []made
+	key, attr, _, err := fsys.Create(ctx, root, "file", 0644, 1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all = append(all, made{key, TypeFile, attr})
+	key, attr, err = fsys.Mknod(ctx, root, "fifo", 0644, TypeFifo, 0, 1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all = append(all, made{key, TypeFifo, attr})
+	key, attr, err = fsys.Symlink(ctx, root, "link", "file", 1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all = append(all, made{key, TypeSymlink, attr})
+	key, attr, err = fsys.Mkdir(ctx, root, "dir", 0755, 1, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all = append(all, made{key, TypeDir, attr})
+	for _, m := range all {
+		got, err := fsys.Stat(ctx, m.key, m.typ)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, s := m.attr, got
+		if !r.Ctime.Equal(s.Ctime) || !r.Mtime.Equal(s.Mtime) || !r.Btime.Equal(s.Btime) ||
+			r.Mode != s.Mode || r.Nlink != s.Nlink || r.Size != s.Size || r.Uid != s.Uid || r.Gid != s.Gid {
+			t.Errorf("%s: create returned ctime %v mtime %v btime %v mode %o nlink %d size %d;\n\tStat says ctime %v mtime %v btime %v mode %o nlink %d size %d",
+				typeName(m.typ), r.Ctime, r.Mtime, r.Btime, r.Mode, r.Nlink, r.Size, s.Ctime, s.Mtime, s.Btime, s.Mode, s.Nlink, s.Size)
+		}
+	}
+}
