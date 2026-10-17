@@ -1,14 +1,24 @@
 // Package objstore is the object store as icbfs uses it: whole-object put
 // and get, conditional writes, version listing, and prefix listing.
 // Everything else in icbfs is written against Store; S3Store (AWS S3 and
-// MinIO) is the one implementation, and AsOf is a read-only view of a Store
-// at a past time.
+// MinIO) and AzureStore (Azure Blob Storage) implement it, and AsOf is a
+// read-only view of a Store at a past time.
 package objstore
 
 import (
 	"context"
+	"errors"
 	"io"
 	"time"
+)
+
+// ErrNotFound and ErrPreconditionFailed are what a store's errors wrap for
+// "no such object" and "the condition didn't hold", where the store's own
+// errors aren't S3's (AzureStore): IsNotFound and IsPreconditionFailed
+// recognize them, as they do S3's.
+var (
+	ErrNotFound           = errors.New("not found")
+	ErrPreconditionFailed = errors.New("precondition failed")
 )
 
 // Object describes one version of a stored blob.

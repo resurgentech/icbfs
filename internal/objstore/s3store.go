@@ -490,7 +490,7 @@ func (s *S3Store) ServerTime(ctx context.Context) (time.Time, error) {
 // conditional write (If-Match mismatch) — the signal a CAS retry loop
 // should watch for.
 func IsPreconditionFailed(err error) bool {
-	if errors.Is(err, errLostRace) {
+	if errors.Is(err, errLostRace) || errors.Is(err, ErrPreconditionFailed) {
 		return true
 	}
 	var respErr *smithyhttp.ResponseError
@@ -505,6 +505,9 @@ func IsPreconditionFailed(err error) bool {
 // HeadObject/CopyObject (which report a generic 404 with no distinguishing
 // body).
 func IsNotFound(err error) bool {
+	if errors.Is(err, ErrNotFound) {
+		return true
+	}
 	var noSuchKey *types.NoSuchKey
 	if errors.As(err, &noSuchKey) {
 		return true

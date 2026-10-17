@@ -24,9 +24,12 @@ import (
 
 // newTestStore spins up a real MinIO container, creates a versioned bucket
 // in it, and returns a Store backed by it. Requires Docker.
-func newTestStore(t *testing.T) *S3Store {
+func newTestStore(t *testing.T) Store {
 	t.Helper()
 	ctx := context.Background()
+	if account := os.Getenv("ICBFS_TEST_AZURE_ACCOUNT"); account != "" {
+		return azureTestStore(t, account)
+	}
 	if bucket := os.Getenv("ICBFS_TEST_S3_BUCKET"); bucket != "" {
 		return externalTestStore(t, bucket)
 	}
@@ -224,19 +227,14 @@ func TestListVersionsIsNewestFirstWithTimestamps(t *testing.T) {
 	}
 }
 
-func mustGetVersion(t *testing.T, store *S3Store, key, versionID string) []byte {
+func mustGetVersion(t *testing.T, store Store, key, versionID string) []byte {
 	t.Helper()
-	ctx := context.Background()
-	out, err := store.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket:    aws.String(store.bucket),
-		Key:       aws.String(store.k(key)),
-		VersionId: aws.String(versionID),
-	})
+	body, _, err := store.GetVersion(context.Background(), key, versionID)
 	if err != nil {
 		t.Fatalf("get version %s: %v", versionID, err)
 	}
-	defer out.Body.Close()
-	data, err := io.ReadAll(out.Body)
+	defer body.Close()
+	data, err := io.ReadAll(body)
 	if err != nil {
 		t.Fatalf("read version %s: %v", versionID, err)
 	}
@@ -282,12 +280,13 @@ func TestConditionalPutRejectsStaleETag(t *testing.T) {
 	}
 }
 
-// TestConditionalUpdateMetadataIgnoresUnchangedETag records a limit: an
-// ETag is a hash of the body, so a metadata-only update leaves it as it
+// TestConditionalUpdateMetadataETagVaries records a limit: on S3 and MinIO
+// an ETag is a hash of the body, so a metadata-only update leaves it as it
 // was, and a conditional write can't catch two metadata-only writers racing
 // (content writes are caught: TestConditionalPutRejectsStaleETag). That's
-// why attributes live in .metadata objects, whose bodies change.
-func TestConditionalUpdateMetadataIgnoresUnchangedETag(t *testing.T) {
+// why attributes live in .metadata objects, whose bodies change. Azure moves
+// the ETag on any change, so there the stale writer is refused.
+func TestConditionalUpdateMetadataETagVaries(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
@@ -304,11 +303,19 @@ func TestConditionalUpdateMetadataIgnoresUnchangedETag(t *testing.T) {
 	}
 
 	if v2.ETag != v1.ETag {
-		t.Fatalf("got etag %q after a metadata-only update, want it unchanged at %q — if this ever fails, the backend's ETag semantics changed and the nlink side-object workaround may no longer be needed", v2.ETag, v1.ETag)
+		// Azure moves the ETag on a metadata change, so a stale writer's
+		// conditional update is refused, as it should be.
+		t.Log("a metadata-only update moves the ETag (Azure)")
+		if _, err := store.UpdateMetadata(ctx, "file-1", map[string]string{"nlink": "99"}, v1.ETag); !IsPreconditionFailed(err) {
+			t.Fatalf("a stale conditional metadata update: %v, want a precondition failure", err)
+		}
+		return
 	}
 
-	// Because the ETag never moved, a "stale" writer's conditional update
-	// does not actually get rejected — this is the crux of the finding.
+	// S3 and MinIO keep the ETag, so a "stale" writer's conditional update
+	// is not rejected: why icbfs keeps the link count in an object of its
+	// own (nlink side object), which a content write does move.
+	t.Log("a metadata-only update keeps the ETag (S3, MinIO)")
 	v3, err := store.UpdateMetadata(ctx, "file-1", map[string]string{"nlink": "99"}, v1.ETag)
 	if err != nil {
 		t.Fatalf("expected this update to succeed (unprotected) given unchanged ETag, got: %v", err)
@@ -342,7 +349,7 @@ func TestConditionalDeleteIfMatchVaries(t *testing.T) {
 	case err == nil && IsNotFound(headErr):
 		t.Log("If-Match on delete is ignored (MinIO)")
 	case IsPreconditionFailed(err) && headErr == nil:
-		t.Log("If-Match on delete is enforced (AWS S3)")
+		t.Log("If-Match on delete is enforced (AWS S3, Azure)")
 	default:
 		t.Fatalf("delete with a stale If-Match: %v, then head: %v; want ignored or enforced", err, headErr)
 	}
@@ -412,7 +419,12 @@ func TestPutPartsCopiesAndUploadsUnderIfMatch(t *testing.T) {
 			obj.Size, obj.ETag, v2.ETag, obj.Metadata, bytes.Equal(got, want))
 	}
 
-	// A part below the minimum fails the whole write; nothing changes.
+	// On S3, a part below the minimum fails the whole write and nothing
+	// changes. (Azure's blocks have no minimum; icbfs never sends one so
+	// small either way.)
+	if _, azure := store.(*AzureStore); azure {
+		return
+	}
 	bad := []Part{{Size: 1, Body: bytes.NewReader([]byte("x"))}, {Size: 1, Body: bytes.NewReader([]byte("y"))}}
 	if _, err := store.PutParts(ctx, "big", bad, nil, v2.ETag); err == nil {
 		t.Fatal("PutParts with an undersized first part succeeded")
@@ -456,9 +468,26 @@ func TestDeleteVersion(t *testing.T) {
 	if err := store.DeleteVersion(ctx, "k", v1.VersionID); err != nil {
 		t.Fatalf("erase version one: %v", err)
 	}
+	// Version one is gone from the history, and the content is still two.
+	// (On S3 the history is then just two; Azure, which undeletes by
+	// copying, keeps both copies of two.)
 	versions, _ = store.ListVersions(ctx, "k")
-	if len(versions) != 1 || versions[0].VersionID == v1.VersionID {
-		t.Fatalf("history after erasing one version: %+v", versions)
+	for _, v := range versions {
+		if v.VersionID == v1.VersionID || v.DeleteMarker {
+			t.Fatalf("history after erasing version one: %+v", versions)
+		}
+	}
+	if len(versions) == 0 {
+		t.Fatal("no history left")
+	}
+	body, _, err = store.Get(ctx, "k")
+	if err != nil {
+		t.Fatalf("get after erasing version one: %v", err)
+	}
+	data, _ = io.ReadAll(body)
+	body.Close()
+	if string(data) != "two" {
+		t.Fatalf("after erasing version one: %q, want two", data)
 	}
 }
 
@@ -522,4 +551,22 @@ func externalTestStore(t *testing.T, bucket string) *S3Store {
 	})
 	prefix := fmt.Sprintf("objstore-test/%s/%s/", time.Now().UTC().Format("20060102T150405.000"), t.Name())
 	return NewS3Store(client, bucket).WithKeyPrefix(prefix)
+}
+
+// azureTestStore is newTestStore on a real Azure Blob Storage container:
+// ICBFS_TEST_AZURE_ACCOUNT names the account (blob versioning on),
+// ICBFS_TEST_AZURE_KEY its key, ICBFS_TEST_AZURE_CONTAINER the container
+// (default icbfs-test). Each test's keys are under a prefix of its own.
+func azureTestStore(t *testing.T, account string) *AzureStore {
+	t.Helper()
+	containerName := os.Getenv("ICBFS_TEST_AZURE_CONTAINER")
+	if containerName == "" {
+		containerName = "icbfs-test"
+	}
+	store, err := NewAzureStore("https://"+account+".blob.core.windows.net/", account, os.Getenv("ICBFS_TEST_AZURE_KEY"), containerName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefix := fmt.Sprintf("objstore-test/%s/%s/", time.Now().UTC().Format("20060102T150405.000"), t.Name())
+	return store.WithKeyPrefix(prefix)
 }
