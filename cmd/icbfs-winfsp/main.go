@@ -57,7 +57,10 @@ func main() {
 	if err := storeflags.Check(conn); err != nil {
 		log.Fatal(err)
 	}
-	store := pkgicbfs.OpenS3(*conn)
+	store, err := pkgicbfs.Open(*conn)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	var view *objstore.AsOf
 	if *asOf != "" {

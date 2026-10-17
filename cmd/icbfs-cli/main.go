@@ -96,7 +96,7 @@ func addStoreFlags(fset *flag.FlagSet) storeFlags {
 	}
 }
 
-func (s storeFlags) store() objstore.Store { return pkgicbfs.OpenS3(*s.conn) }
+func (s storeFlags) store() (objstore.Store, error) { return pkgicbfs.Open(*s.conn) }
 
 // run runs a storage command — here, or on the server through the
 // daemon — and decodes its result into out (if not nil).
@@ -116,7 +116,11 @@ func (s storeFlags) runWith(name string, args map[string]string, out any, openDr
 		if err := storeflags.Check(s.conn); err != nil {
 			return err
 		}
-		result, err = sidecmd.Run(ctx(), sidecmd.Env{Store: s.store(), Drive: openDrive}, sidecmd.Request{Name: name, Args: args, Actor: actor()})
+		store, err := s.store()
+		if err != nil {
+			return err
+		}
+		result, err = sidecmd.Run(ctx(), sidecmd.Env{Store: store, Drive: openDrive}, sidecmd.Request{Name: name, Args: args, Actor: actor()})
 	}
 	if err != nil {
 		return err

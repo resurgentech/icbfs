@@ -10,6 +10,7 @@ mount without them fails.
 
 | flag | environment variable | default |
 |---|---|---|
+| `-store` | `ICBFS_STORE` | `s3` (AWS S3, MinIO); or `azure` (Azure Blob Storage) |
 | `-endpoint` | `ICBFS_ENDPOINT` | `http://127.0.0.1:9000` |
 | `-bucket` | `ICBFS_BUCKET` | `icbfs` (versioning must be on) |
 | `-region` | `ICBFS_REGION` | `us-east-1` (MinIO ignores it) |
@@ -18,6 +19,11 @@ mount without them fails.
 
 Prefer the variables for the keys: a flag's value is visible to other
 users in the process list.
+
+On Azure, `-endpoint` is the account's service URL
+(`https://ACCOUNT.blob.core.windows.net/`), `-bucket` the container, and
+`-access-key` and `-secret-key` the account name and key. The account
+needs blob versioning on.
 
 | flag | default | meaning |
 |---|---|---|

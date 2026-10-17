@@ -10,14 +10,30 @@
 #
 # Workloads: smoke, storm, exclusive, counter, append, rename, fsstress.
 #
-# The store is a throwaway MinIO, or with ICBFS_MULTI_STORE=s3 the real S3
-# bucket .env.aws names (test/aws), with the AWS CLI's credentials.
+# The store is a throwaway MinIO; with ICBFS_MULTI_STORE=s3 the real S3
+# bucket .env.aws names (test/aws), with the AWS CLI's credentials; with
+# ICBFS_MULTI_STORE=azure the Azure container .env.azure names (test/azure),
+# with the account key from the az CLI.
 # MULTI_MACHINES limits how many machines take part; STORM, EXCL, COUNT,
 # APPEND and RENAMES set the workloads' sizes (per machine).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/lib.sh"
-if [ "${ICBFS_MULTI_STORE:-minio}" = s3 ]; then
+STORE_TYPE=s3
+if [ "${ICBFS_MULTI_STORE:-minio}" = azure ]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "$REPO/.env.azure"
+  set +a
+  STORE_TYPE=azure
+  STORE_ENDPOINT="https://${ICBFS_TEST_AZURE_ACCOUNT}.blob.core.windows.net/"
+  STORE_VM_ENDPOINT="$STORE_ENDPOINT"
+  STORE_BUCKET="$ICBFS_TEST_AZURE_CONTAINER"
+  STORE_ACCESS_KEY="$ICBFS_TEST_AZURE_ACCOUNT"
+  STORE_SECRET_KEY=$(az storage account keys list --subscription "$ICBFS_TEST_AZURE_SUBSCRIPTION" \
+    -g "$ICBFS_TEST_AZURE_RESOURCE_GROUP" -n "$ICBFS_TEST_AZURE_ACCOUNT" --query '[0].value' -o tsv)
+  STORE_REGION=us-east-1 # unused by Azure
+elif [ "${ICBFS_MULTI_STORE:-minio}" = s3 ]; then
   set -a
   # shellcheck disable=SC1091
   source "$REPO/.env.aws"
@@ -63,7 +79,7 @@ echo "machines: ${IPS[*]}" >&2
 (cd "$REPO" && CGO_ENABLED=0 go build -o "$WORK_DIR/icbfs" ./cmd/icbfs && go build -o "$WORK_DIR/icbfs-cli" ./cmd/icbfs-cli)
 cli() {
   ICBFS_ACCESS_KEY="$STORE_ACCESS_KEY" ICBFS_SECRET_KEY="$STORE_SECRET_KEY" \
-    "$WORK_DIR/icbfs-cli" "$@" -endpoint "$STORE_ENDPOINT" -bucket "$STORE_BUCKET" -region "$STORE_REGION"
+    "$WORK_DIR/icbfs-cli" "$@" -store "$STORE_TYPE" -endpoint "$STORE_ENDPOINT" -bucket "$STORE_BUCKET" -region "$STORE_REGION"
 }
 cli fs create -fs "$FS" -root-uid 0 -root-gid 0 >/dev/null
 
@@ -96,7 +112,7 @@ for ip in "${IPS[@]}"; do
     ssh_vm "$ip" "umask 077; cat > /tmp/icbfs-multi.env"
   # Detached, with no stdin or output left to the ssh session, so ssh returns.
   ssh_vm "$ip" "sudo sh -c 'set -a; . /tmp/icbfs-multi.env; set +a; exec setsid $BIN/icbfs mount \
-    -endpoint $STORE_VM_ENDPOINT -bucket $STORE_BUCKET -region $STORE_REGION -fs $FS -allow-other $MNT' \
+    -store $STORE_TYPE -endpoint $STORE_VM_ENDPOINT -bucket $STORE_BUCKET -region $STORE_REGION -fs $FS -allow-other $MNT' \
     < /dev/null > /tmp/icbfs-multi.log 2>&1 &"
 done
 for ip in "${IPS[@]}"; do

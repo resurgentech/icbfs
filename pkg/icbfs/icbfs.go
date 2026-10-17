@@ -6,6 +6,7 @@ package icbfs
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awscreds "github.com/aws/aws-sdk-go-v2/credentials"
@@ -34,8 +35,12 @@ var (
 // DefaultMaxFileSize is a new filesystem's max file size unless given.
 const DefaultMaxFileSize = core.DefaultMaxFileSize
 
-// S3 is how to reach a bucket over the S3 API (AWS S3, MinIO).
+// S3 is how to reach a bucket over the S3 API (AWS S3, MinIO), or with
+// Type "azure" an Azure Blob Storage container: Endpoint the service URL
+// (https://ACCOUNT.blob.core.windows.net/), Bucket the container,
+// AccessKey the account name and SecretKey the account key.
 type S3 struct {
+	Type      string `json:"type,omitempty"` // "" or "s3", or "azure"
 	Endpoint  string `json:"endpoint"`
 	Region    string `json:"region,omitempty"`
 	Bucket    string `json:"bucket"`
@@ -43,7 +48,18 @@ type S3 struct {
 	SecretKey string `json:"secretKey"`
 }
 
-// OpenS3 opens a bucket.
+// Open opens c's store, of either type (see S3).
+func Open(c S3) (Store, error) {
+	switch c.Type {
+	case "", "s3":
+		return OpenS3(c), nil
+	case "azure":
+		return objstore.NewAzureStore(c.Endpoint, c.AccessKey, c.SecretKey, c.Bucket)
+	}
+	return nil, fmt.Errorf("store type %q: s3 or azure", c.Type)
+}
+
+// OpenS3 opens a bucket over the S3 API.
 func OpenS3(c S3) Store {
 	region := c.Region
 	if region == "" {

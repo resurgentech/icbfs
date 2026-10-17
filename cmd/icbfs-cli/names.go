@@ -52,7 +52,11 @@ func (df driveFlags) run(name string, args map[string]string, out any) error {
 		}
 	}
 	return df.sf.runWith(name, args, out, func(ctx context.Context, _ map[string]string) (drive.Drive, error) {
-		return icbfsdrive.New(ctx, icbfsdrive.Config{Store: df.sf.store(), Filesystem: *df.fs, Root: *df.root})
+		store, err := df.sf.store()
+		if err != nil {
+			return nil, err
+		}
+		return icbfsdrive.New(ctx, icbfsdrive.Config{Store: store, Filesystem: *df.fs, Root: *df.root})
 	})
 }
 

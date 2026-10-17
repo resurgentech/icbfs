@@ -39,6 +39,24 @@ flowchart TB
 
 ## Object layout
 
+The store is an S3 bucket (AWS S3, MinIO) or an Azure Blob Storage
+container; both need versioning on. Azure's model differs from S3's in
+three places icbfs relies on, and the Azure store maps them:
+
+- Deleting a versioned blob leaves no delete marker and no time of
+  deletion, which past views need: a delete first writes a marker version
+  (an empty blob flagged in its metadata), then deletes the blob, so the
+  marker is the newest version, dated at the delete.
+- An earlier version can't become current again with its own version ID:
+  undeleting copies the version before the marker to a new current
+  version, and history keeps both.
+- A large file's unchanged ranges are copied on the server from the
+  pinned version as blocks, authorized by a short-lived read SAS for that
+  version, and committed under `If-Match`.
+
+Azure also moves an ETag when only metadata changes, and enforces
+`If-Match` on deletes; icbfs relies on neither.
+
 A bucket can hold many filesystems. Every object a filesystem owns starts
 with its four-hex-digit ID, so one prefix listing finds all of it.
 
@@ -539,11 +557,9 @@ See [api.md](api.md).
 
 ## Not supported
 
-- **Object stores:**
-  - Azure Blob Storage has no store implementation, only the change-feed
-    filter.
-  - AWS S3 uses the same S3-API code as MinIO, but hasn't been run against
-    real S3.
+- **Object stores:** the mounts and `icbfs-cli` take Azure Blob Storage
+  (`-store azure`); the drive API, icbfs-sync and the logging daemon take
+  only S3-API stores so far.
 - **Directory structure:** 8.3 short names, directory junctions, and volume
   mount points.
 - **Coordination:** a strongly consistent lock service. Locking (above) is

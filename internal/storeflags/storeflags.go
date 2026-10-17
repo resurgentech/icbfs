@@ -1,7 +1,10 @@
 // Package storeflags is how every command takes the store's connection:
 // the same flags, each defaulting to an environment variable, so a key
-// never has to be on a command line.
+// never has to be on a command line. For an Azure Blob Storage store,
+// -endpoint is the service URL, -bucket the container, -access-key the
+// account name and -secret-key the account key.
 //
+//	-store       $ICBFS_STORE       (s3; or azure)
 //	-endpoint    $ICBFS_ENDPOINT    (http://127.0.0.1:9000)
 //	-bucket      $ICBFS_BUCKET      (icbfs)
 //	-region      $ICBFS_REGION      (us-east-1)
@@ -21,6 +24,7 @@ import (
 // filled in when fset is parsed.
 func Add(fset *flag.FlagSet) *pkgicbfs.S3 {
 	c := &pkgicbfs.S3{}
+	fset.StringVar(&c.Type, "store", env("ICBFS_STORE", "s3"), "store: s3 (AWS S3, MinIO) or azure (Azure Blob Storage) ($ICBFS_STORE)")
 	fset.StringVar(&c.Endpoint, "endpoint", env("ICBFS_ENDPOINT", "http://127.0.0.1:9000"), "S3-API endpoint ($ICBFS_ENDPOINT)")
 	fset.StringVar(&c.Bucket, "bucket", env("ICBFS_BUCKET", "icbfs"), "bucket, with versioning on ($ICBFS_BUCKET)")
 	fset.StringVar(&c.Region, "region", env("ICBFS_REGION", "us-east-1"), "region ($ICBFS_REGION)")

@@ -4,7 +4,8 @@
 
 *I Can't Believe this isn't already a Filesystem.*
 
-icbfs is a filesystem stored directly in a versioned S3 bucket. It works in
+icbfs is a filesystem stored directly in a versioned S3 bucket (or Azure
+Blob Storage container). It works in
 the spirit of [JuiceFS](https://juicefs.com/), but is simpler: there is no
 chunking and no block format of its own. A file is one object, and the
 bucket's own version history is the filesystem's history.
@@ -47,7 +48,7 @@ flowchart LR
     SYNC["icbfs-sync"]
     CORE["filesystem core<br/>internal/icbfs"]
   end
-  S3[("versioned bucket<br/>MinIO / S3")]
+  S3[("versioned bucket<br/>MinIO / S3 / Azure Blob")]
   L --> FUSE --> CORE
   W --> WFS --> CORE
   H --> API --> CORE
@@ -114,12 +115,14 @@ rows on 2026-10-14):
 | Logging chain end to end | Linux VM | 5 / 5 checks |
 | icbfs-sync end to end | Windows Server 2025 VM | 12 / 12 checks |
 | Large files (6 GiB, multipart edits, max size) | Linux VM | 7 / 7 checks |
+| Object store conformance on real stores | AWS S3 (us-east-1), Azure Blob Storage (westus2) | 15 / 15 on each |
+| Two machines on AWS S3 and on Azure (smoke, create storm, `O_EXCL`, counter under `flock`), then `fs check` | Linux VMs | all pass; `fs check` clean |
 
 **Not yet tested:**
 
-- **Real AWS S3.** The code is the same S3-API code as for MinIO, but it
-  hasn't been run against AWS.
-- **Azure Blob Storage.** There is no Azure store implementation.
+- **Long runs on AWS S3 and Azure** (pjdfstest, xfstests, the full
+  multi-machine set): so far they've had the store tests and a short
+  two-machine set.
 - **The rest of xfstests** beyond the quick group, and long fsx and
   fsstress runs.
 - **Scale:** millions of files, many concurrent machines, and performance
@@ -216,7 +219,7 @@ cmd/            the commands above
 internal/
   icbfs/        the filesystem core
   block/        directory B-tree blocks
-  objstore/     the S3 store, and as-of views of it
+  objstore/     the S3 and Azure Blob stores, and as-of views of them
   fuseserver/   the FUSE driver
   winfspserver/ the WinFsp driver
   acl/          the Windows access check

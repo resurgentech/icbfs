@@ -128,6 +128,33 @@ just multi-test [workload]  # test/multi/run-multi.sh
 | rename | moves 50 files between two shared directories 4 times | none is lost or doubled |
 | fsstress | 2,000 random operations in a directory of its own | `fs check` |
 
+### Real stores: AWS S3 and Azure Blob Storage
+
+The object store's conformance tests (`internal/objstore`: conditional
+writes and their 412, put-if-absent, multipart writes under `If-Match`,
+version listings and deletes, past views, the server's clock) run against
+a real bucket or container as well as MinIO:
+
+```
+test/aws/run-conformance.sh     # .env.aws names the bucket; keys from the aws CLI
+test/azure/run-conformance.sh   # .env.azure names the account; key from the az CLI
+```
+
+`.env.aws` and `.env.azure` are gitignored and hold names only. Each test
+writes under a prefix of its own, and the bucket's and account's lifecycle
+rules expire what's left after two days. The multi-machine tests run on
+either with `ICBFS_MULTI_STORE=s3` or `azure` (and `MULTI_MACHINES`,
+`STORM`, `EXCL`, `COUNT`, `APPEND`, `RENAMES` to size a short run).
+
+On 2026-10-17, against AWS S3 (us-east-1) and Azure (westus2): all 15
+conformance tests pass on each, and on two machines the smoke, storm,
+exclusive and counter workloads pass, with `fs check` clean. Where the
+stores differ (Azure moves the ETag on a metadata change and has no
+minimum part size; AWS and Azure enforce `If-Match` on deletes, MinIO
+doesn't), the tests record each behaviour. Locks are slow on a remote
+store: a locked increment took about 5 seconds on S3, every lock, unlock
+and close-to-open read being a round trip.
+
 ### winfsp-tests (Windows)
 
 [winfsp-tests](https://github.com/winfsp/winfsp/wiki/WinFsp-Testing) is
@@ -206,11 +233,10 @@ test/minio/down.sh             # remove it; --all removes any left behind
 
 ## Not tested
 
-- **Real AWS S3.** It is the same S3-API code as for MinIO. Things that
-  might differ: `If-Match` on `PutObject`, one-second `Last-Modified`
-  resolution for as-of views, and SQS notifications.
-- **Azure Blob Storage.** There is no store implementation; the
-  change-feed adapter is tested against a fake.
+- **Long runs on AWS S3 and Azure:** pjdfstest, xfstests and the full
+  multi-machine set have run against MinIO only; S3 and Azure have had the
+  store conformance tests and a short multi-machine set (above). SQS
+  notifications and Azure's change feed are tested against fakes.
 - **xfstests and fsx.** fuse-xfstests is built for gocryptfs's mount
   conventions and would need its own wrapper.
 - **A real WebDAV drive** for icbfs-sync. The test VM has no WebDAV
