@@ -389,6 +389,14 @@ write.
   lock list, and refuses the write if that span overlaps someone else's
   lock. This is stronger than advisory, but not mandatory: a new lock can
   still slip in between the check and the write.
+- **Consistency around locks, as NFS.** Before a lock is released, the
+  file's unflushed writes are stored, under the lock still held. After one
+  is acquired, the open file is brought up to what the last holder stored:
+  unflushed writes here are flushed, rebasing onto the newer version; with
+  none, the newer version replaces the content, and the kernel's pages
+  and attributes for the file are dropped. So a program that keeps a file
+  open across lock cycles reads, under each lock, what was written under
+  the one before, on any machine.
 - The same mechanism serves `flock`/`fcntl` from applications and the write
   path's own escalation. As POSIX says, a process's `fcntl` locks on a
   file go when it closes any descriptor for it (the kernel's FLUSH names

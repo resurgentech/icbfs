@@ -253,6 +253,17 @@ func (o *OpenFile) Allocate(off, length int64, mode uint32) error {
 // Flush stores every open's writes; see content.Flush.
 func (o *OpenFile) Flush(ctx context.Context) (Attr, error) { return o.c.Flush(ctx, o.holder) }
 
+// SyncAfterLock brings the content up to date for a lock just taken, as
+// NFS revalidates a file's cache when a lock is acquired, so that what
+// the last holder wrote reads here even through a descriptor opened
+// before it wrote. Unflushed writes are stored, rebased onto a newer
+// stored version if there is one; with none, a newer stored version
+// replaces the content. changed reports that what this file reads may now
+// differ, so the caller drops the kernel's pages and attributes for it.
+func (o *OpenFile) SyncAfterLock(ctx context.Context) (changed bool, err error) {
+	return o.c.syncAfterLock(ctx, o.holder)
+}
+
 // TouchAtime records an access, at most once per session. The kernel splits
 // one read(2) into many FUSE reads (about 128 KiB each), and one metadata
 // write per chunk would turn a large read into thousands of synchronous
@@ -456,6 +467,33 @@ func (c *content) applyLocked(data []byte, off int64) error {
 // dirty, which WriteAt never sets without widening the range.
 func (c *content) touchedRangeLocked() (start, end int64) {
 	return c.touchedStart, c.touchedEnd
+}
+
+// syncAfterLock is OpenFile.SyncAfterLock.
+func (c *content) syncAfterLock(ctx context.Context, holder string) (bool, error) {
+	c.mu.Lock()
+	if c.dirty {
+		c.mu.Unlock()
+		// A flush that lost a race rebases onto what the other writer
+		// stored, so the content may change.
+		_, err := c.Flush(ctx, holder)
+		return true, err
+	}
+	defer c.mu.Unlock()
+	if c.file == nil {
+		return false, errSessionClosed
+	}
+	head, err := c.fsys.store.Head(ctx, c.key)
+	if objstore.IsNotFound(err) {
+		return false, nil // removed elsewhere: nothing newer to read
+	}
+	if err != nil {
+		return false, err
+	}
+	if head.ETag == c.etag {
+		return false, nil
+	}
+	return true, c.rebaseLocked(ctx)
 }
 
 // rebaseLocked fetches key's current content into a fresh scratch file

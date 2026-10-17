@@ -741,6 +741,11 @@ func (h *FileHandle) setlk(ctx context.Context, owner uint64, lk *fuse.FileLock,
 	}
 	switch lk.Typ {
 	case syscall.F_UNLCK:
+		// As NFS flushes before releasing a lock: the next holder, on
+		// any machine, reads what was written under this one.
+		if err := h.flushBeforeUnlock(ctx); err != nil {
+			return errnoFromErr(err)
+		}
 		return errnoFromErr(h.open.UnlockRange(ctx, start, end, holder))
 	case syscall.F_RDLCK:
 		if blocking {
@@ -748,7 +753,7 @@ func (h *FileHandle) setlk(ctx context.Context, owner uint64, lk *fuse.FileLock,
 				return errnoFromErr(err)
 			}
 			h.ensureRenewal(owner)
-			return 0
+			return h.syncAfterLock(ctx)
 		}
 		err := h.open.TryAcquireSharedLockRange(ctx, start, end, holder, lockLeaseTTL)
 		if errors.Is(err, icbfs.ErrLocked) {
@@ -758,14 +763,14 @@ func (h *FileHandle) setlk(ctx context.Context, owner uint64, lk *fuse.FileLock,
 			return errnoFromErr(err)
 		}
 		h.ensureRenewal(owner)
-		return 0
+		return h.syncAfterLock(ctx)
 	case syscall.F_WRLCK:
 		if blocking {
 			if err := h.open.AcquireLockRange(ctx, start, end, holder, lockLeaseTTL); err != nil {
 				return errnoFromErr(err)
 			}
 			h.ensureRenewal(owner)
-			return 0
+			return h.syncAfterLock(ctx)
 		}
 		err := h.open.TryAcquireLockRange(ctx, start, end, holder, lockLeaseTTL)
 		if errors.Is(err, icbfs.ErrLocked) {
@@ -775,10 +780,45 @@ func (h *FileHandle) setlk(ctx context.Context, owner uint64, lk *fuse.FileLock,
 			return errnoFromErr(err)
 		}
 		h.ensureRenewal(owner)
-		return 0
+		return h.syncAfterLock(ctx)
 	default:
 		return syscall.EINVAL
 	}
+}
+
+// syncAfterLock brings the file up to date under a lock just taken (see
+// icbfs.OpenFile.SyncAfterLock), and drops the kernel's pages and
+// attributes for it if what it reads may have changed: they're kept
+// across reads within an open (ExplicitDataCacheControl), so without this
+// a descriptor opened before the last holder's writes would still read
+// around them. A failure leaves the lock held: the caller can't be told
+// both that it holds the lock and that this failed, and a lock refused
+// after it was taken would be worse.
+func (h *FileHandle) syncAfterLock(ctx context.Context) syscall.Errno {
+	changed, err := h.open.SyncAfterLock(ctx)
+	if err != nil {
+		log.Printf("icbfs: bringing a file up to date after taking a lock: %v", err)
+		return 0
+	}
+	if changed && h.node != nil {
+		h.node.EmbeddedInode().NotifyContent(0, 0)
+	}
+	return 0
+}
+
+// flushBeforeUnlock stores unflushed writes before a lock goes.
+func (h *FileHandle) flushBeforeUnlock(ctx context.Context) error {
+	if !h.open.Dirty() {
+		return nil
+	}
+	attr, err := h.open.Flush(ctx)
+	if err != nil {
+		return err
+	}
+	if h.node != nil && h.wrote.Swap(false) {
+		h.node.logEvent(ctx, fslog.EventWrite, h.node.path(), attr.Size)
+	}
+	return nil
 }
 
 func (n *Node) addFcntlOwner(owner uint64) {
@@ -867,6 +907,18 @@ func (h *FileHandle) stopRenewal(owner uint64) {
 // A close through another descriptor releases them sooner (Flush).
 func (h *FileHandle) Release(ctx context.Context) syscall.Errno {
 	ctx = detach(ctx)
+	// Writes since the last close's flush: a mapping's pages, which the
+	// kernel writes back after the file is closed. Stored before this
+	// handle's locks go, with their leases still renewed, so the next
+	// holder reads them. Nothing waits for a release, so a failure can
+	// only be logged.
+	if h.open.Dirty() {
+		if attr, err := h.open.Flush(ctx); err != nil {
+			log.Printf("icbfs: storing writes made after the close: %v", err)
+		} else if h.node != nil && h.wrote.Swap(false) {
+			h.node.logEvent(ctx, fslog.EventWrite, h.node.path(), attr.Size)
+		}
+	}
 	h.mu.Lock()
 	renewers := h.renewers
 	h.renewers = nil
@@ -880,16 +932,6 @@ func (h *FileHandle) Release(ctx context.Context) syscall.Errno {
 	h.wg.Wait()
 	for owner := range renewers {
 		h.releaseAllHeldBy(ctx, owner)
-	}
-	// Writes since the last close's flush: a mapping's pages, which the
-	// kernel writes back after the file is closed. Nothing waits for a
-	// release, so a failure can only be logged.
-	if h.open.Dirty() {
-		if attr, err := h.open.Flush(ctx); err != nil {
-			log.Printf("icbfs: storing writes made after the close: %v", err)
-		} else if h.node != nil && h.wrote.Swap(false) {
-			h.node.logEvent(ctx, fslog.EventWrite, h.node.path(), attr.Size)
-		}
 	}
 	// Releases this session's private local scratch file — without this, every real close(2) would leak
 	// a file on local disk for the life of the mount process.
