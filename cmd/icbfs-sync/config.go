@@ -1,12 +1,14 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"time"
+
+	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
 )
 
 // Config is icbfs-sync's settings file.
@@ -15,16 +17,29 @@ type Config struct {
 	Pairs []Pair `json:"pairs"`
 }
 
-// Store is how to reach the bucket the drives are in.
+// Store is the store the drives are in, its secret (the S3 secret key or
+// the Azure account key) either in the clear or, in SecretProtected,
+// encrypted for this Windows account (icbfs-sync set-secret writes it).
 type Store struct {
-	Endpoint  string `json:"endpoint"`
-	Region    string `json:"region,omitempty"`
-	Bucket    string `json:"bucket"`
-	AccessKey string `json:"accessKey"`
-	// SecretKey in the clear, or SecretKeyProtected, encrypted for this
-	// Windows account (icbfs-sync set-secret writes it).
-	SecretKey          string `json:"secretKey,omitempty"`
-	SecretKeyProtected string `json:"secretKeyProtected,omitempty"`
+	pkgicbfs.StoreConfig
+	SecretProtected string `json:"secretProtected,omitempty"`
+}
+
+// UnmarshalJSON reads a Store; secretKeyProtected is what SecretProtected
+// was called when the store could only be S3.
+func (s *Store) UnmarshalJSON(b []byte) error {
+	if err := s.StoreConfig.UnmarshalJSON(b); err != nil {
+		return err
+	}
+	var p struct {
+		SecretProtected    string `json:"secretProtected"`
+		SecretKeyProtected string `json:"secretKeyProtected"`
+	}
+	if err := json.Unmarshal(b, &p); err != nil {
+		return err
+	}
+	s.SecretProtected = cmp.Or(p.SecretProtected, p.SecretKeyProtected)
+	return nil
 }
 
 // Pair is a folder kept in step with an icbfs drive.
@@ -77,8 +92,8 @@ func durationOr(s string, def time.Duration) time.Duration {
 }
 
 func (c *Config) validate() error {
-	if c.Store.Endpoint == "" || c.Store.Bucket == "" || c.Store.AccessKey == "" {
-		return errors.New("store: endpoint, bucket and accessKey are required")
+	if err := c.Store.Check(); err != nil {
+		return fmt.Errorf("store: %w", err)
 	}
 	seen := map[string]bool{}
 	for i, p := range c.Pairs {
@@ -124,12 +139,12 @@ func loadConfig(path string) (*Config, error) {
 	if err := json.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	if c.Store.SecretKeyProtected != "" {
-		s, err := unprotect(c.Store.SecretKeyProtected)
+	if c.Store.SecretProtected != "" {
+		s, err := unprotect(c.Store.SecretProtected)
 		if err != nil {
-			return nil, fmt.Errorf("%s: the protected secret key: %w", path, err)
+			return nil, fmt.Errorf("%s: the protected secret: %w", path, err)
 		}
-		c.Store.SecretKey = s
+		c.Store.SetSecret(s)
 	}
 	if err := c.validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
@@ -140,8 +155,8 @@ func loadConfig(path string) (*Config, error) {
 // saveConfig writes c, keeping a protected secret protected.
 func saveConfig(path string, c *Config) error {
 	out := *c
-	if out.Store.SecretKeyProtected != "" {
-		out.Store.SecretKey = ""
+	if out.Store.SecretProtected != "" {
+		out.Store.SetSecret("")
 	}
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
@@ -160,7 +175,8 @@ func saveConfig(path string, c *Config) error {
 // template is what init writes: a starting point to edit.
 func template() *Config {
 	return &Config{
-		Store: Store{Endpoint: "https://s3.example.com", Region: "us-east-1", Bucket: "documents", AccessKey: "ACCESS-KEY", SecretKey: "SECRET-KEY"},
+		Store: Store{StoreConfig: pkgicbfs.StoreConfig{Kind: pkgicbfs.KindS3, S3: pkgicbfs.S3{
+			Endpoint: "https://s3.example.com", Region: "us-east-1", Bucket: "documents", AccessKey: "ACCESS-KEY", SecretKey: "SECRET-KEY"}}},
 		Pairs: []Pair{{
 			Name: "documents", Folder: `Z:\`, Filesystem: "documents", Root: "/", Mode: "one-way",
 			Interval: "5m", RemoteEvery: "1h", MaxRemovals: 200, IDs: "auto", ACLs: "auto",

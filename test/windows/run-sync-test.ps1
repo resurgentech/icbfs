@@ -61,7 +61,7 @@ Dismount-Icbfs
 
 @"
 {
-  "store": {"endpoint": "$Endpoint", "bucket": "$Bucket", "accessKey": "$AccessKey", "secretKey": "$SecretKey"},
+  "store": {"kind": "s3", "s3": {"endpoint": "$Endpoint", "bucket": "$Bucket", "accessKey": "$AccessKey", "secretKey": "$SecretKey"}},
   "pairs": [
     {"name": "ntfs", "folder": "$($t -replace '\\','\\')\\ntfs", "filesystem": "ntfs-mirror", "root": "/", "mode": "one-way"},
     {"name": "dav", "folder": "$($t -replace '\\','\\')\\dav", "filesystem": "dav-mirror", "root": "/", "mode": "one-way",

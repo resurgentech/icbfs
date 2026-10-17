@@ -7,7 +7,7 @@
 //	icbfs-sync run             syncs, logging to the console, until stopped
 //	icbfs-sync once [-pair N] [-confirm]   one pass of each pair, then exit
 //	icbfs-sync init            write a settings file to start from
-//	icbfs-sync set-secret      store the secret key encrypted (Windows)
+//	icbfs-sync set-secret      store the store's secret encrypted (Windows)
 //	icbfs-sync install         start the tray at login (Windows)
 //	icbfs-sync uninstall
 //	icbfs-sync paths           where the settings, state and log are
@@ -94,7 +94,10 @@ func run(paths Paths) error {
 		return err
 	}
 	defer log.Close()
-	r := newRunner(cfg, paths, log)
+	r, err := newRunner(cfg, paths, log)
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	log.Printf("icbfs-sync: %d pairs", len(cfg.Pairs))
@@ -115,7 +118,10 @@ func once(paths Paths, only string, confirm bool) error {
 		return err
 	}
 	defer log.Close()
-	r := newRunner(cfg, paths, log)
+	r, err := newRunner(cfg, paths, log)
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	failed := false
@@ -174,7 +180,7 @@ func setSecret(paths Paths) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprint(os.Stderr, "secret key: ")
+	fmt.Fprint(os.Stderr, "secret (the S3 secret key or the Azure account key): ")
 	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil && line == "" {
 		return err
@@ -187,7 +193,8 @@ func setSecret(paths Paths) error {
 	if err != nil {
 		return err
 	}
-	cfg.Store.SecretKey, cfg.Store.SecretKeyProtected = "", p
+	cfg.Store.SetSecret("")
+	cfg.Store.SecretProtected = p
 	if err := saveConfig(paths.Config, cfg); err != nil {
 		return err
 	}

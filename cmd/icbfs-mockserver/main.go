@@ -15,6 +15,7 @@ import (
 
 	"github.com/resurgentech/icbfs/internal/fslog"
 	"github.com/resurgentech/icbfs/internal/logserver"
+	"github.com/resurgentech/icbfs/internal/storeflags"
 )
 
 func main() {
@@ -23,12 +24,8 @@ func main() {
 	logPath := flag.String("log", "icbfs-events.jsonl", "JSON-lines file events are appended to")
 	drives := flag.String("drives", "", `the drive registry, comma-separated: id=filesystem[:/root][:ro] ("docs=docs,team-a=docs:/team-a:ro")`)
 	allowCommands := flag.String("allow-commands", "", `comma-separated side commands daemons may run ("names create,trash list"); empty allows every one`)
-	endpoint := flag.String("endpoint", "", "S3-API endpoint handed to mounts")
-	storeEndpoint := flag.String("store-endpoint", "", "the S3-API endpoint as this server reaches it, for side commands (default -endpoint)")
-	bucket := flag.String("bucket", "icbfs", "bucket handed to mounts")
-	region := flag.String("region", "us-east-1", "region handed to mounts")
-	accessKey := flag.String("access-key", "", "access key handed to mounts")
-	secretKey := flag.String("secret-key", "", "secret key handed to mounts")
+	creds := storeflags.Add(flag.CommandLine) // the store handed to mounts
+	storeEndpoint := flag.String("store-endpoint", "", "the store's endpoint as this server reaches it, for side commands (default the one handed to mounts)")
 	flag.Parse()
 
 	registry, err := parseDrives(*drives)
@@ -44,7 +41,7 @@ func main() {
 		StoreEndpoint: *storeEndpoint,
 		Secret:        *secret,
 		Log:           *logPath,
-		Creds:         fslog.Creds{Endpoint: *endpoint, Bucket: *bucket, Region: *region, AccessKey: *accessKey, SecretKey: *secretKey},
+		Creds:         *creds,
 		Drives:        registry,
 	})
 	if err != nil {

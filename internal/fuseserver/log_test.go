@@ -20,6 +20,7 @@ import (
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/logd"
 	"github.com/resurgentech/icbfs/internal/logserver"
+	"github.com/resurgentech/icbfs/internal/storeconfig"
 )
 
 // TestMountLogsThroughDaemon is the whole chain, the way `icbfs mount
@@ -37,7 +38,7 @@ func TestMountLogsThroughDaemon(t *testing.T) {
 
 			srv, err := logserver.New(logserver.Config{
 				Secret: "s", Log: logPath, Drives: map[string]fslog.Mount{"logged-drive": {Filesystem: "logged"}},
-				Creds: fslog.Creds{Endpoint: store.endpoint, Bucket: store.bucket, Region: "us-east-1", AccessKey: store.accessKey, SecretKey: store.secretKey},
+				Creds: fslog.Creds{S3: storeconfig.S3{Endpoint: store.endpoint, Bucket: store.bucket, Region: "us-east-1", AccessKey: store.accessKey, SecretKey: store.secretKey}},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -66,7 +67,7 @@ func TestMountLogsThroughDaemon(t *testing.T) {
 			if err != nil {
 				t.Fatalf("mount: %v", err)
 			}
-			fsys := icbfs.New(newS3Store(testMinIO{endpoint: creds.Endpoint, bucket: creds.Bucket, accessKey: creds.AccessKey, secretKey: creds.SecretKey}), m.Filesystem)
+			fsys := icbfs.New(newS3Store(testMinIO{endpoint: creds.S3.Endpoint, bucket: creds.S3.Bucket, accessKey: creds.S3.AccessKey, secretKey: creds.S3.SecretKey}), m.Filesystem)
 			if err := fsys.Bootstrap(ctx, 1<<30, 0755, uint32(os.Getuid()), uint32(os.Getgid()), false); err != nil {
 				t.Fatalf("bootstrap with the server's credentials: %v", err)
 			}

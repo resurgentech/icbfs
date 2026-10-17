@@ -118,9 +118,9 @@ func main() {
 	defer server.Unmount()
 
 	if view != nil {
-		log.Printf("icbfs %q mounted read-only at %s as of %s (bucket %s via %s)", *fsName, mountpoint, view.At().Format(time.RFC3339Nano), conn.Bucket, conn.Endpoint)
+		log.Printf("icbfs %q mounted read-only at %s as of %s (%s)", *fsName, mountpoint, view.At().Format(time.RFC3339Nano), conn)
 	} else {
-		log.Printf("icbfs %q mounted at %s (bucket %s via %s)", *fsName, mountpoint, conn.Bucket, conn.Endpoint)
+		log.Printf("icbfs %q mounted at %s (%s)", *fsName, mountpoint, conn)
 	}
 	log.Println(winfspAttribution)
 	// winfsp.Mount's dispatcher runs its own background goroutines;

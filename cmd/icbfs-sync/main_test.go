@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
@@ -12,7 +13,30 @@ import (
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/syncer/icbfsside"
 	"github.com/resurgentech/icbfs/internal/testutil/miniotest"
+	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
 )
+
+// TestConfigBeforeAzure: a settings file from before the store could be
+// Azure, its S3 settings at the top of "store", still reads.
+func TestConfigBeforeAzure(t *testing.T) {
+	c, err := loadConfigRaw([]byte(`{"store": {"endpoint": "https://s3.example.com", "bucket": "documents",
+		"accessKey": "AK", "secretKeyProtected": "PROTECTED"}, "pairs": []}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := pkgicbfs.S3{Endpoint: "https://s3.example.com", Bucket: "documents", AccessKey: "AK"}
+	if c.Store.Kind != "" || c.Store.S3 != want || c.Store.SecretProtected != "PROTECTED" {
+		t.Fatalf("store %+v", c.Store)
+	}
+	data, err := json.Marshal(c.Store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var again Store
+	if err := json.Unmarshal(data, &again); err != nil || again != c.Store {
+		t.Fatalf("%s → %+v, %v", data, again, err)
+	}
+}
 
 func TestConfigValidation(t *testing.T) {
 	good := template()
@@ -20,7 +44,9 @@ func TestConfigValidation(t *testing.T) {
 		t.Fatalf("the template: %v", err)
 	}
 	for name, mutate := range map[string]func(*Config){
-		"no endpoint": func(c *Config) { c.Store.Endpoint = "" },
+		"no endpoint": func(c *Config) { c.Store.S3.Endpoint = "" },
+		"no secret":   func(c *Config) { c.Store.S3.SecretKey = "" },
+		"no account":  func(c *Config) { c.Store.Kind, c.Store.Azure = "azure", pkgicbfs.Azure{Container: "c", Key: "k"} },
 		"no folder":   func(c *Config) { c.Pairs[0].Folder = "" },
 		"bad mode":    func(c *Config) { c.Pairs[0].Mode = "sideways" },
 		"same name":   func(c *Config) { c.Pairs = append(c.Pairs, c.Pairs[0]) },
@@ -62,7 +88,7 @@ func TestOnce(t *testing.T) {
 	}
 	paths := Paths{Config: filepath.Join(dir, "config.json"), Data: filepath.Join(dir, "data")}
 	cfg := &Config{
-		Store: Store{Endpoint: srv.Endpoint, Bucket: srv.Bucket, AccessKey: srv.AccessKey, SecretKey: srv.SecretKey},
+		Store: Store{StoreConfig: pkgicbfs.StoreConfig{S3: pkgicbfs.S3{Endpoint: srv.Endpoint, Bucket: srv.Bucket, AccessKey: srv.AccessKey, SecretKey: srv.SecretKey}}},
 		Pairs: []Pair{{Name: "docs", Folder: folder, Filesystem: "docs", Root: "/", Mode: "one-way"}},
 	}
 	if err := saveConfig(paths.Config, cfg); err != nil {

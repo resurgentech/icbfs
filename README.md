@@ -115,7 +115,7 @@ rows on 2026-10-14):
 | Logging chain end to end | Linux VM | 5 / 5 checks |
 | icbfs-sync end to end | Windows Server 2025 VM | 12 / 12 checks |
 | Large files (6 GiB, multipart edits, max size) | Linux VM | 7 / 7 checks |
-| Object store conformance on real stores | AWS S3 (us-east-1), Azure Blob Storage (westus2) | 15 / 15 on each |
+| Object store conformance on real stores | AWS S3 (us-east-1), Azure Blob Storage (westus2) | 14 / 14 on each |
 | Two machines on AWS S3 and on Azure (smoke, create storm, `O_EXCL`, counter under `flock`), then `fs check` | Linux VMs | all pass; `fs check` clean |
 
 **Not yet tested:**
@@ -219,7 +219,9 @@ cmd/            the commands above
 internal/
   icbfs/        the filesystem core
   block/        directory B-tree blocks
-  objstore/     the S3 and Azure Blob stores, and as-of views of them
+  objstore/     the store interface; the S3 and Azure Blob stores, their
+                conformance suite, and as-of views of them
+  storeconfig/ storeflags/   which store, and how to reach it
   fuseserver/   the FUSE driver
   winfspserver/ the WinFsp driver
   acl/          the Windows access check
@@ -229,7 +231,7 @@ internal/
   pb/           generated Protobuf code
 pkg/
   drive/        the drive library, icbfs backend, and HTTP handlers
-  icbfs/        opening a bucket; filesystem administration
+  icbfs/        opening a store; filesystem administration
 spec/           Protobuf schemas and the OpenAPI spec
 test/           VM test environments and runners
 third_party/go-winfsp/   vendored WinFsp binding, patched

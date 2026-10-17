@@ -12,6 +12,8 @@ package fslog
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/resurgentech/icbfs/internal/storeconfig"
 )
 
 // Frame ops.
@@ -88,11 +90,8 @@ type Event struct {
 	Error string    `json:"error,omitempty"` // EventCommand: it failed
 }
 
-// Creds is how to reach a filesystem's object store.
-type Creds struct {
-	Endpoint  string `json:"endpoint"`
-	Bucket    string `json:"bucket"`
-	Region    string `json:"region"`
-	AccessKey string `json:"accessKey"`
-	SecretKey string `json:"secretKey"`
-}
+// Creds is how to reach a filesystem's object store: which kind, and that
+// kind's section ({"kind": "s3", "s3": {...}}). A server that sends an S3
+// store's fields at the top, as before there was more than one kind, is
+// understood.
+type Creds = storeconfig.Config

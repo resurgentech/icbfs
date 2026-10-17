@@ -40,20 +40,28 @@ flowchart TB
 ## Object layout
 
 The store is an S3 bucket (AWS S3, MinIO) or an Azure Blob Storage
-container; both need versioning on. Azure's model differs from S3's in
-three places icbfs relies on, and the Azure store maps them:
+container; both need versioning on. icbfs uses either through one
+interface in its own terms (`internal/objstore.Store`), and each store
+implements it in its own: `s3store` and `azurestore`, equals, with one
+conformance suite (`storetest`) that both pass. A store is chosen by a
+store configuration, a kind (`s3` or `azure`) and that kind's section,
+which the mounts take as flags and the drive API, icbfs-sync and the
+logging server as JSON.
 
-- Deleting a versioned blob leaves no delete marker and no time of
-  deletion, which past views need: a delete first writes a marker version
-  (an empty blob flagged in its metadata), then deletes the blob, so the
-  marker is the newest version, dated at the delete.
-- An earlier version can't become current again with its own version ID:
-  undeleting copies the version before the marker to a new current
-  version, and history keeps both.
-- A large file's unchanged ranges are copied on the server from the
-  pinned version as blocks, authorized by a short-lived read SAS for that
-  version, and committed under `If-Match`.
+| icbfs needs | S3 | Azure Blob Storage |
+|---|---|---|
+| conditional write (`If-Match`, put-if-absent) | conditional PUT | conditional Put Blob |
+| a large file from parts, unchanged ranges copied on the server from the pinned version | multipart upload, UploadPartCopy, completed under `If-Match` | Put Block From URL (a short-lived read SAS for that version), Put Block, Put Block List under `If-Match` |
+| part limits | 5 MiB to 5 GiB, 10,000 parts | 1 byte to 4,000 MiB, 50,000 blocks |
+| history: every version and deletion, newest first, with times | ListObjectVersions: versions and delete markers | the blob's versions; a deletion is a marker version (below) |
+| delete, keeping history | DELETE: a delete marker | write a marker version (an empty blob flagged `icbfs_delete_marker`), then delete the blob |
+| undelete | erase the newest delete marker | copy the version before the marker to a new current version |
+| erase a version, or everything under a prefix | DELETE with a version ID | Delete Blob with a version ID |
+| the store's clock | the `Date` of a response | the `Date` of a response |
 
+Azure needs a marker version because deleting a versioned blob leaves no
+record of the deletion or when it happened, which past views need: with
+the marker, the deletion is the newest version, dated at the delete.
 Azure also moves an ETag when only metadata changes, and enforces
 `If-Match` on deletes; icbfs relies on neither.
 
@@ -557,9 +565,9 @@ See [api.md](api.md).
 
 ## Not supported
 
-- **Object stores:** the mounts and `icbfs-cli` take Azure Blob Storage
-  (`-store azure`); the drive API, icbfs-sync and the logging daemon take
-  only S3-API stores so far.
+- **Change notifications on Azure:** `-notify` and the drive API's
+  `"notify": "minio"` need MinIO's bucket notifications; on Azure, locks
+  wait by polling and the event stream carries only the API's own changes.
 - **Directory structure:** 8.3 short names, directory junctions, and volume
   mount points.
 - **Coordination:** a strongly consistent lock service. Locking (above) is

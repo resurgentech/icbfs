@@ -19,42 +19,42 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/lib.sh"
-STORE_TYPE=s3
+# STORE_ARGS are the store's flags as this host reaches it, STORE_VM_ARGS
+# as the VMs do. Its secrets are exported here as the ICBFS_* variables
+# icbfs-cli reads, and STORE_ENV is the same lines for the VMs: never on a
+# command line (ps would show them).
 if [ "${ICBFS_MULTI_STORE:-minio}" = azure ]; then
   set -a
   # shellcheck disable=SC1091
   source "$REPO/.env.azure"
   set +a
-  STORE_TYPE=azure
-  STORE_ENDPOINT="https://${ICBFS_TEST_AZURE_ACCOUNT}.blob.core.windows.net/"
-  STORE_VM_ENDPOINT="$STORE_ENDPOINT"
-  STORE_BUCKET="$ICBFS_TEST_AZURE_CONTAINER"
-  STORE_ACCESS_KEY="$ICBFS_TEST_AZURE_ACCOUNT"
-  STORE_SECRET_KEY=$(az storage account keys list --subscription "$ICBFS_TEST_AZURE_SUBSCRIPTION" \
+  STORE_ARGS="-store azure -azure-account $ICBFS_TEST_AZURE_ACCOUNT -azure-container $ICBFS_TEST_AZURE_CONTAINER"
+  STORE_VM_ARGS="$STORE_ARGS"
+  ICBFS_AZURE_KEY=$(az storage account keys list --subscription "$ICBFS_TEST_AZURE_SUBSCRIPTION" \
     -g "$ICBFS_TEST_AZURE_RESOURCE_GROUP" -n "$ICBFS_TEST_AZURE_ACCOUNT" --query '[0].value' -o tsv)
-  STORE_REGION=us-east-1 # unused by Azure
-elif [ "${ICBFS_MULTI_STORE:-minio}" = s3 ]; then
-  set -a
-  # shellcheck disable=SC1091
-  source "$REPO/.env.aws"
-  set +a
-  eval "$(aws configure export-credentials --format env)"
-  STORE_ENDPOINT="https://s3.${ICBFS_TEST_S3_REGION:-us-east-1}.amazonaws.com"
-  STORE_VM_ENDPOINT="$STORE_ENDPOINT"
-  STORE_BUCKET="$ICBFS_TEST_S3_BUCKET"
-  STORE_ACCESS_KEY="$AWS_ACCESS_KEY_ID"
-  STORE_SECRET_KEY="$AWS_SECRET_ACCESS_KEY"
-  STORE_REGION="${ICBFS_TEST_S3_REGION:-us-east-1}"
+  export ICBFS_AZURE_KEY
+  STORE_ENV="ICBFS_AZURE_KEY=$ICBFS_AZURE_KEY"
 else
-  if [ -z "${ICBFS_MINIO_VM_ENDPOINT:-}" ]; then
-    exec "$HERE/../minio/with-minio.sh" "$HERE/run-multi.sh" "$@"
+  if [ "${ICBFS_MULTI_STORE:-minio}" = s3 ]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "$REPO/.env.aws"
+    set +a
+    eval "$(aws configure export-credentials --format env)"
+    region="${ICBFS_TEST_S3_REGION:-us-east-1}"
+    STORE_ARGS="-store s3 -endpoint https://s3.$region.amazonaws.com -bucket $ICBFS_TEST_S3_BUCKET -region $region"
+    STORE_VM_ARGS="$STORE_ARGS"
+    ICBFS_ACCESS_KEY="$AWS_ACCESS_KEY_ID" ICBFS_SECRET_KEY="$AWS_SECRET_ACCESS_KEY"
+  else
+    if [ -z "${ICBFS_MINIO_VM_ENDPOINT:-}" ]; then
+      exec "$HERE/../minio/with-minio.sh" "$HERE/run-multi.sh" "$@"
+    fi
+    STORE_ARGS="-store s3 -endpoint $ICBFS_MINIO_ENDPOINT -bucket $ICBFS_MINIO_BUCKET"
+    STORE_VM_ARGS="-store s3 -endpoint $ICBFS_MINIO_VM_ENDPOINT -bucket $ICBFS_MINIO_BUCKET"
+    ICBFS_ACCESS_KEY="$ICBFS_MINIO_ACCESS_KEY" ICBFS_SECRET_KEY="$ICBFS_MINIO_SECRET_KEY"
   fi
-  STORE_ENDPOINT="$ICBFS_MINIO_ENDPOINT"
-  STORE_VM_ENDPOINT="$ICBFS_MINIO_VM_ENDPOINT"
-  STORE_BUCKET="$ICBFS_MINIO_BUCKET"
-  STORE_ACCESS_KEY="$ICBFS_MINIO_ACCESS_KEY"
-  STORE_SECRET_KEY="$ICBFS_MINIO_SECRET_KEY"
-  STORE_REGION=us-east-1
+  export ICBFS_ACCESS_KEY ICBFS_SECRET_KEY
+  STORE_ENV=$(printf 'ICBFS_ACCESS_KEY=%s\nICBFS_SECRET_KEY=%s' "$ICBFS_ACCESS_KEY" "$ICBFS_SECRET_KEY")
 fi
 STORM="${STORM:-300}" EXCL="${EXCL:-100}" COUNT="${COUNT:-40}" APPEND="${APPEND:-100}" RENAMES="${RENAMES:-50}"
 
@@ -78,8 +78,8 @@ echo "machines: ${IPS[*]}" >&2
 # Static binaries from this host, so the small VMs need no Go.
 (cd "$REPO" && CGO_ENABLED=0 go build -o "$WORK_DIR/icbfs" ./cmd/icbfs && go build -o "$WORK_DIR/icbfs-cli" ./cmd/icbfs-cli)
 cli() {
-  ICBFS_ACCESS_KEY="$STORE_ACCESS_KEY" ICBFS_SECRET_KEY="$STORE_SECRET_KEY" \
-    "$WORK_DIR/icbfs-cli" "$@" -store "$STORE_TYPE" -endpoint "$STORE_ENDPOINT" -bucket "$STORE_BUCKET" -region "$STORE_REGION"
+  # shellcheck disable=SC2086 # STORE_ARGS is words
+  "$WORK_DIR/icbfs-cli" "$@" $STORE_ARGS
 }
 cli fs create -fs "$FS" -root-uid 0 -root-gid 0 >/dev/null
 
@@ -108,11 +108,11 @@ for ip in "${IPS[@]}"; do
   ssh_vm "$ip" "sudo mkdir -p $MNT"
   # The keys reach the VM on ssh's stdin, into a file only its owner reads,
   # never on a command line (ps would show them).
-  printf 'ICBFS_ACCESS_KEY=%s\nICBFS_SECRET_KEY=%s\n' "$STORE_ACCESS_KEY" "$STORE_SECRET_KEY" |
+  printf '%s\n' "$STORE_ENV" |
     ssh_vm "$ip" "umask 077; cat > /tmp/icbfs-multi.env"
   # Detached, with no stdin or output left to the ssh session, so ssh returns.
   ssh_vm "$ip" "sudo sh -c 'set -a; . /tmp/icbfs-multi.env; set +a; exec setsid $BIN/icbfs mount \
-    -store $STORE_TYPE -endpoint $STORE_VM_ENDPOINT -bucket $STORE_BUCKET -region $STORE_REGION -fs $FS -allow-other $MNT' \
+    $STORE_VM_ARGS -fs $FS -allow-other $MNT' \
     < /dev/null > /tmp/icbfs-multi.log 2>&1 &"
 done
 for ip in "${IPS[@]}"; do

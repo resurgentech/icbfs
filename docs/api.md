@@ -389,8 +389,9 @@ The configuration (`driveapi.Standalone`) stands in for a host:
 {
   "listen": ":8080",
   "token": "a-static-token",
-  "buckets": {"main": {"endpoint": "http://127.0.0.1:9000", "bucket": "icbfs",
-                        "accessKey": "…", "secretKey": "…"}},
+  "buckets": {"main": {"kind": "s3", "s3": {"endpoint": "http://127.0.0.1:9000", "bucket": "icbfs",
+                                           "accessKey": "…", "secretKey": "…"}},
+              "archive": {"kind": "azure", "azure": {"account": "…", "container": "icbfs", "key": "…"}}},
   "drives": {"docs": {"name": "Documents", "bucket": "main", "filesystem": "docs", "root": "/"}},
   "sideStore": {"bucket": "main", "filesystem": "drafts"},
   "profiles": {"alice": {"windows": {"user": "S-1-5-21-…-1001"}}},
@@ -398,6 +399,9 @@ The configuration (`driveapi.Standalone`) stands in for a host:
 }
 ```
 
+- Each bucket is a store configuration, S3 or Azure, as in
+  [mount.md](mount.md); one with its S3 fields at the top, as before Azure,
+  reads as S3.
 - Requests carry `Authorization: Bearer <token>` and `X-Drive-Actor: <actor>`.
 - An actor not listed in `permissions` has every permission.
 - `driveProfiles` gives a drive its own profiles, and `bucketSideStores`

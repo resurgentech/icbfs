@@ -43,7 +43,10 @@ func tray(paths Paths) error {
 		}
 		return err
 	}
-	r := newRunner(cfg, paths, log)
+	r, err := newRunner(cfg, paths, log)
+	if err != nil {
+		return err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	log.Printf("icbfs-sync tray: %d pairs", len(cfg.Pairs))

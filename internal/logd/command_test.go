@@ -15,6 +15,7 @@ import (
 	"github.com/resurgentech/icbfs/internal/fslog"
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/logserver"
+	"github.com/resurgentech/icbfs/internal/storeconfig"
 	"github.com/resurgentech/icbfs/internal/testutil/miniotest"
 	"github.com/resurgentech/icbfs/pkg/drive"
 )
@@ -29,7 +30,7 @@ func TestCommandsThroughTheDaemon(t *testing.T) {
 	logPath := filepath.Join(dir, "events.jsonl")
 	s, err := logserver.New(logserver.Config{
 		Secret: secret, Log: logPath,
-		Creds:         fslog.Creds{Endpoint: srv.Endpoint, Bucket: srv.Bucket, Region: "us-east-1", AccessKey: srv.AccessKey, SecretKey: srv.SecretKey},
+		Creds:         fslog.Creds{S3: storeconfig.S3{Endpoint: srv.Endpoint, Bucket: srv.Bucket, Region: "us-east-1", AccessKey: srv.AccessKey, SecretKey: srv.SecretKey}},
 		AllowCommands: []string{"fs create", "names create", "names list"},
 		Drives:        map[string]fslog.Mount{"team": {Filesystem: "viadaemon"}},
 	})

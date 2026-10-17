@@ -146,7 +146,7 @@ rules expire what's left after two days. The multi-machine tests run on
 either with `ICBFS_MULTI_STORE=s3` or `azure` (and `MULTI_MACHINES`,
 `STORM`, `EXCL`, `COUNT`, `APPEND`, `RENAMES` to size a short run).
 
-On 2026-10-17, against AWS S3 (us-east-1) and Azure (westus2): all 15
+On 2026-10-17, against AWS S3 (us-east-1) and Azure (westus2): all 14
 conformance tests pass on each, and on two machines the smoke, storm,
 exclusive and counter workloads pass, with `fs check` clean. Where the
 stores differ (Azure moves the ETag on a metadata change and has no

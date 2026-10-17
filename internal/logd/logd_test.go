@@ -16,6 +16,7 @@ import (
 	"github.com/resurgentech/icbfs/internal/fslog"
 	"github.com/resurgentech/icbfs/internal/logd"
 	"github.com/resurgentech/icbfs/internal/logserver"
+	"github.com/resurgentech/icbfs/internal/storeconfig"
 )
 
 const secret = "s3cret"
@@ -26,7 +27,7 @@ func server(t *testing.T, addr, logPath string, drives ...string) (url string, s
 	t.Helper()
 	s, err := logserver.New(logserver.Config{
 		Secret: secret, Log: logPath, Drives: registry(drives...),
-		Creds: fslog.Creds{Endpoint: "http://store", Bucket: "b", AccessKey: "ak", SecretKey: "sk"},
+		Creds: fslog.Creds{S3: storeconfig.S3{Endpoint: "http://store", Bucket: "b", AccessKey: "ak", SecretKey: "sk"}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +105,7 @@ func TestMount(t *testing.T) {
 	c := fslog.NewClient(socket, "allowed", false)
 	defer c.Close(time.Second)
 	creds, m, err := c.Mount(ctx)
-	if err != nil || creds.AccessKey != "ak" || creds.Endpoint != "http://store" || m.Filesystem != "allowed" {
+	if err != nil || creds.S3.AccessKey != "ak" || creds.S3.Endpoint != "http://store" || m.Filesystem != "allowed" {
 		t.Fatalf("mount: %+v %+v, %v", creds, m, err)
 	}
 	other := fslog.NewClient(socket, "other", false)

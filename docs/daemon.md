@@ -39,13 +39,18 @@ icbfs-cli names create -daemon /run/icbfs-logd.sock -drive team -name before-cle
 ```
 
 `icbfs-mockserver` is a stand-in for a real server: one shared secret, one
-set of store credentials for every drive, and a JSON-lines log.
+set of store credentials for every drive, and a JSON-lines log. It takes
+the store the way the mounts do (`-store`, and the S3 or `-azure-*` flags;
+see [mount.md](mount.md)), and hands it to mounts as a store
+configuration: `{"kind": "s3", "s3": {...}}` or `{"kind": "azure",
+"azure": {...}}`. A mount also understands a server that sends an S3
+store's fields at the top level, as before Azure.
 
 | flag | meaning |
 |---|---|
 | `-drives` | the registry, comma-separated: `id=filesystem[:/root][:ro]` |
 | `-allow-commands` | which side commands daemons may run (`"names create,trash list"`); empty allows all |
-| `-store-endpoint` | the store's endpoint as the server reaches it, if that differs from what mounts use |
+| `-store-endpoint` | the store's endpoint (S3) or service URL (Azure) as the server reaches it, if that differs from what mounts use |
 | `-addr` | listen address (`:8090`) |
 
 `icbfs-logd` and `icbfs-mockserver` read the secret from

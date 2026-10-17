@@ -11,19 +11,29 @@ mount without them fails.
 | flag | environment variable | default |
 |---|---|---|
 | `-store` | `ICBFS_STORE` | `s3` (AWS S3, MinIO); or `azure` (Azure Blob Storage) |
+
+An S3-API store (`-store s3`), a bucket with versioning on:
+
+| flag | environment variable | default |
+|---|---|---|
 | `-endpoint` | `ICBFS_ENDPOINT` | `http://127.0.0.1:9000` |
-| `-bucket` | `ICBFS_BUCKET` | `icbfs` (versioning must be on) |
+| `-bucket` | `ICBFS_BUCKET` | `icbfs` |
 | `-region` | `ICBFS_REGION` | `us-east-1` (MinIO ignores it) |
 | `-access-key` | `ICBFS_ACCESS_KEY` | none |
 | `-secret-key` | `ICBFS_SECRET_KEY` | none |
 
+An Azure Blob Storage container (`-store azure`), in an account with blob
+versioning on:
+
+| flag | environment variable | default |
+|---|---|---|
+| `-azure-account` | `ICBFS_AZURE_ACCOUNT` | none |
+| `-azure-container` | `ICBFS_AZURE_CONTAINER` | `icbfs` |
+| `-azure-key` | `ICBFS_AZURE_KEY` | none: the account's key |
+| `-azure-endpoint` | `ICBFS_AZURE_ENDPOINT` | `https://ACCOUNT.blob.core.windows.net/` |
+
 Prefer the variables for the keys: a flag's value is visible to other
 users in the process list.
-
-On Azure, `-endpoint` is the account's service URL
-(`https://ACCOUNT.blob.core.windows.net/`), `-bucket` the container, and
-`-access-key` and `-secret-key` the account name and key. The account
-needs blob versioning on.
 
 | flag | default | meaning |
 |---|---|---|

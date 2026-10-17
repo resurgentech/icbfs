@@ -25,15 +25,21 @@ JSON output for the `list` and `describe` commands.
 
 `icbfs-cli` connects in one of two ways.
 
-**Directly**, with the store's connection:
+**Directly**, with the store's connection, the same flags the mounts take
+(see [mount.md](mount.md)):
 
 | flag | environment variable | default |
 |---|---|---|
+| `-store` | `ICBFS_STORE` | `s3`; or `azure` |
 | `-endpoint` | `ICBFS_ENDPOINT` | `http://127.0.0.1:9000` |
 | `-bucket` | `ICBFS_BUCKET` | `icbfs` |
 | `-region` | `ICBFS_REGION` | `us-east-1` |
 | `-access-key` | `ICBFS_ACCESS_KEY` | |
 | `-secret-key` | `ICBFS_SECRET_KEY` | |
+| `-azure-account` | `ICBFS_AZURE_ACCOUNT` | |
+| `-azure-container` | `ICBFS_AZURE_CONTAINER` | `icbfs` |
+| `-azure-key` | `ICBFS_AZURE_KEY` | |
+| `-azure-endpoint` | `ICBFS_AZURE_ENDPOINT` | `https://ACCOUNT.blob.core.windows.net/` |
 
 A DRIVE is then `-fs NAME`, optionally with `-root DIR` for a directory
 in the filesystem.

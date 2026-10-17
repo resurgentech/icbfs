@@ -84,7 +84,7 @@ func main() {
 // storeFlags are every command's way to the store: directly, or through
 // the daemon.
 type storeFlags struct {
-	conn   *pkgicbfs.S3
+	conn   *pkgicbfs.StoreConfig
 	daemon *string
 }
 

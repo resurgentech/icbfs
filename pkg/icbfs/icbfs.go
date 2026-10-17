@@ -16,6 +16,7 @@ import (
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/internal/objstore/azurestore"
 	"github.com/resurgentech/icbfs/internal/objstore/s3store"
+	"github.com/resurgentech/icbfs/internal/storeconfig"
 )
 
 // Store is a versioned bucket.
@@ -37,28 +38,43 @@ var (
 // DefaultMaxFileSize is a new filesystem's max file size unless given.
 const DefaultMaxFileSize = core.DefaultMaxFileSize
 
-// S3 is how to reach a bucket over the S3 API (AWS S3, MinIO), or with
-// Type "azure" an Azure Blob Storage container: Endpoint the service URL
-// (https://ACCOUNT.blob.core.windows.net/), Bucket the container,
-// AccessKey the account name and SecretKey the account key.
-type S3 struct {
-	Type      string `json:"type,omitempty"` // "" or "s3", or "azure"
-	Endpoint  string `json:"endpoint"`
-	Region    string `json:"region,omitempty"`
-	Bucket    string `json:"bucket"`
-	AccessKey string `json:"accessKey"`
-	SecretKey string `json:"secretKey"`
+// StoreConfig says which object store and how to reach it: Kind (KindS3,
+// the default, or KindAzure) and that kind's section. Its JSON is
+// {"kind": ..., "s3": {...}} or {"kind": "azure", "azure": {...}}; an S3
+// section's fields at the top, as configurations had them before, read as
+// an S3 store.
+type StoreConfig = storeconfig.Config
+
+// S3 is a bucket over the S3 API (AWS S3, MinIO), with versioning on.
+type S3 = storeconfig.S3
+
+// Azure is an Azure Blob Storage container, in an account with blob
+// versioning on.
+type Azure = storeconfig.Azure
+
+// ErrNoStoreKeys is StoreConfig.Check's answer when the store's
+// credentials are missing.
+var ErrNoStoreKeys = storeconfig.ErrNoKeys
+
+const (
+	KindS3    = storeconfig.KindS3
+	KindAzure = storeconfig.KindAzure
+)
+
+// Open opens c's store.
+func Open(c StoreConfig) (Store, error) {
+	switch c.Kind {
+	case "", KindS3:
+		return OpenS3(c.S3), nil
+	case KindAzure:
+		return OpenAzure(c.Azure)
+	}
+	return nil, fmt.Errorf("store kind %q: %s or %s", c.Kind, KindS3, KindAzure)
 }
 
-// Open opens c's store, of either type (see S3).
-func Open(c S3) (Store, error) {
-	switch c.Type {
-	case "", "s3":
-		return OpenS3(c), nil
-	case "azure":
-		return azurestore.New(c.Endpoint, c.AccessKey, c.SecretKey, c.Bucket)
-	}
-	return nil, fmt.Errorf("store type %q: s3 or azure", c.Type)
+// OpenAzure opens an Azure Blob Storage container with the account's key.
+func OpenAzure(c Azure) (Store, error) {
+	return azurestore.New(c.ServiceURL(), c.Account, c.Key, c.Container)
 }
 
 // OpenS3 opens a bucket over the S3 API.

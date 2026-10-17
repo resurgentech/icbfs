@@ -37,9 +37,9 @@ func serve(t *testing.T) string {
 		Token: token,
 		// "shared" is registered separately but is the same bucket, so
 		// both side stores can be seen from "main"'s filesystem list.
-		Buckets: map[string]pkgicbfs.S3{
-			"main":   {Endpoint: srv.Endpoint, Bucket: srv.Bucket, AccessKey: srv.AccessKey, SecretKey: srv.SecretKey},
-			"shared": {Endpoint: srv.Endpoint, Bucket: srv.Bucket, AccessKey: srv.AccessKey, SecretKey: srv.SecretKey},
+		Buckets: map[string]pkgicbfs.StoreConfig{
+			"main":   {S3: pkgicbfs.S3{Endpoint: srv.Endpoint, Bucket: srv.Bucket, AccessKey: srv.AccessKey, SecretKey: srv.SecretKey}},
+			"shared": {S3: pkgicbfs.S3{Endpoint: srv.Endpoint, Bucket: srv.Bucket, AccessKey: srv.AccessKey, SecretKey: srv.SecretKey}},
 		},
 		Drives: map[string]StandaloneDrive{
 			"docs":        {Name: "Docs", Bucket: "main", Filesystem: "docs", Root: "/"},

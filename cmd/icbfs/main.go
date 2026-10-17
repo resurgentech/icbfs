@@ -83,10 +83,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("drive %q: %v", *driveID, err)
 		}
-		conn.Endpoint, conn.Bucket, conn.AccessKey, conn.SecretKey = creds.Endpoint, creds.Bucket, creds.AccessKey, creds.SecretKey
-		if creds.Region != "" {
-			conn.Region = creds.Region
-		}
+		*conn = creds
 		*fsName, driveRoot, driveReadOnly = m.Filesystem, strings.TrimSuffix(m.Root, "/"), m.ReadOnly
 	}
 
@@ -151,11 +148,14 @@ func main() {
 
 	var fuseSignals <-chan notify.Signal
 	if *enableNotify {
-		minioClient, err := pkgicbfs.NewMinIOClient(conn.Endpoint, conn.AccessKey, conn.SecretKey)
+		if conn.Kind == pkgicbfs.KindAzure {
+			log.Fatal("-notify needs MinIO's bucket notifications: not on Azure Blob Storage")
+		}
+		minioClient, err := pkgicbfs.NewMinIOClient(conn.S3.Endpoint, conn.S3.AccessKey, conn.S3.SecretKey)
 		if err != nil {
 			log.Fatalf("set up notify backend: %v", err)
 		}
-		src := miniosrc.New(ctx, minioClient, conn.Bucket, fsys.Prefix())
+		src := miniosrc.New(ctx, minioClient, conn.S3.Bucket, fsys.Prefix())
 		defer src.Close()
 
 		// A Broadcaster, not src.Signals() directly: the FUSE watch
@@ -198,9 +198,9 @@ func main() {
 	}
 
 	if view != nil {
-		log.Printf("icbfs %q mounted read-only at %s as of %s (bucket %s via %s)", *fsName, mountpoint, view.At().Format(time.RFC3339Nano), conn.Bucket, conn.Endpoint)
+		log.Printf("icbfs %q mounted read-only at %s as of %s (%s)", *fsName, mountpoint, view.At().Format(time.RFC3339Nano), conn)
 	} else {
-		log.Printf("icbfs %q mounted at %s (bucket %s via %s)", *fsName, mountpoint, conn.Bucket, conn.Endpoint)
+		log.Printf("icbfs %q mounted at %s (%s)", *fsName, mountpoint, conn)
 	}
 	// Ctrl+C or SIGTERM unmounts cleanly, so the deferred cleanup (an
 	// as-of mount's version cache) runs.

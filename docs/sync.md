@@ -27,7 +27,7 @@ so a service couldn't see it.
 ```
 icbfs-sync init          # write a settings file to start from
 notepad "%APPDATA%\icbfs-sync\config.json"
-icbfs-sync set-secret    # store the secret key encrypted for this account
+icbfs-sync set-secret    # store the secret (S3 secret key or Azure account key) encrypted for this account
 icbfs-sync once          # one pass of every pair, from a command prompt
 icbfs-sync install       # start the tray at login
 icbfs-sync               # start the tray now
@@ -62,11 +62,14 @@ The settings file is JSON: one `store`, and a list of `pairs`.
 ```json
 {
   "store": {
-    "endpoint": "https://s3.example.com",
-    "region": "us-east-1",
-    "bucket": "documents",
-    "accessKey": "ACCESS-KEY",
-    "secretKeyProtected": "…written by icbfs-sync set-secret…"
+    "kind": "s3",
+    "s3": {
+      "endpoint": "https://s3.example.com",
+      "region": "us-east-1",
+      "bucket": "documents",
+      "accessKey": "ACCESS-KEY"
+    },
+    "secretProtected": "…written by icbfs-sync set-secret…"
   },
   "pairs": [
     {
@@ -91,10 +94,14 @@ The settings file is JSON: one `store`, and a list of `pairs`.
 
 | setting | meaning |
 |---|---|
-| `endpoint`, `region`, `bucket` | the S3-API store the drives are in |
-| `accessKey` | the access key |
-| `secretKey` | the secret key in the clear, or leave it out and run `icbfs-sync set-secret` |
-| `secretKeyProtected` | the secret key encrypted for this Windows account (DPAPI), written by `set-secret` |
+| `kind` | `s3` (the default) or `azure` |
+| `s3` | an S3-API store: `endpoint`, `region`, `bucket`, `accessKey`, and `secretKey` in the clear or left out for `set-secret` |
+| `azure` | an Azure Blob Storage container: `account`, `container`, optionally `endpoint` (the blob service URL), and `key` in the clear or left out for `set-secret` |
+| `secretProtected` | the secret (the S3 secret key or the Azure account key) encrypted for this Windows account (DPAPI), written by `set-secret` |
+
+A settings file from before Azure, with the S3 settings directly in
+`store` and `secretKeyProtected`, still reads; `icbfs-sync` writes it back
+in this form.
 
 **pairs**
 
@@ -257,7 +264,7 @@ icbfs-sync run             sync until stopped, logging to the console
 icbfs-sync once [-pair NAME] [-confirm]
                            one pass of each pair (or one), then exit
 icbfs-sync init            write a settings file to start from
-icbfs-sync set-secret      store the secret key encrypted for this account
+icbfs-sync set-secret      store the store's secret encrypted for this account
 icbfs-sync install         start the tray at login
 icbfs-sync uninstall
 icbfs-sync paths           where the settings, state and log are

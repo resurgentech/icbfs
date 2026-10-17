@@ -56,19 +56,22 @@ type PairStatus struct {
 	Recent                    []string
 }
 
-func newRunner(cfg *Config, paths Paths, log *Log) *Runner {
+func newRunner(cfg *Config, paths Paths, log *Log) (*Runner, error) {
+	store, err := pkgicbfs.Open(cfg.Store.StoreConfig)
+	if err != nil {
+		return nil, err
+	}
 	host, _ := os.Hostname()
 	user := os.Getenv("USERNAME")
 	if user == "" {
 		user = os.Getenv("USER")
 	}
 	r := &Runner{paths: paths, log: log, actor: fmt.Sprintf("icbfs-sync:%s/%s", host, user),
-		store: pkgicbfs.OpenS3(pkgicbfs.S3{Endpoint: cfg.Store.Endpoint, Region: cfg.Store.Region, Bucket: cfg.Store.Bucket,
-			AccessKey: cfg.Store.AccessKey, SecretKey: cfg.Store.SecretKey})}
+		store: store}
 	for _, p := range cfg.Pairs {
 		r.pairs = append(r.pairs, &pairRun{cfg: p, r: r, wake: make(chan struct{}, 1), paused: p.Paused, state: "starting"})
 	}
-	return r
+	return r, nil
 }
 
 // Start runs the pairs until Stop.

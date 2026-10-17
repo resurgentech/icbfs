@@ -44,7 +44,8 @@ type Config struct {
 	// create", ...); empty allows every one.
 	AllowCommands []string
 	// StoreEndpoint, if set, is the store's endpoint as the server itself
-	// reaches it, for side commands (Creds.Endpoint is as mounts do).
+	// reaches it, for side commands (Creds' is as mounts do): the S3
+	// endpoint, or the Azure blob service URL.
 	StoreEndpoint string
 }
 
@@ -82,12 +83,15 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	endpoint := cfg.Creds.Endpoint
+	own := cfg.Creds
 	if cfg.StoreEndpoint != "" {
-		endpoint = cfg.StoreEndpoint
+		own.S3.Endpoint, own.Azure.Endpoint = cfg.StoreEndpoint, cfg.StoreEndpoint
 	}
-	store := pkgicbfs.OpenS3(pkgicbfs.S3{Endpoint: endpoint, Region: cfg.Creds.Region, Bucket: cfg.Creds.Bucket,
-		AccessKey: cfg.Creds.AccessKey, SecretKey: cfg.Creds.SecretKey})
+	store, err := pkgicbfs.Open(own)
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
 	return &Server{cfg: cfg, f: f, seen: seen, conns: map[*websocket.Conn]bool{}, store: store}, nil
 }
 

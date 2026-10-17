@@ -22,8 +22,8 @@ import (
 type Standalone struct {
 	Listen string `json:"listen"`
 	Token  string `json:"token"`
-	// Buckets by registered id.
-	Buckets map[string]pkgicbfs.S3 `json:"buckets"`
+	// Buckets by registered id: each a store, S3 or Azure.
+	Buckets map[string]pkgicbfs.StoreConfig `json:"buckets"`
 	// Drives by registry id.
 	Drives map[string]StandaloneDrive `json:"drives"`
 	// SideStore is the deployment's side store: where drafts go for a
@@ -68,7 +68,11 @@ type StandaloneDrive struct {
 func (st *Standalone) Config(ctx context.Context) (Config, func(), error) {
 	stores := map[string]pkgicbfs.Store{}
 	for id, b := range st.Buckets {
-		stores[id] = pkgicbfs.OpenS3(b)
+		s, err := pkgicbfs.Open(b)
+		if err != nil {
+			return Config{}, nil, fmt.Errorf("bucket %s: %w", id, err)
+		}
+		stores[id] = s
 	}
 	var mu sync.Mutex
 	open := map[string]*icbfsdrive.Drive{}
@@ -103,7 +107,12 @@ func (st *Standalone) Config(ctx context.Context) (Config, func(), error) {
 			switch kind := st.Notify[sd.Bucket]; kind {
 			case "":
 			case "minio":
-				signals, err := pkgicbfs.WatchMinIO(watchCtx, st.Buckets[sd.Bucket], sd.Filesystem)
+				b := st.Buckets[sd.Bucket]
+				if b.Kind == pkgicbfs.KindAzure {
+					d.Close()
+					return nil, DriveEntry{}, fmt.Errorf("bucket %s: notify \"minio\" on an Azure store", sd.Bucket)
+				}
+				signals, err := pkgicbfs.WatchMinIO(watchCtx, b.S3, sd.Filesystem)
 				if err != nil {
 					d.Close()
 					return nil, DriveEntry{}, fmt.Errorf("drive %s: notifications: %w", id, err)
