@@ -106,3 +106,71 @@ func TestAtimeModes(t *testing.T) {
 		t.Fatal("nodiratime recorded a directory access")
 	}
 }
+
+// TestAtimeHourly: NTFS's rule. A first access is recorded; another within
+// the hour isn't, and costs this mount no request at all; one more than an
+// hour after the recorded access is recorded again, also by another mount
+// that never saw the first.
+func TestAtimeHourly(t *testing.T) {
+	fsys, store := newTestFilesystem(t)
+	ctx := context.Background()
+	key, _, _, err := fsys.Create(ctx, fsys.RootKey(), "f", 0o644, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsys.SetAtime(AtimeHourly, true)
+	atime := func() time.Time {
+		t.Helper()
+		a, err := fsys.Stat(ctx, key, TypeFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a.Atime
+	}
+	if err := fsys.TouchAtime(ctx, key, TypeFile); err != nil {
+		t.Fatal(err)
+	}
+	first := atime()
+	if first.IsZero() {
+		t.Fatal("a first access wasn't recorded")
+	}
+
+	counter := &countingStore{Store: store}
+	quiet := New(counter, fsys.fsName)
+	if err := quiet.Attach(ctx); err != nil {
+		t.Fatal(err)
+	}
+	quiet.SetAtime(AtimeHourly, true)
+	if err := quiet.TouchAtime(ctx, key, TypeFile); err != nil {
+		t.Fatal(err)
+	}
+	if got := atime(); !got.Equal(first) {
+		t.Fatalf("an access within the hour was recorded: %v, then %v", first, got)
+	}
+	before := counter.gets.Load()
+	for range 5 {
+		if err := quiet.TouchAtime(ctx, key, TypeFile); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := counter.gets.Load() - before; n != 0 {
+		t.Fatalf("5 more accesses within the hour cost %d requests, want 0", n)
+	}
+
+	// An hour and more later (set back by hand), another mount records it.
+	old := time.Now().Add(-2 * time.Hour)
+	if _, err := fsys.SetAttr(ctx, key, TypeFile, nil, nil, nil, nil, &old, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	later := New(store, fsys.fsName)
+	if err := later.Attach(ctx); err != nil {
+		t.Fatal(err)
+	}
+	later.SetAtime(AtimeHourly, true)
+	if err := later.TouchAtime(ctx, key, TypeFile); err != nil {
+		t.Fatal(err)
+	}
+	if got := atime(); time.Since(got) > time.Minute {
+		t.Fatalf("an access over an hour after the last wasn't recorded: %v", got)
+	}
+}

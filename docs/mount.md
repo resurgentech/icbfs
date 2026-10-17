@@ -167,6 +167,7 @@ unmount.
 | flag | default | meaning |
 |---|---|---|
 | `-case-insensitive` | `true` | look names up case-insensitively, as NTFS does. Names are always stored as given. |
+| `-atime MODE` | `hourly` | when reads and folder listings record access times: `hourly` (when the recorded one is over an hour old, as NTFS does when it keeps access times at all), `relatime`, `strict` (every read and listing: a store write each) or `noatime` (never, as most Windows machines since 1803, which turn access times off on volumes over 128 GB). `-nodiratime` leaves folders' alone. |
 | `-meta-cache D` | `1s` (unlimited for `-as-of`) | how long names and file and folder details are trusted, as on Linux (above): another machine's renames, creates, deletes and attribute changes can take this long to show in a listing or a file's properties; an open still reads its name and content from the store. `0` trusts nothing. |
 
 WinFsp keeps no names of its own: every open hands the driver a whole

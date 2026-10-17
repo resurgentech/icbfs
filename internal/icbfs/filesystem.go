@@ -94,6 +94,8 @@ type Filesystem struct {
 	lockingEnabled     bool   // off by default; see EnableLocking
 	posixACLs          bool   // new items inherit default ACLs; see EnablePosixACLs
 	atime              AtimeMode
+	atimeMu            sync.Mutex
+	atimeKnown         map[string]time.Time // AtimeHourly: access times this mount knows, by key
 	noDirAtime         bool // see SetAtime
 
 	// lockNotify is nil unless EnableChangeNotifications was called. It's
@@ -2105,10 +2107,11 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 	return f.Stat(ctx, key, typ)
 }
 
-// TouchAtime sets key's access time to now. Access layers call it after a
-// real read or directory listing, never from stat, which must not change
-// atime. It's strict, not relatime: a file's first read in each open
-// session, and every listing, costs a metadata write.
+// TouchAtime records an access to key now, as the mount's AtimeMode says
+// (SetAtime). Access layers call it after a real read or directory
+// listing, never from stat, which must not change atime. Strict, a file's
+// first read in each open session and every listing cost a metadata
+// write; the other modes write far less often.
 //
 // A lost race against a concurrent chmod, chown or write just means this
 // access time is superseded by that writer's version, which is fine for a
@@ -2121,7 +2124,8 @@ func (f *Filesystem) TouchAtime(ctx context.Context, key string, typ EntryType) 
 		return nil
 	}
 	now := time.Now()
-	if f.atime == AtimeRelative {
+	switch f.atime {
+	case AtimeRelative:
 		a, err := f.Stat(ctx, key, typ)
 		if err != nil {
 			return err
@@ -2129,11 +2133,58 @@ func (f *Filesystem) TouchAtime(ctx context.Context, key string, typ EntryType) 
 		if !relatimeDue(a, now) {
 			return nil
 		}
+	case AtimeHourly:
+		// What this mount recorded within the hour needs no look at the
+		// store: a folder listed or a file read again and again costs
+		// nothing more.
+		if f.atimeSeen(key, now) {
+			return nil
+		}
+		a, err := f.Stat(ctx, key, typ)
+		if err != nil {
+			return err
+		}
+		if now.Sub(a.Atime) < atimeHour {
+			f.atimeRecorded(key, a.Atime)
+			return nil
+		}
 	}
-	return f.writeMetadataIf(ctx, key, typ, false, func(a *Attr) bool {
+	err := f.writeMetadataIf(ctx, key, typ, false, func(a *Attr) bool {
 		a.Atime = now
 		return true
 	})
+	if err == nil && f.atime == AtimeHourly {
+		f.atimeRecorded(key, now)
+	}
+	return err
+}
+
+// atimeSeen reports whether key's access time is known, from this mount,
+// to be less than an hour old.
+func (f *Filesystem) atimeSeen(key string, now time.Time) bool {
+	f.atimeMu.Lock()
+	defer f.atimeMu.Unlock()
+	t, ok := f.atimeKnown[key]
+	return ok && now.Sub(t) < atimeHour
+}
+
+// atimeRecorded remembers key's access time is t, dropping what's over an
+// hour old once the memory grows, so it holds about an hour's worth.
+func (f *Filesystem) atimeRecorded(key string, t time.Time) {
+	f.atimeMu.Lock()
+	defer f.atimeMu.Unlock()
+	if f.atimeKnown == nil {
+		f.atimeKnown = map[string]time.Time{}
+	}
+	if len(f.atimeKnown) >= 1<<16 {
+		now := time.Now()
+		for k, v := range f.atimeKnown {
+			if now.Sub(v) >= atimeHour {
+				delete(f.atimeKnown, k)
+			}
+		}
+	}
+	f.atimeKnown[key] = t
 }
 
 // truncate sets a file's size through an OpenFile, so the content is
@@ -2157,14 +2208,20 @@ func (f *Filesystem) truncate(ctx context.Context, key string, size int64) error
 // AtimeMode is when reads record an access time, as Linux's mount
 // options: AtimeStrict on every read (strictatime), AtimeRelative only
 // when the recorded one is no newer than the last change or a day old
-// (relatime, Linux's default), AtimeNever not at all (noatime).
+// (relatime, Linux's default), AtimeNever not at all (noatime); and
+// AtimeHourly, NTFS's rule when it keeps access times at all, only when
+// the recorded one is more than an hour old (Windows mounts' default).
 type AtimeMode int
 
 const (
 	AtimeStrict AtimeMode = iota
 	AtimeRelative
 	AtimeNever
+	AtimeHourly
 )
+
+// atimeHour is AtimeHourly's granularity, NTFS's.
+const atimeHour = time.Hour
 
 // SetAtime sets when reads record access times; dirs false records none
 // for directories (nodiratime). The default is AtimeStrict, with dirs.
