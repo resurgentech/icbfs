@@ -495,25 +495,39 @@ func combineFileAttr(key string, metaData []byte, metaLastModified time.Time, co
 		// S3's Last-Modified has 1-second resolution and is floored, so a
 		// write just after creation can report an mtime before the key's
 		// (millisecond) creation time. Content can't change before it
-		// exists, so the creation time is the lower bound. This corrects
-		// only the derived mtime, never an explicit override, and uses the
-		// key's time, not a btime override.
-		if keyBtime.After(attr.Mtime) {
-			attr.Mtime = keyBtime
+		// exists, so its creation is the lower bound: the end of the
+		// millisecond the key records, which the creation is somewhere
+		// in, so the bound is never before it (a client that read the
+		// clock just before creating, in the same millisecond, sees an
+		// mtime after that, as winfsp-tests' getfileinfo_test checks).
+		// This corrects only the derived mtime, never an explicit
+		// override, and uses the key's time, not a btime override.
+		if created := createdBound(keyBtime); created.After(attr.Mtime) {
+			attr.Mtime = created
 		}
 	}
 	// A content write is a status change too, and it doesn't touch
-	// .metadata: the content's own write time counts (floored the same
+	// .metadata: the content's own write time counts (bounded the same
 	// way as the derived mtime above).
 	written := contentObj.LastModified
-	if keyBtime.After(written) {
-		written = keyBtime
+	if created := createdBound(keyBtime); created.After(written) {
+		written = created
 	}
 	if written.After(ctime) {
 		ctime = written
 	}
 	attr.Ctime = ctime
 	return attr, nil
+}
+
+// createdBound is the latest instant an item whose key records btime
+// (floored to the millisecond) can have been created at: the end of that
+// millisecond. Zero stays zero.
+func createdBound(btime time.Time) time.Time {
+	if btime.IsZero() {
+		return btime
+	}
+	return btime.Add(time.Millisecond - time.Nanosecond)
 }
 
 // combineDirAttr assembles a directory's Attr from its .metadata body and
