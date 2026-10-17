@@ -29,7 +29,21 @@ type POSIXProfile struct {
 type (
 	actorKey   struct{}
 	profileKey struct{}
+	passKey    struct{}
 )
+
+// WithPass attaches a sync pass's id to ctx: what a Delete with it sends to
+// the trash is recorded as that pass's, so the pass's removals can be
+// listed (TrashOptions.Pass) and undone together (Mirror.Undo).
+func WithPass(ctx context.Context, pass string) context.Context {
+	return context.WithValue(ctx, passKey{}, pass)
+}
+
+// Pass is ctx's sync pass, or "".
+func Pass(ctx context.Context) string {
+	p, _ := ctx.Value(passKey{}).(string)
+	return p
+}
 
 // WithActor attaches who is acting (the host's user or agent id), for
 // the records operations leave: trash entries, names, drafts, origins.

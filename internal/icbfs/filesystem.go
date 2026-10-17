@@ -1594,6 +1594,37 @@ func (f *Filesystem) SetAppData(ctx context.Context, uuid string, typ EntryType,
 	})
 }
 
+// SetItemInfo records, in one metadata write, what a writer knows about an
+// item it just wrote: its time at the source it was copied from (mtime,
+// if set: for a file an override tied to the content version contentETag,
+// so a later real write puts mtime back to the content's, as SetAttr's
+// does; for a directory its mtime) and app data (a nil value removes
+// the key). A sync daemon's write then costs one metadata write, not one
+// for the time and one per app key.
+func (f *Filesystem) SetItemInfo(ctx context.Context, uuid string, typ EntryType, mtime *time.Time, contentETag string, app map[string][]byte) (Attr, error) {
+	if err := f.checkWritable(); err != nil {
+		return Attr{}, err
+	}
+	return f.updateMetadata(ctx, uuid, typ, func(a *Attr) {
+		if mtime != nil {
+			a.Mtime = *mtime
+			if typ != TypeDir {
+				a.mtimeOverrideETag = contentETag
+			}
+		}
+		for k, v := range app {
+			if v == nil {
+				delete(a.App, k)
+				continue
+			}
+			if a.App == nil {
+				a.App = make(map[string][]byte)
+			}
+			a.App[k] = v
+		}
+	})
+}
+
 // SetGenericReparseData stores a file's raw, non-symlink reparse point
 // buffer as is (see Attr.GenericReparse).
 func (f *Filesystem) SetGenericReparseData(ctx context.Context, uuid string, buf []byte) (Attr, error) {

@@ -37,6 +37,9 @@ type TrashEntry struct {
 	// app data, as the drive API encodes it) when it was deleted, so a
 	// mirror can find its entry when the source brings the item back.
 	Origin []byte `json:"origin,omitempty"`
+	// Pass is the sync pass that removed it, when one did (DeleteInfo.Pass),
+	// so a whole pass's removals can be found and undone.
+	Pass string `json:"pass,omitempty"`
 }
 
 // DeleteInfo is what the core can't know about a delete: who made it,
@@ -53,6 +56,9 @@ type DeleteInfo struct {
 	// NoTrash: an access layer's internal delete (replacing a placeholder),
 	// not a user's, so nothing is recorded.
 	NoTrash bool
+	// Pass names the sync pass deleting (a mirror's), recorded on the
+	// entry so the pass's removals can be undone together.
+	Pass string
 }
 
 type deleteInfoKey struct{}
@@ -68,6 +74,38 @@ func deleteInfoFrom(ctx context.Context) DeleteInfo {
 }
 
 func (f *Filesystem) trashPrefix() string { return f.id + "-trash-" }
+
+// trashByKey is the object naming an item's newest trash entry (its key),
+// so finding a trashed item's entry is one read, not a scan of the trash,
+// which is kept forever and only grows. Written with the entry, removed by
+// a restore, erased by a purge.
+func (f *Filesystem) trashByKey(itemID string) string {
+	return f.id + "-trashby-" + strings.TrimPrefix(itemID, f.id+"-")
+}
+
+// TrashedItem returns the newest trash entry for the item itemID (the
+// item's key), in two reads, or ErrNotFound if it isn't in the trash.
+// Entries made before items had a pointer to theirs aren't found this way;
+// ListTrash still lists them.
+func (f *Filesystem) TrashedItem(ctx context.Context, itemID string) (TrashEntry, error) {
+	body, _, err := f.store.Get(ctx, f.trashByKey(itemID))
+	if err != nil {
+		return TrashEntry{}, mapNotFound(err)
+	}
+	key, err := io.ReadAll(body)
+	body.Close()
+	if err != nil {
+		return TrashEntry{}, err
+	}
+	e, err := f.readTrash(ctx, string(key))
+	if err != nil {
+		return TrashEntry{}, err
+	}
+	if e.ItemID != itemID {
+		return TrashEntry{}, fmt.Errorf("trashed item %s: %w", itemID, ErrNotFound)
+	}
+	return e, nil
+}
 
 func (f *Filesystem) trashKey(e TrashEntry) string {
 	return fmt.Sprintf("%s%019d-%s", f.trashPrefix(), math.MaxInt64-e.DeletedAt.UnixNano(), e.EntryID)
@@ -90,19 +128,24 @@ func (f *Filesystem) recordTrash(ctx context.Context, itemID string, typ EntryTy
 	e := TrashEntry{
 		EntryID: id, ItemID: itemID, Type: typ, Name: name, ParentID: dirKey,
 		Path: info.Path, DeletedAt: time.Now().UTC(), DeletedBy: info.By,
-		Size: size, Version: version, Batch: info.Batch, Origin: origin,
+		Size: size, Version: version, Batch: info.Batch, Origin: origin, Pass: info.Pass,
 	}
 	data, err := json.Marshal(e)
 	if err != nil {
 		return
 	}
-	_, _ = f.store.PutIfAbsent(ctx, f.trashKey(e), bytes.NewReader(data), nil)
+	key := f.trashKey(e)
+	if _, err := f.store.PutIfAbsent(ctx, key, bytes.NewReader(data), nil); err != nil {
+		return
+	}
+	_, _ = f.store.Put(ctx, f.trashByKey(itemID), strings.NewReader(key), nil, "")
 }
 
 // TrashOptions narrows ListTrash.
 type TrashOptions struct {
 	PathPrefix string // only items deleted from under this path (entries without a path are left out)
 	Batch      string // only this batch
+	Pass       string // only what this sync pass removed
 	Limit      int    // at most this many (0: all)
 	After      string // continue after this entry id (a previous page's last)
 }
@@ -128,6 +171,9 @@ func (f *Filesystem) ListTrash(ctx context.Context, opts TrashOptions) ([]TrashE
 			continue // gone since the listing
 		}
 		if opts.Batch != "" && e.Batch != opts.Batch {
+			continue
+		}
+		if opts.Pass != "" && e.Pass != opts.Pass {
 			continue
 		}
 		if opts.PathPrefix != "" && !underPath(e.Path, opts.PathPrefix) {
@@ -231,6 +277,7 @@ func (f *Filesystem) Restore(ctx context.Context, entryID string, opts RestoreOp
 	}
 	f.touchDir(ctx, dir)
 	_ = f.store.Delete(ctx, key)
+	_ = f.store.Delete(ctx, f.trashByKey(e.ItemID))
 
 	// A directory that started a recursive delete brings its batch back,
 	// newest first: the reverse of the order the delete removed them,

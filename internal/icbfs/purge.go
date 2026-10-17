@@ -145,6 +145,9 @@ func (f *Filesystem) eraseItems(ctx context.Context, items []block.Entry) error 
 		if err := f.store.EraseAll(ctx, it.UUID); err != nil {
 			return fmt.Errorf("purge %s: %w", it.Name, err)
 		}
+		if err := f.store.EraseAll(ctx, f.trashByKey(it.UUID)); err != nil {
+			return fmt.Errorf("purge %s: %w", it.Name, err)
+		}
 		erased[it.UUID] = true
 	}
 	objs, err := f.store.List(ctx, f.trashPrefix())

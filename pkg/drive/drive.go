@@ -103,6 +103,13 @@ type Condition struct {
 type WriteOptions struct {
 	Parents     bool   // make missing parent directories
 	ContentType string // recorded with the content, where the backend keeps it
+	// ModTime, if set, is the file's time at its source (a document's
+	// modification date), shown as its modified time instead of the moment
+	// of the write; a later write without one puts it back to the write's.
+	ModTime time.Time
+	// Origin, if set, records where the content was copied from, in the
+	// same write (as SetOrigin would after it).
+	Origin *Origin
 }
 
 // ListOptions for List.
@@ -188,6 +195,8 @@ type TrashOptions struct {
 	// a mirror finds what it trashed when the source brings an item back.
 	OriginDrive string
 	OriginID    string
+	// Pass, if set, keeps only what that sync pass removed (WithPass).
+	Pass string
 }
 
 // TrashEntry is one deleted item.
@@ -205,6 +214,8 @@ type TrashEntry struct {
 	// Origin is where the item had been copied from, as it was when the
 	// item was deleted (SetOrigin, Copy); nil for an item with none.
 	Origin *Origin `json:"origin,omitempty"`
+	// Pass is the sync pass that removed it (WithPass), if one did.
+	Pass string `json:"pass,omitempty"`
 }
 
 // TrashPage is one page of the trash.

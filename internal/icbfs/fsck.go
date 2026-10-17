@@ -195,7 +195,7 @@ func (f *Filesystem) checkTree(ctx context.Context, key, lower, upper string, bl
 // checkUnreachable counts the filesystem's current objects that nothing
 // reaches: not the root or a block of a directory walked, not an item a
 // name leads to or one of its objects (.metadata, .lock, streams), not a
-// trash entry or named version.
+// trash entry (or the pointer to one), a named version or an origin record.
 func (f *Filesystem) checkUnreachable(ctx context.Context, items map[string]*checkedItem, blocks map[string]bool, r *CheckReport) error {
 	versions, err := f.store.HistoryUnder(ctx, f.id+"-")
 	if err != nil {
@@ -211,7 +211,8 @@ func (f *Filesystem) checkUnreachable(ctx context.Context, items map[string]*che
 			continue
 		}
 		k := v.Key
-		if blocks[k] || strings.HasPrefix(k, f.trashPrefix()) || strings.HasPrefix(k, nameKey(f.id, "")) {
+		if blocks[k] || strings.HasPrefix(k, f.trashPrefix()) || strings.HasPrefix(k, nameKey(f.id, "")) ||
+			strings.HasPrefix(k, f.id+"-trashby-") || strings.HasPrefix(k, f.id+"-origin-") {
 			continue
 		}
 		base := k

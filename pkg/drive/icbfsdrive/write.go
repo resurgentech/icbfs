@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore"
@@ -56,7 +57,8 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 			if cond.IfNoneMatch || cond.IfMatch != "" && cond.IfMatch != cur.VersionID {
 				return drive.Item{}, &drive.PreconditionError{Current: cur.VersionID}
 			}
-			if err := d.writeContent(ctx, n.key, data, spool, cur.ETag); err != nil {
+			written, err := d.writeContent(ctx, n.key, data, spool, cur.ETag)
+			if err != nil {
 				if objstore.IsPreconditionFailed(err) {
 					if cond.IfMatch != "" {
 						now, _ := d.fs.Store().Head(ctx, n.key)
@@ -70,8 +72,8 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 				}
 				return drive.Item{}, mapErr(err)
 			}
-			if opts.ContentType != "" {
-				_, _ = d.fs.SetAppData(ctx, n.key, icbfs.TypeFile, icbfs.AppDriveContentType, []byte(opts.ContentType))
+			if err := d.afterWrite(ctx, n.key, n.path, written, opts); err != nil {
+				return drive.Item{}, err
 			}
 			d.changed(parent)
 			return d.statItem(ctx, n.path)
@@ -101,12 +103,13 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 				return drive.Item{}, mapErr(err)
 			}
 		}
-		if opts.ContentType != "" {
-			_, _ = d.fs.SetAppData(ctx, key, icbfs.TypeFile, icbfs.AppDriveContentType, []byte(opts.ContentType))
-		}
 		created, _ := d.fs.Store().Head(ctx, key)
-		if err := d.writeContent(ctx, key, data, spool, etag); err != nil {
+		written, err := d.writeContent(ctx, key, data, spool, etag)
+		if err != nil {
 			return drive.Item{}, mapErr(err)
+		}
+		if err := d.afterWrite(ctx, key, joinPath(parent.path, name), written, opts); err != nil {
+			return drive.Item{}, err
 		}
 		// Creating made an empty version before the content's; a file the
 		// API makes starts with just its content.
@@ -150,30 +153,31 @@ func (d *Drive) readBody(body io.Reader) ([]byte, *os.File, error) {
 	return nil, f, nil
 }
 
-// writeContent replaces key's content, if it's still at etag.
-func (d *Drive) writeContent(ctx context.Context, key string, data []byte, spool *os.File, etag string) error {
+// writeContent replaces key's content, if it's still at etag, and returns
+// the new content's ETag.
+func (d *Drive) writeContent(ctx context.Context, key string, data []byte, spool *os.File, etag string) (string, error) {
 	if spool == nil {
-		_, _, err := d.fs.WriteFile(ctx, key, data, etag)
-		return err
+		_, written, err := d.fs.WriteFile(ctx, key, data, etag)
+		return written, err
 	}
 	of, err := d.fs.Open(ctx, key)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer of.Close()
 	if err := of.Truncate(0); err != nil {
-		return err
+		return "", err
 	}
 	buf := make([]byte, 8<<20)
 	var off int64
 	if _, err := spool.Seek(0, io.SeekStart); err != nil {
-		return err
+		return "", err
 	}
 	for {
 		n, rerr := spool.Read(buf)
 		if n > 0 {
 			if err := of.WriteAt(buf[:n], off); err != nil {
-				return err
+				return "", err
 			}
 			off += int64(n)
 		}
@@ -181,11 +185,49 @@ func (d *Drive) writeContent(ctx context.Context, key string, data []byte, spool
 			break
 		}
 		if rerr != nil {
-			return rerr
+			return "", rerr
 		}
 	}
-	_, err = of.Flush(ctx)
-	return err
+	if _, err := of.Flush(ctx); err != nil {
+		return "", err
+	}
+	head, err := d.fs.Store().Head(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	return head.ETag, nil
+}
+
+// afterWrite records, in one metadata write, what opts say about content
+// just written to the file key at drive path p (its ETag now written):
+// its content type, its time at the source, its origin; and indexes the
+// origin.
+func (d *Drive) afterWrite(ctx context.Context, key, p, written string, opts drive.WriteOptions) error {
+	app := map[string][]byte{}
+	if opts.ContentType != "" {
+		app[icbfs.AppDriveContentType] = []byte(opts.ContentType)
+	}
+	if opts.Origin != nil {
+		data, err := json.Marshal(opts.Origin)
+		if err != nil {
+			return err
+		}
+		app[icbfs.AppDriveOrigin] = data
+	}
+	var mtime *time.Time
+	if !opts.ModTime.IsZero() {
+		t := opts.ModTime
+		mtime = &t
+	}
+	if len(app) > 0 || mtime != nil {
+		if _, err := d.fs.SetItemInfo(ctx, key, icbfs.TypeFile, mtime, written, app); err != nil {
+			return mapErr(err)
+		}
+	}
+	if opts.Origin != nil {
+		return d.recordOrigin(ctx, key, p, *opts.Origin)
+	}
+	return nil
 }
 
 func (d *Drive) statItem(ctx context.Context, p string) (drive.Item, error) {
@@ -333,9 +375,9 @@ func (d *Drive) Delete(ctx context.Context, ref drive.ItemRef, recursive bool, c
 			return &drive.PreconditionError{Current: cur.VersionID}
 		}
 	}
-	by := drive.Actor(ctx)
+	by, pass := drive.Actor(ctx), drive.Pass(ctx)
 	if n.typ != icbfs.TypeDir {
-		dctx := icbfs.WithDeleteInfo(ctx, icbfs.DeleteInfo{By: by, Path: d.fsPath(n.path)})
+		dctx := icbfs.WithDeleteInfo(ctx, icbfs.DeleteInfo{By: by, Path: d.fsPath(n.path), Pass: pass})
 		if err := d.fs.Unlink(dctx, n.parentKey(), n.name); err != nil {
 			return mapErr(err)
 		}
@@ -343,7 +385,7 @@ func (d *Drive) Delete(ctx context.Context, ref drive.ItemRef, recursive bool, c
 		return nil
 	}
 	if !recursive {
-		dctx := icbfs.WithDeleteInfo(ctx, icbfs.DeleteInfo{By: by, Path: d.fsPath(n.path)})
+		dctx := icbfs.WithDeleteInfo(ctx, icbfs.DeleteInfo{By: by, Path: d.fsPath(n.path), Pass: pass})
 		if err := d.fs.Rmdir(dctx, n.parentKey(), n.name); err != nil {
 			return mapErr(err)
 		}
@@ -366,7 +408,7 @@ func (d *Drive) Delete(ctx context.Context, ref drive.ItemRef, recursive bool, c
 	// directories first, so go backwards).
 	for i := len(below) - 1; i >= 0; i-- {
 		c := below[i]
-		dctx := icbfs.WithDeleteInfo(ctx, icbfs.DeleteInfo{By: by, Path: d.fsPath(c.path), Batch: batch})
+		dctx := icbfs.WithDeleteInfo(ctx, icbfs.DeleteInfo{By: by, Path: d.fsPath(c.path), Batch: batch, Pass: pass})
 		if c.typ == icbfs.TypeDir {
 			err = d.fs.Rmdir(dctx, c.parentKey(), c.name)
 		} else {
@@ -376,7 +418,7 @@ func (d *Drive) Delete(ctx context.Context, ref drive.ItemRef, recursive bool, c
 			return mapErr(err)
 		}
 	}
-	dctx := icbfs.WithDeleteInfo(ctx, icbfs.DeleteInfo{By: by, Path: d.fsPath(n.path), Batch: batch, EntryID: batch})
+	dctx := icbfs.WithDeleteInfo(ctx, icbfs.DeleteInfo{By: by, Path: d.fsPath(n.path), Batch: batch, EntryID: batch, Pass: pass})
 	if err := d.fs.Rmdir(dctx, n.parentKey(), n.name); err != nil {
 		return mapErr(err)
 	}
@@ -432,8 +474,10 @@ func (d *Drive) SetOrigin(ctx context.Context, ref drive.ItemRef, o drive.Origin
 	if err != nil {
 		return err
 	}
-	_, err = d.fs.SetAppData(ctx, n.key, n.typ, icbfs.AppDriveOrigin, data)
-	return mapErr(err)
+	if _, err := d.fs.SetAppData(ctx, n.key, n.typ, icbfs.AppDriveOrigin, data); err != nil {
+		return mapErr(err)
+	}
+	return d.recordOrigin(ctx, n.key, n.path, o)
 }
 
 func decodeOrigin(data []byte) *drive.Origin {

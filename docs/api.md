@@ -87,6 +87,53 @@ came from (drive, ID, version) on targets that can keep it. It reads as
 the actor's profile on the source and writes as the actor's profile on the
 target. **Diff** is the library's own too.
 
+`WriteOptions.ModTime` and `WriteOptions.Origin` set a file's time at its
+source and where it was copied from in the same write, instead of a
+`SetAttr` and a `SetOrigin` after it.
+
+### Mirroring a source: `drive.Mirror`
+
+A sync daemon (a SharePoint mirror, say) keeps a drive matching a
+source of documents. `drive.NewMirror(d, sourceDrive)` does the
+bookkeeping, keyed by each item's origin (the source drive and the item's
+id there), so the daemon only says what each source item is now:
+
+```go
+m := drive.NewMirror(d, "sharepoint:site/library")
+applied, err := m.Apply(ctx, drive.SourceItem{
+    Origin: drive.Origin{ID: id, Version: "4.0", Path: spPath},
+    Path:   "/Matters/brief.docx", Type: drive.TypeFile, ModTime: modified,
+    Open:   func(ctx context.Context) (io.ReadCloser, error) { return download(ctx, id) },
+})
+removed, err := m.Remove(drive.WithPass(ctx, passID), id) // to the trash
+item, trashed, found, err := m.Known(ctx, id)              // what the drive holds
+n, err := m.Undo(ctx, passID)                              // a bad pass, undone
+```
+
+| the drive holds for the source item | `Apply` |
+|---|---|
+| nothing | writes it (`created`), its time and origin in the write |
+| it, same version | nothing (`unchanged`); the content isn't downloaded |
+| it, another version | a new version (`updated`) |
+| it, at another path | moves it (`moved`), then writes only if the version differs |
+| it, in the trash | restores it, history and all (`restored`), then as above |
+
+- `Open` is called only when the bytes are needed: never for a move, a
+  restore of the version held, or an item already up to date.
+- The trash is the undo. An item the source deletes and brings back with
+  the same id (a recycle bin, a folder shared again, a listing that came
+  back short) is restored, not copied again; and `Undo` restores
+  everything one pass removed. A daemon needn't cap how much a pass may
+  remove.
+- A path taken by an item not copied from that source item is refused
+  (`ErrNotMirrored`); a directory there is adopted. An item copied before
+  origins were indexed, still at its path with its origin, is adopted too.
+- Two items claiming one source item (a copy made twice): the newest
+  claim is the one the mirror works on.
+- On icbfs, finding a source item is a lookup (`OriginFinder`: an origin
+  record per item, and a pointer from each trashed item to its entry);
+  any other backend is searched, a listing of the drive and its trash.
+
 ### Capabilities
 
 Every drive reports what its backend can do. An operation the backend

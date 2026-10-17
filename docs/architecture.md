@@ -77,7 +77,9 @@ with its four-hex-digit ID, so one prefix listing finds all of it.
 | `<id>-<uuid>.ads.<n>` | an alternate data stream's bytes |
 | `<id>-<uuid>.lock` | byte-range and whole-file locks, when locking is on |
 | `<id>-trash-<inverted time>-<entry>` | one trash entry |
+| `<id>-trashby-<uuid>` | the key of the item's newest trash entry, so a trashed item's entry is one read |
 | `<id>-name-<name>` | a named version |
+| `<id>-origin-<hash>` | the item copied from one source item (a SharePoint document, say): its id, the source version, where it was last seen |
 
 Item keys are **UUIDv7**. Their embedded millisecond timestamp gives each
 item a creation time for free and keeps keys roughly time-ordered.

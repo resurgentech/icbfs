@@ -104,7 +104,7 @@ func (d *Drive) DeleteName(ctx context.Context, name string) error {
 
 func (d *Drive) toTrash(e icbfs.TrashEntry) (drive.TrashEntry, bool) {
 	out := drive.TrashEntry{ID: e.EntryID, ItemID: e.ItemID, Name: e.Name, Type: typeName(e.Type),
-		DeletedAt: e.DeletedAt, DeletedBy: e.DeletedBy, Size: e.Size, Version: e.Version, Batch: e.Batch}
+		DeletedAt: e.DeletedAt, DeletedBy: e.DeletedBy, Size: e.Size, Version: e.Version, Batch: e.Batch, Pass: e.Pass}
 	if len(e.Origin) > 0 {
 		out.Origin = decodeOrigin(e.Origin)
 	}
@@ -134,7 +134,7 @@ func (d *Drive) Trash(ctx context.Context, opts drive.TrashOptions) (drive.Trash
 	if opts.Path != "" {
 		prefix = d.fsPath(opts.Path)
 	}
-	entries, err := d.fs.ListTrash(ctx, icbfs.TrashOptions{PathPrefix: prefix, After: opts.Cursor})
+	entries, err := d.fs.ListTrash(ctx, icbfs.TrashOptions{PathPrefix: prefix, After: opts.Cursor, Pass: opts.Pass})
 	if err != nil {
 		return drive.TrashPage{}, mapErr(err)
 	}
