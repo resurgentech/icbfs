@@ -419,3 +419,88 @@ func TestDiskCacheAvoidsRedundantFetchOnValidatedHit(t *testing.T) {
 		t.Fatalf("fetchCount after a different etag = %d, want 2 (a real miss, not a stale hit)", fetchCount)
 	}
 }
+
+// TestInterleavedWritesAllSurvive: one writer edits bytes 0 and 1000 of a
+// file, another edits byte 500, in between, and stores first. The first
+// writer's flush loses the race and rebases: re-applying only what it
+// wrote, the other writer's byte 500 survives. With one span from its
+// first written byte to its last, the rebase would write its stale copy of
+// byte 500 back over it.
+func TestInterleavedWritesAllSurvive(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	key, _, etag, err := fsys.Create(ctx, fsys.RootKey(), "interleaved.bin", 0644, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fsys.WriteFile(ctx, key, bytes.Repeat([]byte("."), 1100), etag); err != nil {
+		t.Fatal(err)
+	}
+	ours, err := fsys.Open(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ours.Close()
+	theirs, err := otherClient(t, fsys).Open(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer theirs.Close()
+
+	if err := ours.WriteAt([]byte("A"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := ours.WriteAt([]byte("C"), 1000); err != nil {
+		t.Fatal(err)
+	}
+	if err := theirs.WriteAt([]byte("B"), 500); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := theirs.Flush(ctx); err != nil {
+		t.Fatalf("their flush: %v", err)
+	}
+	if _, err := ours.Flush(ctx); err != nil {
+		t.Fatalf("our flush: %v", err)
+	}
+
+	final, _, _, err := fsys.ReadFile(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string([]byte{final[0], final[500], final[1000]}); got != "ABC" {
+		t.Fatalf("bytes 0, 500, 1000 are %q, want \"ABC\": an edit was lost", got)
+	}
+}
+
+// TestFlushNotRefusedByLockBetweenEdits: another client's lock on bytes
+// 500-510 doesn't refuse a write of bytes 0 and 1000, which overlaps
+// neither; a lock check on one span from the first edit to the last did.
+func TestFlushNotRefusedByLockBetweenEdits(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	fsys.EnableLocking(true)
+	ctx := context.Background()
+	key, _, _, err := fsys.Create(ctx, fsys.RootKey(), "between.bin", 0644, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := fsys.WriteFile(ctx, key, make([]byte, 1100), ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsys.TryAcquireLockRange(ctx, key, 500, 510, "client-1", 30*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	open, err := otherClient(t, fsys).Open(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer open.Close()
+	open.WriteAt([]byte("A"), 0)
+	open.WriteAt([]byte("C"), 1000)
+	if _, err := open.Flush(ctx); err != nil {
+		t.Fatalf("flush of edits on either side of a lock: %v, want nil", err)
+	}
+	open.WriteAt([]byte("B"), 505)
+	if _, err := open.Flush(ctx); !errors.Is(err, ErrLocked) {
+		t.Fatalf("flush of an edit inside the lock: %v, want ErrLocked", err)
+	}
+}

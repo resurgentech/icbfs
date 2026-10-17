@@ -506,6 +506,13 @@ func (f *Filesystem) waitBackoffOrSignal(ctx context.Context, backoff time.Durat
 // holding a shared lock expects the data not to change under it, though
 // readers don't conflict with each other.
 func (f *Filesystem) CheckRangeLockConflict(ctx context.Context, key string, start, end int64, selfHolder string) error {
+	return f.checkRangesLockConflict(ctx, key, [][2]int64{{start, end}}, selfHolder)
+}
+
+// checkRangesLockConflict is CheckRangeLockConflict for several ranges, on
+// one read of the lock object: ErrLocked if any of them overlaps another
+// holder's lock.
+func (f *Filesystem) checkRangesLockConflict(ctx context.Context, key string, ranges [][2]int64, selfHolder string) error {
 	if !f.lockingEnabled {
 		// Without locking no application lock can exist, so there is
 		// nothing to check, and no round trip.
@@ -523,8 +530,10 @@ func (f *Filesystem) CheckRangeLockConflict(ctx context.Context, key string, sta
 		if e.Holder == selfHolder || f.ownHolder(e.Holder) || e.EscalationOnly || rangeExpired(e, now) {
 			continue
 		}
-		if rangesOverlap(start, end, e.Start, e.End) {
-			return ErrLocked
+		for _, r := range ranges {
+			if rangesOverlap(r[0], r[1], e.Start, e.End) {
+				return ErrLocked
+			}
 		}
 	}
 	return nil

@@ -135,6 +135,28 @@ func TestMultipartFlush(t *testing.T) {
 	}
 	check("one-byte edit")
 
+	// A byte in the first part and one in the last: two uploads, and the
+	// middle part, between them, is still copied.
+	o, err = fsys.Open(ctx, key)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := o.WriteAt([]byte("Y"), 1); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := o.WriteAt([]byte("Z"), 17*mib); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := o.Flush(ctx); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+	o.Close()
+	want[1], want[17*mib] = 'Y', 'Z'
+	if c, u := store.last(t); c != 1 || u != 2 {
+		t.Fatalf("edits in the first and last parts: %d copied, %d uploaded; want 1, 2", c, u)
+	}
+	check("edits in the first and last parts")
+
 	// Two clients (two Filesystems, as two mounts: opens in one share
 	// their content) edit different parts; the second loses the race,
 	// rebases, and both edits land.

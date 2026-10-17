@@ -27,11 +27,6 @@ const lockEscalationLeaseTTL = 30 * time.Second
 // can't land (for example, ctx ends before the lock is taken).
 var ErrWriteContention = errors.New("content write: exceeded retry budget and lock escalation under contention")
 
-// noTouch marks touchedStart as "nothing written yet this session" —
-// touchedEnd alone can't carry that meaning, since 0 is also a
-// perfectly real end for a write at offset 0.
-const noTouch = -1
-
 // content is a file's content while it's open in this process: a local
 // scratch file every open of the file reads and writes, as on a local
 // disk, flushed back as one conditional whole-object write that, on a
@@ -55,18 +50,18 @@ type content struct {
 	dirty bool
 
 	// baseVersion and baseSize identify the stored version the scratch file
-	// was seeded from (etag is its ETag). Outside the touched range, the
+	// was seeded from (etag is its ETag). Outside the touched ranges, the
 	// scratch file still holds exactly those bytes, so a multipart flush
 	// can copy those ranges on the server (partsLocked). Empty when
 	// unknown, as right after Create; then nothing is copied.
 	baseVersion string
 	baseSize    int64
 
-	// touchedStart and touchedEnd span every byte written since the last
-	// flush, through any open. The writes themselves are already merged in
-	// the scratch file, in order, so a rebase needs only this range read
-	// back from it, not a log of writes.
-	touchedStart, touchedEnd int64
+	// touched is every byte range written since the last flush, through
+	// any open. The writes themselves are already merged in the scratch
+	// file, in order, so a rebase needs only these ranges read back from
+	// it, not a log of writes.
+	touched byteRanges
 
 	// truncated is set when Truncate has fixed the size since the last
 	// flush, so a rebase onto newer content keeps that size instead of the
@@ -144,7 +139,7 @@ func (f *Filesystem) Open(ctx context.Context, key string) (*OpenFile, error) {
 		return nil, err
 	}
 	c := f.installContent(&content{fsys: f, key: key, file: file, size: size, etag: head.ETag,
-		baseVersion: head.VersionID, baseSize: size, touchedStart: noTouch})
+		baseVersion: head.VersionID, baseSize: size})
 	o := &OpenFile{fsys: f, key: key, holder: holder, c: c}
 	f.holdOpen(o)
 	return o, nil
@@ -162,7 +157,7 @@ func (f *Filesystem) NewOpenFile(key, etag string, data []byte) *OpenFile {
 	}
 	c := f.shareContent(key)
 	if c == nil {
-		c = &content{fsys: f, key: key, etag: etag, baseSize: int64(len(data)), touchedStart: noTouch}
+		c = &content{fsys: f, key: key, etag: etag, baseSize: int64(len(data))}
 		// Only if a local temp file can't be created is file nil: the
 		// OpenFile then fails on first use, rather than every caller of
 		// Create and Mknod having to handle an error here.
@@ -298,21 +293,15 @@ func (c *content) ReadAt(off, length int64) []byte {
 	return out[:n]
 }
 
-// WriteAt writes data at off into the scratch file, and widens the touched
-// range Flush re-applies after a lost race.
+// WriteAt writes data at off into the scratch file, and adds it to the
+// touched ranges Flush re-applies after a lost race.
 func (c *content) WriteAt(data []byte, off int64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.applyLocked(data, off); err != nil {
 		return err
 	}
-	end := off + int64(len(data))
-	if c.touchedStart == noTouch || off < c.touchedStart {
-		c.touchedStart = off
-	}
-	if end > c.touchedEnd {
-		c.touchedEnd = end
-	}
+	c.touched.add(off, off+int64(len(data)))
 	c.dirty = true
 	c.lastWrite = time.Now()
 	return nil
@@ -417,15 +406,10 @@ func (c *content) zeroLocked(lo, hi int64) error {
 	return nil
 }
 
-// touchLocked widens the touched range to cover [lo, hi) and marks the
-// content dirty, as WriteAt does.
+// touchLocked adds [lo, hi) to the touched ranges and marks the content
+// dirty, as WriteAt does.
 func (c *content) touchLocked(lo, hi int64) {
-	if c.touchedStart == noTouch || lo < c.touchedStart {
-		c.touchedStart = lo
-	}
-	if hi > c.touchedEnd {
-		c.touchedEnd = hi
-	}
+	c.touched.add(lo, hi)
 	c.dirty = true
 	c.lastWrite = time.Now()
 }
@@ -461,12 +445,12 @@ func (c *content) applyLocked(data []byte, off int64) error {
 	return nil
 }
 
-// touchedRangeLocked returns the span written since the last flush.
-// Merging separate edits into one span over-approximates, which can only
-// make a lock check stricter, never miss a conflict. It's called only when
-// dirty, which WriteAt never sets without widening the range.
+// touchedRangeLocked returns the span of everything written since the
+// last flush: one range over all of touched, for the escalation lock,
+// which only has to cover them. It's called only when dirty, which
+// WriteAt never sets without adding a range.
 func (c *content) touchedRangeLocked() (start, end int64) {
-	return c.touchedStart, c.touchedEnd
+	return c.touched.span()
 }
 
 // syncAfterLock is OpenFile.SyncAfterLock.
@@ -497,18 +481,28 @@ func (c *content) syncAfterLock(ctx context.Context, holder string) (bool, error
 }
 
 // rebaseLocked fetches key's current content into a fresh scratch file
-// (through the cache, as Open does), copies the touched range onto it from
-// the old scratch file, and updates c.etag. With nothing touched, it
+// (through the cache, as Open does), copies the touched ranges onto it
+// from the old scratch file, and updates c.etag. With nothing touched, it
 // brings the content up to the stored version.
 func (c *content) rebaseLocked(ctx context.Context) error {
-	var ownEdits []byte
+	type edit struct {
+		off  int64
+		data []byte
+	}
+	var ownEdits []edit
 	ownSize := c.size
-	if c.touchedStart != noTouch && c.file != nil && c.touchedStart < ownSize {
-		// Only what's still inside the content: past its end
-		// is a truncated-away tail, which the size below takes care of.
-		ownEdits = make([]byte, min(c.touchedEnd, ownSize)-c.touchedStart)
-		if _, err := c.file.ReadAt(ownEdits, c.touchedStart); err != nil && err != io.EOF {
-			return err
+	if c.file != nil {
+		for _, r := range c.touched.ranges() {
+			// Only what's still inside the content: past its end is a
+			// truncated-away tail, which the size below takes care of.
+			if r[0] >= ownSize {
+				break
+			}
+			data := make([]byte, min(r[1], ownSize)-r[0])
+			if _, err := c.file.ReadAt(data, r[0]); err != nil && err != io.EOF {
+				return err
+			}
+			ownEdits = append(ownEdits, edit{r[0], data})
 		}
 	}
 
@@ -534,8 +528,8 @@ func (c *content) rebaseLocked(ctx context.Context) error {
 	}
 	c.file = fresh
 	c.size = size
-	if ownEdits != nil {
-		if err := c.applyLocked(ownEdits, c.touchedStart); err != nil {
+	for _, e := range ownEdits {
+		if err := c.applyLocked(e.data, e.off); err != nil {
 			if oldName != "" {
 				_ = os.Remove(oldName)
 			}
@@ -567,11 +561,11 @@ func (c *content) rebaseLocked(ctx context.Context) error {
 // On a lost race the scratch file can't just be resent: it's built on
 // content that's no longer current, and would erase the other writer's
 // change. Flush instead rebases: fetches the current content, copies its
-// own touched range onto it, and tries again. Two writers editing different
-// ranges both land, as on a local disk.
+// own touched ranges onto it, and tries again. Two writers editing
+// different ranges both land, as on a local disk, interleaved or not.
 //
 // Retrying is bounded by contentWriteRetryBudget. After that, with locking
-// on, Flush escalates: it takes a lock on its touched range, makes one more
+// on, Flush escalates: it takes a lock over its touched ranges, makes one more
 // conditional write while holding it, and releases it. Escalating writers
 // take turns on the lock instead of burning retries against each other, so
 // each one gets its write in.
@@ -589,7 +583,7 @@ func (c *content) Flush(ctx context.Context, holder string) (Attr, error) {
 		// and its objects go at the last Close. Drop the writes.
 		c.dirty = false
 		c.truncated = false
-		c.touchedStart, c.touchedEnd = noTouch, 0
+		c.touched.clear()
 		return c.fsys.statFile(ctx, c.key)
 	}
 
@@ -597,10 +591,10 @@ func (c *content) Flush(ctx context.Context, holder string) (Attr, error) {
 	// overlaps another holder's application lock (fcntl, LockFileEx). A
 	// lost race alone couldn't tell that apart from ordinary contention,
 	// which retry and escalation handle.
-	start, end := c.touchedRangeLocked()
-	if err := c.fsys.CheckRangeLockConflict(ctx, c.key, start, end, holder); err != nil {
+	if err := c.fsys.checkRangesLockConflict(ctx, c.key, c.touched.ranges(), holder); err != nil {
 		return Attr{}, err
 	}
+	start, end := c.touchedRangeLocked()
 
 	deadline := time.Now().Add(contentWriteRetryBudget)
 	for {
@@ -656,8 +650,7 @@ func (c *content) uploadLocked(ctx context.Context) (Attr, error) {
 	}
 	c.etag = obj.ETag
 	c.baseVersion, c.baseSize = obj.VersionID, c.size
-	c.touchedStart = noTouch
-	c.touchedEnd = 0
+	c.touched.clear()
 	c.dirty = false
 	c.truncated = false
 	c.updateSharedCacheLocked(obj.ETag)
@@ -666,7 +659,7 @@ func (c *content) uploadLocked(ctx context.Context) (Attr, error) {
 
 // partsLocked splits the scratch file into parts of partSize for a
 // multipart write: a part wholly inside the base version and outside the
-// touched range is copied on the server from that version, and any other
+// touched ranges is copied on the server from that version, and any other
 // part is uploaded. So a few changed bytes of a large file upload one part.
 // The copies are pinned to the base version; whether it's still current is
 // checked when the parts are assembled (If-Match), and a lost race rebases
@@ -676,7 +669,7 @@ func (c *content) partsLocked(partSize int64) []objstore.Part {
 	for off := int64(0); off < c.size; off += partSize {
 		n := min(partSize, c.size-off)
 		end := off + n
-		untouched := c.touchedStart == noTouch || end <= c.touchedStart || off >= c.touchedEnd
+		untouched := !c.touched.overlaps(off, end)
 		if c.baseVersion != "" && end <= c.baseSize && untouched {
 			parts = append(parts, objstore.Part{Size: n, CopyVersion: c.baseVersion, CopyOffset: off})
 		} else {

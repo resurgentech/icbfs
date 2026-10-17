@@ -348,8 +348,9 @@ its content, as on a local disk):
 - **File content is close-to-open.** A close (or `fsync`) stores the file
   as one conditional whole-object write, so another machine sees the old
   content or the new, never a mix, and sees the new at its next open.
-  Writers to different ranges of one file both land; where their ranges
-  overlap, the later flush wins.
+  Writers to different ranges of one file both land, interleaved or not:
+  a flush that loses a race re-applies only the byte ranges it wrote onto
+  the newer version. Where their ranges overlap, the later flush wins.
 - **Names and attributes, as seen through a mount, can lag** another
   machine's changes by up to the mount's metadata cache timeout
   (`-meta-cache`, 1 s by default), as with NFS's attribute cache: the
