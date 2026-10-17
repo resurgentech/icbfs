@@ -183,6 +183,11 @@ type TrashOptions struct {
 	Path   string // only what was deleted from under this directory
 	Limit  int
 	Cursor string
+	// OriginDrive, if set, keeps only entries whose item had been copied
+	// from that drive, and OriginID, if set too, from that item there: how
+	// a mirror finds what it trashed when the source brings an item back.
+	OriginDrive string
+	OriginID    string
 }
 
 // TrashEntry is one deleted item.
@@ -197,6 +202,9 @@ type TrashEntry struct {
 	Size      int64     `json:"size"`
 	Version   string    `json:"version,omitempty"`
 	Batch     string    `json:"batch,omitempty"`
+	// Origin is where the item had been copied from, as it was when the
+	// item was deleted (SetOrigin, Copy); nil for an item with none.
+	Origin *Origin `json:"origin,omitempty"`
 }
 
 // TrashPage is one page of the trash.

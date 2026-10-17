@@ -343,6 +343,7 @@ type TrashEntry struct {
 	Id        string    `json:"id"`
 	ItemId    string    `json:"itemId"`
 	Name      string    `json:"name"`
+	Origin    *Origin   `json:"origin,omitempty"`
 	Path      *string   `json:"path,omitempty"`
 	Size      int64     `json:"size"`
 	Type      string    `json:"type"`
@@ -520,6 +521,12 @@ type ListTrashParams struct {
 	Path   *PathParam `form:"path,omitempty" json:"path,omitempty"`
 	Limit  *int       `form:"limit,omitempty" json:"limit,omitempty"`
 	Cursor *string    `form:"cursor,omitempty" json:"cursor,omitempty"`
+
+	// OriginDrive Only entries whose item had been copied from this drive.
+	OriginDrive *string `form:"originDrive,omitempty" json:"originDrive,omitempty"`
+
+	// OriginId Only entries whose item had been copied from this item (its origin's id).
+	OriginId *string `form:"originId,omitempty" json:"originId,omitempty"`
 }
 
 // ListVersionsParams defines parameters for ListVersions.
@@ -3098,6 +3105,38 @@ func NewListTrashRequest(server string, drive DriveParam, params *ListTrashParam
 		if params.Cursor != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "cursor", runtime.ParamLocationQuery, *params.Cursor); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.OriginDrive != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "originDrive", runtime.ParamLocationQuery, *params.OriginDrive); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.OriginId != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "originId", runtime.ParamLocationQuery, *params.OriginId); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

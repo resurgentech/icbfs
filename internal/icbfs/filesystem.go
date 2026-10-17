@@ -1337,26 +1337,33 @@ const nlinkZero = 0
 // loses the race and retries; it never revives an item this call is
 // deleting. Then it deletes the item's objects.
 func (f *Filesystem) adjustNlink(ctx context.Context, uuid string, delta int) (deleted bool, err error) {
+	deleted, _, err = f.adjustNlinkAttr(ctx, uuid, delta)
+	return deleted, err
+}
+
+// adjustNlinkAttr is adjustNlink that also returns, when it deleted the
+// item, the attributes the item had: what its trash entry records.
+func (f *Filesystem) adjustNlinkAttr(ctx context.Context, uuid string, delta int) (deleted bool, last Attr, err error) {
 	mk := metadataObjectKey(uuid)
 	for attempt := 0; attempt < maxTreeRetries; attempt++ {
 		retryPause(ctx, attempt)
 		body, obj, err := f.store.Get(ctx, mk)
 		if err != nil {
-			return false, mapNotFound(err)
+			return false, Attr{}, mapNotFound(err)
 		}
 		data, readErr := io.ReadAll(body)
 		body.Close()
 		if readErr != nil {
-			return false, readErr
+			return false, Attr{}, readErr
 		}
 		attr, err := decodeFileMetadata(data)
 		if err != nil {
-			return false, err
+			return false, Attr{}, err
 		}
 		if attr.Nlink == nlinkZero {
 			// Already tombstoned by a prior/concurrent Unlink; nothing to
 			// resurrect, and nothing further for a decrement to do either.
-			return false, ErrNotFound
+			return false, Attr{}, ErrNotFound
 		}
 		newNlink := int(attr.Nlink) + delta
 		attr.Ctime = time.Now() // a link count change is a status change
@@ -1365,33 +1372,33 @@ func (f *Filesystem) adjustNlink(ctx context.Context, uuid string, delta int) (d
 			attr.Nlink = nlinkZero
 			tomb, err := encodeFileMetadata(attr)
 			if err != nil {
-				return false, err
+				return false, Attr{}, err
 			}
 			_, err = f.store.Put(ctx, mk, bytes.NewReader(tomb), nil, obj.ETag)
 			if objstore.IsPreconditionFailed(err) {
 				continue
 			}
 			if err != nil {
-				return false, err
+				return false, Attr{}, err
 			}
 			// This call wrote the zero, so no Link can get past it:
 			// deleting is safe now.
 			f.deleteUnlessOpen(ctx, uuid, attr.Streams)
-			return true, nil
+			return true, attr, nil
 		}
 
 		attr.Nlink = uint32(newNlink)
 		updated, err := encodeFileMetadata(attr)
 		if err != nil {
-			return false, err
+			return false, Attr{}, err
 		}
 		_, err = f.store.Put(ctx, mk, bytes.NewReader(updated), nil, obj.ETag)
 		if objstore.IsPreconditionFailed(err) {
 			continue
 		}
-		return false, err
+		return false, Attr{}, err
 	}
-	return false, fmt.Errorf("adjust nlink %s: exceeded %d retries", uuid, maxTreeRetries)
+	return false, Attr{}, fmt.Errorf("adjust nlink %s: exceeded %d retries", uuid, maxTreeRetries)
 }
 
 // updateFileMetadata applies mutate to a file's or symlink's .metadata
@@ -1654,7 +1661,7 @@ func (f *Filesystem) Unlink(ctx context.Context, dirKey, name string) error {
 	before, _ := f.store.Head(ctx, entry.UUID) // for the trash entry, if this was the last name
 	f.touchDir(ctx, dirKey)
 
-	deleted, err := f.adjustNlink(ctx, entry.UUID, -1)
+	deleted, last, err := f.adjustNlinkAttr(ctx, entry.UUID, -1)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return err
 	}
@@ -1664,7 +1671,7 @@ func (f *Filesystem) Unlink(ctx context.Context, dirKey, name string) error {
 		if before != nil {
 			size, version = before.Size, before.VersionID
 		}
-		f.recordTrash(ctx, entry.UUID, entry.Type, dirKey, name, size, version)
+		f.recordTrash(ctx, entry.UUID, entry.Type, dirKey, name, size, version, last.App[AppDriveOrigin])
 	}
 	return nil
 }
@@ -1712,7 +1719,7 @@ func (f *Filesystem) Rmdir(ctx context.Context, dirKey, name string) error {
 	if err := f.store.Delete(ctx, metadataObjectKey(entry.UUID)); err != nil && !objstore.IsNotFound(err) {
 		return err
 	}
-	f.recordTrash(ctx, entry.UUID, TypeDir, dirKey, name, 0, "")
+	f.recordTrash(ctx, entry.UUID, TypeDir, dirKey, name, 0, "", dirAttr.App[AppDriveOrigin])
 	return nil
 }
 
@@ -1809,6 +1816,7 @@ func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, 
 			if len(children) > 0 {
 				return ErrNotEmpty
 			}
+			replaced, _ := f.statDir(ctx, existing.UUID) // for the trash entry's origin
 			if _, err := f.removeEntry(ctx, newDirKey, newName); err != nil {
 				return err
 			}
@@ -1818,7 +1826,7 @@ func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, 
 			if err := f.store.Delete(ctx, metadataObjectKey(existing.UUID)); err != nil && !objstore.IsNotFound(err) {
 				return err
 			}
-			f.recordTrash(ctx, existing.UUID, TypeDir, newDirKey, newName, 0, "")
+			f.recordTrash(ctx, existing.UUID, TypeDir, newDirKey, newName, 0, "", replaced.App[AppDriveOrigin])
 		} else {
 			if entry.Type == TypeDir {
 				return ErrNotDir
@@ -1827,7 +1835,7 @@ func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, 
 			if _, err := f.removeEntry(ctx, newDirKey, newName); err != nil {
 				return err
 			}
-			deleted, err := f.adjustNlink(ctx, existing.UUID, -1)
+			deleted, last, err := f.adjustNlinkAttr(ctx, existing.UUID, -1)
 			if err != nil && !errors.Is(err, ErrNotFound) {
 				return err
 			}
@@ -1837,7 +1845,7 @@ func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, 
 				if before != nil {
 					size, version = before.Size, before.VersionID
 				}
-				f.recordTrash(ctx, existing.UUID, existing.Type, newDirKey, newName, size, version)
+				f.recordTrash(ctx, existing.UUID, existing.Type, newDirKey, newName, size, version, last.App[AppDriveOrigin])
 			}
 		}
 	}

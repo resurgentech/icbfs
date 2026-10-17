@@ -226,3 +226,78 @@ func TestTrashDeletedWhileOpen(t *testing.T) {
 		t.Fatalf("after close = %q", got)
 	}
 }
+
+// TestTrashRecordsOrigin: however an item goes (unlink, rmdir, or replaced
+// by a rename, as through a mount), its trash entry records the origin
+// app data it had, so a mirror can find it when the source brings the
+// item back; an item with none records none.
+func TestTrashRecordsOrigin(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	root := fsys.RootKey()
+	withOrigin := func(key string, typ EntryType, o string) {
+		t.Helper()
+		if _, err := fsys.SetAppData(ctx, key, typ, AppDriveOrigin, []byte(o)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	file := func(name, o string) {
+		t.Helper()
+		key, _, _, err := fsys.Create(ctx, root, name, 0644, 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if o != "" {
+			withOrigin(key, TypeFile, o)
+		}
+	}
+	dir := func(name, o string) {
+		t.Helper()
+		key, _, err := fsys.Mkdir(ctx, root, name, 0755, 0, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		withOrigin(key, TypeDir, o)
+	}
+	file("unlinked", `{"id":"u"}`)
+	dir("removed", `{"id":"r"}`)
+	file("replaced", `{"id":"f"}`)
+	file("newer", "")
+	dir("replaced-dir", `{"id":"d"}`)
+	dir("newer-dir", `{"id":"n"}`)
+	file("plain", "")
+
+	if err := fsys.Unlink(ctx, root, "unlinked"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsys.Rmdir(ctx, root, "removed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsys.Rename(ctx, root, "newer", root, "replaced", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsys.Rename(ctx, root, "newer-dir", root, "replaced-dir", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsys.Unlink(ctx, root, "plain"); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := fsys.ListTrash(ctx, TrashOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, e := range entries {
+		got[e.Name] = string(e.Origin)
+	}
+	want := map[string]string{
+		"unlinked": `{"id":"u"}`, "removed": `{"id":"r"}`,
+		"replaced": `{"id":"f"}`, "replaced-dir": `{"id":"d"}`, "plain": "",
+	}
+	for name, o := range want {
+		if g, ok := got[name]; !ok || g != o {
+			t.Errorf("%s: trash entry origin %q (present %v), want %q", name, g, ok, o)
+		}
+	}
+}
