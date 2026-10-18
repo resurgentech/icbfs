@@ -112,7 +112,7 @@ Linux-only flags:
 |---|---|
 | `-allow-other` | let users other than the one mounting use the mount. Without it, the kernel refuses every other user, whatever the file modes say. |
 | `-locking=false` | refuse `flock`/`fcntl` (ENOSYS). By default they're locks shared with every other mount (see [architecture.md](architecture.md#locking)), which costs a read of the file's `.lock` object per flush. |
-| `-meta-cache D` | how long the kernel trusts names and attributes (above): `1s` by default, a day for `-as-of`, `0` for not at all |
+| `-meta-cache D` | how long the kernel trusts names and attributes (above): `5s` by default, a day for `-as-of`, `0` for not at all |
 | `-notify` | MinIO change notifications: a lock wait retries as soon as the lock changes |
 | `-log-socket SOCK -drive ID` | mount a drive through the logging daemon (see [daemon.md](daemon.md)) |
 | `-log-async` | with `-log-socket`: queue events instead of waiting for the server |
@@ -168,7 +168,7 @@ unmount.
 |---|---|---|
 | `-case-insensitive` | `true` | look names up case-insensitively, as NTFS does. Names are always stored as given. |
 | `-atime MODE` | `hourly` | when reads and folder listings record access times: `hourly` (when the recorded one is over an hour old, as NTFS does when it keeps access times at all), `relatime`, `strict` (every read and listing: a store write each) or `noatime` (never, as most Windows machines since 1803, which turn access times off on volumes over 128 GB). `-nodiratime` leaves folders' alone. |
-| `-meta-cache D` | `1s` (unlimited for `-as-of`) | how long names and file and folder details are trusted, as on Linux (above): another machine's renames, creates, deletes and attribute changes can take this long to show in a listing or a file's properties; an open still reads its name and content from the store. `0` trusts nothing. |
+| `-meta-cache D` | `5s` (unlimited for `-as-of`) | how long names and file and folder details are trusted, as on Linux (above): another machine's renames, creates, deletes and attribute changes can take this long to show in a listing or a file's properties; an open still reads its name and content from the store. `0` trusts nothing. |
 
 WinFsp keeps no names of its own: every open hands the driver a whole
 path. So the driver keeps a small name cache (at most 32 MB; at the

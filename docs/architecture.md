@@ -355,7 +355,7 @@ its content, as on a local disk):
   the newer version. Where their ranges overlap, the later flush wins.
 - **Names and attributes, as seen through a mount, can lag** another
   machine's changes by up to the mount's metadata cache timeout
-  (`-meta-cache`, 1 s by default), as with NFS's attribute cache: the
+  (`-meta-cache`, 5 s by default), as with NFS's attribute cache: the
   kernel (on Windows, the driver's name cache, `internal/namecache`)
   trusts what it last heard. An open still goes to the store, for the
   content and for whether its name still leads to it, so content stays

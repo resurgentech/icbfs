@@ -55,7 +55,7 @@ func main() {
 	allowOther := fset.Bool("allow-other", false, "allow users other than the one running this command (and root) to use the mount; without it the kernel refuses every other uid, whatever the file modes say. Needs user_allow_other in /etc/fuse.conf when not run as root")
 	cacheDir := fset.String("cache-dir", "", "local disk directory for open files and the read cache (default: a new directory under the system temp directory)")
 	cacheSize := fset.Uint64("cache-size", 512<<20, "maximum total bytes the local disk cache (-cache-dir) may hold before evicting the least-recently-used cached file")
-	metaCache := fset.Duration("meta-cache", time.Second, "how long the kernel trusts names and attributes, as NFS's attribute cache: other machines' renames, creates and chmods can take this long to show here; opens and locks still check the store (0: trust nothing; as-of mounts default to a day)")
+	metaCache := fset.Duration("meta-cache", 5*time.Second, "how long the kernel trusts names and attributes, as NFS's attribute cache: other machines' renames, creates and chmods can take this long to show here; opens and locks still check the store (0: trust nothing; as-of mounts default to a day)")
 	if err := fset.Parse(os.Args[2:]); err != nil {
 		os.Exit(2)
 	}
