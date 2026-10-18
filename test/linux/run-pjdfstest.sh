@@ -36,6 +36,16 @@ FS_NAME="pjdfstest-$(date +%Y%m%d%H%M%S)"
 MAX_FILE_SIZE=$((8 << 30))
 MNT=/mnt/icbfs-test
 
+# pjdfstest itself, built on the VM the first time (pinned).
+PJDFSTEST_REV=85a8aea
+echo "Building pjdfstest ($PJDFSTEST_REV) on the VM if needed..." >&2
+ssh_vm "$IP" "set -e
+  if [ ! -x /home/ubuntu/pjdfstest/pjdfstest ]; then
+    command -v autoreconf >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq autoconf automake build-essential >/dev/null
+    [ -d /home/ubuntu/pjdfstest/.git ] || git clone -q https://github.com/pjd/pjdfstest.git /home/ubuntu/pjdfstest
+    cd /home/ubuntu/pjdfstest && git checkout -q $PJDFSTEST_REV && autoreconf -ifs >/dev/null 2>&1 && ./configure >/dev/null && make -s pjdfstest >/dev/null
+  fi"
+
 deploy_icbfs "$IP"
 
 echo "Mounting ${FS_NAME} at ${MNT}..." >&2

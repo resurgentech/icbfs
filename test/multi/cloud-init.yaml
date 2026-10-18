@@ -9,3 +9,8 @@ packages:
   - fuse3
   - libaio1t64 # for fsstress, copied from test/linux's VM
   - liburing2
+  - attr # setfattr, getfattr: the smoke workload
+  - acl # setfacl, getfacl: likewise
+  - build-essential # Connectathon's general tests compile on the mount
+  - pkg-config
+  - libtirpc-dev

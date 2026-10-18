@@ -15,7 +15,8 @@
 # bucket .env.aws names (test/aws), with the AWS CLI's credentials; with
 # ICBFS_MULTI_STORE=azure the Azure container .env.azure names (test/azure),
 # with the account key from the az CLI.
-# MULTI_MACHINES limits how many machines take part; STORM, EXCL, COUNT,
+# MULTI_MACHINES limits how many machines take part, and ICBFS_MULTI_ONLY
+# leaves test/linux's VM out (test/multi/lib.sh); STORM, EXCL, COUNT,
 # APPEND, RENAMES and FSSTRESS_OPS set the workloads' sizes (per machine).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -84,18 +85,20 @@ cli() {
 }
 cli fs create -fs "$FS" -root-uid 0 -root-gid 0 >/dev/null
 
-# fsstress from test/linux's VM, where run-xfstests.sh builds xfstests.
+# fsstress from test/linux's VM, where run-xfstests.sh builds xfstests,
+# whether or not that VM takes part (ICBFS_MULTI_ONLY).
+MAIN_IP=$(vm_ip "$MAIN_VM")
 FSSTRESS=""
-if ssh_vm "${IPS[0]}" "test -x /home/ubuntu/xfstests-dev/ltp/fsstress"; then
+if [ -n "$MAIN_IP" ] && ssh_vm "$MAIN_IP" "test -x /home/ubuntu/xfstests-dev/ltp/fsstress"; then
   scp -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
-    "ubuntu@${IPS[0]}:/home/ubuntu/xfstests-dev/ltp/fsstress" "$WORK_DIR/fsstress"
+    "ubuntu@${MAIN_IP}:/home/ubuntu/xfstests-dev/ltp/fsstress" "$WORK_DIR/fsstress"
   FSSTRESS="$WORK_DIR/fsstress"
 fi
 
 # Connectathon (cthon04), as test/linux/run-cthon.sh builds it on that VM.
 CTHON=""
-if ssh_vm "${IPS[0]}" "test -x /home/ubuntu/cthon04/basic/test1"; then
-  ssh_vm "${IPS[0]}" "tar -C /home/ubuntu -cf - cthon04" > "$WORK_DIR/cthon04.tar"
+if [ -n "$MAIN_IP" ] && ssh_vm "$MAIN_IP" "test -x /home/ubuntu/cthon04/basic/test1"; then
+  ssh_vm "$MAIN_IP" "tar -C /home/ubuntu -cf - cthon04" > "$WORK_DIR/cthon04.tar"
   CTHON="$WORK_DIR/cthon04.tar"
 fi
 
@@ -119,6 +122,9 @@ for ip in "${IPS[@]}"; do
     # every machine needs a compiler, make, and libtirpc's headers.
     ssh_vm "$ip" "tar -C $BIN -xf $BIN/cthon04.tar; command -v make >/dev/null && command -v pkg-config >/dev/null && pkg-config --exists libtirpc || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config libtirpc-dev >/dev/null; true"
   fi
+  # The smoke workload's xattr and ACL tools (on VMs made before
+  # cloud-init installed them).
+  ssh_vm "$ip" "command -v setfattr >/dev/null && command -v setfacl >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq attr acl >/dev/null; true"
   ssh_vm "$ip" "sudo mkdir -p $MNT"
   # The keys reach the VM on ssh's stdin, into a file only its owner reads,
   # never on a command line (ps would show them).

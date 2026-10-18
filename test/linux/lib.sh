@@ -3,7 +3,9 @@
 # directly. Mirrors test/windows/lib.sh's own shape.
 set -uo pipefail
 
-VM_NAME="icbfs-fuse-test"
+# ICBFS_TEST_VM picks another test VM (create-vm.sh makes it), so two runs
+# can go at once on two VMs.
+VM_NAME="${ICBFS_TEST_VM:-icbfs-fuse-test}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="$HERE/work"
 # shellcheck disable=SC1091
@@ -59,7 +61,7 @@ deploy_icbfs() {
   local ip="$1" repo tarball
   repo="$(cd "$HERE/../.." && pwd)"
   mkdir -p "$WORK_DIR"
-  tarball="$WORK_DIR/icbfs-src.tar"
+  tarball="$WORK_DIR/icbfs-src-$ip.tar" # one per VM: two runs can deploy at once
   echo "Deploying working tree to ${VM_SRC} and building icbfs and icbfs-logd..." >&2
   (cd "$repo" && git ls-files -co --exclude-standard -z | tar --null -T - -cf "$tarball") || return 1
   scp_to_vm "$ip" "$tarball" /tmp/icbfs-src.tar >/dev/null || return 1

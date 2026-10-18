@@ -24,9 +24,10 @@ vm_ip() {
 }
 
 # machines prints the IPs of the machines the tests use: test/linux's VM,
-# then every running icbfs-multi-N.
+# then every running icbfs-multi-N; with ICBFS_MULTI_ONLY set, only the
+# icbfs-multi-N, so test/linux's VM is free for another run meanwhile.
 machines() {
-  vm_ip "$MAIN_VM"
+  [ -n "${ICBFS_MULTI_ONLY:-}" ] || vm_ip "$MAIN_VM"
   virsh list --name | grep "^${VM_PREFIX}" | sort -V | while read -r name; do
     vm_ip "$name"
   done
