@@ -32,6 +32,13 @@ message FilesystemEntry {
   // listing, and larger blocks rewritten per change. 0 (filesystems
   // created before this field) means the default, 128.
   uint32 dir_block_entries = 7;
+  // format_version is the format the filesystem's objects are in, as a
+  // whole: 1 now; 0 (filesystems created before this field) reads as 1. A
+  // mount of a filesystem whose format is newer than it knows is refused
+  // (internal/icbfs's ErrNewerFormat), so a binary can't misread or
+  // overwrite objects in a format it doesn't understand. Raising it is how
+  // a format change is committed, once every machine can read it.
+  uint32 format_version = 8;
 }
 
 // MasterBlock is the body of the one, fixed, well-known master-block
@@ -42,4 +49,7 @@ message FilesystemEntry {
 // are already permanently keyed with the old one.
 message MasterBlock {
   repeated FilesystemEntry filesystems = 1;
+  // layout is this list's format: 1; 0, or absent, reads as 1. A reader
+  // refuses a layout it doesn't know.
+  uint32 layout = 2;
 }

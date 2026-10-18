@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"io"
 
 	"github.com/resurgentech/icbfs/internal/objstore"
@@ -46,8 +45,8 @@ func (f *Filesystem) OriginRecord(ctx context.Context, sourceDrive, sourceID str
 	if err != nil {
 		return OriginRecord{}, "", err
 	}
-	var r OriginRecord
-	if err := json.Unmarshal(data, &r); err != nil {
+	r, err := decodeOriginRecord(data)
+	if err != nil {
 		return OriginRecord{}, "", err
 	}
 	return r, obj.ETag, nil
@@ -60,7 +59,7 @@ func (f *Filesystem) PutOriginRecord(ctx context.Context, r OriginRecord, ifMatc
 	if err := f.checkWritable(); err != nil {
 		return err
 	}
-	data, err := json.Marshal(r)
+	data, err := encodeOriginRecord(r)
 	if err != nil {
 		return err
 	}

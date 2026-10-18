@@ -3,7 +3,6 @@ package icbfs
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -130,7 +129,7 @@ func (f *Filesystem) recordTrash(ctx context.Context, itemID string, typ EntryTy
 		Path: info.Path, DeletedAt: time.Now().UTC(), DeletedBy: info.By,
 		Size: size, Version: version, Batch: info.Batch, Origin: origin, Pass: info.Pass,
 	}
-	data, err := json.Marshal(e)
+	data, err := encodeTrashEntry(e)
 	if err != nil {
 		return
 	}
@@ -202,8 +201,7 @@ func (f *Filesystem) readTrash(ctx context.Context, key string) (TrashEntry, err
 	if err != nil {
 		return TrashEntry{}, err
 	}
-	var e TrashEntry
-	return e, json.Unmarshal(data, &e)
+	return decodeTrashEntry(data)
 }
 
 // trashEntry finds an entry by its id, with its key.

@@ -3,7 +3,6 @@ package icbfs
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"regexp"
@@ -70,7 +69,7 @@ func CreateName(ctx context.Context, store objstore.Store, fsName string, nv Nam
 	}
 	nv.Time = at.UTC()
 	nv.CreatedAt = time.Now().UTC()
-	data, err := json.Marshal(nv)
+	data, err := encodeNamedVersion(nv)
 	if err != nil {
 		return NamedVersion{}, err
 	}
@@ -96,8 +95,8 @@ func readVersionName(ctx context.Context, store objstore.Store, key string) (Nam
 	if err != nil {
 		return NamedVersion{}, err
 	}
-	var nv NamedVersion
-	if err := json.Unmarshal(data, &nv); err != nil {
+	nv, err := decodeNamedVersion(data)
+	if err != nil {
 		return NamedVersion{}, err
 	}
 	if nv.Time.IsZero() {

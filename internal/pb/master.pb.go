@@ -49,8 +49,15 @@ type FilesystemEntry struct {
 	// listing, and larger blocks rewritten per change. 0 (filesystems
 	// created before this field) means the default, 128.
 	DirBlockEntries uint32 `protobuf:"varint,7,opt,name=dir_block_entries,json=dirBlockEntries,proto3" json:"dir_block_entries,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// format_version is the format the filesystem's objects are in, as a
+	// whole: 1 now; 0 (filesystems created before this field) reads as 1. A
+	// mount of a filesystem whose format is newer than it knows is refused
+	// (internal/icbfs's ErrNewerFormat), so a binary can't misread or
+	// overwrite objects in a format it doesn't understand. Raising it is how
+	// a format change is committed, once every machine can read it.
+	FormatVersion uint32 `protobuf:"varint,8,opt,name=format_version,json=formatVersion,proto3" json:"format_version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *FilesystemEntry) Reset() {
@@ -132,6 +139,13 @@ func (x *FilesystemEntry) GetDirBlockEntries() uint32 {
 	return 0
 }
 
+func (x *FilesystemEntry) GetFormatVersion() uint32 {
+	if x != nil {
+		return x.FormatVersion
+	}
+	return 0
+}
+
 // MasterBlock is the body of the one, fixed, well-known master-block
 // object per bucket. The list can only ever grow in length, never
 // shrink or reorder — a deleted filesystem's entry is blanked in place
@@ -139,8 +153,11 @@ func (x *FilesystemEntry) GetDirBlockEntries() uint32 {
 // entry's position, and therefore its ID, out from under objects that
 // are already permanently keyed with the old one.
 type MasterBlock struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Filesystems   []*FilesystemEntry     `protobuf:"bytes,1,rep,name=filesystems,proto3" json:"filesystems,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Filesystems []*FilesystemEntry     `protobuf:"bytes,1,rep,name=filesystems,proto3" json:"filesystems,omitempty"`
+	// layout is this list's format: 1; 0, or absent, reads as 1. A reader
+	// refuses a layout it doesn't know.
+	Layout        uint32 `protobuf:"varint,2,opt,name=layout,proto3" json:"layout,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -182,11 +199,18 @@ func (x *MasterBlock) GetFilesystems() []*FilesystemEntry {
 	return nil
 }
 
+func (x *MasterBlock) GetLayout() uint32 {
+	if x != nil {
+		return x.Layout
+	}
+	return 0
+}
+
 var File_spec_proto_icbfs_v1_master_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_master_proto_rawDesc = "" +
 	"\n" +
-	" spec/proto/icbfs/v1/master.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x84\x02\n" +
+	" spec/proto/icbfs/v1/master.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xab\x02\n" +
 	"\x0fFilesystemEntry\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x1a\n" +
@@ -194,9 +218,11 @@ const file_spec_proto_icbfs_v1_master_proto_rawDesc = "" +
 	"\x0fprimary_windows\x18\x04 \x01(\bR\x0eprimaryWindows\x12\"\n" +
 	"\rmax_file_size\x18\x05 \x01(\x04R\vmaxFileSize\x124\n" +
 	"\acreated\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\acreated\x12*\n" +
-	"\x11dir_block_entries\x18\a \x01(\rR\x0fdirBlockEntries\"J\n" +
+	"\x11dir_block_entries\x18\a \x01(\rR\x0fdirBlockEntries\x12%\n" +
+	"\x0eformat_version\x18\b \x01(\rR\rformatVersion\"b\n" +
 	"\vMasterBlock\x12;\n" +
-	"\vfilesystems\x18\x01 \x03(\v2\x19.icbfs.v1.FilesystemEntryR\vfilesystemsB+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
+	"\vfilesystems\x18\x01 \x03(\v2\x19.icbfs.v1.FilesystemEntryR\vfilesystems\x12\x16\n" +
+	"\x06layout\x18\x02 \x01(\rR\x06layoutB+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
 
 var (
 	file_spec_proto_icbfs_v1_master_proto_rawDescOnce sync.Once

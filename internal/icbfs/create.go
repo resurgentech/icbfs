@@ -45,6 +45,7 @@ type Info struct {
 	DirBlockEntries int
 	Archived        bool
 	Created         time.Time // zero for filesystems created before it was recorded
+	FormatVersion   int       // its objects' format as a whole (see FormatVersion)
 }
 
 // filesystemName is what a filesystem may be called: it's part of the
@@ -78,7 +79,9 @@ func CreateFilesystem(ctx context.Context, store objstore.Store, s Settings) (In
 		return Info{}, err
 	}
 	f := New(store, s.Name)
-	f.applyEntry(id, entry)
+	if err := f.applyEntry(id, entry); err != nil {
+		return Info{}, err
+	}
 	if existed {
 		if _, err := store.Head(ctx, f.RootKey()); err == nil {
 			return Info{}, fmt.Errorf("filesystem %q: %w", s.Name, ErrExists)
@@ -108,7 +111,9 @@ func (f *Filesystem) Attach(ctx context.Context) error {
 	}
 	for i, e := range mb.Filesystems {
 		if e.Name == f.fsName {
-			f.applyEntry(fsID(i), e)
+			if err := f.applyEntry(fsID(i), e); err != nil {
+				return err
+			}
 			if _, err := f.store.Head(ctx, f.RootKey()); err != nil {
 				return fmt.Errorf("filesystem %q has no root (an interrupted create?): %w", f.fsName, mapNotFound(err))
 			}
@@ -172,7 +177,7 @@ func DescribeFilesystem(ctx context.Context, store objstore.Store, name string) 
 
 func infoOf(id string, e *pb.FilesystemEntry) Info {
 	info := Info{Name: e.Name, ID: id, Size: e.Size, PrimaryWindows: e.PrimaryWindows, Archived: e.Archived, MaxFileSize: DefaultMaxFileSize,
-		DirBlockEntries: dirBlockEntries(e)}
+		DirBlockEntries: dirBlockEntries(e), FormatVersion: max(1, int(e.FormatVersion))}
 	if e.MaxFileSize != 0 && e.MaxFileSize <= DefaultMaxFileSize {
 		info.MaxFileSize = int64(e.MaxFileSize)
 	}

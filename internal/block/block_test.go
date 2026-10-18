@@ -1,6 +1,7 @@
 package block
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
@@ -168,5 +169,26 @@ func TestDecodeIgnoresUnknownField(t *testing.T) {
 	}
 	if decoded.Kind != Leaf || len(decoded.Entries) != 1 || decoded.Entries[0].Name != "a.txt" {
 		t.Fatalf("got %+v, want the known fields intact despite the unknown one", decoded)
+	}
+}
+
+// TestDecodeRefusesNewerLayout: a block in a layout newer than Layout is
+// refused, and the blocks Encode writes say Layout.
+func TestDecodeRefusesNewerLayout(t *testing.T) {
+	data, err := proto.Marshal(&pb.Block{Kind: pb.BlockKind(Leaf), Layout: Layout + 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Decode(data); !errors.Is(err, ErrNewerFormat) {
+		t.Fatalf("decode a newer block: %v, want ErrNewerFormat", err)
+	}
+	b := &Block{Kind: Leaf, Entries: []Entry{{Name: "a", UUID: "u"}}}
+	data, _ = b.Encode()
+	var w pb.Block
+	if err := proto.Unmarshal(data, &w); err != nil || w.Layout != Layout {
+		t.Fatalf("encoded layout = %d, %v", w.Layout, err)
+	}
+	if _, err := Decode(data); err != nil {
+		t.Fatal(err)
 	}
 }

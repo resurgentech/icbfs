@@ -52,4 +52,7 @@ message Block {
   // they existed.
   string high_key = 4;
   string right = 5;
+  // layout is this format: 1; 0, or absent, reads as 1. A reader refuses
+  // a layout it doesn't know (internal/block's ErrNewerFormat).
+  uint32 layout = 6;
 }

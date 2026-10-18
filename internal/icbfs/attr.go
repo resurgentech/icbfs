@@ -5,6 +5,7 @@ package icbfs
 
 import (
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +32,9 @@ var (
 	ErrFileTooLarge    = errors.New("file too large for this filesystem")
 	ErrInvalidRename   = errors.New("new path is inside the directory being renamed")
 	ErrInvalidArgument = errors.New("invalid argument")
+	// ErrNewerFormat is an object, or the filesystem as a whole, in a
+	// format newer than this build knows (see FormatVersion).
+	ErrNewerFormat = block.ErrNewerFormat
 )
 
 // The Windows FILE_ATTRIBUTE_* bits stored for an item: Win32's values,
@@ -226,6 +230,9 @@ func decodeFileMetadata(data []byte) (Attr, error) {
 	var m pb.Metadata
 	if err := proto.Unmarshal(data, &m); err != nil {
 		return Attr{}, err
+	}
+	if m.Layout > metadataLayout {
+		return Attr{}, fmt.Errorf("metadata layout %d: %w", m.Layout, ErrNewerFormat)
 	}
 	atime := timeOrZero(m.Atime)
 	if atime.IsZero() && m.AtimeUnixNano != 0 {

@@ -35,7 +35,7 @@ var ErrReadOnly = objstore.ErrReadOnly
 // PutIfAbsent one create wins and the others' precondition failures just
 // mean the block exists.
 func bootstrapMaster(ctx context.Context, store objstore.Store) error {
-	empty, err := proto.Marshal(&pb.MasterBlock{})
+	empty, err := encodeMaster(&pb.MasterBlock{})
 	if err != nil {
 		return err
 	}
@@ -44,6 +44,21 @@ func bootstrapMaster(ctx context.Context, store objstore.Store) error {
 		return nil
 	}
 	return err
+}
+
+// Layouts this package reads and writes; see the fields in
+// spec/proto/icbfs/v1/master.proto. FormatVersion is the format of a
+// filesystem's objects as a whole, recorded in its master-block entry at
+// creation: a filesystem with a newer one isn't opened at all.
+const (
+	masterLayout  = 1
+	FormatVersion = 1
+)
+
+// encodeMaster serializes mb in this package's layout.
+func encodeMaster(mb *pb.MasterBlock) ([]byte, error) {
+	mb.Layout = masterLayout
+	return proto.Marshal(mb)
 }
 
 func readMaster(ctx context.Context, store objstore.Store) (*pb.MasterBlock, *objstore.Object, error) {
@@ -61,6 +76,9 @@ func readMaster(ctx context.Context, store objstore.Store) (*pb.MasterBlock, *ob
 		if err := proto.Unmarshal(data, &mb); err != nil {
 			return nil, nil, err
 		}
+	}
+	if mb.Layout > masterLayout {
+		return nil, nil, fmt.Errorf("master block layout %d: %w", mb.Layout, ErrNewerFormat)
 	}
 	return &mb, obj, nil
 }
@@ -102,10 +120,10 @@ func registerFilesystem(ctx context.Context, store objstore.Store, entry *pb.Fil
 			idx = len(mb.Filesystems)
 			mb.Filesystems = append(mb.Filesystems, &pb.FilesystemEntry{})
 		}
-		created := &pb.FilesystemEntry{Name: name, Size: entry.Size, PrimaryWindows: entry.PrimaryWindows, MaxFileSize: entry.MaxFileSize, DirBlockEntries: entry.DirBlockEntries, Created: entry.Created}
+		created := &pb.FilesystemEntry{Name: name, Size: entry.Size, PrimaryWindows: entry.PrimaryWindows, MaxFileSize: entry.MaxFileSize, DirBlockEntries: entry.DirBlockEntries, Created: entry.Created, FormatVersion: FormatVersion}
 		mb.Filesystems[idx] = created
 
-		data, err := proto.Marshal(mb)
+		data, err := encodeMaster(mb)
 		if err != nil {
 			return "", nil, false, err
 		}
@@ -154,7 +172,7 @@ func updateFilesystemEntry(ctx context.Context, store objstore.Store, fsName str
 		if !found {
 			return ErrNotFound
 		}
-		data, err := proto.Marshal(mb)
+		data, err := encodeMaster(mb)
 		if err != nil {
 			return err
 		}

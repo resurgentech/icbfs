@@ -6,6 +6,7 @@
 package block
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 
@@ -85,6 +86,15 @@ func (b *Block) Past(name string) bool {
 	return b.HighKey != "" && b.Collation.Compare(name, b.HighKey) >= 0
 }
 
+// Layout is the block format this package reads and writes. A block
+// written before blocks carried one reads as layout 0, the same format.
+const Layout = 1
+
+// ErrNewerFormat is a stored object in a format newer than this build
+// knows: refused, not guessed at, so an older binary can't misread it or
+// write over it in the old format.
+var ErrNewerFormat = errors.New("stored in a newer format than this build reads; upgrade icbfs")
+
 // Decode parses a directory block body (Protobuf-encoded, per
 // spec/proto/icbfs/v1/block.proto). Empty input decodes to an empty leaf
 // block, so a freshly created directory's body can just be nil bytes.
@@ -95,6 +105,9 @@ func Decode(data []byte) (*Block, error) {
 	var wire pb.Block
 	if err := proto.Unmarshal(data, &wire); err != nil {
 		return nil, fmt.Errorf("decode directory block: %w", err)
+	}
+	if wire.Layout > Layout {
+		return nil, fmt.Errorf("directory block layout %d: %w", wire.Layout, ErrNewerFormat)
 	}
 	return fromWire(&wire), nil
 }
@@ -109,7 +122,7 @@ func (b *Block) Encode() ([]byte, error) {
 }
 
 func toWire(b *Block) *pb.Block {
-	w := &pb.Block{Kind: pb.BlockKind(b.Kind), HighKey: b.HighKey, Right: b.Right}
+	w := &pb.Block{Kind: pb.BlockKind(b.Kind), HighKey: b.HighKey, Right: b.Right, Layout: Layout}
 	for _, e := range b.Entries {
 		w.Entries = append(w.Entries, &pb.Entry{
 			Name: e.Name,

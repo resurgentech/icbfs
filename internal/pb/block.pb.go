@@ -261,8 +261,11 @@ type Block struct {
 	// anything looking for a name at or past high_key moves right). Both
 	// empty for a block with nothing after it, and in blocks written before
 	// they existed.
-	HighKey       string `protobuf:"bytes,4,opt,name=high_key,json=highKey,proto3" json:"high_key,omitempty"`
-	Right         string `protobuf:"bytes,5,opt,name=right,proto3" json:"right,omitempty"`
+	HighKey string `protobuf:"bytes,4,opt,name=high_key,json=highKey,proto3" json:"high_key,omitempty"`
+	Right   string `protobuf:"bytes,5,opt,name=right,proto3" json:"right,omitempty"`
+	// layout is this format: 1; 0, or absent, reads as 1. A reader refuses
+	// a layout it doesn't know (internal/block's ErrNewerFormat).
+	Layout        uint32 `protobuf:"varint,6,opt,name=layout,proto3" json:"layout,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -332,6 +335,13 @@ func (x *Block) GetRight() string {
 	return ""
 }
 
+func (x *Block) GetLayout() uint32 {
+	if x != nil {
+		return x.Layout
+	}
+	return 0
+}
+
 var File_spec_proto_icbfs_v1_block_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_block_proto_rawDesc = "" +
@@ -343,13 +353,14 @@ const file_spec_proto_icbfs_v1_block_proto_rawDesc = "" +
 	"\x04type\x18\x03 \x01(\x0e2\x13.icbfs.v1.EntryTypeR\x04type\"4\n" +
 	"\x05Child\x12\x17\n" +
 	"\amin_key\x18\x01 \x01(\tR\x06minKey\x12\x12\n" +
-	"\x04uuid\x18\x02 \x01(\tR\x04uuid\"\xb9\x01\n" +
+	"\x04uuid\x18\x02 \x01(\tR\x04uuid\"\xd1\x01\n" +
 	"\x05Block\x12'\n" +
 	"\x04kind\x18\x01 \x01(\x0e2\x13.icbfs.v1.BlockKindR\x04kind\x12)\n" +
 	"\aentries\x18\x02 \x03(\v2\x0f.icbfs.v1.EntryR\aentries\x12+\n" +
 	"\bchildren\x18\x03 \x03(\v2\x0f.icbfs.v1.ChildR\bchildren\x12\x19\n" +
 	"\bhigh_key\x18\x04 \x01(\tR\ahighKey\x12\x14\n" +
-	"\x05right\x18\x05 \x01(\tR\x05right*\xb1\x01\n" +
+	"\x05right\x18\x05 \x01(\tR\x05right\x12\x16\n" +
+	"\x06layout\x18\x06 \x01(\rR\x06layout*\xb1\x01\n" +
 	"\tEntryType\x12\x13\n" +
 	"\x0fENTRY_TYPE_FILE\x10\x00\x12\x12\n" +
 	"\x0eENTRY_TYPE_DIR\x10\x01\x12\x16\n" +

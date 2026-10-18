@@ -274,7 +274,9 @@ func (f *Filesystem) Bootstrap(ctx context.Context, size uint64, mode, uid, gid 
 	if err != nil {
 		return err
 	}
-	f.applyEntry(id, entry)
+	if err := f.applyEntry(id, entry); err != nil {
+		return err
+	}
 	if _, err := f.store.Head(ctx, f.RootKey()); err == nil {
 		return nil
 	}
@@ -282,8 +284,12 @@ func (f *Filesystem) Bootstrap(ctx context.Context, size uint64, mode, uid, gid 
 }
 
 // applyEntry takes this filesystem's identity and fixed settings from
-// its master-block entry.
-func (f *Filesystem) applyEntry(id string, entry *pb.FilesystemEntry) {
+// its master-block entry, refusing a filesystem in a newer format than
+// this build knows (ErrNewerFormat).
+func (f *Filesystem) applyEntry(id string, entry *pb.FilesystemEntry) error {
+	if entry.FormatVersion > FormatVersion {
+		return fmt.Errorf("filesystem %q is format %d, this build reads up to %d: %w", entry.Name, entry.FormatVersion, FormatVersion, ErrNewerFormat)
+	}
 	f.id = id
 	f.archived = entry.Archived
 	f.primaryWindows = entry.PrimaryWindows
@@ -292,6 +298,7 @@ func (f *Filesystem) applyEntry(id string, entry *pb.FilesystemEntry) {
 		f.maxFileSize = int64(entry.MaxFileSize)
 	}
 	f.dirBlockEntries = dirBlockEntries(entry)
+	return nil
 }
 
 // dirBlockEntries is entry's directory block size, or the default.
@@ -316,7 +323,9 @@ func (f *Filesystem) BootstrapReadOnly(ctx context.Context) error {
 	found := false
 	for i, e := range mb.Filesystems {
 		if e.Name == f.fsName {
-			f.applyEntry(fsID(i), e)
+			if err := f.applyEntry(fsID(i), e); err != nil {
+				return err
+			}
 			found = true
 			break
 		}

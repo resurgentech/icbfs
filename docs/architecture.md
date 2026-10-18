@@ -85,12 +85,32 @@ Item keys are **UUIDv7**. Their embedded millisecond timestamp gives each
 item a creation time for free and keeps keys roughly time-ordered.
 
 Encodings are Protobuf; the schemas are in [`spec/proto`](../spec/proto).
+Trash entries, named versions and origin records written before they were
+Protobuf are JSON, and are still read (a JSON record starts with `{`,
+which none of the Protobuf ones can).
+
+**Format versions.** Every object carries the number of its format: a
+`layout` field in each message (directory blocks, `.metadata`, locks, the
+master block, the three records), and in the master block each
+filesystem's `format_version`, the format of its objects as a whole. All
+are 1 now; 0, or absent (objects from before the fields), reads as 1. A
+reader refuses a number newer than it knows (`ErrNewerFormat`): a binary
+that is too old won't open a filesystem in a newer format, or read an
+object in one, rather than misread it or write it back in the old one.
+A change a reader of the old format would mishandle raises the number;
+a new field it can ignore doesn't. Adopting a new format is then: every
+machine upgraded to a build that reads it, then `format_version` raised,
+then objects rewritten as they are next written (or all at once, by a
+tool). Old formats stay readable for good: past views and the trash read
+old versions. A rewrite only for the format must carry the item's times
+over explicitly and not stamp its ctime, since some times are still
+derived from the store's object times when none is stored.
 
 ## The master block
 
 The master block is a list of `FilesystemEntry` records: name, declared
-size, archived flag, primary mode (Windows or POSIX), max file size, and
-creation time. **A filesystem's ID is its position in the list.**
+size, archived flag, primary mode (Windows or POSIX), max file size,
+creation time and format version. **A filesystem's ID is its position in the list.**
 
 - Creating a filesystem reads the list, takes the first free slot (or
   appends one), and writes the list back with a conditional write.

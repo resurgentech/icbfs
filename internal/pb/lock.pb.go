@@ -129,8 +129,11 @@ func (x *LockRange) GetShared() bool {
 // Lock is the whole <uuid>.lock object body: every currently-claimed
 // range across every holder.
 type Lock struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Ranges        []*LockRange           `protobuf:"bytes,1,rep,name=ranges,proto3" json:"ranges,omitempty"`
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Ranges []*LockRange           `protobuf:"bytes,1,rep,name=ranges,proto3" json:"ranges,omitempty"`
+	// layout is this format: 1; 0, or absent, reads as 1. A reader refuses
+	// a layout it doesn't know (internal/icbfs's ErrNewerFormat).
+	Layout        uint32 `protobuf:"varint,2,opt,name=layout,proto3" json:"layout,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -172,6 +175,13 @@ func (x *Lock) GetRanges() []*LockRange {
 	return nil
 }
 
+func (x *Lock) GetLayout() uint32 {
+	if x != nil {
+		return x.Layout
+	}
+	return 0
+}
+
 var File_spec_proto_icbfs_v1_lock_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_lock_proto_rawDesc = "" +
@@ -183,9 +193,10 @@ const file_spec_proto_icbfs_v1_lock_proto_rawDesc = "" +
 	"\x06holder\x18\x03 \x01(\tR\x06holder\x12+\n" +
 	"\x12expires_at_unix_ms\x18\x04 \x01(\x03R\x0fexpiresAtUnixMs\x12'\n" +
 	"\x0fescalation_only\x18\x05 \x01(\bR\x0eescalationOnly\x12\x16\n" +
-	"\x06shared\x18\x06 \x01(\bR\x06shared\"3\n" +
+	"\x06shared\x18\x06 \x01(\bR\x06shared\"K\n" +
 	"\x04Lock\x12+\n" +
-	"\x06ranges\x18\x01 \x03(\v2\x13.icbfs.v1.LockRangeR\x06rangesB+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
+	"\x06ranges\x18\x01 \x03(\v2\x13.icbfs.v1.LockRangeR\x06ranges\x12\x16\n" +
+	"\x06layout\x18\x02 \x01(\rR\x06layoutB+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
 
 var (
 	file_spec_proto_icbfs_v1_lock_proto_rawDescOnce sync.Once

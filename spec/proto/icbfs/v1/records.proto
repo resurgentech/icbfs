@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package icbfs.v1;
+
+import "google/protobuf/timestamp.proto";
+import "spec/proto/icbfs/v1/block.proto";
+
+option go_package = "github.com/resurgentech/icbfs/internal/pb";
+
+// The records a filesystem keeps beside its tree: trash entries, named
+// versions and origin records. Records written before these messages
+// existed are JSON (they begin with '{', which no protobuf message here
+// does) and are still read; new ones are these.
+//
+// layout, in each, is the record's format: 1 for these fields; 0, or
+// absent, reads as 1. A reader refuses a layout it doesn't know rather
+// than guess at it (internal/icbfs's ErrNewerFormat).
+
+// TrashEntry is one deleted item: <id>-trash-<inverted time>-<entry id>.
+message TrashEntry {
+  string entry_id = 1;
+  string item_id = 2;   // the item's key, its stable id
+  EntryType type = 3;
+  string name = 4;
+  string parent_id = 5; // the directory it was in
+  string path = 6;      // as the deleting access layer saw it, when it knew
+  google.protobuf.Timestamp deleted_at = 7;
+  string deleted_by = 8;
+  int64 size = 9;
+  string version = 10;  // the content version current when it was deleted
+  string batch = 11;    // shared by everything one recursive delete removed
+  bytes origin = 12;    // the item's drive.origin app data when deleted
+  string pass = 13;     // the sync pass that removed it, if one did
+  uint32 layout = 14;
+}
+
+// NamedVersion is a name for a moment: <id>-name-<name>.
+message NamedVersion {
+  string name = 1;
+  google.protobuf.Timestamp time = 2;
+  string scope = 3;      // the subtree it was made for; "" for all
+  string created_by = 4;
+  google.protobuf.Timestamp created_at = 5;
+  uint32 layout = 6;
+}
+
+// OriginRecord is the item copied from one source item:
+// <id>-origin-<hash of source drive and id>.
+message OriginRecord {
+  string drive = 1;   // the source drive
+  string id = 2;      // the source item's id there
+  string item_id = 3; // the item here (its key)
+  string version = 4; // the source version last copied
+  string path = 5;    // where the item was last known to be
+  uint32 layout = 6;
+}

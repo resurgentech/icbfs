@@ -46,6 +46,9 @@ const lockWholeFileEnd = math.MinInt64
 // layers converting their locks' ranges (lockWholeFileEnd).
 const LockEOF int64 = lockWholeFileEnd
 
+// lockLayout is the lock object format this package reads and writes.
+const lockLayout = 1
+
 // lockObjectKey is the object holding a file's locks. It's separate from
 // .metadata because locks are read by other callers than stat, and can
 // change far more often than attributes.
@@ -72,6 +75,9 @@ func readLockRanges(ctx context.Context, store objstore.Store, lockKey string) (
 		if err := proto.Unmarshal(data, &l); err != nil {
 			return nil, nil, err
 		}
+	}
+	if l.Layout > lockLayout {
+		return nil, nil, fmt.Errorf("lock layout %d: %w", l.Layout, ErrNewerFormat)
 	}
 	return &l, obj, nil
 }
@@ -219,7 +225,7 @@ func (f *Filesystem) tryAcquireLockRange(ctx context.Context, key string, start,
 		kept = append(kept, remainder...)
 
 		claim := &pb.LockRange{Start: claimStart, End: claimEnd, Holder: holder, ExpiresAtUnixMs: serverNow.Add(ttl).UnixMilli(), EscalationOnly: escalationOnly, Shared: shared}
-		data, err := proto.Marshal(&pb.Lock{Ranges: append(kept, claim)})
+		data, err := proto.Marshal(&pb.Lock{Ranges: append(kept, claim), Layout: lockLayout})
 		if err != nil {
 			return err
 		}
@@ -282,7 +288,7 @@ func (f *Filesystem) ReleaseLockRange(ctx context.Context, key string, start, en
 			return nil
 		}
 
-		data, err := proto.Marshal(&pb.Lock{Ranges: kept})
+		data, err := proto.Marshal(&pb.Lock{Ranges: kept, Layout: lockLayout})
 		if err != nil {
 			return err
 		}
@@ -338,7 +344,7 @@ func (f *Filesystem) UnlockRange(ctx context.Context, key string, start, end int
 		if !changed {
 			return nil
 		}
-		data, err := proto.Marshal(&pb.Lock{Ranges: kept})
+		data, err := proto.Marshal(&pb.Lock{Ranges: kept, Layout: lockLayout})
 		if err != nil {
 			return err
 		}
@@ -400,7 +406,7 @@ func (f *Filesystem) RenewLockRange(ctx context.Context, key string, start, end 
 		}
 
 		renewed := &pb.LockRange{Start: start, End: end, Holder: holder, ExpiresAtUnixMs: serverNow.Add(ttl).UnixMilli(), EscalationOnly: escalationOnly, Shared: shared}
-		data, err := proto.Marshal(&pb.Lock{Ranges: append(kept, renewed)})
+		data, err := proto.Marshal(&pb.Lock{Ranges: append(kept, renewed), Layout: lockLayout})
 		if err != nil {
 			return err
 		}
