@@ -35,8 +35,16 @@ const maxLockCASRetries = 20
 
 // lockWholeFileEnd is the end of a whole-file lock: "to end of file" as a
 // fixed value, not the file's size, so the lock also covers bytes appended
-// after it was taken.
-const lockWholeFileEnd = math.MaxInt64
+// after it was taken. Range ends are exclusive and compared unsigned (see
+// rangesOverlap), and this one is 2^63: past the last possible offset,
+// 2^63-1, so a range ending here holds that byte too, and a range that
+// ends just before it ([x, 2^63-1)) is told apart from one to the end of
+// the file. As int64, which ranges are stored in, it's math.MinInt64.
+const lockWholeFileEnd = math.MinInt64
+
+// LockEOF is the end of a range "to the end of the file", for access
+// layers converting their locks' ranges (lockWholeFileEnd).
+const LockEOF int64 = lockWholeFileEnd
 
 // lockObjectKey is the object holding a file's locks. It's separate from
 // .metadata because locks are read by other callers than stat, and can
@@ -73,7 +81,9 @@ func rangeExpired(e *pb.LockRange, now time.Time) bool {
 }
 
 func rangesOverlap(aStart, aEnd, bStart, bEnd int64) bool {
-	return aStart < bEnd && bStart < aEnd
+	// Unsigned: an end of LockEOF (2^63) is past every offset, the last
+	// included (Connectathon's lock tests 2.7 and 6).
+	return uint64(aStart) < uint64(bEnd) && uint64(bStart) < uint64(aEnd)
 }
 
 // locksConflict reports whether two overlapping claims of different holders
@@ -111,7 +121,7 @@ func mergeOwnRanges(owned []*pb.LockRange, start, end int64, shared bool) (remai
 				if e.Start < newStart {
 					newStart = e.Start
 				}
-				if e.End > newEnd {
+				if uint64(e.End) > uint64(newEnd) {
 					newEnd = e.End
 				}
 				continue // absorbed into the new claim, not kept
@@ -119,7 +129,7 @@ func mergeOwnRanges(owned []*pb.LockRange, start, end int64, shared bool) (remai
 			if e.Start < newStart {
 				next = append(next, &pb.LockRange{Start: e.Start, End: newStart, Holder: e.Holder, ExpiresAtUnixMs: e.ExpiresAtUnixMs, EscalationOnly: e.EscalationOnly, Shared: e.Shared})
 			}
-			if e.End > newEnd {
+			if uint64(e.End) > uint64(newEnd) {
 				next = append(next, &pb.LockRange{Start: newEnd, End: e.End, Holder: e.Holder, ExpiresAtUnixMs: e.ExpiresAtUnixMs, EscalationOnly: e.EscalationOnly, Shared: e.Shared})
 			}
 		}
@@ -321,7 +331,7 @@ func (f *Filesystem) UnlockRange(ctx context.Context, key string, start, end int
 			if e.Start < start {
 				kept = append(kept, &pb.LockRange{Start: e.Start, End: start, Holder: e.Holder, ExpiresAtUnixMs: e.ExpiresAtUnixMs, Shared: e.Shared})
 			}
-			if e.End > end {
+			if uint64(e.End) > uint64(end) {
 				kept = append(kept, &pb.LockRange{Start: end, End: e.End, Holder: e.Holder, ExpiresAtUnixMs: e.ExpiresAtUnixMs, Shared: e.Shared})
 			}
 		}

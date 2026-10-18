@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"sync"
 	"testing"
@@ -758,5 +759,29 @@ func TestUnlockRangeIsPOSIX(t *testing.T) {
 	// The freed middle is free for b.
 	if err := fsys.TryAcquireLockRange(ctx, key, 12, 18, "b", time.Minute); err != nil {
 		t.Fatalf("b locks the freed middle: %v", err)
+	}
+}
+
+// TestLockOnTheLastByte: the two highest offsets, as Connectathon's lock
+// test 6 has them. A range to the end of the file (LockEOF) holds the last
+// byte, 2^63-1; a range ending just before it doesn't.
+func TestLockOnTheLastByte(t *testing.T) {
+	const last = math.MaxInt64 // the last possible offset
+	for _, tc := range []struct {
+		name         string
+		aStart, aEnd int64
+		bStart, bEnd int64
+		want         bool
+	}{
+		{"the last byte, under a whole-file lock", last, LockEOF, 0, LockEOF, true},
+		{"the byte before it, against a lock on the last byte", last - 1, last, last, LockEOF, false},
+		{"two bytes from the one before, against the last", last - 1, LockEOF, last, LockEOF, true},
+		{"a range at the start, against the last byte", 0, 10, last, LockEOF, false},
+		{"ordinary ranges that touch", 0, 10, 10, 20, false},
+		{"ordinary ranges that overlap", 0, 11, 10, 20, true},
+	} {
+		if got := rangesOverlap(tc.aStart, tc.aEnd, tc.bStart, tc.bEnd); got != tc.want {
+			t.Errorf("%s: overlap %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
