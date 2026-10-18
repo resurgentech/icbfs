@@ -366,6 +366,17 @@ func (n *Node) Setattr(ctx context.Context, f fs.FileHandle, in *fuse.SetAttrIn,
 
 func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	ctx = detach(ctx)
+	list, errno := n.listing(ctx)
+	if errno != 0 {
+		return nil, errno
+	}
+	return &dirStream{n: n, entries: list}, 0
+}
+
+// listing is the directory's entries now, "." and ".." first, as
+// getdents(2) lists them on Linux filesystems, with the inode numbers stat
+// reports; and records the listing (an access, a logged event).
+func (n *Node) listing(ctx context.Context) ([]fuse.DirEntry, syscall.Errno) {
 	entries, err := n.fsys.ReadDir(ctx, n.key)
 	if err != nil {
 		return nil, errnoFromErr(err)
@@ -374,8 +385,7 @@ func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	// that has already succeeded.
 	_ = n.fsys.TouchAtime(ctx, n.key, icbfs.TypeDir)
 	n.logEvent(ctx, fslog.EventList, n.path(), 0)
-	// "." and "..", as getdents(2) lists them on Linux filesystems, with
-	// the inode numbers stat reports. The root is its own parent.
+	// The root is its own parent.
 	parentKey := n.key
 	if _, parent := n.Parent(); parent != nil {
 		if pn, ok := parent.Operations().(*Node); ok {
@@ -393,8 +403,50 @@ func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 			Mode: typeToFuseMode(e.Type),
 		})
 	}
-	return fs.NewListDirStream(list), 0
+	return list, 0
 }
+
+// dirStream is an open directory's listing, read when it's opened. A
+// rewind (rewinddir(3), a seek to its start) reads the directory again,
+// as POSIX has it: the stream then shows the directory as it is now, as a
+// new opendir would, not as it was when opened. go-fuse's list stream
+// only went back to the start of the old listing, so a name removed since
+// was read again (Connectathon's basic test6). A seek anywhere else stays
+// in the listing it has.
+type dirStream struct {
+	n       *Node
+	entries []fuse.DirEntry
+	idx     int
+}
+
+var _ fs.FileSeekdirer = (*dirStream)(nil)
+
+func (d *dirStream) HasNext() bool { return d.idx < len(d.entries) }
+
+func (d *dirStream) Next() (fuse.DirEntry, syscall.Errno) {
+	e := d.entries[d.idx]
+	d.idx++
+	e.Off = uint64(d.idx)
+	return e, 0
+}
+
+func (d *dirStream) Seekdir(ctx context.Context, off uint64) syscall.Errno {
+	if off == 0 {
+		list, errno := d.n.listing(detach(ctx))
+		if errno != 0 {
+			return errno
+		}
+		d.entries, d.idx = list, 0
+		return 0
+	}
+	if off > uint64(len(d.entries)) {
+		return syscall.EINVAL
+	}
+	d.idx = int(off)
+	return 0
+}
+
+func (d *dirStream) Close() {}
 
 func (n *Node) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	ctx = withUmask(ctx)
@@ -684,11 +736,11 @@ func (h *FileHandle) lockHolder(owner uint64) string {
 // overflowing as lk.End+1 would.
 func lockRangeFromFileLock(lk *fuse.FileLock, flags uint32) (start, end int64) {
 	if flags&fuse.FUSE_LK_FLOCK != 0 {
-		return 0, fcntlLockEOF
+		return 0, icbfs.LockEOF
 	}
 	start = int64(lk.Start)
-	if lk.End == fcntlLockEOF {
-		return start, fcntlLockEOF
+	if lk.End >= fcntlLockEOF {
+		return start, icbfs.LockEOF
 	}
 	return start, int64(lk.End) + 1
 }
@@ -714,7 +766,7 @@ func (h *FileHandle) Getlk(ctx context.Context, owner uint64, lk *fuse.FileLock,
 		return 0
 	}
 	out.Start = uint64(info.Start)
-	if info.End >= fcntlLockEOF {
+	if info.End == icbfs.LockEOF {
 		out.End = fcntlLockEOF
 	} else {
 		out.End = uint64(info.End - 1)
