@@ -23,6 +23,7 @@ last three from 2026-10-14.
 | logging chain | Ubuntu 24.04 VM | 5 / 5 checks pass |
 | icbfs-sync end to end | Windows Server 2025 VM | 12 / 12 checks pass; its Go tests pass on NTFS |
 | large files (6 GiB, opt-in) | Ubuntu 24.04 VM | 7 / 7 checks pass (6 GiB written in 73 s; a one-byte edit in 22 s) |
+| Connectathon (cthon04), 2026-10-17 | Ubuntu 24.04 VM, FUSE | basic, general, special and lock tests all pass; one warning (lock 13.1, mandatory locking) |
 
 ## Go tests
 
@@ -105,6 +106,32 @@ outside icbfs's reach: opening by file handle (go-fuse has no FUSE export
 support), FIBMAP, the kernel FUSE side's setgid rule on writes, FUSE's
 asynchronous release of OFD locks, `/proc/locks`, and the declared size
 not being enforced.
+
+### Connectathon (NFS)
+
+[cthon04](https://git.linux-nfs.org/?p=steved/cthon04.git), the
+Connectathon NFS test suite, pinned to a commit: basic (create, remove,
+lookups, setattr, read and write, readdir, links, rename, symlinks,
+statfs), general (compiles programs on the filesystem, a large file),
+special (open-then-delete, renames, holes, truncation, exclusive create,
+negative seeks) and lock tests (fcntl ranges up to the last possible
+byte, between a parent and a child process).
+
+```
+test/linux/run-cthon.sh <vm-ip>                 # one machine; CTHON_TESTS=-b etc. for one group
+test/multi/run-multi.sh cthon                   # every machine at once, a directory each
+```
+
+The first run clones and builds it on the Linux test VM; the
+multi-machine workload copies that build to every machine. Like
+pjdfstest, `ICBFS_TEST_STORE=s3` or `azure` runs on a real store.
+
+On 2026-10-17, on MinIO: every group passes on one machine, with one
+warning (lock test 13.1: mapping a locked file isn't refused, which is
+mandatory locking, as on Linux's NFS). It found two bugs: rewinding an
+open directory showed it as it was at the open, not as it is
+(rewinddir), and a lock range at the last possible byte, 2^63-1, wasn't
+told apart from one to the end of the file.
 
 ### Several machines
 

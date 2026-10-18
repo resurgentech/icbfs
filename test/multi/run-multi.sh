@@ -8,14 +8,15 @@
 #
 #   test/multi/run-multi.sh [workload ...]   (default: all)
 #
-# Workloads: smoke, storm, exclusive, counter, append, rename, fsstress.
+# Workloads: smoke, storm, exclusive, counter, append, rename, fsstress,
+# cthon.
 #
 # The store is a throwaway MinIO; with ICBFS_MULTI_STORE=s3 the real S3
 # bucket .env.aws names (test/aws), with the AWS CLI's credentials; with
 # ICBFS_MULTI_STORE=azure the Azure container .env.azure names (test/azure),
 # with the account key from the az CLI.
 # MULTI_MACHINES limits how many machines take part; STORM, EXCL, COUNT,
-# APPEND and RENAMES set the workloads' sizes (per machine).
+# APPEND, RENAMES and FSSTRESS_OPS set the workloads' sizes (per machine).
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/lib.sh"
@@ -56,10 +57,10 @@ else
   export ICBFS_ACCESS_KEY ICBFS_SECRET_KEY
   STORE_ENV=$(printf 'ICBFS_ACCESS_KEY=%s\nICBFS_SECRET_KEY=%s' "$ICBFS_ACCESS_KEY" "$ICBFS_SECRET_KEY")
 fi
-STORM="${STORM:-300}" EXCL="${EXCL:-100}" COUNT="${COUNT:-40}" APPEND="${APPEND:-100}" RENAMES="${RENAMES:-50}"
+STORM="${STORM:-300}" EXCL="${EXCL:-100}" COUNT="${COUNT:-40}" APPEND="${APPEND:-100}" RENAMES="${RENAMES:-50}" FSSTRESS_OPS="${FSSTRESS_OPS:-2000}"
 
 WORKLOADS=("$@")
-[ ${#WORKLOADS[@]} -gt 0 ] || WORKLOADS=(smoke storm exclusive counter append rename fsstress)
+[ ${#WORKLOADS[@]} -gt 0 ] || WORKLOADS=(smoke storm exclusive counter append rename fsstress cthon)
 
 mapfile -t IPS < <(machines | grep . | head -n "${MULTI_MACHINES:-99}")
 N=${#IPS[@]}
@@ -91,6 +92,13 @@ if ssh_vm "${IPS[0]}" "test -x /home/ubuntu/xfstests-dev/ltp/fsstress"; then
   FSSTRESS="$WORK_DIR/fsstress"
 fi
 
+# Connectathon (cthon04), as test/linux/run-cthon.sh builds it on that VM.
+CTHON=""
+if ssh_vm "${IPS[0]}" "test -x /home/ubuntu/cthon04/basic/test1"; then
+  ssh_vm "${IPS[0]}" "tar -C /home/ubuntu -cf - cthon04" > "$WORK_DIR/cthon04.tar"
+  CTHON="$WORK_DIR/cthon04.tar"
+fi
+
 unmount_all() {
   for ip in "${IPS[@]}"; do
     ssh_vm "$ip" "sudo umount $MNT 2>/dev/null || sudo umount -l $MNT 2>/dev/null; sudo pkill -f '[i]cbfs-multi/icbfs mount' 2>/dev/null; rm -f /tmp/icbfs-multi.env; true" || true
@@ -104,6 +112,12 @@ for ip in "${IPS[@]}"; do
   if [ -n "$FSSTRESS" ]; then
     scp_to_vm "$ip" "$FSSTRESS" "$BIN/fsstress"
     ssh_vm "$ip" "ldd $BIN/fsstress | grep -q 'not found' && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq libaio1t64 liburing2 >/dev/null; true"
+  fi
+  if [ -n "$CTHON" ]; then
+    scp_to_vm "$ip" "$CTHON" "$BIN/cthon04.tar"
+    # Its general tests compile programs on the filesystem under test, so
+    # every machine needs a compiler, make, and libtirpc's headers.
+    ssh_vm "$ip" "tar -C $BIN -xf $BIN/cthon04.tar; command -v make >/dev/null && command -v pkg-config >/dev/null && pkg-config --exists libtirpc || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config libtirpc-dev >/dev/null; true"
   fi
   ssh_vm "$ip" "sudo mkdir -p $MNT"
   # The keys reach the VM on ssh's stdin, into a file only its owner reads,
@@ -233,8 +247,20 @@ for w in "${WORKLOADS[@]}"; do
     # which shares the filesystem's root and blocks with the others.
     # fsstress exits 0 even when its workers fail or are killed, so what
     # it says counts too: its errors go to stderr, the machine's log.
-    check "fsstress: $N machines, 2000 operations each" \
-      "everywhere fsstress '\$BIN/fsstress -d \$MNT/stress-\$i -n 2000 -p 2 -s \$i >/dev/null' && ! grep -q . \"\$OUT\"/fsstress-*.log"
+    check "fsstress: $N machines, $FSSTRESS_OPS operations each" \
+      "everywhere fsstress '\$BIN/fsstress -d \$MNT/stress-\$i -n $FSSTRESS_OPS -p 2 -s \$i >/dev/null' && ! grep -q . \"\$OUT\"/fsstress-*.log"
+    ;;
+  cthon)
+    if [ -z "$CTHON" ]; then
+      echo "SKIP  cthon (build it on test/linux's VM: test/linux/run-cthon.sh)"
+      continue
+    fi
+    # Connectathon's basic, general, special and lock tests on every
+    # machine at once, each in a directory of its own on the one
+    # filesystem. runtests says "All tests completed" only if every
+    # group passed.
+    check "cthon: $N machines, all groups" \
+      "everywhere cthon 'cd \$BIN/cthon04 && ./runtests -a -t \$MNT/cthon-\$i' && [ \$(grep -l 'All tests completed' \"\$OUT\"/cthon-*.log | wc -l) -eq $N ]"
     ;;
   *)
     echo "unknown workload $w" >&2
