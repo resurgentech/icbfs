@@ -30,6 +30,7 @@ var (
 	ErrInvalidName     = errors.New("name reserved on a primary-Windows filesystem")
 	ErrNameTooLong     = errors.New("name too long")
 	ErrFileTooLarge    = errors.New("file too large for this filesystem")
+	ErrNoSpace         = errors.New("no space left on this filesystem")
 	ErrInvalidRename   = errors.New("new path is inside the directory being renamed")
 	ErrInvalidArgument = errors.New("invalid argument")
 	// ErrNewerFormat is an object, or the filesystem as a whole, in a

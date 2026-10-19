@@ -60,7 +60,7 @@ func TestAllocateModes(t *testing.T) {
 		if err := o.WriteAt(pattern(), 0); err != nil {
 			t.Fatal(err)
 		}
-		err = o.Allocate(c.off, c.len, c.mode)
+		err = o.Allocate(ctx, c.off, c.len, c.mode)
 		if c.wantError != nil {
 			if !errors.Is(err, c.wantError) {
 				t.Errorf("%s: %v, want %v", c.name, err, c.wantError)
@@ -87,5 +87,45 @@ func TestAllocateModes(t *testing.T) {
 		if !bytes.Equal(got, c.want) {
 			t.Errorf("%s: content differs (%d bytes, want %d)", c.name, len(got), len(c.want))
 		}
+	}
+}
+
+// TestAllocateNoSpace: as on Linux, an allocation past the max file size
+// is "file too large", and one that grows the file by more than the
+// filesystem has free is "no space" and changes nothing; one that fits
+// goes ahead, and one that keeps the size isn't counted.
+func TestAllocateNoSpace(t *testing.T) {
+	fsys, store := newTestFilesystem(t)
+	ctx := context.Background()
+	const capacity = 1 << 20
+	if err := Resize(ctx, store, "test", capacity); err != nil {
+		t.Fatal(err)
+	}
+	key, _, _, err := fsys.Create(ctx, fsys.RootKey(), "f", 0o644, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := fsys.Open(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer o.Close()
+	if err := o.Allocate(ctx, 0, fsys.maxFileSize+1, 0); !errors.Is(err, ErrFileTooLarge) {
+		t.Fatalf("past the max file size: %v, want ErrFileTooLarge", err)
+	}
+	if err := o.Allocate(ctx, 0, 2*capacity, 0); !errors.Is(err, ErrNoSpace) {
+		t.Fatalf("twice the capacity: %v, want ErrNoSpace", err)
+	}
+	if err := o.Allocate(ctx, 0, 2*capacity, FallocZeroRange); !errors.Is(err, ErrNoSpace) {
+		t.Fatalf("zero range of twice the capacity: %v, want ErrNoSpace", err)
+	}
+	if o.Size() != 0 {
+		t.Fatalf("size after refusals = %d, want 0", o.Size())
+	}
+	if err := o.Allocate(ctx, 0, 2*capacity, FallocKeepSize); err != nil {
+		t.Fatalf("keep size: %v", err)
+	}
+	if err := o.Allocate(ctx, 0, capacity/2, 0); err != nil || o.Size() != capacity/2 {
+		t.Fatalf("half the capacity: %v, size %d", err, o.Size())
 	}
 }

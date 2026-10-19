@@ -203,6 +203,8 @@ func errnoFromErr(err error) syscall.Errno {
 		return syscall.ENAMETOOLONG
 	case errors.Is(err, icbfs.ErrFileTooLarge):
 		return syscall.EFBIG
+	case errors.Is(err, icbfs.ErrNoSpace):
+		return syscall.ENOSPC
 	case errors.Is(err, icbfs.ErrInvalidRename):
 		// POSIX rename(2)'s EINVAL: "newpath contains a path prefix
 		// of oldpath".
@@ -663,7 +665,7 @@ func (h *FileHandle) Allocate(ctx context.Context, off uint64, size uint64, mode
 	if off > math.MaxInt64 || size > math.MaxInt64 {
 		return syscall.EFBIG
 	}
-	err := h.open.Allocate(int64(off), int64(size), mode)
+	err := h.open.Allocate(detach(ctx), int64(off), int64(size), mode)
 	if errors.Is(err, icbfs.ErrNotSupported) {
 		return syscall.EOPNOTSUPP
 	}

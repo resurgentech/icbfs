@@ -240,8 +240,26 @@ func (o *OpenFile) WriteAt(data []byte, off int64) error { return o.c.WriteAt(da
 // Truncate sets the file's length, as ftruncate(2) does, for every open.
 func (o *OpenFile) Truncate(size int64) error { return o.c.Truncate(size) }
 
-// Allocate is fallocate(2); see content.Allocate.
-func (o *OpenFile) Allocate(off, length int64, mode uint32) error {
+// Allocate is fallocate(2); see content.Allocate. As Linux does, an end
+// past the max file size is ErrFileTooLarge; then an allocation that
+// would grow the file by more than the filesystem has free (its declared
+// capacity less what it uses, as StatFS counts them) is ErrNoSpace, and
+// nothing changes. Free space is only counted for an allocation that
+// grows the file, at the cost of one StatFS.
+func (o *OpenFile) Allocate(ctx context.Context, off, length int64, mode uint32) error {
+	end := off + length
+	if off >= 0 && length > 0 && end > off && end <= o.c.fsys.maxFileSize && mode&FallocKeepSize == 0 &&
+		mode&^FallocKeepSize != FallocPunchHole {
+		if grow := end - o.Size(); grow > 0 {
+			total, used, err := o.c.fsys.StatFS(ctx)
+			if err != nil {
+				return err
+			}
+			if used >= total || uint64(grow) > total-used {
+				return ErrNoSpace
+			}
+		}
+	}
 	return o.c.Allocate(off, length, mode)
 }
 

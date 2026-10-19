@@ -9,6 +9,10 @@
 # (pinned to XFSTESTS_REV) on the VM. Results are copied to
 # work/xfstests-<time>/; failures not listed in xfstests-known.txt fail the
 # run.
+#
+# XFSTESTS_FROM=generic/426 runs only the tests the check arguments pick
+# from that one on, to carry on a run that stopped; XFSTESTS_TIMEOUT
+# (default 8h) bounds the whole check.
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -z "${ICBFS_MINIO_VM_ENDPOINT:-}" ]; then
@@ -32,8 +36,11 @@ OUT="$WORK_DIR/xfstests-$STAMP"
 vm() { ssh_vm "$IP" "$@"; }
 
 deploy_icbfs "$IP"
-create_fs "$TEST_FS" -max-file-size $((8 << 30))
-create_fs "$SCRATCH_FS" -max-file-size $((8 << 30))
+# Each filesystem is smaller than its max file size, as on a disk: tests
+# that fill it, or allocate past what's free (generic/103, generic/213),
+# need "no space" to come before "file too large".
+create_fs "$TEST_FS" -size $((4 << 30)) -max-file-size $((8 << 30))
+create_fs "$SCRATCH_FS" -size $((4 << 30)) -max-file-size $((8 << 30))
 
 echo "Preparing xfstests on the VM..." >&2
 vm "set -e
@@ -82,9 +89,22 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "Running ./check ${CHECK_ARGS[*]} (this takes a while against an object store)..." >&2
+if [ -n "${XFSTESTS_FROM:-}" ]; then
+  # ./check -n lists what it would run, without running it.
+  listed=$(vm "cd $XFSTESTS && sudo ./check -n ${CHECK_ARGS[*]}" 2>/dev/null)
+  CHECK_ARGS=()
+  for t in $(echo "$listed" | awk '/^[a-z]+\/[0-9]+/ {print $1}' | sort -uV); do
+    if [ "${t%%/*}" != "${XFSTESTS_FROM%%/*}" ] || [ $((10#${t#*/})) -ge $((10#${XFSTESTS_FROM#*/})) ]; then
+      CHECK_ARGS+=("$t")
+    fi
+  done
+  [ ${#CHECK_ARGS[@]} -gt 0 ] || { echo "no tests from $XFSTESTS_FROM" >&2; exit 1; }
+  echo "${#CHECK_ARGS[@]} tests from $XFSTESTS_FROM" >&2
+fi
+
+echo "Running ./check ${CHECK_ARGS[*]:0:8} ... (this takes a while against an object store)..." >&2
 status=0
-vm "cd $XFSTESTS && sudo timeout 8h ./check ${CHECK_ARGS[*]}" >"$WORK_DIR/xfstests-$STAMP.log" 2>&1 || status=$?
+vm "cd $XFSTESTS && sudo timeout ${XFSTESTS_TIMEOUT:-8h} ./check ${CHECK_ARGS[*]}" >"$WORK_DIR/xfstests-$STAMP.log" 2>&1 || status=$?
 
 mkdir -p "$OUT"
 vm "sudo tar -C $XFSTESTS -czf /tmp/xfstests-results.tgz results" >/dev/null 2>&1 &&
