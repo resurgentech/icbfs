@@ -57,7 +57,9 @@ For the Windows 11 VM, put `ICBFS_WIN_VM=icbfs-win11-test` before each.
 
 `setup-vm.sh` installs these (`setup-vm.ps1`; the versions are at the top
 of `setup-vm.sh`). Then shut the VM down and take a `clean-base` snapshot
-(`virsh snapshot-create-as <vm> clean-base`).
+(`virsh snapshot-create-as <vm> clean-base`). With Administrator logged
+on (auto-logon), `virsh shutdown` is ignored; shut it down from inside:
+`ssh Administrator@<ip> Stop-Computer -Force`.
 
 - **Go**, on the machine `Path`, for the native builds.
 - **WinFsp**, from [WinFsp's
