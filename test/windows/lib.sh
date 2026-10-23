@@ -2,7 +2,9 @@
 # Shared config/helpers for the scripts in this directory. Not run directly.
 set -uo pipefail
 
-VM_NAME="icbfs-winfsp-test"
+# ICBFS_WIN_VM picks another Windows VM: icbfs-win11-test is the
+# Windows 11 one, with a desktop (create-vm.sh makes either).
+VM_NAME="${ICBFS_WIN_VM:-icbfs-winfsp-test}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK_DIR="$HERE/work"
 # The key the VM lets in as Administrator (written in by autounattend.xml),

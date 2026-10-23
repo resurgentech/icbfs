@@ -1,7 +1,12 @@
-# Windows test VM
+# Windows test VMs
 
-A disposable KVM/libvirt VM (`icbfs-winfsp-test`, Windows Server 2025
-evaluation) for the suites that need a real WinFsp mount. Each run copies
+Disposable KVM/libvirt VMs for the suites that need a real WinFsp mount:
+
+- `icbfs-winfsp-test`: Windows Server 2025 evaluation, with no desktop
+  (Server Core), the default.
+- `icbfs-win11-test`: Windows 11 Enterprise LTSC 2024 evaluation, with a
+  desktop and Explorer, for anything with a window. Every script here
+  takes it with `ICBFS_WIN_VM=icbfs-win11-test`. Each run copies
 the working tree to `C:\icbfs-test` on the VM, builds it there with the
 VM's own Go, and uses a throwaway MinIO on the host
 (`test/minio/with-minio.sh`) that is removed when the run ends. See
@@ -14,17 +19,27 @@ Requirements on the host: libvirt and `virt-install`, `xorriso` (for the
 answer-file ISO), Docker (for MinIO), and an SSH key at
 `~/.ssh/id_ed25519.pub` (or `$ICBFS_VM_SSH_KEY`).
 
-The only manual step is downloading the ISO. The Windows Server 2025
-evaluation ISO sits behind a registration form at the [Evaluation
-Center](https://www.microsoft.com/en-us/evalcenter/evaluate-windows-server-2025).
+The only manual step is downloading the ISO.
+
+- **Windows Server 2025:** behind a registration form at the [Evaluation
+  Center](https://www.microsoft.com/en-us/evalcenter/evaluate-windows-server-2025).
+- **Windows 11 Enterprise LTSC 2024:** a direct link, with no form
+  (5.1 GB):
+  `curl -L -o win11-ltsc-2024-eval-en-us.iso 'https://go.microsoft.com/fwlink/?linkid=2289029&clcid=0x409&culture=en-us&country=us'`.
+
+`create-vm.sh` tells the two apart by the ISO's name (`CLIENT`, as in
+Microsoft's own file names, means Windows 11).
 
 ```
-./create-vm.sh /path/to/windows-server-2025-eval.iso   # unattended install
-ip=$(./wait-for-ssh.sh)                                # prints the IP once SSH is up
-./check-eval-expiry.sh "$ip"                           # when the evaluation runs out
-ssh Administrator@"$ip"                                # logs in with your SSH key
+./create-vm.sh /path/to/windows-eval.iso   # unattended install
+ip=$(./wait-for-ssh.sh)                    # prints the IP once SSH is up
+./setup-vm.sh "$ip"                        # Go, WinFsp, winfsp-tests
+./check-eval-expiry.sh "$ip"               # when the evaluation runs out
+ssh Administrator@"$ip"                    # logs in with your SSH key
 ./destroy-vm.sh
 ```
+
+For the Windows 11 VM, put `ICBFS_WIN_VM=icbfs-win11-test` before each.
 
 - `autounattend.xml` installs Windows with an MBR layout (this libvirt
   profile boots SeaBIOS) on emulated SATA and e1000e, so no drivers are
@@ -40,29 +55,47 @@ ssh Administrator@"$ip"                                # logs in with your SSH k
 
 ### What the VM needs installed
 
-Install these once, then take a `clean-base` snapshot
-(`virsh snapshot-create-as icbfs-winfsp-test clean-base`):
+`setup-vm.sh` installs these (`setup-vm.ps1`; the versions are at the top
+of `setup-vm.sh`). Then shut the VM down and take a `clean-base` snapshot
+(`virsh snapshot-create-as <vm> clean-base`).
 
 - **Go**, on the machine `Path`, for the native builds.
-- **WinFsp**: `msiexec /i winfsp-<version>.msi /qn /norestart`, from
-  [WinFsp's releases](https://github.com/winfsp/winfsp/releases/latest).
-  Add `C:\Program Files (x86)\WinFsp\bin` to the machine `Path` yourself,
-  because the installer doesn't, and restart `sshd` so SSH sessions see it.
-- **winfsp-tests**: `winfsp-tests-<version>.zip` from the same release,
-  unzipped to `C:\Windows\Temp\winfsp-tests\`.
+- **WinFsp**, from [WinFsp's
+  releases](https://github.com/winfsp/winfsp/releases/latest), with
+  `C:\Program Files (x86)\WinFsp\bin` added to the machine `Path`, which
+  its installer doesn't do.
+- **winfsp-tests**, from the same release, unzipped to
+  `C:\Windows\Temp\winfsp-tests\`.
+- **Defender exclusions** for the Go module cache, the build cache and
+  `C:\icbfs-test`. Defender takes a generated file in `modernc.org/sqlite`
+  (`sqlite_g_*.go`) for malware (`TrojanDropper:VBS/Mikey.A!MSR`) and
+  blocks the build, so the script also allows that one signature. Go
+  remembers a blocked read in its build cache: after a block, run
+  `go clean -cache` as well.
+
+### Seeing the Windows 11 desktop
+
+`autounattend.xml` turns on Remote Desktop. From the host, connect with
+Remmina (or any RDP client) to the VM's address (`virsh domifaddr
+icbfs-win11-test`) as `Administrator`, with the password in
+`work/vm-password`. `virt-manager` shows the console as well, but slowly.
+
+Windows 11 Setup's TPM 2.0 and Secure Boot checks are skipped
+(`LabConfig` in `autounattend.xml`), so this VM boots as the Server one
+does: SeaBIOS, MBR, no TPM.
 
 ### The evaluation clock
 
-The evaluation edition expires after 180 days. `check-eval-expiry.sh` asks
-Windows (`slmgr`) when it will.
+`check-eval-expiry.sh` asks Windows (`slmgr`) when the evaluation runs
+out: 180 days for Windows Server, 90 for Windows 11 Enterprise LTSC.
 
 - When expiry is near, `slmgr /rearm` and a reboot reset the clock once.
   Then re-take the snapshot.
 - After that, `destroy-vm.sh` and `create-vm.sh` again. The install is
   unattended.
 
-The current `clean-base` snapshot expires on 2027-04-08, with one rearm
-left.
+The current `clean-base` snapshots expire on 2027-04-08 (Server, with one
+rearm left) and 2027-01-21 (Windows 11, activated 2026-10-23).
 
 ## Runs
 
