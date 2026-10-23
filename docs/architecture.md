@@ -488,10 +488,17 @@ runs on top of it.
   that had it then.
 - A T later than the store's own clock is refused, except within two
   seconds, which is waited out (the store's clock reads in whole seconds).
-- Each object's version list is resolved once and cached in a local SQLite
-  database. The past doesn't change, so the cache never goes stale. It is
-  deleted at unmount; a mount that was killed leaves it behind, and the
-  next as-of mount cleans it up.
+- Each object's version list is fetched once into a history cache, a
+  local SQLite database shared by views of every time. Moving a view to
+  another time needs nothing more from the store, which is what lets the
+  history app's slider move fast. A mount keeps it between mounts, one
+  per store and credential, in the user's cache directory
+  (`objstore.HistoryCache`; WAL, so as-of mounts and the app share it).
+- The past doesn't change, except by a purge. A view that finds a cached
+  version erased forgets that key and asks the store again. Everything
+  is fetched again once it's older than the cache's TTL (30 days by
+  default), so a purged item's name and times stay in a cache at most
+  that long.
 - `df` and `du` are computed as of T, from every version under the prefix.
   That is slow for a long history, so a mount computes them once.
 

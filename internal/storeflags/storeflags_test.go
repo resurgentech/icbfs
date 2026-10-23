@@ -1,9 +1,15 @@
 package storeflags
 
 import (
+	"context"
 	"errors"
 	"flag"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
+
+	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
 )
 
 func TestEnvironmentThenFlags(t *testing.T) {
@@ -56,6 +62,23 @@ func TestAzure(t *testing.T) {
 	}
 	c.Azure.Key = "k"
 	if err := Check(c); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHistoryFallsBackToATemporaryCache(t *testing.T) {
+	// A file where the cache directory should be: the shared cache can't
+	// be made there.
+	blocked := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := &History{Dir: blocked, TTL: time.Hour}
+	hist, err := h.Open(context.Background(), nil, &pkgicbfs.StoreConfig{})
+	if err != nil {
+		t.Fatalf("no fallback: %v", err)
+	}
+	if err := hist.Close(); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -33,6 +34,8 @@ func Run(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	t.Run("List", func(t *testing.T) { list(t, newStore) })
 	t.Run("ServerTimeIsTheStoresClock", func(t *testing.T) { serverTimeIsTheStoresClock(t, newStore) })
 	t.Run("AsOf", func(t *testing.T) { asOf(t, newStore) })
+	t.Run("HistoryCacheLastsForItsTTL", func(t *testing.T) { historyCacheLastsForItsTTL(t, newStore) })
+	t.Run("AsOfAfterErase", func(t *testing.T) { asOfAfterErase(t, newStore) })
 }
 
 // pause lets the store's clock pass a whole second, so a time taken
@@ -508,9 +511,10 @@ func historyPaginatesAndIncludesDeletions(t *testing.T, newStore func(*testing.T
 	}
 }
 
-// TestAsOf checks the view at three moments: before a key existed,
-// between two writes, and after it was deleted, plus ListByPrefix,
-// read-only writes, the future check and the cache's cleanup.
+// TestAsOf checks views at three moments, all over one history cache:
+// before a key existed, between two writes, and after it was deleted,
+// plus List, read-only writes, the future check and the temporary
+// cache's cleanup.
 func asOf(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	store := newStore(t)
 	ctx := context.Background()
@@ -536,6 +540,11 @@ func asOf(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	pause()
 	after := serverNow(t, store)
 
+	parent := t.TempDir()
+	hist, err := objstore.OpenTempHistoryCache(ctx, store, parent)
+	if err != nil {
+		t.Fatal(err)
+	}
 	read := func(v *objstore.AsOf, key string) (string, error) {
 		body, _, err := v.Get(ctx, key)
 		if err != nil {
@@ -555,7 +564,7 @@ func asOf(t *testing.T, newStore func(*testing.T) objstore.Store) {
 		{middle, "one", "x", 2, 4},
 		{after, "two!", "", 1, 4},
 	} {
-		v, err := objstore.NewAsOf(ctx, store, tc.at, t.TempDir())
+		v, err := objstore.NewAsOf(ctx, hist, tc.at)
 		if err != nil {
 			t.Fatalf("as of %v: %v", tc.at, err)
 		}
@@ -588,15 +597,125 @@ func asOf(t *testing.T, newStore func(*testing.T) objstore.Store) {
 		if err := v.Delete(ctx, "p/a"); !errors.Is(err, objstore.ErrReadOnly) {
 			t.Fatalf("delete through an as-of view: %v", err)
 		}
-		if err := v.Close(); err != nil {
-			t.Fatalf("close: %v", err)
-		}
-		if _, err := os.Stat(v.CacheDir()); !os.IsNotExist(err) {
-			t.Fatalf("cache dir still there after Close: %v", err)
-		}
 	}
 
-	if _, err := objstore.NewAsOf(ctx, store, after.Add(time.Hour), t.TempDir()); err == nil {
+	if _, err := objstore.NewAsOf(ctx, hist, after.Add(time.Hour)); err == nil {
 		t.Fatal("an as-of time in the future was accepted")
+	}
+	if err := hist.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if left, _ := os.ReadDir(parent); len(left) != 0 {
+		t.Fatalf("the temporary cache is still there after Close: %v", left)
+	}
+}
+
+// countingStore counts the history listings that reach the store.
+type countingStore struct {
+	objstore.Store
+	listings int
+}
+
+func (s *countingStore) History(ctx context.Context, key string) ([]objstore.Object, error) {
+	s.listings++
+	return s.Store.History(ctx, key)
+}
+
+func (s *countingStore) HistoryUnder(ctx context.Context, prefix string) ([]objstore.Object, error) {
+	s.listings++
+	return s.Store.HistoryUnder(ctx, prefix)
+}
+
+// historyCacheLastsForItsTTL checks that a history cache answers a view
+// of another time, and a later process, without the store, until what it
+// holds is older than its TTL.
+func historyCacheLastsForItsTTL(t *testing.T, newStore func(*testing.T) objstore.Store) {
+	store := &countingStore{Store: newStore(t)}
+	ctx := context.Background()
+	if _, err := store.Put(ctx, "p/a", bytes.NewReader([]byte("one")), nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	pause()
+	middle := serverNow(t, store)
+	pause()
+	if _, err := store.Put(ctx, "p/a", bytes.NewReader([]byte("two")), nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	pause()
+	now := serverNow(t, store)
+	path := filepath.Join(t.TempDir(), "history.db")
+
+	look := func(ttl time.Duration, at time.Time) int {
+		t.Helper()
+		hist, err := objstore.OpenHistoryCache(ctx, store, path, ttl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer hist.Close()
+		v, err := objstore.NewAsOf(ctx, hist, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := store.listings
+		if _, err := v.Head(ctx, "p/a"); err != nil {
+			t.Fatalf("as of %v: %v", at, err)
+		}
+		if listed, err := v.List(ctx, "p/"); err != nil || len(listed) != 1 {
+			t.Fatalf("as of %v, listing: %v, %v", at, listed, err)
+		}
+		return store.listings - before
+	}
+	if n := look(time.Hour, now); n != 2 {
+		t.Fatalf("an empty cache asked the store %d times; want 2", n)
+	}
+	if n := look(time.Hour, middle); n != 0 {
+		t.Fatalf("a reopened cache, at an earlier time, asked the store %d times; want 0", n)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if n := look(time.Millisecond, middle); n != 2 {
+		t.Fatalf("a cache past its TTL asked the store %d times; want 2", n)
+	}
+}
+
+// asOfAfterErase checks that a view whose cached version has since been
+// erased (a purge) asks the store again, rather than failing.
+func asOfAfterErase(t *testing.T, newStore func(*testing.T) objstore.Store) {
+	store := newStore(t)
+	ctx := context.Background()
+	first, err := store.Put(ctx, "k", bytes.NewReader([]byte("one")), nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pause()
+	middle := serverNow(t, store)
+	pause()
+	if _, err := store.Put(ctx, "k", bytes.NewReader([]byte("two")), nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	pause()
+	hist, err := objstore.OpenTempHistoryCache(ctx, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hist.Close()
+	v, err := objstore.NewAsOf(ctx, hist, middle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.Head(ctx, "k"); err != nil {
+		t.Fatalf("before the erase: %v", err)
+	}
+	if err := store.Erase(ctx, "k", first.VersionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := v.Get(ctx, "k"); !objstore.IsNotFound(err) {
+		t.Fatalf("after its only version then was erased: %v; want not found", err)
+	}
+	later, err := objstore.NewAsOf(ctx, hist, serverNow(t, store))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := later.Head(ctx, "k"); err != nil {
+		t.Fatalf("the current version, after the erase: %v", err)
 	}
 }

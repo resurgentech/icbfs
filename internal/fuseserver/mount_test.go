@@ -1442,11 +1442,15 @@ func TestMountAsOf(t *testing.T) {
 		t.Fatalf("write g: %v", err)
 	}
 
-	view, err := objstore.NewAsOf(ctx, store, at, t.TempDir())
+	hist, err := objstore.OpenTempHistoryCache(ctx, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hist.Close()
+	view, err := objstore.NewAsOf(ctx, hist, at)
 	if err != nil {
 		t.Fatalf("as of: %v", err)
 	}
-	defer view.Close()
 	fsys := icbfs.New(view, "past")
 	if err := fsys.BootstrapReadOnly(ctx); err != nil {
 		t.Fatalf("bootstrap read-only: %v", err)

@@ -43,6 +43,7 @@ func main() {
 	fsName := fset.String("fs", "default", "filesystem name")
 	asOf := fset.String("as-of", "", "mount read-only as the filesystem was at this time: a date (2006-01-02, meaning the end of that day), a date-time (2006-01-02T15:04:05) in local time, or RFC 3339 with a zone; or a version name (icbfs-cli names). Fails if the filesystem didn't exist yet then")
 	caseInsensitive := fset.Bool("case-insensitive", true, "look names up case-insensitively, as NTFS does; names are always stored as given")
+	history := storeflags.AddHistory(fset)
 	cacheDir := fset.String("cache-dir", "", "local disk directory for open files and the read cache (default: a new directory under the system temp directory)")
 	cacheSize := fset.Uint64("cache-size", 512<<20, "maximum total bytes the local disk cache (-cache-dir) may hold before evicting the least-recently-used cached file")
 	atime := fset.String("atime", "hourly", "when reads and folder listings record access times: hourly (when the recorded one is over an hour old, as NTFS does), relatime (when it's no newer than the last change, or a day old), strict (every read and listing), or noatime (never)")
@@ -77,11 +78,15 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		view, err = objstore.NewAsOf(ctx, store, at, *cacheDir)
+		hist, err := history.Open(ctx, store, conn)
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer view.Close()
+		defer hist.Close()
+		view, err = objstore.NewAsOf(ctx, hist, at)
+		if err != nil {
+			log.Fatal(err)
+		}
 		store = view
 	}
 
@@ -104,7 +109,6 @@ func main() {
 	var attrs uint32
 	if view != nil {
 		if err := fsys.BootstrapReadOnly(ctx); err != nil {
-			view.Close()
 			log.Fatalf("filesystem %q as of %s: %v", *fsName, view.At().Format(time.RFC3339), err)
 		}
 		attrs = winfsp.FspFSAttributeReadOnlyVolume
@@ -152,9 +156,6 @@ func main() {
 		winfsp.FileInfoTimeout(fileInfoTimeout),
 	)
 	if err != nil {
-		if view != nil {
-			view.Close()
-		}
 		log.Fatalf("mount %s: %v", mountpoint, err)
 	}
 	defer server.Unmount()

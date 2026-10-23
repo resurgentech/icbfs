@@ -126,23 +126,26 @@ func TestAsOfFilesystem(t *testing.T) {
 	}
 	second := take("b")
 
-	open := func(at time.Time) (*Filesystem, *objstore.AsOf, error) {
-		view, err := objstore.NewAsOf(ctx, store, at, t.TempDir())
+	hist, err := objstore.OpenTempHistoryCache(ctx, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hist.Close()
+	open := func(at time.Time) (*Filesystem, error) {
+		view, err := objstore.NewAsOf(ctx, hist, at)
 		if err != nil {
 			t.Fatalf("as of %v: %v", at, err)
 		}
 		f := New(view, "past")
-		return f, view, f.BootstrapReadOnly(ctx)
+		return f, f.BootstrapReadOnly(ctx)
 	}
 
-	if _, view, err := open(beforeCreation); !errors.Is(err, ErrNotFound) {
+	if _, err := open(beforeCreation); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("as of before creation: %v, want ErrNotFound", err)
-	} else {
-		view.Close()
 	}
 
 	for _, s := range []snapshot{first, second} {
-		f, view, err := open(s.at)
+		f, err := open(s.at)
 		if err != nil {
 			t.Fatalf("as of %v: %v", s.at, err)
 		}
@@ -186,7 +189,6 @@ func TestAsOfFilesystem(t *testing.T) {
 		if err := f.TouchAtime(ctx, dir, TypeDir); err != nil {
 			t.Fatalf("a read in the past tried to record atime: %v", err)
 		}
-		view.Close()
 	}
 
 	// The multi-level directory really was multi-level at first.

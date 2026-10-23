@@ -18,3 +18,7 @@ func processAlive(pid int) bool {
 	const stillActive = 259
 	return code == stillActive
 }
+
+// notOthersHere is a no-op on Windows: a process only ever finds its
+// own user's cache directory (%LOCALAPPDATA%), even as SYSTEM.
+func notOthersHere(string) error { return nil }

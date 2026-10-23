@@ -53,6 +53,7 @@ func main() {
 	noDirAtime := fset.Bool("nodiratime", false, "don't record access times for directories")
 	debug := fset.Bool("debug", false, "log every FUSE operation")
 	allowOther := fset.Bool("allow-other", false, "allow users other than the one running this command (and root) to use the mount; without it the kernel refuses every other uid, whatever the file modes say. Needs user_allow_other in /etc/fuse.conf when not run as root")
+	history := storeflags.AddHistory(fset)
 	cacheDir := fset.String("cache-dir", "", "local disk directory for open files and the read cache (default: a new directory under the system temp directory)")
 	cacheSize := fset.Uint64("cache-size", 512<<20, "maximum total bytes the local disk cache (-cache-dir) may hold before evicting the least-recently-used cached file")
 	metaCache := fset.Duration("meta-cache", 5*time.Second, "how long the kernel trusts names and attributes, as NFS's attribute cache: other machines' renames, creates and chmods can take this long to show here; opens and locks still check the store (0: trust nothing; as-of mounts default to a day)")
@@ -112,11 +113,15 @@ func main() {
 			log.Fatal("-as-of mounts the past read-only; -notify doesn't apply")
 		}
 		*locking = false // nothing can be written, so there's nothing to lock
-		view, err = objstore.NewAsOf(ctx, store, at, *cacheDir)
+		hist, err := history.Open(ctx, store, conn)
 		if err != nil {
 			log.Fatal(err)
 		}
-		defer view.Close()
+		defer hist.Close()
+		view, err = objstore.NewAsOf(ctx, hist, at)
+		if err != nil {
+			log.Fatal(err)
+		}
 		store = view
 	}
 
@@ -126,7 +131,6 @@ func main() {
 	}
 	if view != nil {
 		if err := fsys.BootstrapReadOnly(ctx); err != nil {
-			view.Close()
 			log.Fatalf("filesystem %q as of %s: %v", *fsName, view.At().Format(time.RFC3339), err)
 		}
 	} else if err := fsys.Attach(ctx); err != nil {
@@ -211,9 +215,6 @@ func main() {
 	fuseserver.MetaCacheTimeouts(mountOpts, cacheFor)
 	server, err := fuseserver.Mount(mountpoint, root, mountOpts)
 	if err != nil {
-		if view != nil {
-			view.Close()
-		}
 		log.Fatalf("mount %s: %v", mountpoint, err)
 	}
 

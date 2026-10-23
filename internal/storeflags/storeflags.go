@@ -21,11 +21,15 @@
 package storeflags
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"os"
+	"time"
 
+	"github.com/resurgentech/icbfs/internal/objstore"
 	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
 )
 
@@ -60,6 +64,38 @@ func Check(c *pkgicbfs.StoreConfig) error {
 		return fmt.Errorf("%w: give -access-key and -secret-key, or set ICBFS_ACCESS_KEY and ICBFS_SECRET_KEY", err)
 	}
 	return err
+}
+
+// History is where as-of views keep the store's history, and for how
+// long: the -history-cache-dir and -history-ttl flags.
+type History struct {
+	Dir string
+	TTL time.Duration
+}
+
+// AddHistory registers the history cache flags on fset.
+func AddHistory(fset *flag.FlagSet) *History {
+	h := &History{}
+	fset.StringVar(&h.Dir, "history-cache-dir", objstore.DefaultHistoryCacheDir(), "as-of mounts: directory of the history caches, one per store and credential, kept between mounts and shared with every other as-of mount and the history app")
+	fset.DurationVar(&h.TTL, "history-ttl", objstore.DefaultHistoryTTL, "as-of mounts: how long the history cache keeps what it fetched (a purged file's name and times stay in it until then)")
+	return h
+}
+
+// Open opens the history cache of the store c says how to reach. If it
+// can't (another user's directory, say), it logs why and opens a
+// temporary one instead, which Close removes: the past is readable
+// either way, only not shared.
+func (h *History) Open(ctx context.Context, store objstore.Store, c *pkgicbfs.StoreConfig) (*objstore.HistoryCache, error) {
+	who := c.S3.AccessKey
+	if c.Kind == pkgicbfs.KindAzure {
+		who = c.Azure.Account
+	}
+	hist, err := objstore.OpenHistoryCache(ctx, store, objstore.HistoryCachePath(h.Dir, c.String()+" as "+who), h.TTL)
+	if err == nil {
+		return hist, nil
+	}
+	log.Printf("%v; using a temporary history cache, for this mount only", err)
+	return objstore.OpenTempHistoryCache(ctx, store, "")
 }
 
 func env(name, def string) string {

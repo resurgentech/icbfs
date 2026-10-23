@@ -53,11 +53,15 @@ func TestNamedVersions(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolve %q: %v", arg, err)
 		}
-		view, err := objstore.NewAsOf(ctx, store, at, t.TempDir())
+		hist, err := objstore.OpenTempHistoryCache(ctx, store, t.TempDir())
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer view.Close()
+		defer hist.Close()
+		view, err := objstore.NewAsOf(ctx, hist, at)
+		if err != nil {
+			t.Fatal(err)
+		}
 		past := New(view, "named")
 		if err := past.BootstrapReadOnly(ctx); err != nil {
 			t.Fatal(err)

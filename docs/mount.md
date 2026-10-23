@@ -214,8 +214,17 @@ icbfs mount -as-of q3-signoff … /mnt/q3                  # a named version
 
 - The mount fails if the filesystem didn't exist at that time, or if the
   time is in the future.
-- An as-of mount keeps its version cache in a fresh directory under
-  `-cache-dir`, and deletes it at unmount.
+- An as-of mount reads the store's history through a cache kept between
+  mounts, one per store and credential: `-history-cache-dir` (by
+  default `icbfs/history` in the user's cache directory, e.g.
+  `~/.cache` or `%LOCALAPPDATA%`), and `-history-ttl` for how long it
+  keeps what it fetched (`720h`, 30 days, by default). A purged file's
+  name and times can stay in it until then. The history app uses the same
+  cache, so a mount it starts begins with what the app has fetched.
+- If the shared cache can't be opened, the mount logs why and uses a
+  temporary one, deleted at unmount. A mount run as root refuses to make
+  one in another user's directory (as `sudo -E` would, in their
+  `~/.cache`), since that user couldn't open it afterwards.
 - An as-of mount takes no locks, and `-notify` doesn't apply to it.
 
 Named versions are made with `icbfs-cli names create` (see

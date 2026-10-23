@@ -12,17 +12,19 @@ import (
 	"github.com/resurgentech/icbfs/pkg/drive"
 )
 
-// viewCache keeps a few read-only as-of filesystems, by time: each has a
-// version cache worth reusing while someone browses the same moment.
+// viewCache keeps a few read-only as-of filesystems, by time, over one
+// history cache: the drive's (Config.History), or a temporary one opened
+// on first use.
 type viewCache struct {
-	d     *Drive
-	mu    sync.Mutex
-	views map[time.Time]*view
+	d       *Drive
+	mu      sync.Mutex
+	views   map[time.Time]*view
+	history *objstore.HistoryCache
+	ownHist bool // history is the temporary one, for closeAll to close
 }
 
 type view struct {
 	fsys *icbfs.Filesystem
-	asOf *objstore.AsOf
 	used time.Time
 }
 
@@ -53,13 +55,21 @@ func (c *viewCache) get(ctx context.Context, t time.Time) (*icbfs.Filesystem, er
 		v.used = time.Now()
 		return v.fsys, nil
 	}
-	asOf, err := objstore.NewAsOf(ctx, c.d.cfg.Store, t, c.d.cfg.CacheDir)
+	if c.history == nil {
+		if c.history = c.d.cfg.History; c.history == nil {
+			h, err := objstore.OpenTempHistoryCache(ctx, c.d.cfg.Store, c.d.cfg.CacheDir)
+			if err != nil {
+				return nil, err
+			}
+			c.history, c.ownHist = h, true
+		}
+	}
+	asOf, err := objstore.NewAsOf(ctx, c.history, t)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", drive.ErrInvalid, err)
 	}
 	fsys := icbfs.New(asOf, c.d.cfg.Filesystem)
 	if err := fsys.BootstrapReadOnly(ctx); err != nil {
-		asOf.Close()
 		if errors.Is(err, icbfs.ErrNotFound) {
 			return nil, fmt.Errorf("the filesystem as of %s: %w", t.Format(time.RFC3339), drive.ErrNotFound)
 		}
@@ -76,18 +86,18 @@ func (c *viewCache) get(ctx context.Context, t time.Time) (*icbfs.Filesystem, er
 				oldest, oldestUse = k, v.used
 			}
 		}
-		c.views[oldest].asOf.Close()
 		delete(c.views, oldest)
 	}
-	c.views[t] = &view{fsys: fsys, asOf: asOf, used: time.Now()}
+	c.views[t] = &view{fsys: fsys, used: time.Now()}
 	return fsys, nil
 }
 
 func (c *viewCache) closeAll() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for k, v := range c.views {
-		v.asOf.Close()
-		delete(c.views, k)
+	clear(c.views)
+	if c.ownHist {
+		c.history.Close()
 	}
+	c.history, c.ownHist = nil, false
 }

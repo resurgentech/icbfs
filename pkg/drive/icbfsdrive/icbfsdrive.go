@@ -26,7 +26,11 @@ type Config struct {
 	// ID is the drive's id in the host's registry, recorded in the
 	// origin of copies made from it.
 	ID string
-	// CacheDir holds as-of views' version caches ("" for the temp
+	// History is the history cache as-of views read through. If it's
+	// nil, the drive opens a temporary one in CacheDir, which Close
+	// removes.
+	History *objstore.HistoryCache
+	// CacheDir holds the drive's temporary files ("" for the temp
 	// directory).
 	CacheDir string
 }
@@ -73,7 +77,8 @@ func New(ctx context.Context, cfg Config) (*Drive, error) {
 // Filesystem is the drive's icbfs filesystem.
 func (d *Drive) Filesystem() *icbfs.Filesystem { return d.fs }
 
-// Close releases the drive's as-of views.
+// Close releases the drive's as-of views, and its temporary history
+// cache.
 func (d *Drive) Close() { d.views.closeAll() }
 
 // Capabilities: everything.
