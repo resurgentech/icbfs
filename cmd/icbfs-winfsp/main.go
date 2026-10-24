@@ -83,6 +83,12 @@ func main() {
 			log.Fatal(err)
 		}
 		defer hist.Close()
+		// What a purge has erased since the cache last looked goes from it.
+		if live := icbfs.New(store, *fsName); live.Attach(ctx) == nil {
+			if err := icbfs.ForgetPurged(ctx, live, hist); err != nil {
+				log.Fatalf("history cache: %v", err)
+			}
+		}
 		view, err = objstore.NewAsOf(ctx, hist, at)
 		if err != nil {
 			log.Fatal(err)

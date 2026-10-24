@@ -80,6 +80,7 @@ with its four-hex-digit ID, so one prefix listing finds all of it.
 | `<id>-trashby-<uuid>` | the key of the item's newest trash entry, so a trashed item's entry is one read |
 | `<id>-name-<name>` | a named version |
 | `<id>-origin-<hash>` | the item copied from one source item (a SharePoint document, say): its id, the source version, where it was last seen |
+| `<id>-purged` | empty; each purge writes it again, telling history caches to drop what they kept (see Past views) |
 
 Item keys are **UUIDv7**. Their embedded millisecond timestamp gives each
 item a creation time for free and keeps keys roughly time-ordered.
@@ -494,11 +495,21 @@ runs on top of it.
   history app's slider move fast. A mount keeps it between mounts, one
   per store and credential, in the user's cache directory
   (`objstore.HistoryCache`; WAL, so as-of mounts and the app share it).
-- The past doesn't change, except by a purge. A view that finds a cached
-  version erased forgets that key and asks the store again. Everything
-  is fetched again once it's older than the cache's TTL (30 days by
-  default), so a purged item's name and times stay in a cache at most
-  that long.
+- The cache keeps what each version says, too, which never changes: its
+  metadata, and the content of the reads icbfs marks as metadata (its
+  directory blocks, `.metadata` objects, symlink targets and the master
+  block; never file data). Once a directory has been listed at some
+  moments, listing it at them again needs nothing from the store, in a
+  later session as well.
+- The past doesn't change, except by a purge, which the cache can't see
+  for itself. So each purge writes a new version of an empty object,
+  `<id>-purged`, after it has erased. The history app checks it every 30
+  seconds, and an as-of mount when it starts (`icbfs.ForgetPurged`); a
+  new version since the cache last looked drops everything it kept of
+  that filesystem. A view that finds a cached version erased forgets that
+  key and asks again. And everything is fetched again once it's older
+  than the cache's TTL (30 days by default), so nothing stays in it
+  longer.
 - `df` and `du` are computed as of T, from every version under the prefix.
   That is slow for a long history, so a mount computes them once.
 

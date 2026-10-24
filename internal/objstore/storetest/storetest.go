@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -36,6 +37,7 @@ func Run(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	t.Run("AsOf", func(t *testing.T) { asOf(t, newStore) })
 	t.Run("HistoryCacheLastsForItsTTL", func(t *testing.T) { historyCacheLastsForItsTTL(t, newStore) })
 	t.Run("AsOfAfterErase", func(t *testing.T) { asOfAfterErase(t, newStore) })
+	t.Run("HistoryCacheKeepsVersions", func(t *testing.T) { historyCacheKeepsVersions(t, newStore) })
 }
 
 // pause lets the store's clock pass a whole second, so a time taken
@@ -610,10 +612,21 @@ func asOf(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	}
 }
 
-// countingStore counts the history listings that reach the store.
+// countingStore counts the history listings, and the reads of one
+// version, that reach the store.
 type countingStore struct {
 	objstore.Store
-	listings int
+	listings, versionReads int
+}
+
+func (s *countingStore) GetVersion(ctx context.Context, key, versionID string) (io.ReadCloser, *objstore.Object, error) {
+	s.versionReads++
+	return s.Store.GetVersion(ctx, key, versionID)
+}
+
+func (s *countingStore) HeadVersion(ctx context.Context, key, versionID string) (*objstore.Object, error) {
+	s.versionReads++
+	return s.Store.HeadVersion(ctx, key, versionID)
 }
 
 func (s *countingStore) History(ctx context.Context, key string) ([]objstore.Object, error) {
@@ -717,5 +730,67 @@ func asOfAfterErase(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	}
 	if _, err := later.Head(ctx, "k"); err != nil {
 		t.Fatalf("the current version, after the erase: %v", err)
+	}
+}
+
+// historyCacheKeepsVersions checks that views of different times read a
+// version's metadata from the store once, and its content once if it's
+// marked as metadata (CacheContent), but file data every time.
+func historyCacheKeepsVersions(t *testing.T, newStore func(*testing.T) objstore.Store) {
+	store := &countingStore{Store: newStore(t)}
+	ctx := context.Background()
+	if _, err := store.Put(ctx, "k", bytes.NewReader([]byte("block")), map[string]string{"m": "1"}, ""); err != nil {
+		t.Fatal(err)
+	}
+	pause()
+	first := serverNow(t, store)
+	pause()
+	second := serverNow(t, store)
+	hist, err := objstore.OpenTempHistoryCache(ctx, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hist.Close()
+	reads := func(get func(*objstore.AsOf) error) int {
+		t.Helper()
+		before := store.versionReads
+		for _, at := range []time.Time{first, second, first} {
+			v, err := objstore.NewAsOf(ctx, hist, at)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := get(v); err != nil {
+				t.Fatalf("as of %v: %v", at, err)
+			}
+		}
+		return store.versionReads - before
+	}
+	if n := reads(func(v *objstore.AsOf) error {
+		o, err := v.Head(ctx, "k")
+		if err == nil && o.Metadata["m"] != "1" {
+			err = fmt.Errorf("metadata %v", o.Metadata)
+		}
+		return err
+	}); n != 1 {
+		t.Fatalf("three heads read the store %d times; want 1", n)
+	}
+	read := func(ctx context.Context) func(*objstore.AsOf) error {
+		return func(v *objstore.AsOf) error {
+			body, _, err := v.Get(ctx, "k")
+			if err != nil {
+				return err
+			}
+			defer body.Close()
+			if data, _ := io.ReadAll(body); string(data) != "block" {
+				return fmt.Errorf("read %q", data)
+			}
+			return nil
+		}
+	}
+	if n := reads(read(objstore.CacheContent(ctx))); n != 1 {
+		t.Fatalf("three reads marked as metadata reached the store %d times; want 1", n)
+	}
+	if n := reads(read(ctx)); n != 3 {
+		t.Fatalf("three reads of file data reached the store %d times; want 3", n)
 	}
 }

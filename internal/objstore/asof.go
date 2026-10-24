@@ -38,6 +38,11 @@ const asOfClockSlack = 2 * time.Second
 // unless it's within asOfClockSlack, which it waits out.
 func NewAsOf(ctx context.Context, cache *HistoryCache, at time.Time) (*AsOf, error) {
 	store := cache.Store()
+	// A time clearly past, by the cache's reckoning of the store's clock,
+	// needs no request: a history app's slider makes a view per position.
+	if now, err := cache.StoreNow(ctx); err == nil && at.Before(now.Add(-asOfClockSlack)) {
+		return &AsOf{cache: cache, store: store, at: at}, nil
+	}
 	// The store's clock reads in whole seconds (an HTTP Date), so a time
 	// just made — a version name made now — can look up to a second
 	// ahead: wait that out rather than refuse it.
@@ -118,7 +123,7 @@ func (a *AsOf) Get(ctx context.Context, key string) (io.ReadCloser, *Object, err
 	var body io.ReadCloser
 	var obj *Object
 	err := a.withVersion(ctx, key, func(versionID string) (err error) {
-		body, obj, err = a.store.GetVersion(ctx, key, versionID)
+		body, obj, err = a.cache.getVersion(ctx, key, versionID)
 		return err
 	})
 	return body, obj, err
@@ -127,18 +132,18 @@ func (a *AsOf) Get(ctx context.Context, key string) (io.ReadCloser, *Object, err
 func (a *AsOf) Head(ctx context.Context, key string) (*Object, error) {
 	var obj *Object
 	err := a.withVersion(ctx, key, func(versionID string) (err error) {
-		obj, err = a.store.HeadVersion(ctx, key, versionID)
+		obj, err = a.cache.headVersion(ctx, key, versionID)
 		return err
 	})
 	return obj, err
 }
 
 func (a *AsOf) GetVersion(ctx context.Context, key, versionID string) (io.ReadCloser, *Object, error) {
-	return a.store.GetVersion(ctx, key, versionID)
+	return a.cache.getVersion(ctx, key, versionID)
 }
 
 func (a *AsOf) HeadVersion(ctx context.Context, key, versionID string) (*Object, error) {
-	return a.store.HeadVersion(ctx, key, versionID)
+	return a.cache.headVersion(ctx, key, versionID)
 }
 
 // History is key's history up to a.at.

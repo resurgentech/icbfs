@@ -62,7 +62,7 @@ func encodeMaster(mb *pb.MasterBlock) ([]byte, error) {
 }
 
 func readMaster(ctx context.Context, store objstore.Store) (*pb.MasterBlock, *objstore.Object, error) {
-	body, obj, err := store.Get(ctx, masterBlockKey)
+	body, obj, err := store.Get(objstore.CacheContent(ctx), masterBlockKey)
 	if err != nil {
 		return nil, nil, err
 	}

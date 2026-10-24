@@ -408,7 +408,7 @@ func (f *Filesystem) StatFS(ctx context.Context) (total, used uint64, err error)
 // own object metadata (needed so callers can preserve it, and CAS against
 // its ETag, across a read-modify-write).
 func (f *Filesystem) readBlock(ctx context.Context, key string) (*block.Block, *objstore.Object, error) {
-	body, obj, err := f.store.Get(ctx, key)
+	body, obj, err := f.store.Get(objstore.CacheContent(ctx), key)
 	if err != nil {
 		return nil, nil, mapNotFound(err)
 	}
@@ -590,7 +590,7 @@ func (f *Filesystem) statDir(ctx context.Context, key string) (Attr, error) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		body, obj, err := f.store.Get(ctx, metadataObjectKey(key))
+		body, obj, err := f.store.Get(objstore.CacheContent(ctx), metadataObjectKey(key))
 		if err != nil {
 			metaErr = mapNotFound(err)
 			return
@@ -634,7 +634,7 @@ func (f *Filesystem) statFile(ctx context.Context, key string) (Attr, error) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		body, obj, err := f.store.Get(ctx, metadataObjectKey(key))
+		body, obj, err := f.store.Get(objstore.CacheContent(ctx), metadataObjectKey(key))
 		if err != nil {
 			metaErr = mapNotFound(err)
 			return
@@ -1348,7 +1348,7 @@ func (f *Filesystem) Symlink(ctx context.Context, dirKey, name, target string, u
 
 // Readlink returns a symlink's target.
 func (f *Filesystem) Readlink(ctx context.Context, key string) (string, error) {
-	body, _, err := f.store.Get(ctx, key)
+	body, _, err := f.store.Get(objstore.CacheContent(ctx), key)
 	if err != nil {
 		return "", mapNotFound(err)
 	}
@@ -1972,7 +1972,7 @@ func (f *Filesystem) ReadFile(ctx context.Context, key string) ([]byte, Attr, st
 	}()
 	go func() {
 		defer wg.Done()
-		body, obj, err := f.store.Get(ctx, metadataObjectKey(key))
+		body, obj, err := f.store.Get(objstore.CacheContent(ctx), metadataObjectKey(key))
 		if err != nil {
 			metaErr = mapNotFound(err)
 			return

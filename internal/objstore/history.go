@@ -1,11 +1,15 @@
 package objstore
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,11 +24,16 @@ const DefaultHistoryTTL = 30 * 24 * time.Hour
 
 // HistoryCache keeps keys' histories, as the store lists them, in a local
 // SQLite database that AsOf views of any time answer from: moving from
-// one time to another needs nothing more from the store. The past
-// doesn't change, except that Erase (a purge) can remove entries; a view
-// that finds a cached version gone forgets the key and asks again, and
-// everything is fetched again once it's older than the cache's TTL, so
-// a purged name lingers in it no longer than that.
+// one time to another needs nothing more from the store. It keeps what
+// the versions themselves say too, which never changes: each one's
+// metadata (HeadVersion), and the content of reads the caller marks as
+// metadata (CacheContent: directory blocks, never file data).
+//
+// The past doesn't change, except that Erase (a purge) can remove
+// entries. A view that finds a cached version gone forgets the key and
+// asks again; the filesystem layer drops what a purge erased (ForgetUnder,
+// on a mark the purge leaves); and everything is fetched again once it's
+// older than the cache's TTL, so nothing lingers in it longer than that.
 //
 // Several processes can share one database (WAL, with a busy timeout):
 // a mount as of some time and the history app, say.
@@ -41,7 +50,11 @@ type HistoryCache struct {
 
 // historyLayout is the database's layout (PRAGMA user_version). A cache
 // of another layout, older or newer, is dropped and started again.
-const historyLayout = 1
+const historyLayout = 2
+
+// maxCachedContent is the largest content a HistoryCache keeps: a
+// directory block or a .metadata object is far smaller.
+const maxCachedContent = 1 << 20
 
 // historyClockCheck is how often the store's clock is read again.
 const historyClockCheck = 10 * time.Minute
@@ -158,8 +171,11 @@ func (c *HistoryCache) Close() error {
 // The database: versions holds keys' histories as the store listed them
 // (pos is the order it listed them in), and covered says what has been
 // fetched: every key starting with prefix (whole = 0), or the one key
-// prefix (whole = 1), complete for every time up to upto. fetched times,
-// by this machine's clock, are what the TTL is counted from.
+// prefix (whole = 1), complete for every time up to upto. blobs holds
+// versions' metadata, and content where it was asked for (else NULL);
+// notes, values the caller keeps with the cache (ForgetUnder's marks).
+// fetched times, by this machine's clock, are what the TTL is counted
+// from.
 func (c *HistoryCache) init(ctx context.Context) error {
 	tx, err := c.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -174,6 +190,8 @@ func (c *HistoryCache) init(ctx context.Context) error {
 		for _, stmt := range []string{
 			`DROP TABLE IF EXISTS versions`,
 			`DROP TABLE IF EXISTS covered`,
+			`DROP TABLE IF EXISTS blobs`,
+			`DROP TABLE IF EXISTS notes`,
 			`CREATE TABLE versions (
 				key      TEXT NOT NULL,
 				pos      INTEGER NOT NULL,
@@ -192,6 +210,18 @@ func (c *HistoryCache) init(ctx context.Context) error {
 				fetched INTEGER NOT NULL,
 				PRIMARY KEY (prefix, whole)
 			)`,
+			`CREATE TABLE blobs (
+				key      TEXT NOT NULL,
+				version  TEXT NOT NULL,
+				object   TEXT NOT NULL,
+				content  BLOB,
+				fetched  INTEGER NOT NULL,
+				PRIMARY KEY (key, version)
+			)`,
+			`CREATE TABLE notes (
+				name  TEXT PRIMARY KEY,
+				value TEXT NOT NULL
+			)`,
 			fmt.Sprintf(`PRAGMA user_version = %d`, historyLayout),
 		} {
 			if _, err := tx.ExecContext(ctx, stmt); err != nil {
@@ -200,7 +230,7 @@ func (c *HistoryCache) init(ctx context.Context) error {
 		}
 	}
 	cutoff := time.Now().Add(-c.ttl).UnixNano()
-	for _, table := range []string{"versions", "covered"} {
+	for _, table := range []string{"versions", "covered", "blobs"} {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE fetched < ?`, cutoff); err != nil {
 			return err
 		}
@@ -208,9 +238,9 @@ func (c *HistoryCache) init(ctx context.Context) error {
 	return tx.Commit()
 }
 
-// storeNow is the store's clock now, from an offset measured every
+// StoreNow is the store's clock now, from an offset measured every
 // historyClockCheck rather than a request each time.
-func (c *HistoryCache) storeNow(ctx context.Context) (time.Time, error) {
+func (c *HistoryCache) StoreNow(ctx context.Context) (time.Time, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.offsetAt.IsZero() || time.Since(c.offsetAt) > historyClockCheck {
@@ -231,7 +261,7 @@ func (c *HistoryCache) storeNow(ctx context.Context) (time.Time, error) {
 // second or so), or to at itself, which a view never exceeds the store's
 // clock with.
 func (c *HistoryCache) upto(ctx context.Context, at time.Time) (time.Time, error) {
-	now, err := c.storeNow(ctx)
+	now, err := c.StoreNow(ctx)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -352,13 +382,140 @@ func (c *HistoryCache) forget(ctx context.Context, key string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM versions WHERE key = ?`, key); err != nil {
-		return err
+	for _, table := range []string{"versions", "blobs"} {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE key = ?`, key); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM covered WHERE (whole = 1 AND prefix = ?1) OR (whole = 0 AND substr(?1, 1, length(prefix)) = prefix)`, key); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// ForgetUnder drops everything cached for keys starting with prefix, and
+// anything that claims to cover them: for what a purge may have erased.
+func (c *HistoryCache) ForgetUnder(ctx context.Context, prefix string) error {
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	where, args := underPrefix(prefix)
+	for _, table := range []string{"versions", "blobs"} {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE `+where, args...); err != nil {
+			return err
+		}
+	}
+	// A covered row is about prefix if either starts with the other.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM covered WHERE substr(prefix, 1, length(?1)) = ?1 OR (whole = 0 AND substr(?1, 1, length(prefix)) = prefix)`, prefix); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// Note is the value kept under name ("" if none), and SetNote keeps one.
+func (c *HistoryCache) Note(ctx context.Context, name string) (string, error) {
+	var v string
+	err := c.db.QueryRowContext(ctx, `SELECT value FROM notes WHERE name = ?`, name).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return v, err
+}
+
+func (c *HistoryCache) SetNote(ctx context.Context, name, value string) error {
+	_, err := c.db.ExecContext(ctx, `INSERT OR REPLACE INTO notes VALUES (?, ?)`, name, value)
+	return err
+}
+
+// cacheContentKey marks a context whose reads may keep their content.
+type cacheContentKey struct{}
+
+// CacheContent marks ctx's reads, through an AsOf view, as metadata (a
+// directory block, a .metadata object) whose content a HistoryCache may
+// keep. File data is never marked: it stays in the store.
+func CacheContent(ctx context.Context) context.Context {
+	return context.WithValue(ctx, cacheContentKey{}, true)
+}
+
+func cachingContent(ctx context.Context) bool {
+	v, _ := ctx.Value(cacheContentKey{}).(bool)
+	return v
+}
+
+// blob is a cached version: its Object, and its content if kept.
+func (c *HistoryCache) blob(ctx context.Context, key, versionID string, wantContent bool) (*Object, []byte, bool, error) {
+	var object string
+	var content []byte
+	err := c.db.QueryRowContext(ctx, `SELECT object, content FROM blobs WHERE key = ? AND version = ? AND fetched >= ?`,
+		key, versionID, time.Now().Add(-c.ttl).UnixNano()).Scan(&object, &content)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && wantContent && content == nil) {
+		return nil, nil, false, nil
+	}
+	if err != nil {
+		return nil, nil, false, err
+	}
+	var o Object
+	if err := json.Unmarshal([]byte(object), &o); err != nil {
+		return nil, nil, false, nil // unreadable: fetch it again
+	}
+	return &o, content, true, nil
+}
+
+// keepBlob caches a version's Object, and content unless it's nil; a
+// content-less row never replaces one with content.
+func (c *HistoryCache) keepBlob(ctx context.Context, o *Object, content []byte) error {
+	object, err := json.Marshal(o)
+	if err != nil {
+		return err
+	}
+	_, err = c.db.ExecContext(ctx, `INSERT INTO blobs VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT (key, version) DO UPDATE SET object = excluded.object,
+			content = coalesce(excluded.content, blobs.content), fetched = excluded.fetched`,
+		o.Key, o.VersionID, string(object), content, time.Now().UnixNano())
+	return err
+}
+
+// headVersion is store.HeadVersion, kept: a version never changes.
+func (c *HistoryCache) headVersion(ctx context.Context, key, versionID string) (*Object, error) {
+	if o, _, ok, err := c.blob(ctx, key, versionID, false); err != nil || ok {
+		return o, err
+	}
+	o, err := c.store.HeadVersion(ctx, key, versionID)
+	if err != nil {
+		return nil, err
+	}
+	return o, c.keepBlob(ctx, o, nil)
+}
+
+// getVersion is store.GetVersion, with the content kept if ctx asks for
+// that (CacheContent) and it's small.
+func (c *HistoryCache) getVersion(ctx context.Context, key, versionID string) (io.ReadCloser, *Object, error) {
+	if !cachingContent(ctx) {
+		return c.store.GetVersion(ctx, key, versionID)
+	}
+	if o, content, ok, err := c.blob(ctx, key, versionID, true); err != nil {
+		return nil, nil, err
+	} else if ok {
+		return io.NopCloser(bytes.NewReader(content)), o, nil
+	}
+	body, o, err := c.store.GetVersion(ctx, key, versionID)
+	if err != nil || o.Size > maxCachedContent {
+		return body, o, err
+	}
+	defer body.Close()
+	content, err := io.ReadAll(body)
+	if err != nil {
+		return nil, nil, err
+	}
+	if content == nil {
+		content = []byte{} // kept as empty, not as absent
+	}
+	if err := c.keepBlob(ctx, o, content); err != nil {
+		return nil, nil, err
+	}
+	return io.NopCloser(bytes.NewReader(content)), o, nil
 }
 
 // underPrefix is a WHERE clause, and its arguments, for the keys starting

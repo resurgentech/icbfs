@@ -1,12 +1,14 @@
 package icbfs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 
 	"github.com/resurgentech/icbfs/internal/block"
+	"github.com/resurgentech/icbfs/internal/objstore"
 )
 
 // ErrHasLinks: a permanent delete of a file that still has other names.
@@ -47,7 +49,7 @@ func (f *Filesystem) Purge(ctx context.Context, dirKey, name string, allNames bo
 			return err
 		}
 	}
-	return f.eraseItems(ctx, items)
+	return f.eraseAndMark(ctx, items)
 }
 
 // collectForPurge lists e and, for a directory, everything under it
@@ -121,11 +123,50 @@ func (f *Filesystem) PurgeTrash(ctx context.Context, entryID string) error {
 			}
 		}
 	}
-	return f.eraseItems(ctx, items)
+	return f.eraseAndMark(ctx, items)
 }
 
 // eraseItems erases every version of each item's objects, then its trash
 // entries.
+// eraseAndMark erases items, then marks the filesystem purged, even if
+// the erase failed partway: some of it may be gone.
+func (f *Filesystem) eraseAndMark(ctx context.Context, items []block.Entry) error {
+	err := f.eraseItems(ctx, items)
+	if _, markErr := f.store.Put(ctx, f.purgedKey(), bytes.NewReader(nil), nil, ""); err == nil {
+		err = markErr
+	}
+	return err
+}
+
+// purgedKey is an empty object every purge writes again once it has
+// erased: a new version of it tells history caches, which can't tell an
+// erased version from one they hold, to drop what they kept of this
+// filesystem (ForgetPurged).
+func (f *Filesystem) purgedKey() string { return f.id + "-purged" }
+
+// ForgetPurged makes cache drop everything it kept of live's filesystem
+// if a purge has marked it since the cache last looked. live is the
+// filesystem attached to the live store, not a past view.
+func ForgetPurged(ctx context.Context, live *Filesystem, cache *objstore.HistoryCache) error {
+	mark := ""
+	obj, err := live.store.Head(ctx, live.purgedKey())
+	switch {
+	case err == nil:
+		mark = obj.VersionID
+	case !objstore.IsNotFound(err):
+		return err
+	}
+	note := "purged:" + live.id
+	seen, err := cache.Note(ctx, note)
+	if err != nil || seen == mark {
+		return err
+	}
+	if err := cache.ForgetUnder(ctx, live.prefix()); err != nil {
+		return err
+	}
+	return cache.SetNote(ctx, note, mark)
+}
+
 func (f *Filesystem) eraseItems(ctx context.Context, items []block.Entry) error {
 	erased := map[string]bool{}
 	for _, it := range items {
