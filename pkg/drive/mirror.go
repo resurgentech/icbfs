@@ -49,6 +49,7 @@ type SourceItem struct {
 	Path        string    // where it belongs on the drive
 	Type        string    // TypeFile or TypeDir
 	ModTime     time.Time // its time at the source, if known
+	Created     time.Time // its creation time at the source, if known
 	ContentType string
 	// Open gives the content; it's called only when the bytes are needed,
 	// never for a move, a restore of the version held, or an item already
@@ -64,6 +65,7 @@ const (
 	Restored  Action = "restored" // from the trash, with its history
 	Moved     Action = "moved"
 	Updated   Action = "updated" // a new version
+	Retimed   Action = "retimed" // its times set as the source's, no new version
 	Unchanged Action = "unchanged"
 )
 
@@ -95,7 +97,10 @@ func (m *Mirror) Known(ctx context.Context, sourceID string) (item Item, trashed
 // Apply makes the drive match the source item: it creates the item if the
 // drive has none for it; restores it if it's in the trash; moves it if
 // its path changed; writes a new version if the version held differs from
-// src's (the time and the origin in the same write); or does nothing.
+// src's (the times and the origin in the same write); sets its times if
+// only they differ from src's (on a drive that's a TimeSetter: a
+// directory's creation time, a file's creation and modified times); or
+// does nothing.
 func (m *Mirror) Apply(ctx context.Context, src SourceItem) (Applied, error) {
 	o := src.Origin
 	if o.Drive == "" {
@@ -159,6 +164,20 @@ func (m *Mirror) Apply(ctx context.Context, src SourceItem) (Applied, error) {
 			}
 			item.Origin = &o
 		}
+		// A directory's modified time is its entries', here as anywhere,
+		// so only its creation time follows the source after it's made.
+		modified := src.ModTime
+		if src.Type == TypeDir {
+			modified = time.Time{}
+		}
+		retimed, ok, err := m.retime(ctx, item, modified, src.Created)
+		if err != nil {
+			return Applied{}, err
+		}
+		if ok {
+			item = retimed
+			done = append(done, Retimed)
+		}
 		if len(done) == 0 {
 			done = append(done, Unchanged)
 		}
@@ -205,12 +224,19 @@ func (m *Mirror) create(ctx context.Context, src SourceItem, o Origin) (Applied,
 	}
 	if src.Type == TypeDir {
 		item := existing
+		modified := time.Time{} // an adopted directory's is its entries'
 		if !taken {
 			if item, err = m.d.Mkdir(ctx, src.Path, true); err != nil {
 				return Applied{}, err
 			}
+			modified = src.ModTime
 		} else if existing.Type != TypeDir {
 			return Applied{}, fmt.Errorf("%s: %w", src.Path, ErrNotMirrored)
+		}
+		if retimed, ok, err := m.retime(ctx, item, modified, src.Created); err != nil {
+			return Applied{}, err
+		} else if ok {
+			item = retimed
 		}
 		if err := m.d.SetOrigin(ctx, ItemRef{ID: item.ID, Path: item.Path}, o); err != nil {
 			return Applied{}, err
@@ -239,8 +265,35 @@ func (m *Mirror) write(ctx context.Context, src SourceItem, o Origin, cond Condi
 	}
 	defer body.Close()
 	return m.d.Write(ctx, src.Path, body, cond, WriteOptions{
-		Parents: true, ContentType: src.ContentType, ModTime: src.ModTime, Origin: &o,
+		Parents: true, ContentType: src.ContentType, ModTime: src.ModTime, Created: src.Created, Origin: &o,
 	})
+}
+
+// retime sets item's times to modified and created where they're set and
+// differ from its own, on a drive that's a TimeSetter, and reports
+// whether it did.
+func (m *Mirror) retime(ctx context.Context, item Item, modified, created time.Time) (Item, bool, error) {
+	ts, ok := m.d.(TimeSetter)
+	if !ok {
+		return item, false, nil
+	}
+	if modified.Equal(item.Modified) {
+		modified = time.Time{}
+	}
+	if created.Equal(item.Created) {
+		created = time.Time{}
+	}
+	if modified.IsZero() && created.IsZero() {
+		return item, false, nil
+	}
+	retimed, err := ts.SetTimes(ctx, ItemRef{ID: item.ID, Path: item.Path}, modified, created)
+	if err != nil {
+		return item, false, fmt.Errorf("set the times of %s: %w", item.Path, err)
+	}
+	if retimed.Origin == nil {
+		retimed.Origin = item.Origin
+	}
+	return retimed, true, nil
 }
 
 // Remove sends the item copied from the source item to the trash (a

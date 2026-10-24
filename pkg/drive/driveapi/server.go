@@ -603,6 +603,13 @@ func (p profileSwitch) Mkdir(ctx context.Context, path string, parents bool) (dr
 func (p profileSwitch) SetOrigin(ctx context.Context, ref drive.ItemRef, o drive.Origin) error {
 	return p.Drive.SetOrigin(p.with(ctx), ref, o)
 }
+func (p profileSwitch) SetTimes(ctx context.Context, ref drive.ItemRef, modified, created time.Time) (drive.Item, error) {
+	ts, ok := p.Drive.(drive.TimeSetter)
+	if !ok {
+		return drive.Item{}, drive.ErrNotSupported
+	}
+	return ts.SetTimes(p.with(ctx), ref, modified, created)
+}
 
 func (s *server) restoreVersion(r *req) error {
 	var in RestoreVersionRequest

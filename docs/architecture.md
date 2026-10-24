@@ -304,10 +304,16 @@ object.
 - **mtime** is the content object's `Last-Modified`, unless an explicit
   time was set (`utimensat`, `SetFileTime`). An explicit time holds only
   while the content is still the version it was set on, so a later write
-  moves mtime again, as on any local filesystem.
+  moves mtime again, as on any local filesystem. One set on a file with
+  writes not yet flushed (`cp -a`, `tar` and robocopy set a copy's time
+  before closing it) is set again on the version the flush writes, unless
+  another write came after it.
 - **ctime** is the later of the recorded change time and the content's last
   write.
-- **Creation time** is the time in the UUIDv7 key, unless overridden.
+- **Creation time** is the time in the UUIDv7 key, unless overridden
+  (`SetFileTime`, the sync, the drive API's `WriteOptions.Created`); an
+  override stays through later writes. Linux mounts report it through
+  `statx` (Linux 6.6 and later); Linux has no way to set one.
 - **Access time** is recorded in `.metadata` on a file's first read in each
   open, and on a directory listing, subject to the access-time mode:
   Linux mounts default to relatime, which skips the write unless the

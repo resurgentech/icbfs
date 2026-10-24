@@ -30,6 +30,9 @@ type Entry struct {
 	Dir     bool
 	Size    int64
 	ModTime time.Time
+	// Created is the item's creation time, if the side keeps real ones
+	// (Caps.Created).
+	Created time.Time
 	// ID is the side's stable id for the item, surviving renames, if it
 	// has one (Caps.IDs): an icbfs item id, an NTFS file id.
 	ID string
@@ -48,6 +51,10 @@ type Caps struct {
 	// TimeResolution is how finely ModTime is kept: a WebDAV drive keeps
 	// whole seconds, NTFS 100ns.
 	TimeResolution time.Duration
+	// Created: Entry.Created is real, and Write's created and
+	// SetCreated set it (NTFS, icbfs; not a Linux folder, whose
+	// creation times can't be set).
+	Created bool
 }
 
 // Side is one end of a pair.
@@ -57,8 +64,10 @@ type Side interface {
 	List(ctx context.Context) ([]Entry, error)
 	Read(ctx context.Context, path string) (io.ReadCloser, error)
 	// Write makes path a file with r's content (size bytes) and modTime,
-	// creating or replacing it, and answers what it now is.
-	Write(ctx context.Context, path string, r io.Reader, size int64, modTime time.Time) (Entry, error)
+	// creating or replacing it, and answers what it now is. created, if
+	// set, is its creation time, where the side keeps them
+	// (Caps.Created); zero leaves the side's own.
+	Write(ctx context.Context, path string, r io.Reader, size int64, modTime, created time.Time) (Entry, error)
 	Mkdir(ctx context.Context, path string) (Entry, error)
 	// Move renames or moves a file or directory, making any missing
 	// parent directories; the item keeps its id.
@@ -67,6 +76,9 @@ type Side interface {
 	// the trash.
 	Remove(ctx context.Context, path string) error
 	SetACL(ctx context.Context, path, sddl string) error
+	// SetCreated sets a file's or directory's creation time, where the
+	// side keeps them (Caps.Created), and is a no-op where it doesn't.
+	SetCreated(ctx context.Context, path string, t time.Time) error
 }
 
 // Hashes is a side that can keep a content hash with a file, so a later
@@ -129,6 +141,9 @@ type Base struct {
 	Hash string
 	// ACLHash is a hash of the folder side's ACL, when it has real ones.
 	ACLHash string
+	// Created is the folder side's creation time, when both sides keep
+	// them.
+	Created time.Time
 }
 
 // Key is how an item is matched between the sides and the base: its

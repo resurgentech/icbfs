@@ -71,6 +71,14 @@ type content struct {
 	// lastWrite is when the content last changed — the mtime Stat reports
 	// until it's flushed (see Filesystem.localOverlay).
 	lastWrite time.Time
+
+	// setMtime is a modified time set explicitly (utimensat, SetFileTime)
+	// after the last write and before the flush: the flush makes a new
+	// version, which an override set against the old one wouldn't hold
+	// for, so it's set again against the version written. cp -a, tar and
+	// robocopy all set a copy's time before closing it. A write after it
+	// clears it, as a write after utimensat moves mtime.
+	setMtime time.Time
 }
 
 // OpenFile is one open of a file: a handle on the file's content, shared
@@ -212,7 +220,21 @@ func (o *OpenFile) Close() error {
 func (c *content) pending() (size int64, lastWrite time.Time, dirty bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if !c.setMtime.IsZero() {
+		return c.size, c.setMtime, c.dirty
+	}
 	return c.size, c.lastWrite, c.dirty
+}
+
+// keepMtime records t, set explicitly as the file's modified time, to set
+// again against the version the next flush writes, if there are writes
+// to flush.
+func (c *content) keepMtime(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.dirty {
+		c.setMtime = t
+	}
 }
 
 // Dirty reports whether the file has writes, through any open, that Flush
@@ -322,6 +344,7 @@ func (c *content) WriteAt(data []byte, off int64) error {
 	c.touched.add(off, off+int64(len(data)))
 	c.dirty = true
 	c.lastWrite = time.Now()
+	c.setMtime = time.Time{}
 	return nil
 }
 
@@ -430,6 +453,7 @@ func (c *content) touchLocked(lo, hi int64) {
 	c.touched.add(lo, hi)
 	c.dirty = true
 	c.lastWrite = time.Now()
+	c.setMtime = time.Time{}
 }
 
 // applyLocked extends the local scratch file to cover off+len(data) if
@@ -672,6 +696,13 @@ func (c *content) uploadLocked(ctx context.Context) (Attr, error) {
 	c.dirty = false
 	c.truncated = false
 	c.updateSharedCacheLocked(obj.ETag)
+	if t := c.setMtime; !t.IsZero() {
+		c.setMtime = time.Time{}
+		return c.fsys.updateFileMetadata(ctx, c.key, func(a *Attr) {
+			a.Mtime = t
+			a.mtimeOverrideETag = obj.ETag
+		})
+	}
 	return c.fsys.statFile(ctx, c.key)
 }
 

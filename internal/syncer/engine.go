@@ -264,6 +264,7 @@ func (e *Engine) Pass(ctx context.Context) (rep Report) {
 	plan := MakePlan(PlanOptions{
 		Mode: e.cfg.Mode, CaseInsensitive: e.cfg.CaseInsensitive, Resolution: e.resolution(),
 		LocalIDs: e.cfg.Local.Caps().IDs, LocalACLs: e.cfg.Local.Caps().ACLs && e.cfg.Remote.Caps().ACLs,
+		Created: e.cfg.Local.Caps().Created && e.cfg.Remote.Caps().Created,
 	}, local, remote, base)
 	rep.Planned = len(plan.Actions)
 
@@ -393,8 +394,15 @@ func (x *executor) do(a Action) error {
 	switch a.Kind {
 	case Adopt:
 		l, r := x.local[a.Key], x.remote[a.Key]
+		// The same content; the drive's creation time made the folder's
+		// if it isn't (a copy that didn't keep it).
+		if c := x.createdOf(l); !c.IsZero() && !c.Equal(r.Created) {
+			if err := R.SetCreated(x.ctx, a.Path, c); err != nil {
+				return err
+			}
+		}
 		x.base[a.Key] = Base{Path: l.Path, Dir: l.Dir, Size: l.Size, ModTime: l.ModTime, LocalID: l.ID,
-			RemoteID: r.ID, RemoteVersion: r.Version, ACLHash: x.aclHash(l)}
+			RemoteID: r.ID, RemoteVersion: r.Version, ACLHash: x.aclHash(l), Created: x.createdOf(l)}
 		return nil
 	case Forget:
 		delete(x.base, a.Key)
@@ -423,14 +431,25 @@ func (x *executor) do(a Action) error {
 				return err
 			}
 		}
-		x.base[a.Key] = Base{Path: a.Path, Dir: true, LocalID: l.ID, RemoteID: r.ID, ACLHash: x.aclHash(l)}
+		if c := x.createdOf(l); !c.IsZero() {
+			if err := R.SetCreated(x.ctx, a.Path, c); err != nil {
+				return err
+			}
+		}
+		x.base[a.Key] = Base{Path: a.Path, Dir: true, LocalID: l.ID, RemoteID: r.ID, ACLHash: x.aclHash(l), Created: x.createdOf(l)}
 		return nil
 	case MkdirLocal:
 		l, err := L.Mkdir(x.ctx, a.Path)
 		if err != nil {
 			return err
 		}
-		x.base[a.Key] = Base{Path: a.Path, Dir: true, LocalID: l.ID, RemoteID: x.remote[a.Key].ID}
+		c := x.createdOf(x.remote[a.Key])
+		if !c.IsZero() {
+			if err := L.SetCreated(x.ctx, a.Path, c); err != nil {
+				return err
+			}
+		}
+		x.base[a.Key] = Base{Path: a.Path, Dir: true, LocalID: l.ID, RemoteID: x.remote[a.Key].ID, Created: c}
 		return nil
 	case Upload:
 		return x.upload(a)
@@ -443,6 +462,15 @@ func (x *executor) do(a Action) error {
 		}
 		b := x.base[a.Key]
 		b.ACLHash = x.aclHash(l)
+		x.base[a.Key] = b
+		return nil
+	case SetCreatedRemote:
+		l := x.local[a.Key]
+		if err := R.SetCreated(x.ctx, a.Path, l.Created); err != nil {
+			return err
+		}
+		b := x.base[a.Key]
+		b.Created = l.Created
 		x.base[a.Key] = b
 		return nil
 	case RemoveRemote:
@@ -479,6 +507,19 @@ func (x *executor) do(a Action) error {
 
 func (x *executor) acls() bool {
 	return x.e.cfg.Local.Caps().ACLs && x.e.cfg.Remote.Caps().ACLs
+}
+
+// created: both sides keep real creation times.
+func (x *executor) created() bool {
+	return x.e.cfg.Local.Caps().Created && x.e.cfg.Remote.Caps().Created
+}
+
+// createdOf is e's creation time to copy to the other side, or zero.
+func (x *executor) createdOf(e Entry) time.Time {
+	if !x.created() {
+		return time.Time{}
+	}
+	return e.Created
 }
 
 func (x *executor) aclHash(l Entry) string {
@@ -588,8 +629,13 @@ func (x *executor) recordUp(a Action, l Entry, entry Entry, hash string) error {
 			return err
 		}
 	}
+	if c := x.createdOf(l); !c.IsZero() && !c.Equal(entry.Created) {
+		if err := R.SetCreated(x.ctx, a.Path, c); err != nil {
+			return err
+		}
+	}
 	x.base[a.Key] = Base{Path: a.Path, Size: l.Size, ModTime: l.ModTime, LocalID: l.ID,
-		RemoteID: entry.ID, RemoteVersion: entry.Version, Hash: hash, ACLHash: x.aclHash(l)}
+		RemoteID: entry.ID, RemoteVersion: entry.Version, Hash: hash, ACLHash: x.aclHash(l), Created: x.createdOf(l)}
 	return nil
 }
 
@@ -608,7 +654,7 @@ func (x *executor) copyUp(a Action, l Entry, src io.Reader) error {
 	}
 	h := sha256.New()
 	r := io.TeeReader(counting{src, &e.up, &x.rep.BytesUp}, h)
-	entry, err := R.Write(x.ctx, a.Path, r, l.Size, l.ModTime)
+	entry, err := R.Write(x.ctx, a.Path, r, l.Size, l.ModTime, x.createdOf(l))
 	if err != nil {
 		return err
 	}
@@ -622,7 +668,7 @@ func (x *executor) copyUp(a Action, l Entry, src io.Reader) error {
 		}
 	}
 	x.base[a.Key] = Base{Path: a.Path, Size: l.Size, ModTime: l.ModTime, LocalID: l.ID,
-		RemoteID: entry.ID, RemoteVersion: entry.Version, Hash: hash, ACLHash: x.aclHash(l)}
+		RemoteID: entry.ID, RemoteVersion: entry.Version, Hash: hash, ACLHash: x.aclHash(l), Created: x.createdOf(l)}
 	return nil
 }
 
@@ -637,12 +683,12 @@ func (x *executor) download(a Action) error {
 	}
 	defer rc.Close()
 	h := sha256.New()
-	l, err := L.Write(x.ctx, a.Path, io.TeeReader(counting{rc, &e.down, &x.rep.Down}, h), r.Size, r.ModTime)
+	l, err := L.Write(x.ctx, a.Path, io.TeeReader(counting{rc, &e.down, &x.rep.Down}, h), r.Size, r.ModTime, x.createdOf(r))
 	if err != nil {
 		return err
 	}
 	x.base[a.Key] = Base{Path: a.Path, Size: l.Size, ModTime: l.ModTime, LocalID: l.ID,
-		RemoteID: r.ID, RemoteVersion: r.Version, Hash: hex.EncodeToString(h.Sum(nil)), ACLHash: x.aclHash(l)}
+		RemoteID: r.ID, RemoteVersion: r.Version, Hash: hex.EncodeToString(h.Sum(nil)), ACLHash: x.aclHash(l), Created: x.createdOf(l)}
 	return nil
 }
 

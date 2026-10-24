@@ -65,7 +65,7 @@ func TestFolderSide(t *testing.T) {
 		t.Fatalf("read %q", data)
 	}
 
-	e, err := s.Write(ctx, "new/deep/d.txt", strings.NewReader("dee"), 3, t0.Add(time.Hour))
+	e, err := s.Write(ctx, "new/deep/d.txt", strings.NewReader("dee"), 3, t0.Add(time.Hour), time.Time{})
 	if err != nil || e.Size != 3 || !e.ModTime.Equal(t0.Add(time.Hour)) {
 		t.Fatalf("write %+v, %v", e, err)
 	}

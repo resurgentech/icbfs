@@ -73,7 +73,7 @@ func notExist(err error) error {
 }
 
 func entry(it drive.Item) syncer.Entry {
-	e := syncer.Entry{Path: rel(it.Path), Dir: it.Type == drive.TypeDir, Size: it.Size, ModTime: it.Modified, ID: it.ID}
+	e := syncer.Entry{Path: rel(it.Path), Dir: it.Type == drive.TypeDir, Size: it.Size, ModTime: it.Modified, Created: it.Created, ID: it.ID}
 	if it.Version != nil {
 		e.Version = it.Version.ID
 	}
@@ -81,7 +81,7 @@ func entry(it drive.Item) syncer.Entry {
 }
 
 func (s *Side) Caps() syncer.Caps {
-	return syncer.Caps{IDs: true, ACLs: s.windows, TimeResolution: time.Nanosecond}
+	return syncer.Caps{IDs: true, ACLs: s.windows, TimeResolution: time.Nanosecond, Created: true}
 }
 
 func (s *Side) List(ctx context.Context) ([]syncer.Entry, error) {
@@ -127,22 +127,25 @@ func (s *Side) Stat(ctx context.Context, p string) (syncer.Entry, error) {
 	return entry(it), nil
 }
 
-func (s *Side) Write(ctx context.Context, p string, r io.Reader, size int64, mod time.Time) (syncer.Entry, error) {
-	it, err := s.d.Write(s.ctx(ctx), abs(p), r, drive.Condition{}, drive.WriteOptions{Parents: true})
+func (s *Side) Write(ctx context.Context, p string, r io.Reader, size int64, mod, created time.Time) (syncer.Entry, error) {
+	// The folder's times, not the copy's, in the write's own metadata
+	// update: so the next pass sees the two as the same.
+	it, err := s.d.Write(s.ctx(ctx), abs(p), r, drive.Condition{}, drive.WriteOptions{Parents: true, ModTime: mod, Created: created})
 	if err != nil {
 		return syncer.Entry{}, err
 	}
 	if it.Size != size {
 		return syncer.Entry{}, fmt.Errorf("write %s: %d bytes written, want %d", p, it.Size, size)
 	}
-	// The folder's time, not the time of the copy, so the next pass sees
-	// the two as the same.
-	if _, err := s.fs.SetAttr(ctx, it.ID, icbfs.TypeFile, nil, nil, nil, nil, nil, &mod, nil); err != nil {
-		return syncer.Entry{}, err
-	}
 	e := entry(it)
 	e.ModTime = mod
 	return e, nil
+}
+
+// SetCreated sets an item's creation time, with no new version.
+func (s *Side) SetCreated(ctx context.Context, p string, t time.Time) error {
+	_, err := s.d.SetTimes(s.ctx(ctx), drive.ByPath(abs(p)), time.Time{}, t)
+	return notExist(err)
 }
 
 func (s *Side) Mkdir(ctx context.Context, p string) (syncer.Entry, error) {

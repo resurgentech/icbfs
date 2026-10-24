@@ -75,3 +75,41 @@ func TestReadWhileOpenForWriting(t *testing.T) {
 		t.Fatalf("read %q", data)
 	}
 }
+
+// TestNTFSCreationTimes: a folder's creation times are read, set by a
+// write (after the rename into place, which NTFS's tunnelling would
+// otherwise give the old file's), and set alone, a directory's too.
+func TestNTFSCreationTimes(t *testing.T) {
+	root := t.TempDir()
+	s, err := folderside.Open(root, folderside.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.Caps().Created {
+		t.Fatal("NTFS doesn't report creation times")
+	}
+	ctx := context.Background()
+	born := time.Date(2019, 3, 4, 5, 6, 7, 800, time.UTC)
+	e, err := s.Write(ctx, "sub/a.txt", strings.NewReader("a"), 1, t0, born)
+	if err != nil || !e.Created.Equal(born) || !e.ModTime.Equal(t0) {
+		t.Fatalf("written %+v, %v", e, err)
+	}
+	// Replaced: the new creation time, not the old file's.
+	again := born.AddDate(1, 0, 0)
+	if e, err = s.Write(ctx, "sub/a.txt", strings.NewReader("b"), 1, t0, again); err != nil || !e.Created.Equal(again) {
+		t.Fatalf("rewritten %+v, %v", e, err)
+	}
+	if err := s.SetCreated(ctx, "sub", born); err != nil {
+		t.Fatal(err)
+	}
+	es, err := s.List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range es {
+		want := map[string]time.Time{"sub": born, "sub/a.txt": again}[e.Path]
+		if !e.Created.Equal(want) {
+			t.Fatalf("%s: created %v, want %v", e.Path, e.Created, want)
+		}
+	}
+}

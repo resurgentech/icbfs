@@ -45,13 +45,16 @@ If a copy of the folder is already at hand, seed the drive from it before
 the first pass instead of having icbfs-sync upload everything:
 
 1. Mount the filesystem (`icbfs-winfsp ... Y:`; see [mount.md](mount.md)).
-2. Copy onto it with robocopy, which keeps file times:
-   `robocopy C:\copy Y:\ /E /COPY:DAT /DCOPY:T` (add `/SEC` to keep ACLs
-   from an NTFS copy).
+2. Copy onto it with robocopy, which keeps file and folder times,
+   creation times included:
+   `robocopy C:\copy Y:\ /E /COPY:DAT /DCOPY:DAT` (add `/SEC` to keep
+   ACLs from an NTFS copy).
 3. Unmount, and run the first pass.
 
 On the first pass, a file whose path, size and modification time match on
 both sides is **adopted**: it is recorded as in step without being copied.
+If the copy didn't keep its creation time, the folder's is set on the
+drive then, with no copy.
 Only what differs is transferred. Times are compared to the folder's time
 resolution, so a WebDAV folder's whole seconds match a copy's finer times.
 
@@ -151,7 +154,15 @@ last pass. The base records:
 - the folder's file ID;
 - the drive's item ID and version;
 - the content hash, when one was computed;
-- the ACL's hash.
+- the ACL's hash;
+- the folder's creation time.
+
+**Creation times** are copied with the content, both ways, and a change
+to one alone (a tool that set it, a copy made before they were copied) is
+set on the drive with no copy and no new version. Every Windows volume
+keeps them; a Linux folder can't set them, so there they're left to the
+drive. A state from before they were kept has none recorded, so the first
+pass after an upgrade sets every item's: a metadata write each.
 
 A pass works in this order:
 

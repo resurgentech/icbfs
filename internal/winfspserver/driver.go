@@ -364,11 +364,7 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 		// ACL given at creation is enforced (winfsp-tests'
 		// create_notraverse, create_restore, getfileattr).
 		if securityDescriptor != nil || fileAttributes&^windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
-			var sddl []byte
-			if securityDescriptor != nil {
-				sddl = []byte(securityDescriptor.String())
-			}
-			if attr, err = d.fsys.SetWindowsCreateMetadata(ctx(), newUUID, icbfs.TypeDir, fileAttributes, sddl); err != nil {
+			if attr, err = d.fsys.SetWindowsCreateMetadata(ctx(), newUUID, icbfs.TypeDir, fileAttributes, createSDDL(securityDescriptor)); err != nil {
 				return 0, toWinError(err)
 			}
 		}
@@ -390,11 +386,7 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 	//
 	// Windows sets Archive on every new file whatever the caller asked for
 	// (winfsp-tests' create_fileattr_test).
-	var sddl []byte
-	if securityDescriptor != nil {
-		sddl = []byte(securityDescriptor.String())
-	}
-	if attr, err = d.fsys.SetWindowsCreateMetadata(ctx(), newUUID, icbfs.TypeFile, fileAttributes|icbfs.WindowsAttrArchive, sddl); err != nil {
+	if attr, err = d.fsys.SetWindowsCreateMetadata(ctx(), newUUID, icbfs.TypeFile, fileAttributes|icbfs.WindowsAttrArchive, createSDDL(securityDescriptor)); err != nil {
 		return 0, toWinError(err)
 	}
 	// seeded empty, not nil: a just-created file's content really is
@@ -764,3 +756,42 @@ func (d *driver) releaseShared(h *fileHandle) {
 // There is no SID -> uid/gid mapping, so it's root's: on Windows, who
 // owns an item is in its security descriptor.
 func callerOwner() (uid, gid uint32) { return 0, 0 }
+
+// createSDDL is a new item's security descriptor, as stored. One whose
+// DACL came from its folder's (entries marked inherited) is marked
+// auto-inherited, as NTFS marks it (SDDL's AI): WinFsp computes it
+// without the mark.
+func createSDDL(sd *windows.SECURITY_DESCRIPTOR) []byte {
+	if sd == nil {
+		return nil
+	}
+	sddl := sd.String()
+	ctl, _, err := sd.Control()
+	if err != nil || ctl&(windows.SE_DACL_PROTECTED|windows.SE_DACL_AUTO_INHERITED) != 0 || !hasInheritedACE(sd) {
+		return []byte(sddl)
+	}
+	marked, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		return []byte(sddl)
+	}
+	if err := marked.SetControl(windows.SE_DACL_AUTO_INHERITED, windows.SE_DACL_AUTO_INHERITED); err != nil {
+		return []byte(sddl)
+	}
+	return []byte(marked.String())
+}
+
+// hasInheritedACE reports whether sd's DACL has an entry inherited from a
+// parent.
+func hasInheritedACE(sd *windows.SECURITY_DESCRIPTOR) bool {
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil {
+		return false
+	}
+	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if windows.GetAce(dacl, i, &ace) == nil && ace.Header.AceFlags&windows.INHERITED_ACE != 0 {
+			return true
+		}
+	}
+	return false
+}

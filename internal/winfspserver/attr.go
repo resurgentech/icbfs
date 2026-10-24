@@ -59,9 +59,16 @@ func (d *driver) fillFileInfo(info *winfsp.FSP_FSCTL_FILE_INFO, key string, typ 
 	}
 	info.CreationTime = filetimeFromTime(btime)
 
+	// Never read: the later of its creation and its last write. A new
+	// file's is its write time (bounded by its creation's millisecond,
+	// winfsp-tests' getfileinfo_test); a copy's is when it was made, as on
+	// NTFS, not the source's modified time the copy set.
 	atime := a.Atime
 	if atime.IsZero() {
 		atime = mtime
+		if btime.After(atime) {
+			atime = btime
+		}
 	}
 	info.LastAccessTime = filetimeFromTime(atime)
 
@@ -413,6 +420,10 @@ func mergeSecurityDescriptor(base *windows.SECURITY_DESCRIPTOR, info windows.SEC
 		if err := abs.SetDACL(dacl, present, defaulted); err != nil {
 			return nil, err
 		}
+		if err := copyControl(abs, desc, info, windows.SE_DACL_PROTECTED, windows.SE_DACL_AUTO_INHERITED,
+			windows.PROTECTED_DACL_SECURITY_INFORMATION, windows.UNPROTECTED_DACL_SECURITY_INFORMATION); err != nil {
+			return nil, err
+		}
 	}
 	if info&windows.SACL_SECURITY_INFORMATION != 0 {
 		sacl, defaulted, err := desc.SACL()
@@ -426,6 +437,10 @@ func mergeSecurityDescriptor(base *windows.SECURITY_DESCRIPTOR, info windows.SEC
 		if err := abs.SetSACL(sacl, present, defaulted); err != nil {
 			return nil, err
 		}
+		if err := copyControl(abs, desc, info, windows.SE_SACL_PROTECTED, windows.SE_SACL_AUTO_INHERITED,
+			windows.PROTECTED_SACL_SECURITY_INFORMATION, windows.UNPROTECTED_SACL_SECURITY_INFORMATION); err != nil {
+			return nil, err
+		}
 	}
 	merged, err := abs.ToSelfRelative()
 	if err != nil {
@@ -435,6 +450,27 @@ func mergeSecurityDescriptor(base *windows.SECURITY_DESCRIPTOR, info windows.SEC
 		return nil, err
 	}
 	return merged, nil
+}
+
+// copyControl gives abs the new ACL's control flags with it: whether it's
+// protected from inheritance and whether it was made by auto-inheritance
+// (SDDL's P and AI), as desc has them or info says (SetSecurityInfo's
+// PROTECTED_ and UNPROTECTED_ flags). Without them a copy's ACL (robocopy
+// /SEC, xcopy /O) loses AI, and a protected one can come unprotected.
+func copyControl(abs, desc *windows.SECURITY_DESCRIPTOR, info windows.SECURITY_INFORMATION,
+	protected, autoInherited windows.SECURITY_DESCRIPTOR_CONTROL, protect, unprotect windows.SECURITY_INFORMATION) error {
+	ctl, _, err := desc.Control()
+	if err != nil {
+		return err
+	}
+	set := ctl & (protected | autoInherited)
+	switch {
+	case info&protect != 0:
+		set |= protected
+	case info&unprotect != 0:
+		set &^= protected
+	}
+	return abs.SetControl(protected|autoInherited, set)
 }
 
 // File-specific equivalents of the generic access rights (winnt.h's
@@ -464,6 +500,11 @@ func mapGenericFileRights(sd *windows.SECURITY_DESCRIPTOR) error {
 		var ace *windows.ACCESS_ALLOWED_ACE
 		if err := windows.GetAce(dacl, i, &ace); err != nil {
 			return err
+		}
+		// An inherit-only entry keeps its generic rights, as NTFS's do:
+		// they're mapped where it's inherited.
+		if ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+			continue
 		}
 		// Every standard ACE layout (allowed, denied, audit, object
 		// variants) is header-then-mask, so Mask is valid for all.

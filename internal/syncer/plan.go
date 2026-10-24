@@ -38,10 +38,13 @@ const (
 	RemoveLocal
 	// Forget drops the base of an item gone from both sides.
 	Forget
+	// SetCreatedRemote copies an item's creation time from the folder
+	// to the drive: a metadata write, no copy.
+	SetCreatedRemote
 )
 
 var kindNames = [...]string{"adopt", "move-remote", "move-local", "mkdir-remote", "mkdir-local",
-	"upload", "download", "set-acl-remote", "remove-remote", "remove-local", "forget"}
+	"upload", "download", "set-acl-remote", "remove-remote", "remove-local", "forget", "set-created-remote"}
 
 func (k Kind) String() string { return kindNames[k] }
 
@@ -93,6 +96,8 @@ type PlanOptions struct {
 	LocalIDs bool
 	// LocalACLs: the folder's entries carry real ACLs.
 	LocalACLs bool
+	// Created: both sides keep real creation times (Caps.Created).
+	Created bool
 }
 
 // HashACL is the hash of an ACL, as kept in the base.
@@ -511,6 +516,7 @@ func (p *planner) compare() {
 				p.create(k, l)
 			case l.Dir:
 				p.acl(k, l, b)
+				p.created(k, l, b)
 			case b.Dir: // a directory then, a file on both sides now
 				if p.sameFile(l.Size, l.ModTime, r.Size, r.ModTime) {
 					p.add(Action{Kind: Adopt, Key: k, Path: l.Path})
@@ -527,6 +533,7 @@ func (p *planner) compare() {
 				p.add(Action{Kind: Upload, Key: k, Path: l.Path, Note: "changed on the drive; overwritten, the drive's in its history"})
 			default:
 				p.acl(k, l, b)
+				p.created(k, l, b)
 			}
 		case hasB && hasL: // gone from the drive
 			switch {
@@ -597,6 +604,14 @@ func (p *planner) acl(k string, l Entry, b Base) {
 	}
 }
 
+// created copies a changed creation time, where both sides keep them: a
+// file copied before they were kept, say, or one whose time was set.
+func (p *planner) created(k string, l Entry, b Base) {
+	if p.opt.Created && !l.Created.IsZero() && !l.Created.Equal(b.Created) {
+		p.add(Action{Kind: SetCreatedRemote, Key: k, Path: l.Path, Dir: l.Dir})
+	}
+}
+
 // phase orders a plan: moves, then directories made (shallow first),
 // then content, then removals (files, then directories deepest first).
 func phase(a Action) int {
@@ -605,7 +620,7 @@ func phase(a Action) int {
 		return 0
 	case MkdirRemote, MkdirLocal:
 		return 1
-	case Adopt, Upload, Download, SetACLRemote:
+	case Adopt, Upload, Download, SetACLRemote, SetCreatedRemote:
 		return 2
 	case RemoveRemote, RemoveLocal:
 		if !a.Dir {

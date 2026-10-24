@@ -23,6 +23,8 @@ last three from 2026-10-14.
 | logging chain | Ubuntu 24.04 VM | 5 / 5 checks pass |
 | icbfs-sync end to end | Windows Server 2025 VM | 12 / 12 checks pass; its Go tests pass on NTFS |
 | large files (6 GiB, opt-in) | Ubuntu 24.04 VM | 7 / 7 checks pass (6 GiB written in 73 s; a one-byte edit in 22 s) |
+| metadata copies (test/metadata), 2026-10-24 | Ubuntu 24.04 VM, FUSE, root | `cp -a`, `cp -rp`, `rsync -aAXH(U)`, `tar --xattrs --acls`: all keep exactly what they keep on tmpfs |
+| metadata copies (test/metadata), 2026-10-24 | Windows 11 VM, WinFsp | every time kept as on NTFS by robocopy, xcopy, Copy-Item and DISM; robocopy `/COPY:DATSO` differs from NTFS in one symlink's ACL flag; open: an inherited ACL's auto-inherited flag, symlinks' Archive bit and ACLs (xcopy `/O /B`), hard links (DISM) |
 | Connectathon (cthon04), 2026-10-17 | Ubuntu 24.04 VM, FUSE | basic, general, special and lock tests all pass; one warning (lock 13.1, mandatory locking) |
 
 ## Go tests

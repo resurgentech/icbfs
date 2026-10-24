@@ -195,3 +195,53 @@ func TestACLsCarryFromAFolderThatHasThem(t *testing.T) {
 		t.Fatalf("an ACL change re-uploaded: %d versions", n)
 	}
 }
+
+// TestCreationTimesCarryToICBFS: a folder's creation times are the
+// drive's, a file's and a directory's, as the mounts see them; a change
+// to one alone is set with no new version.
+func TestCreationTimesCarryToICBFS(t *testing.T) {
+	ctx := context.Background()
+	remote, fs := open(t)
+	local := memside.NewFolder(true, 100*time.Nanosecond).WithCreated()
+	born := time.Date(2019, 3, 4, 5, 6, 7, 800, time.UTC)
+	it := local.Put("Matters/brief.docx", "b", t0)
+	it.Created = born
+	dir, _ := local.Get("Matters")
+	dir.Created = born.Add(-time.Hour)
+	e := syncer.New(syncer.Config{Name: "t", Local: local, Remote: remote, State: &syncer.MemState{}, CaseInsensitive: true, SpoolDir: t.TempDir()})
+	if rep := e.Pass(ctx); len(rep.Errors) > 0 {
+		t.Fatal(rep.Errors)
+	}
+	btime := func(p string, typ icbfs.EntryType) time.Time {
+		t.Helper()
+		st, err := remote.Stat(ctx, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		attr, err := fs.Stat(ctx, st.ID, typ)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return attr.Btime
+	}
+	if got := btime("Matters/brief.docx", icbfs.TypeFile); !got.Equal(born) {
+		t.Fatalf("file created %v, want %v", got, born)
+	}
+	if got := btime("Matters", icbfs.TypeDir); !got.Equal(born.Add(-time.Hour)) {
+		t.Fatalf("folder created %v", got)
+	}
+	if rep := e.Pass(ctx); len(rep.Errors) > 0 || rep.Planned != 0 {
+		t.Fatalf("second pass %+v", rep)
+	}
+	it.Created = born.AddDate(-1, 0, 0)
+	if rep := e.Pass(ctx); len(rep.Errors) > 0 || rep.Planned != 1 {
+		t.Fatalf("%+v", rep)
+	}
+	if got := btime("Matters/brief.docx", icbfs.TypeFile); !got.Equal(it.Created) {
+		t.Fatalf("file created after a change %v", got)
+	}
+	st, _ := remote.Stat(ctx, "Matters/brief.docx")
+	if n := countVersions(t, fs, st.ID); n != 1 {
+		t.Fatalf("a creation time change re-uploaded: %d versions", n)
+	}
+}

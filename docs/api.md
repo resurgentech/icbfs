@@ -87,9 +87,17 @@ came from (drive, ID, version) on targets that can keep it. It reads as
 the actor's profile on the source and writes as the actor's profile on the
 target. **Diff** is the library's own too.
 
-`WriteOptions.ModTime` and `WriteOptions.Origin` set a file's time at its
-source and where it was copied from in the same write, instead of a
-`SetAttr` and a `SetOrigin` after it.
+`WriteOptions.ModTime`, `WriteOptions.Created` and `WriteOptions.Origin`
+set a file's modified and creation times at its source and where it was
+copied from in the same write, instead of a `SetAttr` and a `SetOrigin`
+after it. The creation time stays through later writes; the modified time
+is the write's again at the next write without one.
+
+A drive that's a `drive.TimeSetter` (icbfs's is) sets an item's times
+alone, with no new version: `SetTimes(ctx, item, modified, created)`, a
+zero time left as it is. It's how a folder gets its times (`Mkdir` takes
+none), and how an item copied before its source's times were passed gets
+them.
 
 ### Mirroring a source: `drive.Mirror`
 
@@ -102,7 +110,7 @@ id there), so the daemon only says what each source item is now:
 m := drive.NewMirror(d, "sharepoint:site/library")
 applied, err := m.Apply(ctx, drive.SourceItem{
     Origin: drive.Origin{ID: id, Version: "4.0", Path: spPath},
-    Path:   "/Matters/brief.docx", Type: drive.TypeFile, ModTime: modified,
+    Path:   "/Matters/brief.docx", Type: drive.TypeFile, ModTime: modified, Created: created,
     Open:   func(ctx context.Context) (io.ReadCloser, error) { return download(ctx, id) },
 })
 removed, err := m.Remove(drive.WithPass(ctx, passID), id) // to the trash
@@ -112,8 +120,9 @@ n, err := m.Undo(ctx, passID)                              // a bad pass, undone
 
 | the drive holds for the source item | `Apply` |
 |---|---|
-| nothing | writes it (`created`), its time and origin in the write |
+| nothing | writes it (`created`), its times and origin in the write |
 | it, same version | nothing (`unchanged`); the content isn't downloaded |
+| it, same version, other times | sets them (`retimed`): no download, no new version |
 | it, another version | a new version (`updated`) |
 | it, at another path | moves it (`moved`), then writes only if the version differs |
 | it, in the trash | restores it, history and all (`restored`), then as above |

@@ -108,6 +108,9 @@ func (s *Side) List(ctx context.Context) ([]syncer.Entry, error) {
 			return nil
 		}
 		e := syncer.Entry{Path: rel, Dir: de.IsDir(), ModTime: info.ModTime().UTC()}
+		if s.caps.Created {
+			e.Created = created(p, info)
+		}
 		if !e.Dir {
 			e.Size = info.Size()
 		}
@@ -137,6 +140,9 @@ func (s *Side) entry(p string) (syncer.Entry, error) {
 		return syncer.Entry{}, err
 	}
 	e := syncer.Entry{Path: p, Dir: info.IsDir(), ModTime: info.ModTime().UTC()}
+	if s.caps.Created {
+		e.Created = created(full, info)
+	}
 	if !e.Dir {
 		e.Size = info.Size()
 	}
@@ -151,7 +157,7 @@ func (s *Side) entry(p string) (syncer.Entry, error) {
 
 // Write writes to a temporary file beside the target and renames it
 // into place, so a reader never sees half a file.
-func (s *Side) Write(ctx context.Context, p string, r io.Reader, size int64, mod time.Time) (syncer.Entry, error) {
+func (s *Side) Write(ctx context.Context, p string, r io.Reader, size int64, mod, created time.Time) (syncer.Entry, error) {
 	full := s.abs(p)
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return syncer.Entry{}, err
@@ -172,6 +178,13 @@ func (s *Side) Write(ctx context.Context, p string, r io.Reader, size int64, mod
 	}
 	if err == nil {
 		err = replace(tmp.Name(), full)
+	}
+	// After the rename: replacing a file can give the new one the old
+	// one's creation time (NTFS's tunnelling), and the drive's wins.
+	if err == nil && !created.IsZero() && s.caps.Created {
+		if err = setCreated(full, created); err != nil {
+			return syncer.Entry{}, err
+		}
 	}
 	if err != nil {
 		os.Remove(tmp.Name())
@@ -204,6 +217,13 @@ func (s *Side) Remove(ctx context.Context, p string) error {
 		return err
 	}
 	return err
+}
+
+func (s *Side) SetCreated(ctx context.Context, p string, t time.Time) error {
+	if !s.caps.Created {
+		return nil
+	}
+	return setCreated(s.abs(p), t)
 }
 
 func (s *Side) SetACL(ctx context.Context, p, sddl string) error {

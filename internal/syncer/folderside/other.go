@@ -35,3 +35,9 @@ func writeACL(string, string) error { return nil }
 func openShared(p string) (io.ReadCloser, error) { return os.Open(p) }
 
 func replace(from, to string) error { return os.Rename(from, to) }
+
+// created is zero: a Linux or macOS folder's creation times can't be set,
+// so they aren't copied (Caps.Created is false).
+func created(string, fs.FileInfo) time.Time { return time.Time{} }
+
+func setCreated(string, time.Time) error { return nil }

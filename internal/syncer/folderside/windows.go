@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -21,8 +22,11 @@ const aclsSupported = true
 // probe asks the volume what it keeps: NTFS and ReFS have stable file
 // ids and persistent ACLs, to 100ns; anything else (a WebDAV drive, a
 // FAT stick) gets names, sizes and times to the second.
+//
+// Every Windows volume keeps creation times (a WebDAV drive reports its
+// server's), so a folder's are copied to the drive.
 func probe(root string) syncer.Caps {
-	caps := syncer.Caps{TimeResolution: time.Second}
+	caps := syncer.Caps{TimeResolution: time.Second, Created: true}
 	vol := filepath.VolumeName(root) + `\`
 	if strings.HasPrefix(root, `\\`) {
 		vol = root
@@ -133,4 +137,32 @@ func replace(from, to string) error {
 		return err
 	}
 	return windows.MoveFileEx(f, t, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+}
+
+// created is a file's or directory's creation time.
+func created(_ string, info fs.FileInfo) time.Time {
+	if d, ok := info.Sys().(*syscall.Win32FileAttributeData); ok {
+		return time.Unix(0, d.CreationTime.Nanoseconds()).UTC()
+	}
+	return time.Time{}
+}
+
+// setCreated sets a file's or directory's creation time, leaving its
+// other times as they are.
+func setCreated(p string, t time.Time) error {
+	name, err := windows.UTF16PtrFromString(p)
+	if err != nil {
+		return err
+	}
+	h, err := windows.CreateFile(name, windows.FILE_WRITE_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return &os.PathError{Op: "open", Path: p, Err: err}
+	}
+	defer windows.CloseHandle(h)
+	ft := windows.NsecToFiletime(t.UnixNano())
+	if err := windows.SetFileTime(h, &ft, nil, nil); err != nil {
+		return &os.PathError{Op: "SetFileTime", Path: p, Err: err}
+	}
+	return nil
 }

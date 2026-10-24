@@ -47,6 +47,7 @@ type Item struct {
 	Dir     bool
 	Data    []byte
 	ModTime time.Time
+	Created time.Time // zero: none kept (or not yet set)
 	ID      string
 	Version int
 	// History is every content the item has had, oldest first, on a
@@ -79,6 +80,9 @@ func NewDrive() *Side {
 
 // WithACLs makes the side keep real ACLs.
 func (s *Side) WithACLs() *Side { s.caps.ACLs = true; return s }
+
+// WithCreated makes the side keep real creation times.
+func (s *Side) WithCreated() *Side { s.caps.Created = true; return s }
 
 func (s *Side) key(p string) string { return syncer.Key(p, s.fold) }
 
@@ -226,6 +230,9 @@ func (s *Side) Caps() syncer.Caps { return s.caps }
 
 func (s *Side) entry(it *Item) syncer.Entry {
 	e := syncer.Entry{Path: it.Path, Dir: it.Dir, Size: int64(len(it.Data)), ModTime: it.ModTime, ACL: it.ACL}
+	if s.caps.Created {
+		e.Created = it.Created
+	}
 	if s.caps.IDs {
 		e.ID = it.ID
 	}
@@ -265,7 +272,7 @@ func (s *Side) Read(ctx context.Context, p string) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(it.Data)), nil
 }
 
-func (s *Side) Write(ctx context.Context, p string, r io.Reader, size int64, mod time.Time) (syncer.Entry, error) {
+func (s *Side) Write(ctx context.Context, p string, r io.Reader, size int64, mod, created time.Time) (syncer.Entry, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return syncer.Entry{}, err
@@ -284,6 +291,9 @@ func (s *Side) Write(ctx context.Context, p string, r io.Reader, size int64, mod
 	s.Writes[p]++
 	it := s.put(p, data, mod)
 	it.Path = p
+	if !created.IsZero() && s.caps.Created {
+		it.Created = created
+	}
 	return s.entry(it), nil
 }
 
@@ -362,6 +372,19 @@ func (s *Side) Remove(ctx context.Context, p string) error {
 		s.trash = append(s.trash, &trashed{id: s.id(), item: it, deleted: time.Now()})
 	}
 	delete(s.items, k)
+	return nil
+}
+
+func (s *Side) SetCreated(ctx context.Context, p string, t time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	it, ok := s.items[s.key(p)]
+	if !ok {
+		return fmt.Errorf("set created %s: %w", p, os.ErrNotExist)
+	}
+	if s.caps.Created {
+		it.Created = t
+	}
 	return nil
 }
 

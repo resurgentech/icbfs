@@ -1631,17 +1631,21 @@ func (f *Filesystem) SetAppData(ctx context.Context, uuid string, typ EntryType,
 }
 
 // SetItemInfo records, in one metadata write, what a writer knows about an
-// item it just wrote: its time at the source it was copied from (mtime,
+// item it just wrote: its times at the source it was copied from (mtime,
 // if set: for a file an override tied to the content version contentETag,
 // so a later real write puts mtime back to the content's, as SetAttr's
-// does; for a directory its mtime) and app data (a nil value removes
+// does; for a directory its mtime; btime, if set, its creation time,
+// which stays through later writes) and app data (a nil value removes
 // the key). A sync daemon's write then costs one metadata write, not one
-// for the time and one per app key.
-func (f *Filesystem) SetItemInfo(ctx context.Context, uuid string, typ EntryType, mtime *time.Time, contentETag string, app map[string][]byte) (Attr, error) {
+// per time and one per app key.
+func (f *Filesystem) SetItemInfo(ctx context.Context, uuid string, typ EntryType, mtime, btime *time.Time, contentETag string, app map[string][]byte) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
 	}
 	return f.updateMetadata(ctx, uuid, typ, func(a *Attr) {
+		if btime != nil {
+			a.Btime = *btime
+		}
 		if mtime != nil {
 			a.Mtime = *mtime
 			if typ != TypeDir {
@@ -2090,12 +2094,16 @@ func (f *Filesystem) SetAttr(ctx context.Context, key string, typ EntryType, mod
 	var contentETag string
 	if mtime != nil {
 		// Tie the override to the current content version — see
-		// combineFileAttr.
+		// combineFileAttr — and, if it has writes still to flush, to the
+		// version they'll make.
 		head, err := f.store.Head(ctx, key)
 		if err != nil {
 			return Attr{}, mapNotFound(err)
 		}
 		contentETag = head.ETag
+		if c := f.openContent(key); c != nil {
+			c.keepMtime(*mtime)
+		}
 	}
 	if mode != nil || uid != nil || gid != nil || atime != nil || mtime != nil || btime != nil {
 		return f.updateFileMetadata(ctx, key, func(a *Attr) {

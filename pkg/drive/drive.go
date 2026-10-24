@@ -49,6 +49,15 @@ type Drive interface {
 	SetOrigin(ctx context.Context, item ItemRef, o Origin) error
 }
 
+// A TimeSetter is a drive that can set an item's times as they were at
+// its source, without a new version of its content: what a sync daemon
+// needs for a directory (Mkdir takes no times) and for an item copied
+// before it kept them. A zero time is left as it is. A file's modified
+// time is tied to its content now, as WriteOptions.ModTime's is.
+type TimeSetter interface {
+	SetTimes(ctx context.Context, item ItemRef, modified, created time.Time) (Item, error)
+}
+
 // Capabilities says what a drive's backend can do.
 type Capabilities struct {
 	IDs              bool   `json:"ids"`      // ids stable across renames
@@ -107,6 +116,10 @@ type WriteOptions struct {
 	// modification date), shown as its modified time instead of the moment
 	// of the write; a later write without one puts it back to the write's.
 	ModTime time.Time
+	// Created, if set, is the file's creation time at its source, shown
+	// as its creation time instead of the moment it was first written
+	// here; it stays through later writes.
+	Created time.Time
 	// Origin, if set, records where the content was copied from, in the
 	// same write (as SetOrigin would after it).
 	Origin *Origin

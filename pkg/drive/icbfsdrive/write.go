@@ -200,7 +200,7 @@ func (d *Drive) writeContent(ctx context.Context, key string, data []byte, spool
 
 // afterWrite records, in one metadata write, what opts say about content
 // just written to the file key at drive path p (its ETag now written):
-// its content type, its time at the source, its origin; and indexes the
+// its content type, its times at the source, its origin; and indexes the
 // origin.
 func (d *Drive) afterWrite(ctx context.Context, key, p, written string, opts drive.WriteOptions) error {
 	app := map[string][]byte{}
@@ -214,13 +214,9 @@ func (d *Drive) afterWrite(ctx context.Context, key, p, written string, opts dri
 		}
 		app[icbfs.AppDriveOrigin] = data
 	}
-	var mtime *time.Time
-	if !opts.ModTime.IsZero() {
-		t := opts.ModTime
-		mtime = &t
-	}
-	if len(app) > 0 || mtime != nil {
-		if _, err := d.fs.SetItemInfo(ctx, key, icbfs.TypeFile, mtime, written, app); err != nil {
+	mtime, btime := timeOrNil(opts.ModTime), timeOrNil(opts.Created)
+	if len(app) > 0 || mtime != nil || btime != nil {
+		if _, err := d.fs.SetItemInfo(ctx, key, icbfs.TypeFile, mtime, btime, written, app); err != nil {
 			return mapErr(err)
 		}
 	}
@@ -478,6 +474,33 @@ func (d *Drive) SetOrigin(ctx context.Context, ref drive.ItemRef, o drive.Origin
 		return mapErr(err)
 	}
 	return d.recordOrigin(ctx, n.key, n.path, o)
+}
+
+// SetTimes sets an item's times at its source (drive.TimeSetter), in one
+// metadata write: no new version of its content.
+func (d *Drive) SetTimes(ctx context.Context, ref drive.ItemRef, modified, created time.Time) (drive.Item, error) {
+	if err := d.writable(ctx); err != nil {
+		return drive.Item{}, err
+	}
+	n, err := d.resolve(ctx, d.fs, ref)
+	if err != nil {
+		return drive.Item{}, err
+	}
+	if err := d.check(ctx, n, needWrite); err != nil {
+		return drive.Item{}, err
+	}
+	if _, err := d.fs.SetAttr(ctx, n.key, n.typ, nil, nil, nil, nil, nil, timeOrNil(modified), timeOrNil(created)); err != nil {
+		return drive.Item{}, mapErr(err)
+	}
+	return d.statItem(ctx, n.path)
+}
+
+// timeOrNil is t, or nil for the zero time: an icbfs time left as it is.
+func timeOrNil(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
 }
 
 func decodeOrigin(data []byte) *drive.Origin {

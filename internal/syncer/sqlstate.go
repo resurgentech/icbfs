@@ -32,9 +32,23 @@ func OpenState(path string) (*SQLState, error) {
 		`CREATE TABLE IF NOT EXISTS base (
 			key TEXT PRIMARY KEY, path TEXT NOT NULL, dir INTEGER NOT NULL, size INTEGER NOT NULL,
 			mtime INTEGER NOT NULL, local_id TEXT NOT NULL, remote_id TEXT NOT NULL,
-			remote_version TEXT NOT NULL, hash TEXT NOT NULL, acl_hash TEXT NOT NULL)`,
+			remote_version TEXT NOT NULL, hash TEXT NOT NULL, acl_hash TEXT NOT NULL,
+			created INTEGER NOT NULL DEFAULT 0)`,
 	} {
 		if _, err := db.Exec(q); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("state %s: %w", path, err)
+		}
+	}
+	// A state from before creation times were kept: none recorded, so
+	// the next pass sets every item's (a metadata write each, no copy).
+	var has int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('base') WHERE name = 'created'`).Scan(&has); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("state %s: %w", path, err)
+	}
+	if has == 0 {
+		if _, err := db.Exec(`ALTER TABLE base ADD COLUMN created INTEGER NOT NULL DEFAULT 0`); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("state %s: %w", path, err)
 		}
@@ -46,7 +60,7 @@ func OpenState(path string) (*SQLState, error) {
 func (s *SQLState) Close() error { return s.db.Close() }
 
 func (s *SQLState) Load(ctx context.Context) (map[string]Base, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT key, path, dir, size, mtime, local_id, remote_id, remote_version, hash, acl_hash FROM base`)
+	rows, err := s.db.QueryContext(ctx, `SELECT key, path, dir, size, mtime, local_id, remote_id, remote_version, hash, acl_hash, created FROM base`)
 	if err != nil {
 		return nil, err
 	}
@@ -56,13 +70,16 @@ func (s *SQLState) Load(ctx context.Context) (map[string]Base, error) {
 		var k string
 		var b Base
 		var dir int
-		var mtime int64
-		if err := rows.Scan(&k, &b.Path, &dir, &b.Size, &mtime, &b.LocalID, &b.RemoteID, &b.RemoteVersion, &b.Hash, &b.ACLHash); err != nil {
+		var mtime, created int64
+		if err := rows.Scan(&k, &b.Path, &dir, &b.Size, &mtime, &b.LocalID, &b.RemoteID, &b.RemoteVersion, &b.Hash, &b.ACLHash, &created); err != nil {
 			return nil, err
 		}
 		b.Dir = dir != 0
 		if mtime != 0 {
 			b.ModTime = time.Unix(0, mtime).UTC()
+		}
+		if created != 0 {
+			b.Created = time.Unix(0, created).UTC()
 		}
 		out[k] = b
 	}
@@ -91,7 +108,7 @@ func (s *SQLState) Save(ctx context.Context, base map[string]Base) error {
 		return err
 	}
 	put, err := tx.PrepareContext(ctx, `INSERT OR REPLACE INTO base
-		(key, path, dir, size, mtime, local_id, remote_id, remote_version, hash, acl_hash) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+		(key, path, dir, size, mtime, local_id, remote_id, remote_version, hash, acl_hash, created) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -110,11 +127,14 @@ func (s *SQLState) Save(ctx context.Context, base map[string]Base) error {
 		if b.Dir {
 			dir = 1
 		}
-		var mtime int64
+		var mtime, created int64
 		if !b.ModTime.IsZero() {
 			mtime = b.ModTime.UnixNano()
 		}
-		if _, err := put.ExecContext(ctx, k, b.Path, dir, b.Size, mtime, b.LocalID, b.RemoteID, b.RemoteVersion, b.Hash, b.ACLHash); err != nil {
+		if !b.Created.IsZero() {
+			created = b.Created.UnixNano()
+		}
+		if _, err := put.ExecContext(ctx, k, b.Path, dir, b.Size, mtime, b.LocalID, b.RemoteID, b.RemoteVersion, b.Hash, b.ACLHash, created); err != nil {
 			return err
 		}
 	}
@@ -131,5 +151,5 @@ func (s *SQLState) Save(ctx context.Context, base map[string]Base) error {
 func sameBase(a, b Base) bool {
 	return a.Path == b.Path && a.Dir == b.Dir && a.Size == b.Size && a.ModTime.Equal(b.ModTime) &&
 		a.LocalID == b.LocalID && a.RemoteID == b.RemoteID && a.RemoteVersion == b.RemoteVersion &&
-		a.Hash == b.Hash && a.ACLHash == b.ACLHash
+		a.Hash == b.Hash && a.ACLHash == b.ACLHash && a.Created.Equal(b.Created)
 }
