@@ -66,6 +66,8 @@ of `setup-vm.sh`). Then shut the VM down and take a `clean-base` snapshot
   its installer doesn't do.
 - **winfsp-tests**, from the same release, unzipped to
   `C:\Windows\Temp\winfsp-tests\`.
+- **The .NET SDK** and **llvm-mingw** (a C compiler, for cgo), on the
+  machine `Path`, for the native app (`cmd/icbfs-history`).
 - **Defender exclusions** for the Go module cache, the build cache and
   `C:\icbfs-test`. Defender takes a generated file in `modernc.org/sqlite`
   (`sqlite_g_*.go`) for malware (`TrojanDropper:VBS/Mikey.A!MSR`) and

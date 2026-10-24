@@ -8,3 +8,5 @@
 /ROADMAP.md
 /.env.aws
 /.env.azure
+/cmd/icbfs-history/windows/bin/
+/cmd/icbfs-history/windows/obj/
