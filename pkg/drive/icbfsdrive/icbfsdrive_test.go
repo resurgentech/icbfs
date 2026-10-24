@@ -420,3 +420,46 @@ func TestDrafts(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestByModeProfile: a profile with no POSIX identity but ByMode, on a
+// primary-POSIX filesystem, is let in as a Windows mount lets anyone in:
+// to read what has any read bit, and write what has the owner-write bit.
+func TestByModeProfile(t *testing.T) {
+	store := miniotest.Store(t)
+	d := newDrive(t, store, icbfs.Settings{Name: "posix", Size: 1 << 30, RootMode: 0o755}, "")
+	ctx := context.Background()
+	owner := as(1000, 1000)
+	windowsUser := drive.WithProfile(ctx, drive.Profile{Windows: &drive.WindowsProfile{User: "S-1-5-21-1-2-3-1001"}, ByMode: true})
+	noMode := drive.WithProfile(ctx, drive.Profile{Windows: &drive.WindowsProfile{User: "S-1-5-21-1-2-3-1001"}})
+
+	chmod := func(p string, mode uint32) {
+		t.Helper()
+		st, err := d.Stat(system(), drive.ByPath(p), drive.At{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.Filesystem().SetAttr(ctx, st.ID, icbfs.TypeFile, &mode, nil, nil, nil, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(t, system(), d, "/owner-only.txt", "x", drive.Condition{})
+	write(t, system(), d, "/no-access.txt", "x", drive.Condition{})
+	chmod("/owner-only.txt", 0o600)
+	chmod("/no-access.txt", 0o000)
+
+	if got := read(t, windowsUser, d, drive.ByPath("/owner-only.txt"), drive.At{}); got != "x" {
+		t.Fatalf("an owner-only file, by mode: %q", got)
+	}
+	if _, _, err := d.Read(windowsUser, drive.ByPath("/no-access.txt"), drive.At{}, nil); !errors.Is(err, drive.ErrForbidden) {
+		t.Fatalf("a mode-0 file, by mode: %v; want forbidden", err)
+	}
+	if _, _, err := d.Read(owner, drive.ByPath("/owner-only.txt"), drive.At{}, nil); !errors.Is(err, drive.ErrForbidden) {
+		t.Fatalf("an owner-only file, by another uid: %v; want forbidden", err)
+	}
+	if _, _, err := d.Read(noMode, drive.ByPath("/owner-only.txt"), drive.At{}, nil); !errors.Is(err, drive.ErrNoAccess) {
+		t.Fatalf("a Windows profile without ByMode: %v; want no access", err)
+	}
+	if _, err := d.Write(windowsUser, "/owner-only.txt", strings.NewReader("y"), drive.Condition{}, drive.WriteOptions{}); err != nil {
+		t.Fatalf("write an owner-writable file, by mode: %v", err)
+	}
+}

@@ -11,6 +11,12 @@ type Profile struct {
 	Windows *WindowsProfile `json:"windows,omitempty"`
 	POSIX   *POSIXProfile   `json:"posix,omitempty"`
 	System  bool            `json:"system,omitempty"`
+	// ByMode, for a profile with no POSIX identity on a primary-POSIX
+	// filesystem, decides as a Windows mount of one does, having no uid to
+	// match: an item can be read if any of its read bits is set, and
+	// written if its owner-write bit is. For a Windows user of such a
+	// filesystem, as the history app's.
+	ByMode bool `json:"byMode,omitempty"`
 }
 
 // WindowsProfile is a Windows identity.

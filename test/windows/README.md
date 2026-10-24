@@ -91,7 +91,15 @@ a command line.
 
 starts a program on that desktop (with a scheduled task that runs only
 while Administrator is logged on), waits, and saves a screenshot of the
-console (`virsh screenshot`), by default to `work/desktop.png`.
+console (`virsh screenshot`), by default to `work/desktop.png`. A fourth
+argument is the program's arguments. `ui.ps1`, copied to the VM and run
+this way through PowerShell (`-WindowStyle Hidden`, or its console takes
+the clicks), drives a window by UI Automation: see
+[cmd/icbfs-history](../../cmd/icbfs-history/README.md).
+
+The VM's clock is the host's local time read as UTC (libvirt's default
+for Windows), hours off unless the runners have set it (`sync_vm_clock`
+in `lib.sh`).
 
 To use the desktop yourself, connect with Remmina (or any RDP client) to
 the VM's address (`virsh domifaddr icbfs-win11-test`) as `Administrator`,

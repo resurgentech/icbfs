@@ -100,6 +100,9 @@ func (d *Drive) allowed(ctx context.Context, n *node, what need) (bool, error) {
 		return sd.Allows(principal(p.Windows), want), nil
 	}
 	if p.POSIX == nil {
+		if p.ByMode {
+			return allowedByMode(n.attr.Mode, what), nil
+		}
 		return false, drive.ErrNoAccess
 	}
 	u := posixUser(p.POSIX)
@@ -121,6 +124,19 @@ func (d *Drive) allowed(ctx context.Context, n *node, what need) (bool, error) {
 		return u.Uid == 0 || u.Uid == a.Uid, nil
 	}
 	return false, nil
+}
+
+// allowedByMode is allowed for a ByMode profile: a Windows mount's DACL
+// for a primary-POSIX item (winfspserver's approximateDACLFromMode),
+// granted to everyone.
+func allowedByMode(mode uint32, what need) bool {
+	switch what {
+	case needRead, needReadControl:
+		return mode&0o444 != 0
+	case needWrite, needAddFile, needAddDir, needDelete:
+		return mode&0o200 != 0
+	}
+	return false // changing permissions needs an owner, which this has none of
 }
 
 // check is allowed, as an error.
@@ -146,8 +162,8 @@ func (d *Drive) checkTraverse(ctx context.Context, dir *node) error {
 	if err != nil {
 		return err
 	}
-	if p.System {
-		return nil
+	if p.System || (p.POSIX == nil && p.ByMode) {
+		return nil // a Windows mount has no traverse check either
 	}
 	if p.POSIX == nil {
 		return drive.ErrNoAccess
@@ -196,6 +212,12 @@ func (d *Drive) canDelete(ctx context.Context, n *node) error {
 		return fmt.Errorf("%s: %w", n.path, drive.ErrForbidden)
 	}
 	if p.POSIX == nil {
+		if p.ByMode && allowedByMode(parent.attr.Mode, needWrite) {
+			return nil
+		}
+		if p.ByMode {
+			return fmt.Errorf("%s: %w", n.path, drive.ErrForbidden)
+		}
 		return drive.ErrNoAccess
 	}
 	u := posixUser(p.POSIX)
