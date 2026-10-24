@@ -28,7 +28,7 @@ source "$HERE/lib.sh"
 if [ "${ICBFS_MULTI_STORE:-minio}" = azure ]; then
   set -a
   # shellcheck disable=SC1091
-  source "$REPO/.env.azure"
+  source "$ICBFS_TEST_HOME/.env.azure"
   set +a
   STORE_ARGS="-store azure -azure-account $ICBFS_TEST_AZURE_ACCOUNT -azure-container $ICBFS_TEST_AZURE_CONTAINER"
   STORE_VM_ARGS="$STORE_ARGS"
@@ -40,7 +40,7 @@ else
   if [ "${ICBFS_MULTI_STORE:-minio}" = s3 ]; then
     set -a
     # shellcheck disable=SC1091
-    source "$REPO/.env.aws"
+    source "$ICBFS_TEST_HOME/.env.aws"
     set +a
     eval "$(aws configure export-credentials --format env)"
     region="${ICBFS_TEST_S3_REGION:-us-east-1}"

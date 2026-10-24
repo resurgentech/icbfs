@@ -7,7 +7,9 @@ set -uo pipefail
 # can go at once on two VMs.
 VM_NAME="${ICBFS_TEST_VM:-icbfs-fuse-test}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORK_DIR="$HERE/work"
+# shellcheck disable=SC1091
+source "$HERE/../home.sh"
+WORK_DIR="$ICBFS_TEST_HOME/test/linux/work"
 # shellcheck disable=SC1091
 source "$HERE/../store.sh"
 

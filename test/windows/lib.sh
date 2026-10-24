@@ -6,7 +6,9 @@ set -uo pipefail
 # Windows 11 one, with a desktop (create-vm.sh makes either).
 VM_NAME="${ICBFS_WIN_VM:-icbfs-winfsp-test}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-WORK_DIR="$HERE/work"
+# shellcheck disable=SC1091
+source "$HERE/../home.sh"
+WORK_DIR="$ICBFS_TEST_HOME/test/windows/work"
 # The key the VM lets in as Administrator (written in by autounattend.xml),
 # and the Administrator password build-answer-iso.sh generates (gitignored).
 SSH_PUBLIC_KEY="${ICBFS_VM_SSH_KEY:-$HOME/.ssh/id_ed25519.pub}"

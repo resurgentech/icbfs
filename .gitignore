@@ -9,3 +9,4 @@
 /ROADMAP.md
 /.env.aws
 /.env.azure
+/.env.test

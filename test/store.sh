@@ -15,9 +15,11 @@
 # VM's environment file. Secrets never go on a command line (ps would
 # show them).
 
+# shellcheck disable=SC1091
+source "$(dirname "${BASH_SOURCE[0]}")/home.sh"
+
 store_setup() {
-  local repo region
-  repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  local repo="$ICBFS_TEST_HOME" region
   case "${ICBFS_TEST_STORE:-minio}" in
   azure)
     set -a

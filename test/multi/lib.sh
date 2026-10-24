@@ -4,8 +4,10 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-WORK_DIR="$HERE/work"
-LINUX_WORK="$REPO/test/linux/work"
+# shellcheck disable=SC1091
+source "$HERE/../home.sh"
+WORK_DIR="$ICBFS_TEST_HOME/test/multi/work"
+LINUX_WORK="$ICBFS_TEST_HOME/test/linux/work"
 VM_PREFIX="icbfs-multi-"
 MAIN_VM="icbfs-fuse-test" # test/linux's VM, the first machine
 

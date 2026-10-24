@@ -145,26 +145,27 @@ func (f *Filesystem) eraseAndMark(ctx context.Context, items []block.Entry) erro
 func (f *Filesystem) purgedKey() string { return f.id + "-purged" }
 
 // ForgetPurged makes cache drop everything it kept of live's filesystem
-// if a purge has marked it since the cache last looked. live is the
-// filesystem attached to the live store, not a past view.
-func ForgetPurged(ctx context.Context, live *Filesystem, cache *objstore.HistoryCache) error {
+// if a purge has marked it since the cache last looked, and reports
+// whether it did. live is the filesystem attached to the live store, not
+// a past view.
+func ForgetPurged(ctx context.Context, live *Filesystem, cache *objstore.HistoryCache) (bool, error) {
 	mark := ""
 	obj, err := live.store.Head(ctx, live.purgedKey())
 	switch {
 	case err == nil:
 		mark = obj.VersionID
 	case !objstore.IsNotFound(err):
-		return err
+		return false, err
 	}
 	note := "purged:" + live.id
 	seen, err := cache.Note(ctx, note)
 	if err != nil || seen == mark {
-		return err
+		return false, err
 	}
 	if err := cache.ForgetUnder(ctx, live.prefix()); err != nil {
-		return err
+		return false, err
 	}
-	return cache.SetNote(ctx, note, mark)
+	return true, cache.SetNote(ctx, note, mark)
 }
 
 func (f *Filesystem) eraseItems(ctx context.Context, items []block.Entry) error {

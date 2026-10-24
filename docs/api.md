@@ -31,6 +31,8 @@ pkg/drive                 the Drive interface, capabilities, Copy, Diff, Drafts,
 pkg/drive/icbfsdrive      the icbfs backend, and the side store on an icbfs filesystem
 pkg/drive/driveapi        Fiber v3 handlers (Mount), generated models and client, Standalone
 pkg/icbfs                 opening a bucket; creating and administering filesystems
+pkg/history               a filesystem's past for a program browsing it (below)
+pkg/icbfstest             a throwaway MinIO for tests of programs built on icbfs
 internal/acl              the Windows access check
 cmd/drive-api             the standalone server
 ```
@@ -251,6 +253,26 @@ drive read-only as it was then.
   current version at that name's time.
 
 Mounts read names too: `icbfs mount -as-of q3-signoff`.
+
+**Browsing the past: `pkg/history`.** A program that moves through a
+filesystem's history (a slider over time, say) opens it with
+`history.Open(ctx, history.Config{Store, Filesystem, Root})` and asks, as
+the profile in each call's context:
+
+- `List(ctx, dir, at)`: a directory as it was at a moment (now, for the
+  zero time);
+- `Versions(ctx, item)`: a file's versions, by id even once it's in the
+  trash;
+- `Search(ctx, query, limit)`: names in the tree now and in the trash,
+  each hit with a moment to see it at (just before a deleted one went);
+- `Span(ctx)`: from the filesystem's creation to now, by the store's
+  clock.
+
+It reads through the history cache as-of mounts share (by default in the
+user's cache directory, kept 30 days), so a directory listed at some
+moments is listed at them again with no store requests, in later runs
+too. A purge is noticed within 30 seconds (`CheckPurges`); `Purges`
+counts them, for a caller keeping listings of its own.
 
 ## Endpoints
 

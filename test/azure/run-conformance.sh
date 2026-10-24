@@ -13,9 +13,11 @@
 # expire what's left.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck disable=SC1091
+source "$REPO/test/home.sh"
 set -a
 # shellcheck disable=SC1091
-source "$REPO/.env.azure"
+source "$ICBFS_TEST_HOME/.env.azure"
 set +a
 ICBFS_TEST_AZURE_KEY=$(az storage account keys list --subscription "$ICBFS_TEST_AZURE_SUBSCRIPTION" \
   -g "$ICBFS_TEST_AZURE_RESOURCE_GROUP" -n "$ICBFS_TEST_AZURE_ACCOUNT" --query '[0].value' -o tsv)

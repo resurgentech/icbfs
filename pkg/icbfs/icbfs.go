@@ -38,6 +38,10 @@ var (
 // DefaultMaxFileSize is a new filesystem's max file size unless given.
 const DefaultMaxFileSize = core.DefaultMaxFileSize
 
+// FormatVersion is the newest object format this build reads and writes:
+// a filesystem of a newer one is refused.
+const FormatVersion = core.FormatVersion
+
 // StoreConfig says which object store and how to reach it: Kind (KindS3,
 // the default, or KindAzure) and that kind's section. Its JSON is
 // {"kind": ..., "s3": {...}} or {"kind": "azure", "azure": {...}}; an S3

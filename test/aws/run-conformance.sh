@@ -14,9 +14,11 @@
 # own; the bucket's lifecycle rules should expire what's left.
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck disable=SC1091
+source "$REPO/test/home.sh"
 set -a
 # shellcheck disable=SC1091
-source "$REPO/.env.aws"
+source "$ICBFS_TEST_HOME/.env.aws"
 set +a
 eval "$(aws configure export-credentials --format env)"
 cd "$REPO"

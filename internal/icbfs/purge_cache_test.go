@@ -57,14 +57,14 @@ func TestForgetPurgedClearsHistoryCaches(t *testing.T) {
 	if names, err := listDir(); err != nil || len(names) != 1 {
 		t.Fatalf("before the purge: %v, %v", names, err)
 	}
-	if err := ForgetPurged(ctx, f, hist); err != nil {
+	if _, err := ForgetPurged(ctx, f, hist); err != nil {
 		t.Fatalf("with no purge yet: %v", err)
 	}
 
 	if err := f.Purge(ctx, root, "d", false); err != nil {
 		t.Fatal(err)
 	}
-	if err := ForgetPurged(ctx, f, hist); err != nil {
+	if _, err := ForgetPurged(ctx, f, hist); err != nil {
 		t.Fatal(err)
 	}
 	if names, err := listDir(); err == nil {

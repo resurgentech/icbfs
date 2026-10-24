@@ -220,7 +220,7 @@ icbfs mount -as-of q3-signoff … /mnt/q3                  # a named version
   `~/.cache` or `%LOCALAPPDATA%`), and `-history-ttl` for how long it
   keeps what it fetched (`720h`, 30 days, by default). A purged file's
   name and times can stay in it until then. Other programs that read the
-  same filesystem's history share the cache, so a mount
+  same filesystem's history (`pkg/history`) share the cache, so a mount
   starts with what they've fetched.
 - If the shared cache can't be opened, the mount logs why and uses a
   temporary one, deleted at unmount. A mount run as root refuses to make

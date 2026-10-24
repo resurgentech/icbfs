@@ -175,6 +175,13 @@ rules expire what's left after two days. The multi-machine tests run on
 either with `ICBFS_MULTI_STORE=s3` or `azure` (and `MULTI_MACHINES`,
 `STORM`, `EXCL`, `COUNT`, `APPEND`, `RENAMES` to size a short run).
 
+**Shared test state.** What the test scripts keep outside git (`.env.aws`,
+`.env.azure`, and each VM kind's `work/`: the Windows VMs' password and
+answer ISO, downloaded images, logs) is under `ICBFS_TEST_HOME`, by
+default the checkout itself (`test/home.sh`). Another checkout of icbfs,
+a submodule in a repo built on it, shares one set by naming the first in
+a gitignored `.env.test` at its root: `ICBFS_TEST_HOME=/path/to/icbfs`.
+
 On 2026-10-17, against AWS S3 (us-east-1) and Azure (westus2): all 14
 conformance tests pass on each, and on two machines the smoke, storm,
 exclusive and counter workloads pass, with `fs check` clean. Where the
