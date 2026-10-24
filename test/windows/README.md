@@ -69,7 +69,8 @@ on (auto-logon), `virsh shutdown` is ignored; shut it down from inside:
 - **winfsp-tests**, from the same release, unzipped to
   `C:\Windows\Temp\winfsp-tests\`.
 - **The .NET SDK** and **llvm-mingw** (a C compiler, for cgo), on the
-  machine `Path`, for the native app (`cmd/icbfs-history`).
+  machine `Path`, for native Windows apps built on icbfs: a WinUI front
+  end over a Go core built as a DLL.
 - **Defender exclusions** for the Go module cache, the build cache and
   `C:\icbfs-test`. Defender takes a generated file in `modernc.org/sqlite`
   (`sqlite_g_*.go`) for malware (`TrojanDropper:VBS/Mikey.A!MSR`) and
@@ -92,10 +93,9 @@ a command line.
 starts a program on that desktop (with a scheduled task that runs only
 while Administrator is logged on), waits, and saves a screenshot of the
 console (`virsh screenshot`), by default to `work/desktop.png`. A fourth
-argument is the program's arguments. `ui.ps1`, copied to the VM and run
-this way through PowerShell (`-WindowStyle Hidden`, or its console takes
-the clicks), drives a window by UI Automation: see
-[cmd/icbfs-history](../../cmd/icbfs-history/README.md).
+argument is the program's arguments. A script that drives a window (by UI
+Automation, say) runs this way too, through PowerShell with
+`-WindowStyle Hidden`, or its console window takes the clicks.
 
 The VM's clock is the host's local time read as UTC (libvirt's default
 for Windows), hours off unless the runners have set it (`sync_vm_clock`

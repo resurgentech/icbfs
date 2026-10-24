@@ -1,6 +1,6 @@
 # Installs what the test runs need on a freshly created Windows VM: Go,
 # WinFsp (with its bin directory on the machine Path) and winfsp-tests,
-# and the .NET SDK and llvm-mingw for the native app.
+# and the .NET SDK and llvm-mingw for native apps built on icbfs.
 # Run by setup-vm.sh, over SSH, as Administrator. Safe to run again.
 param(
   [Parameter(Mandatory)][string]$GoVersion,     # e.g. 1.27.3
@@ -38,9 +38,9 @@ Install-Msi "$release/winfsp-$WinFspBuild.msi" 'winfsp.msi'
 Invoke-WebRequest "$release/winfsp-tests-$WinFspBuild.zip" -OutFile "$tmp\winfsp-tests.zip"
 Expand-Archive "$tmp\winfsp-tests.zip" -DestinationPath "$tmp\winfsp-tests" -Force
 
-# For the native app (cmd/icbfs-history): the .NET SDK, which builds the
-# WinUI front end, and a MinGW C compiler for cgo, which builds the Go
-# core as a DLL the front end loads.
+# For native apps built on icbfs: the .NET SDK, which builds a WinUI
+# front end, and a MinGW C compiler for cgo, which builds a Go core as a
+# DLL the front end loads.
 Invoke-WebRequest https://dot.net/v1/dotnet-install.ps1 -OutFile "$tmp\dotnet-install.ps1"
 & "$tmp\dotnet-install.ps1" -Version $DotnetVersion -InstallDir 'C:\Program Files\dotnet' | Out-Null
 $mingw = "llvm-mingw-$LlvmMingwVersion-ucrt-x86_64"

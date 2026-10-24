@@ -36,7 +36,7 @@ const DefaultHistoryTTL = 30 * 24 * time.Hour
 // older than the cache's TTL, so nothing lingers in it longer than that.
 //
 // Several processes can share one database (WAL, with a busy timeout):
-// a mount as of some time and the history app, say.
+// a mount as of some time and a program browsing history, say.
 type HistoryCache struct {
 	store Store
 	db    *sql.DB

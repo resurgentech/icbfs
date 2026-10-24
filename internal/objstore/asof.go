@@ -39,7 +39,7 @@ const asOfClockSlack = 2 * time.Second
 func NewAsOf(ctx context.Context, cache *HistoryCache, at time.Time) (*AsOf, error) {
 	store := cache.Store()
 	// A time clearly past, by the cache's reckoning of the store's clock,
-	// needs no request: a history app's slider makes a view per position.
+	// needs no request: a program browsing history makes a view per moment.
 	if now, err := cache.StoreNow(ctx); err == nil && at.Before(now.Add(-asOfClockSlack)) {
 		return &AsOf{cache: cache, store: store, at: at}, nil
 	}

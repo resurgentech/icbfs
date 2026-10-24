@@ -76,7 +76,7 @@ type History struct {
 // AddHistory registers the history cache flags on fset.
 func AddHistory(fset *flag.FlagSet) *History {
 	h := &History{}
-	fset.StringVar(&h.Dir, "history-cache-dir", objstore.DefaultHistoryCacheDir(), "as-of mounts: directory of the history caches, one per store and credential, kept between mounts and shared with every other as-of mount and the history app")
+	fset.StringVar(&h.Dir, "history-cache-dir", objstore.DefaultHistoryCacheDir(), "as-of mounts: directory of the history caches, one per store and credential, kept between mounts and shared with every other as-of mount and program reading history")
 	fset.DurationVar(&h.TTL, "history-ttl", objstore.DefaultHistoryTTL, "as-of mounts: how long the history cache keeps what it fetched (a purged file's name and times stay in it until then)")
 	return h
 }

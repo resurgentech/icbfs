@@ -497,10 +497,11 @@ runs on top of it.
   seconds, which is waited out (the store's clock reads in whole seconds).
 - Each object's version list is fetched once into a history cache, a
   local SQLite database shared by views of every time. Moving a view to
-  another time needs nothing more from the store, which is what lets the
-  history app's slider move fast. A mount keeps it between mounts, one
-  per store and credential, in the user's cache directory
-  (`objstore.HistoryCache`; WAL, so as-of mounts and the app share it).
+  another time needs nothing more from the store, which is what lets a
+  program that browses history move through time fast. A mount keeps it
+  between mounts, one per store and credential, in the user's cache
+  directory (`objstore.HistoryCache`; WAL, so as-of mounts and such
+  programs share it).
 - The cache keeps what each version says, too, which never changes: its
   metadata, and the content of the reads icbfs marks as metadata (its
   directory blocks, `.metadata` objects, symlink targets and the master
@@ -509,8 +510,8 @@ runs on top of it.
   later session as well.
 - The past doesn't change, except by a purge, which the cache can't see
   for itself. So each purge writes a new version of an empty object,
-  `<id>-purged`, after it has erased. The history app checks it every 30
-  seconds, and an as-of mount when it starts (`icbfs.ForgetPurged`); a
+  `<id>-purged`, after it has erased. A program browsing history checks it
+  every so often, and an as-of mount when it starts (`icbfs.ForgetPurged`); a
   new version since the cache last looked drops everything it kept of
   that filesystem. A view that finds a cached version erased forgets that
   key and asks again. And everything is fetched again once it's older
