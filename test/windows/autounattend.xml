@@ -87,10 +87,12 @@
         </AdministratorPassword>
       </UserAccounts>
       <!--
-        AutoLogon, once, so FirstLogonCommands below run with no one at
-        the console. They run in oobeSystem, once networking is up; a
-        failing command there doesn't abort Setup, as one in specialize
-        would.
+        AutoLogon, so FirstLogonCommands below run with no one at the
+        console, and after that at every boot, so there's always a desktop
+        for GUI programs (run-in-desktop.sh) and virsh screenshot. Windows
+        turns it off once LogonCount runs out. FirstLogonCommands run in
+        oobeSystem, once networking is up; a failing command there doesn't
+        abort Setup, as one in specialize would.
       -->
       <AutoLogon>
         <Password>
@@ -98,7 +100,7 @@
           <PlainText>true</PlainText>
         </Password>
         <Enabled>true</Enabled>
-        <LogonCount>1</LogonCount>
+        <LogonCount>999</LogonCount>
         <Username>Administrator</Username>
       </AutoLogon>
       <FirstLogonCommands>

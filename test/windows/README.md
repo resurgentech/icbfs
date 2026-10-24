@@ -77,10 +77,25 @@ of `setup-vm.sh`). Then shut the VM down and take a `clean-base` snapshot
 
 ### Seeing the Windows 11 desktop
 
-`autounattend.xml` turns on Remote Desktop. From the host, connect with
-Remmina (or any RDP client) to the VM's address (`virsh domifaddr
-icbfs-win11-test`) as `Administrator`, with the password in
-`work/vm-password`. `virt-manager` shows the console as well, but slowly.
+A program started over SSH runs in a session with no desktop, and a GUI
+one fails there. So `autounattend.xml` logs Administrator on at the
+console at every boot. For a VM made before it did, run
+`./enable-autologon.sh` once; the password goes over as a file, never on
+a command line.
+
+```
+./run-in-desktop.sh 'C:\path\to\app.exe' [shot.png] [seconds]
+```
+
+starts a program on that desktop (with a scheduled task that runs only
+while Administrator is logged on), waits, and saves a screenshot of the
+console (`virsh screenshot`), by default to `work/desktop.png`.
+
+To use the desktop yourself, connect with Remmina (or any RDP client) to
+the VM's address (`virsh domifaddr icbfs-win11-test`) as `Administrator`,
+with the password in `work/vm-password`. Remote Desktop takes over the
+console session: while you're connected, the console shows the lock
+screen. `virt-manager` shows the console as well, but slowly.
 
 Windows 11 Setup's TPM 2.0 and Secure Boot checks are skipped
 (`LabConfig` in `autounattend.xml`), so this VM boots as the Server one
