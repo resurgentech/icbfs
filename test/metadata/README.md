@@ -24,14 +24,22 @@ failure, and one icbfs keeps that the disk wouldn't is.
   extended attributes.
 - `run-windows.sh` runs the Windows tools on the Windows 11 test VM as
   Administrator: robocopy (`/COPY:DAT /DCOPY:DAT`, and `/COPY:DATSO /B`),
-  `xcopy /E /H /K /O /X /B`, `Copy-Item`, Explorer's copy (the shell's
-  `CopyHere`) and a DISM image captured and applied.
+  `xcopy /E /H /K /O /X /B`, `Copy-Item` and a DISM image captured and
+  applied, and first the Go tests that need NTFS and WinFsp. It runs on the
+  VM's logged-on desktop. Explorer's copy isn't among them: scripted (the
+  shell's `CopyHere`), it never finished.
 
 Both use a throwaway MinIO and a fresh filesystem, take a few minutes, and
 leave per tool, in `work/<platform>-<time>/`, the differences from the
 local disk (`<tool>.diff.txt`), what the copy kept of the description
 (`<tool>.check.txt`: the tool's own choices, when the local disk's copy
 lost them too) and the tool's output.
+
+Hard links aren't compared on Windows: WinFsp has no way for a filesystem
+to make one ("The request is not supported", before icbfs sees it).
+xcopy `/O` fails on icbfs: given an ACL of inherited entries at create
+(what `/O` copies), WinFsp computes the new item's descriptor without
+them, an empty DACL, and xcopy is then shut out of what it made.
 
 What can't be compared, by design: status-change times (no tool can set
 them), and on Linux creation times, which nothing can set; there a copy's

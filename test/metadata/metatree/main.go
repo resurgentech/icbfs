@@ -9,7 +9,7 @@
 //	metatree build SPEC DIR        make the tree in DIR (empty or missing)
 //	metatree check SPEC DIR        compare DIR with the description
 //	metatree dump DIR [FILE]       print DIR's metadata as JSON, or write it to FILE
-//	metatree diff [-since T] A B   compare two trees, field by field
+//	metatree diff [-since T] [-skip F,...] A B   compare two trees, field by field
 //
 // check and diff take a dump (a .json file) in place of a directory:
 // reading a tree moves its access times, so a tree read once, dumped, is
@@ -126,6 +126,7 @@ func main() {
 	case "diff":
 		fset := flag.NewFlagSet("diff", flag.ExitOnError)
 		since := fset.String("since", "", "times at or after this (RFC 3339) in both trees are the same: set by the copy")
+		skip := fset.String("skip", "", "fields not to compare, comma-separated: what the target can't keep (links, on a Windows mount)")
 		fset.Parse(os.Args[2:])
 		args := need(fset.Args(), 2)
 		var t time.Time
@@ -135,7 +136,13 @@ func main() {
 			}
 		}
 		var diffs []string
-		if diffs, err = diffTrees(args[0], args[1], t); err == nil {
+		skipped := map[string]bool{}
+		for _, f := range strings.Split(*skip, ",") {
+			if f != "" {
+				skipped[f] = true
+			}
+		}
+		if diffs, err = diffTrees(args[0], args[1], t, skipped); err == nil {
 			err = report(diffs)
 		}
 	default:
@@ -478,7 +485,7 @@ func showTime(t *time.Time) string {
 }
 
 // diffTrees compares two trees, every field either keeps.
-func diffTrees(a, b string, since time.Time) ([]string, error) {
+func diffTrees(a, b string, since time.Time, skip map[string]bool) ([]string, error) {
 	da, err := dump(a)
 	if err != nil {
 		return nil, err
@@ -529,6 +536,9 @@ func diffTrees(a, b string, since time.Time) ([]string, error) {
 		}
 		sort.Strings(names)
 		for _, k := range names {
+			if skip[k] {
+				continue
+			}
 			if fields[k] != other[k] {
 				diffs = append(diffs, fmt.Sprintf("%s: %s: %s, %s", p, k, orNone(fields[k]), orNone(other[k])))
 			}

@@ -126,12 +126,19 @@ func (d *driver) attributesFromAttr(typ icbfs.EntryType, a icbfs.Attr) uint32 {
 		}
 		return attrs
 	case icbfs.TypeSymlink:
-		// A directory symlink: the reparse point attribute tells clients to
-		// resolve it through GetReparsePoint.
+		// The reparse point attribute tells clients to resolve it through
+		// GetReparsePoint; a directory symlink is a directory too. Its own
+		// bits (Archive, Hidden) as a file's are.
+		attrs := uint32(windows.FILE_ATTRIBUTE_REPARSE_POINT)
 		if a.WindowsDirSymlink {
-			return windows.FILE_ATTRIBUTE_REPARSE_POINT | windows.FILE_ATTRIBUTE_DIRECTORY
+			attrs |= windows.FILE_ATTRIBUTE_DIRECTORY
 		}
-		return windows.FILE_ATTRIBUTE_REPARSE_POINT
+		if d.fsys.PrimaryWindows() {
+			if bits, ok := a.WindowsAttributes(); ok {
+				attrs |= bits &^ windows.FILE_ATTRIBUTE_DIRECTORY
+			}
+		}
+		return attrs
 	default:
 		if d.fsys.PrimaryWindows() {
 			if bits, ok := a.WindowsAttributes(); ok {
@@ -200,6 +207,7 @@ func (d *driver) SetBasicInfo(fs *winfsp.FileSystemRef, file uintptr, flags winf
 	if flags&winfsp.SetBasicInfoLastAccessTime != 0 {
 		a := timeFromFiletime(lastAccessTime)
 		atimeP = &a
+		h.keepAtime.Store(true)
 	}
 	if flags&winfsp.SetBasicInfoLastWriteTime != 0 {
 		m := timeFromFiletime(lastWriteTime)
@@ -420,7 +428,7 @@ func mergeSecurityDescriptor(base *windows.SECURITY_DESCRIPTOR, info windows.SEC
 		if err := abs.SetDACL(dacl, present, defaulted); err != nil {
 			return nil, err
 		}
-		if err := copyControl(abs, desc, info, windows.SE_DACL_PROTECTED, windows.SE_DACL_AUTO_INHERITED,
+		if err := copyControl(abs, desc, info, windows.SE_DACL_PROTECTED, windows.SE_DACL_AUTO_INHERITED, windows.SE_DACL_AUTO_INHERIT_REQ,
 			windows.PROTECTED_DACL_SECURITY_INFORMATION, windows.UNPROTECTED_DACL_SECURITY_INFORMATION); err != nil {
 			return nil, err
 		}
@@ -437,7 +445,7 @@ func mergeSecurityDescriptor(base *windows.SECURITY_DESCRIPTOR, info windows.SEC
 		if err := abs.SetSACL(sacl, present, defaulted); err != nil {
 			return nil, err
 		}
-		if err := copyControl(abs, desc, info, windows.SE_SACL_PROTECTED, windows.SE_SACL_AUTO_INHERITED,
+		if err := copyControl(abs, desc, info, windows.SE_SACL_PROTECTED, windows.SE_SACL_AUTO_INHERITED, windows.SE_SACL_AUTO_INHERIT_REQ,
 			windows.PROTECTED_SACL_SECURITY_INFORMATION, windows.UNPROTECTED_SACL_SECURITY_INFORMATION); err != nil {
 			return nil, err
 		}
@@ -452,23 +460,33 @@ func mergeSecurityDescriptor(base *windows.SECURITY_DESCRIPTOR, info windows.SEC
 	return merged, nil
 }
 
-// copyControl gives abs the new ACL's control flags with it: whether it's
-// protected from inheritance and whether it was made by auto-inheritance
-// (SDDL's P and AI), as desc has them or info says (SetSecurityInfo's
-// PROTECTED_ and UNPROTECTED_ flags). Without them a copy's ACL (robocopy
-// /SEC, xcopy /O) loses AI, and a protected one can come unprotected.
+// copyControl sets abs's protected and auto-inherited flags (SDDL's P and
+// AI) for a new ACL from desc, as NTFS does, measured: protection is set
+// by the new ACL's flag or info's PROTECTED_ flag, taken away only by
+// UNPROTECTED_, and otherwise stays as it was; the auto-inherited mark is
+// set when the caller asks for inheritance to be worked out (desc's
+// AUTO_INHERIT_REQ, as SetSecurityInfo and robocopy /SEC send it) and
+// otherwise cleared, so a plain SetFileSecurity of an AI descriptor
+// leaves it unmarked, as on NTFS.
 func copyControl(abs, desc *windows.SECURITY_DESCRIPTOR, info windows.SECURITY_INFORMATION,
-	protected, autoInherited windows.SECURITY_DESCRIPTOR_CONTROL, protect, unprotect windows.SECURITY_INFORMATION) error {
+	protected, autoInherited, autoInheritReq windows.SECURITY_DESCRIPTOR_CONTROL, protect, unprotect windows.SECURITY_INFORMATION) error {
 	ctl, _, err := desc.Control()
 	if err != nil {
 		return err
 	}
-	set := ctl & (protected | autoInherited)
+	old, _, err := abs.Control()
+	if err != nil {
+		return err
+	}
+	set := old & protected
 	switch {
-	case info&protect != 0:
-		set |= protected
 	case info&unprotect != 0:
-		set &^= protected
+		set = 0
+	case info&protect != 0 || ctl&protected != 0:
+		set = protected
+	}
+	if ctl&autoInheritReq != 0 {
+		set |= autoInherited
 	}
 	return abs.SetControl(protected|autoInherited, set)
 }

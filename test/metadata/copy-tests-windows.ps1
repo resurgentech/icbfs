@@ -36,8 +36,14 @@ Remove-Item $EnvFile -Force
 $store = @($env:ICBFS_STORE_ARGS -split " " | Where-Object { $_ })
 $fs = "metadata-" + (Get-Date -Format yyyyMMddHHmmss)
 & "$Src\icbfs-cli.exe" fs create @store -fs $fs -primary-windows 2>&1 | Set-Content -Encoding UTF8 "$Out\fs-create.log"
+# Access times recorded as NTFS records them here: Windows 11 leaves last
+# access updates off by default ("Disabled" in fsutil's answer), and
+# icbfs's default records them hourly, as NTFS does with them on.
+$atime = "hourly"
+if ((fsutil behavior query disablelastaccess) -match "Disabled") { $atime = "noatime" }
+Say "NTFS last access updates: $((fsutil behavior query disablelastaccess) -join ' '); icbfs mounted with -atime $atime"
 Start-Process "$Src\icbfs-winfsp.exe" -WindowStyle Hidden -RedirectStandardError "$Out\mount.log" -RedirectStandardOutput "$Out\mount.out" `
-    -ArgumentList ($store + @("-fs", $fs, $Drive)) | Out-Null
+    -ArgumentList ($store + @("-fs", $fs, "-atime", $atime, $Drive)) | Out-Null
 for ($i = 0; $i -lt 60 -and -not (Test-Path "$Drive\"); $i++) { Start-Sleep -Milliseconds 500 }
 if (-not (Test-Path "$Drive\")) { Say "FAIL  the icbfs mount never came up: see mount.log"; Finish 2 }
 
@@ -93,7 +99,9 @@ foreach ($t in $tools.Keys) {
     & $metatree dump $ref "$Out\$t.ref.json" 2>&1 | Set-Content -Encoding UTF8 "$Out\$t.ref-dump.log"
     & $metatree dump $dst "$Out\$t.icbfs.json" 2>&1 | Set-Content -Encoding UTF8 "$Out\$t.icbfs-dump.log"
     # metatree answers 0 (the same), 1 (differences) or 2 (couldn't compare).
-    $diff = @(& $metatree diff -since $since "$Out\$t.ref.json" "$Out\$t.icbfs.json" 2>$null)
+    # Hard links: WinFsp has no way for a filesystem to make one (the
+    # request is refused before icbfs sees it), so they aren't compared.
+    $diff = @(& $metatree diff -since $since -skip links "$Out\$t.ref.json" "$Out\$t.icbfs.json" 2>$null)
     $diffRc = $LASTEXITCODE
     $diff | Set-Content -Encoding UTF8 "$Out\$t.diff.txt"
     $check = @(& $metatree check $tree "$Out\$t.icbfs.json" 2>$null)

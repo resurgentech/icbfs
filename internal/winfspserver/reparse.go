@@ -215,6 +215,15 @@ func (d *driver) SetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 	// remove the placeholder with Rmdir, not Unlink (which fails on a
 	// directory with ErrIsDir); it's new and empty.
 	wasDir := h.typ == icbfs.TypeDir
+	// The placeholder's ACL (inherited, or given at create) and
+	// attributes are the symlink's, as on NTFS, where a symlink is that
+	// same file.
+	var keep icbfs.Attr
+	if h.typ != icbfs.TypeSymlink {
+		if keep, err = d.fsys.Stat(ctx(), h.key, h.typ); err != nil {
+			return toWinError(err)
+		}
+	}
 	// Replacing a placeholder isn't a delete anyone made: no trash entry.
 	pctx := icbfs.WithDeleteInfo(ctx(), icbfs.DeleteInfo{NoTrash: true})
 	if wasDir {
@@ -229,6 +238,11 @@ func (d *driver) SetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 	newUUID, _, err := d.fsys.Symlink(ctx(), parent.Key, base, target, 0, 0)
 	if err != nil {
 		return toWinError(err)
+	}
+	if bits, ok := keep.WindowsAttributes(); ok || keep.WindowsSDDL != nil {
+		if _, err := d.fsys.SetWindowsCreateMetadata(ctx(), newUUID, icbfs.TypeSymlink, bits&^windows.FILE_ATTRIBUTE_DIRECTORY, keep.WindowsSDDL); err != nil {
+			return toWinError(err)
+		}
 	}
 	if wasDir {
 		// Windows treats a directory symlink as a directory from now on

@@ -11,12 +11,14 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	winfsp "github.com/winfsp/go-winfsp"
 	"golang.org/x/sys/windows"
 
+	"github.com/resurgentech/icbfs/internal/acl"
 	"github.com/resurgentech/icbfs/internal/block"
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/namecache"
@@ -83,6 +85,14 @@ type fileHandle struct {
 	seeded   []byte // seeded content from Create, paired with etag
 
 	dirBuf winfsp.DirBuffer // directories only; zero value until first use
+
+	// keepAtime: the access time was set through this handle
+	// (SetFileTime), so its own reads don't record one, as on NTFS: a
+	// tool that restores a file's times and reads it back (DISM) leaves
+	// them as it set them.
+	keepAtime atomic.Bool
+	// wrote: content was written through this handle (see setArchive).
+	wrote atomic.Bool
 }
 
 // Root builds the winfsp.BehaviourBase for fsys, for winfsp.Mount. fsys
@@ -346,6 +356,7 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 		return 0, toWinError(err)
 	}
 	uid, gid := callerOwner()
+	parentSD := d.parentSD(parent.Attr)
 
 	const fileDirectoryFile = 0x00000001 // FILE_DIRECTORY_FILE, low byte of NtCreateFile's CreateOptions
 	// A directory symlink (SYMBOLIC_LINK_FLAG_DIRECTORY) is created with
@@ -364,7 +375,7 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 		// ACL given at creation is enforced (winfsp-tests'
 		// create_notraverse, create_restore, getfileattr).
 		if securityDescriptor != nil || fileAttributes&^windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
-			if attr, err = d.fsys.SetWindowsCreateMetadata(ctx(), newUUID, icbfs.TypeDir, fileAttributes, createSDDL(securityDescriptor)); err != nil {
+			if attr, err = d.fsys.SetWindowsCreateMetadata(ctx(), newUUID, icbfs.TypeDir, fileAttributes, createSDDL(securityDescriptor, parentSD, true)); err != nil {
 				return 0, toWinError(err)
 			}
 		}
@@ -386,7 +397,7 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 	//
 	// Windows sets Archive on every new file whatever the caller asked for
 	// (winfsp-tests' create_fileattr_test).
-	if attr, err = d.fsys.SetWindowsCreateMetadata(ctx(), newUUID, icbfs.TypeFile, fileAttributes|icbfs.WindowsAttrArchive, createSDDL(securityDescriptor)); err != nil {
+	if attr, err = d.fsys.SetWindowsCreateMetadata(ctx(), newUUID, icbfs.TypeFile, fileAttributes|icbfs.WindowsAttrArchive, createSDDL(securityDescriptor, parentSD, false)); err != nil {
 		return 0, toWinError(err)
 	}
 	// seeded empty, not nil: a just-created file's content really is
@@ -469,11 +480,18 @@ func (d *driver) Overwrite(fs *winfsp.FileSystemRef, file uintptr, attributes ui
 // cleaned up with FspCleanupDelete set: WinFsp's delete protocol, as gofs
 // implements it.
 func (d *driver) Cleanup(fs *winfsp.FileSystemRef, file uintptr, name string, cleanupFlags uint32) {
-	if cleanupFlags&winfsp.FspCleanupDelete == 0 {
-		return
-	}
 	h, ok := d.handle(file)
 	if !ok {
+		return
+	}
+	// WinFsp's own archive flag goes by the attributes the file had when
+	// it was written, so it misses Archive cleared after the write (DISM
+	// sets a restored file's attributes then); NTFS sets it on any file
+	// written through the handle, so this does too.
+	if (cleanupFlags&winfsp.FspCleanupSetArchiveBit != 0 || h.wrote.Load()) && cleanupFlags&winfsp.FspCleanupDelete == 0 {
+		d.setArchive(h)
+	}
+	if cleanupFlags&winfsp.FspCleanupDelete == 0 {
 		return
 	}
 	if h.stream != "" {
@@ -757,41 +775,80 @@ func (d *driver) releaseShared(h *fileHandle) {
 // owns an item is in its security descriptor.
 func callerOwner() (uid, gid uint32) { return 0, 0 }
 
-// createSDDL is a new item's security descriptor, as stored. One whose
-// DACL came from its folder's (entries marked inherited) is marked
-// auto-inherited, as NTFS marks it (SDDL's AI): WinFsp computes it
-// without the mark.
-func createSDDL(sd *windows.SECURITY_DESCRIPTOR) []byte {
+// createSDDL is a new item's security descriptor, as stored. WinFsp
+// gives one inherited from its folder without NTFS's marks: entries not
+// marked inherited (ID), the DACL not marked auto-inherited (AI). If it's
+// what the folder's ACL gives (acl.Inherit), the marked version is stored,
+// as NTFS stores it; one the creator supplied is kept as given.
+func createSDDL(sd *windows.SECURITY_DESCRIPTOR, parent *windows.SECURITY_DESCRIPTOR, isDir bool) []byte {
 	if sd == nil {
 		return nil
 	}
 	sddl := sd.String()
-	ctl, _, err := sd.Control()
-	if err != nil || ctl&(windows.SE_DACL_PROTECTED|windows.SE_DACL_AUTO_INHERITED) != 0 || !hasInheritedACE(sd) {
+	if parent == nil {
 		return []byte(sddl)
 	}
-	marked, err := windows.SecurityDescriptorFromString(sddl)
+	got, err := acl.Parse(sddl)
+	if err != nil || !got.HasDACL || got.DACLFlags != "" {
+		return []byte(sddl) // protected, or marked already
+	}
+	from, err := acl.Parse(parent.String())
 	if err != nil {
 		return []byte(sddl)
 	}
-	if err := marked.SetControl(windows.SE_DACL_AUTO_INHERITED, windows.SE_DACL_AUTO_INHERITED); err != nil {
+	want := acl.Inherit(from, isDir, got.Owner, got.Group)
+	if len(want.DACL) != len(got.DACL) {
+		return []byte(sddl)
+	}
+	for i, a := range want.DACL {
+		b := got.DACL[i]
+		if a.Type != b.Type || a.SID != b.SID || acl.MapGeneric(a.Mask) != acl.MapGeneric(b.Mask) ||
+			a.Flags&^acl.Inherited != b.Flags&^acl.Inherited {
+			return []byte(sddl)
+		}
+	}
+	want.SACL = got.SACL
+	// In Windows's own SDDL (FA, not 0x1f01ff), as every other
+	// descriptor stored here is.
+	marked, err := windows.SecurityDescriptorFromString(want.String())
+	if err != nil {
 		return []byte(sddl)
 	}
 	return []byte(marked.String())
 }
 
-// hasInheritedACE reports whether sd's DACL has an entry inherited from a
-// parent.
-func hasInheritedACE(sd *windows.SECURITY_DESCRIPTOR) bool {
-	dacl, _, err := sd.DACL()
-	if err != nil || dacl == nil {
-		return false
+// parentSD is a folder's security descriptor (from the attributes its
+// resolution read: no request), for what a new item in it inherits
+// (createSDDL); nil on a primary-POSIX filesystem, or if it can't be read.
+func (d *driver) parentSD(attr icbfs.Attr) *windows.SECURITY_DESCRIPTOR {
+	if !d.fsys.PrimaryWindows() {
+		return nil
 	}
-	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
-		var ace *windows.ACCESS_ALLOWED_ACE
-		if windows.GetAce(dacl, i, &ace) == nil && ace.Header.AceFlags&windows.INHERITED_ACE != 0 {
-			return true
-		}
+	sd, err := d.securityDescriptorFor(icbfs.TypeDir, attr)
+	if err != nil {
+		return nil
 	}
-	return false
+	return sd
+}
+
+// setArchive sets a modified file's Archive attribute as its last handle
+// closes, as NTFS does (WinFsp's FspCleanupSetArchiveBit): whatever
+// attributes were set while it was open, a backup must see it changed.
+// One metadata write, only if it isn't set already.
+func (d *driver) setArchive(h *fileHandle) {
+	if !d.fsys.PrimaryWindows() {
+		return
+	}
+	key, typ := h.owner()
+	if typ != icbfs.TypeFile {
+		return
+	}
+	attr, err := d.fsys.Stat(ctx(), key, typ)
+	if err != nil {
+		return
+	}
+	if bits, ok := attr.WindowsAttributes(); ok && bits&windows.FILE_ATTRIBUTE_ARCHIVE == 0 {
+		_, _ = d.fsys.SetWindowsAttributes(ctx(), key, typ, bits|windows.FILE_ATTRIBUTE_ARCHIVE)
+		d.changedItem(h)
+	}
 }

@@ -21,7 +21,9 @@ func (d *driver) Read(fs *winfsp.FileSystemRef, file uintptr, buf []byte, offset
 	data := open.ReadAt(int64(offset), int64(len(buf)))
 	// Best-effort, deliberately not checked — a lost race on this
 	// bump must never fail the read itself.
-	_ = open.TouchAtime(ctx())
+	if !h.keepAtime.Load() {
+		_ = open.TouchAtime(ctx())
+	}
 	if len(data) == 0 {
 		if int64(offset) >= open.Size() {
 			return 0, io.EOF
@@ -68,6 +70,7 @@ func (d *driver) Write(fs *winfsp.FileSystemRef, file uintptr, buf []byte, offse
 	if err := open.WriteAt(buf, off); err != nil {
 		return 0, toWinError(err)
 	}
+	h.wrote.Store(true)
 
 	// Stat reflects the last flush, not this write; report the session's
 	// current size, as ReadAt reads its own writes.
