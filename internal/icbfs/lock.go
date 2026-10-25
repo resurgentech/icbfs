@@ -11,6 +11,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/resurgentech/icbfs/internal/block"
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/internal/pb"
 )
@@ -75,9 +76,9 @@ func readLockRanges(ctx context.Context, store objstore.Store, lockKey string) (
 		if err := proto.Unmarshal(data, &l); err != nil {
 			return nil, nil, err
 		}
-	}
-	if l.Layout > lockLayout {
-		return nil, nil, fmt.Errorf("lock layout %d: %w", l.Layout, ErrNewerFormat)
+		if err := block.CheckLayout("lock", l.Layout, lockLayout); err != nil {
+			return nil, nil, err
+		}
 	}
 	return &l, obj, nil
 }

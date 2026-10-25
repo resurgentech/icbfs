@@ -85,8 +85,8 @@ func TestSyncToICBFS(t *testing.T) {
 		return rep
 	}
 
-	local.Put("A/Adams/will.pdf", "the will of A. Adams", t0)
-	local.Put("A/Adams/deed.pdf", "a deed", t0.Add(time.Second))
+	local.Put("A/Apollo/plan.pdf", "the plan for Apollo", t0)
+	local.Put("A/Apollo/budget.pdf", "a budget", t0.Add(time.Second))
 	local.Put("B/memo.docx", "memo", t0.Add(2*time.Second))
 	pass()
 	if got, want := treeOf(t, remote), local.Tree(); got != want {
@@ -94,11 +94,11 @@ func TestSyncToICBFS(t *testing.T) {
 	}
 	es, _ := remote.List(ctx)
 	for _, x := range es {
-		if x.Path == "A/Adams/will.pdf" && !x.ModTime.Equal(t0) {
+		if x.Path == "A/Apollo/plan.pdf" && !x.ModTime.Equal(t0) {
 			t.Fatalf("time not kept: %v", x.ModTime)
 		}
 	}
-	if h, ok := remote.StoredHash(ctx, "A/Adams/will.pdf"); !ok || len(h) != 64 {
+	if h, ok := remote.StoredHash(ctx, "A/Apollo/plan.pdf"); !ok || len(h) != 64 {
 		t.Fatalf("no stored hash: %q", h)
 	}
 	if rep := pass(); rep.Planned != 0 {
@@ -106,26 +106,26 @@ func TestSyncToICBFS(t *testing.T) {
 	}
 
 	// Rename: the same item, its history kept, no trash.
-	before, _ := remote.Stat(ctx, "A/Adams/will.pdf")
-	local.Rename("A/Adams/will.pdf", "A/Adams/Last Will.pdf")
+	before, _ := remote.Stat(ctx, "A/Apollo/plan.pdf")
+	local.Rename("A/Apollo/plan.pdf", "A/Apollo/Final Plan.pdf")
 	if rep := pass(); rep.Renames != 1 {
 		t.Fatalf("renames %d", rep.Renames)
 	}
-	after, err := remote.Stat(ctx, "A/Adams/Last Will.pdf")
+	after, err := remote.Stat(ctx, "A/Apollo/Final Plan.pdf")
 	if err != nil || after.ID != before.ID || after.Version != before.Version {
 		t.Fatalf("rename lost the item: %+v vs %+v (%v)", after, before, err)
 	}
 
 	// A delete, seen alone, then the file again under another name: it
 	// comes back from the trash.
-	local.Delete("A/Adams/deed.pdf")
+	local.Delete("A/Apollo/budget.pdf")
 	pass()
-	trash, _ := remote.TrashedFiles(ctx, int64(len("a deed")))
+	trash, _ := remote.TrashedFiles(ctx, int64(len("a budget")))
 	if len(trash) != 1 {
 		t.Fatalf("trash %+v", trash)
 	}
 	deed, _ := fs.ListTrash(ctx, icbfs.TrashOptions{})
-	local.Put("C/deed (copy).pdf", "a deed", t0.Add(time.Second))
+	local.Put("C/deed (copy).pdf", "a budget", t0.Add(time.Second))
 	if rep := pass(); rep.Renames != 1 {
 		t.Fatalf("not restored: renames %d", rep.Renames)
 	}
@@ -204,9 +204,9 @@ func TestCreationTimesCarryToICBFS(t *testing.T) {
 	remote, fs := open(t)
 	local := memside.NewFolder(true, 100*time.Nanosecond).WithCreated()
 	born := time.Date(2019, 3, 4, 5, 6, 7, 800, time.UTC)
-	it := local.Put("Matters/brief.docx", "b", t0)
+	it := local.Put("Reports/brief.docx", "b", t0)
 	it.Created = born
-	dir, _ := local.Get("Matters")
+	dir, _ := local.Get("Reports")
 	dir.Created = born.Add(-time.Hour)
 	e := syncer.New(syncer.Config{Name: "t", Local: local, Remote: remote, State: &syncer.MemState{}, CaseInsensitive: true, SpoolDir: t.TempDir()})
 	if rep := e.Pass(ctx); len(rep.Errors) > 0 {
@@ -224,10 +224,10 @@ func TestCreationTimesCarryToICBFS(t *testing.T) {
 		}
 		return attr.Btime
 	}
-	if got := btime("Matters/brief.docx", icbfs.TypeFile); !got.Equal(born) {
+	if got := btime("Reports/brief.docx", icbfs.TypeFile); !got.Equal(born) {
 		t.Fatalf("file created %v, want %v", got, born)
 	}
-	if got := btime("Matters", icbfs.TypeDir); !got.Equal(born.Add(-time.Hour)) {
+	if got := btime("Reports", icbfs.TypeDir); !got.Equal(born.Add(-time.Hour)) {
 		t.Fatalf("folder created %v", got)
 	}
 	if rep := e.Pass(ctx); len(rep.Errors) > 0 || rep.Planned != 0 {
@@ -237,10 +237,10 @@ func TestCreationTimesCarryToICBFS(t *testing.T) {
 	if rep := e.Pass(ctx); len(rep.Errors) > 0 || rep.Planned != 1 {
 		t.Fatalf("%+v", rep)
 	}
-	if got := btime("Matters/brief.docx", icbfs.TypeFile); !got.Equal(it.Created) {
+	if got := btime("Reports/brief.docx", icbfs.TypeFile); !got.Equal(it.Created) {
 		t.Fatalf("file created after a change %v", got)
 	}
-	st, _ := remote.Stat(ctx, "Matters/brief.docx")
+	st, _ := remote.Stat(ctx, "Reports/brief.docx")
 	if n := countVersions(t, fs, st.ID); n != 1 {
 		t.Fatalf("a creation time change re-uploaded: %d versions", n)
 	}

@@ -1,31 +1,24 @@
 package icbfs
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/resurgentech/icbfs/internal/block"
 	"github.com/resurgentech/icbfs/internal/pb"
 )
 
 // The records kept beside the tree — trash entries, named versions and
 // origin records — are Protobuf (spec/proto/icbfs/v1/records.proto), like
-// every other object. Ones written before that are JSON, which these
-// decoders still read: a JSON record starts with '{', and none of these
-// messages can (their first byte is field 1's tag, or there is none).
-// The JSON tags on the Go types are that legacy format's names.
+// every other object.
 
-// recordLayout is the layout of each record message this package writes.
+// recordLayout is the layout of each record message this package reads
+// and writes.
 const recordLayout = 1
 
-func isLegacyJSON(data []byte) bool { return len(data) > 0 && data[0] == '{' }
-
 func checkRecordLayout(kind string, layout uint32) error {
-	if layout > recordLayout {
-		return fmt.Errorf("%s layout %d: %w", kind, layout, ErrNewerFormat)
-	}
-	return nil
+	return block.CheckLayout(kind, layout, recordLayout)
 }
 
 func encodeTrashEntry(e TrashEntry) ([]byte, error) {
@@ -39,9 +32,6 @@ func encodeTrashEntry(e TrashEntry) ([]byte, error) {
 
 func decodeTrashEntry(data []byte) (TrashEntry, error) {
 	var e TrashEntry
-	if isLegacyJSON(data) {
-		return e, json.Unmarshal(data, &e)
-	}
 	var m pb.TrashEntry
 	if err := proto.Unmarshal(data, &m); err != nil {
 		return e, fmt.Errorf("decode trash entry: %w", err)
@@ -66,9 +56,6 @@ func encodeNamedVersion(nv NamedVersion) ([]byte, error) {
 
 func decodeNamedVersion(data []byte) (NamedVersion, error) {
 	var nv NamedVersion
-	if isLegacyJSON(data) {
-		return nv, json.Unmarshal(data, &nv)
-	}
 	var m pb.NamedVersion
 	if err := proto.Unmarshal(data, &m); err != nil {
 		return nv, fmt.Errorf("decode version name: %w", err)
@@ -90,9 +77,6 @@ func encodeOriginRecord(r OriginRecord) ([]byte, error) {
 
 func decodeOriginRecord(data []byte) (OriginRecord, error) {
 	var r OriginRecord
-	if isLegacyJSON(data) {
-		return r, json.Unmarshal(data, &r)
-	}
 	var m pb.OriginRecord
 	if err := proto.Unmarshal(data, &m); err != nil {
 		return r, fmt.Errorf("decode origin record: %w", err)

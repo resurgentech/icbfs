@@ -89,8 +89,8 @@ func TestFolderSide(t *testing.T) {
 func TestFolderToDrive(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	put(t, root, "Matter/brief.pdf", "the brief", t0)
-	put(t, root, "Matter/exhibit.pdf", "exhibit A", t0)
+	put(t, root, "Reports/brief.pdf", "the brief", t0)
+	put(t, root, "Reports/exhibit.pdf", "exhibit A", t0)
 	local, err := folderside.Open(root, folderside.Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -106,17 +106,17 @@ func TestFolderToDrive(t *testing.T) {
 		return rep
 	}
 	pass()
-	if tree := remote.Tree(); tree != "Matter/ Matter/brief.pdf=the brief Matter/exhibit.pdf=exhibit A" {
+	if tree := remote.Tree(); tree != "Reports/ Reports/brief.pdf=the brief Reports/exhibit.pdf=exhibit A" {
 		t.Fatalf("drive %s", tree)
 	}
-	if err := os.Rename(filepath.Join(root, "Matter", "brief.pdf"), filepath.Join(root, "Matter", "Brief (filed).pdf")); err != nil {
+	if err := os.Rename(filepath.Join(root, "Reports", "brief.pdf"), filepath.Join(root, "Reports", "Brief (filed).pdf")); err != nil {
 		t.Fatal(err)
 	}
 	rep := pass()
-	if rep.Renames != 1 || remote.Reads["Matter/brief.pdf"] != 0 {
+	if rep.Renames != 1 || remote.Reads["Reports/brief.pdf"] != 0 {
 		t.Fatalf("renames %d, drive reads %v", rep.Renames, remote.Reads)
 	}
-	if tree := remote.Tree(); tree != "Matter/ Matter/Brief (filed).pdf=the brief Matter/exhibit.pdf=exhibit A" {
+	if tree := remote.Tree(); tree != "Reports/ Reports/Brief (filed).pdf=the brief Reports/exhibit.pdf=exhibit A" {
 		t.Fatalf("drive %s", tree)
 	}
 }

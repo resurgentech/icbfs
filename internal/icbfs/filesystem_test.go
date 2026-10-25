@@ -18,12 +18,10 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/minio"
 
 	"github.com/resurgentech/icbfs/internal/testutil/minioimage"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/resurgentech/icbfs/internal/block"
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/internal/objstore/s3store"
-	"github.com/resurgentech/icbfs/internal/pb"
 	"github.com/resurgentech/icbfs/internal/testutil"
 )
 
@@ -356,80 +354,6 @@ func TestInternalStateIsNotXattrs(t *testing.T) {
 	}
 	if string(got.App[AppSyncHash]) != "abc123" {
 		t.Fatalf("app data = %v", got.App)
-	}
-}
-
-// TestLegacyXattrLayoutIsSplitOnRead: a .metadata record written before
-// the split (layout 0) kept icbfs's state in xattrs under fixed names;
-// reading it puts each in its own field, leaving only users' xattrs, and
-// the next write stores the new layout.
-func TestLegacyXattrLayoutIsSplitOnRead(t *testing.T) {
-	fsys, store := newTestFilesystem(t)
-	ctx := context.Background()
-	uuid, _, _, err := fsys.Create(ctx, fsys.RootKey(), "legacy.txt", 0644, 0, 0)
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	legacy, err := proto.Marshal(&pb.Metadata{Mode: 0644, Nlink: 1, Xattrs: map[string][]byte{
-		"user.tag":                []byte("mine"),
-		"windows.acl":             []byte("O:BAG:BA"),
-		"windows.attributes":      {byte(WindowsAttrReadOnly)},
-		"windows.reparse":         []byte("\x01\x02\x03\x04"),
-		"system.posix_acl_access": []byte("acl"),
-		"user.sync.sha256":        []byte("abc123"),
-		"user.drive.contentType":  []byte("text/plain"),
-		"user.side.base":          []byte("v1"),
-	}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Put(ctx, metadataObjectKey(uuid), bytes.NewReader(legacy), nil, ""); err != nil {
-		t.Fatal(err)
-	}
-
-	check := func(what string) {
-		t.Helper()
-		got, err := fsys.Stat(ctx, uuid, TypeFile)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(got.Xattrs) != 1 || string(got.Xattrs["user.tag"]) != "mine" {
-			t.Fatalf("%s: xattrs = %v, want only user.tag", what, got.Xattrs)
-		}
-		if sddl, _ := got.WindowsACL(); string(sddl) != "O:BAG:BA" {
-			t.Fatalf("%s: Windows ACL = %q", what, sddl)
-		}
-		if bits, ok := got.WindowsAttributes(); !ok || bits != WindowsAttrReadOnly {
-			t.Fatalf("%s: Windows attributes = %#x, %v", what, bits, ok)
-		}
-		if buf, _ := got.GenericReparse(); len(buf) != 4 {
-			t.Fatalf("%s: reparse = %v", what, buf)
-		}
-		if string(got.PosixACLAccess) != "acl" {
-			t.Fatalf("%s: POSIX ACL = %q", what, got.PosixACLAccess)
-		}
-		if string(got.App[AppSyncHash]) != "abc123" || string(got.App[AppDriveContentType]) != "text/plain" || string(got.App[AppSidePrefix+"base"]) != "v1" {
-			t.Fatalf("%s: app data = %v", what, got.App)
-		}
-	}
-	check("read")
-	// A write stores the new layout; reading it gives the same.
-	if _, err := fsys.SetXattr(ctx, uuid, TypeFile, "user.more", []byte("x"), XattrAny); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fsys.RemoveXattr(ctx, uuid, TypeFile, "user.more"); err != nil {
-		t.Fatal(err)
-	}
-	check("after a write")
-	body, _, err := store.Get(ctx, metadataObjectKey(uuid))
-	if err != nil {
-		t.Fatal(err)
-	}
-	data, _ := io.ReadAll(body)
-	body.Close()
-	var m pb.Metadata
-	if err := proto.Unmarshal(data, &m); err != nil || m.Layout != metadataLayout {
-		t.Fatalf("stored layout = %d, %v", m.Layout, err)
 	}
 }
 
@@ -919,58 +843,6 @@ func TestDirectoryMetadataObject(t *testing.T) {
 	}
 	if _, err := store.Head(ctx, metadataObjectKey(dir)); !objstore.IsNotFound(err) {
 		t.Fatalf("dir .metadata after Rmdir: err = %v, want not found", err)
-	}
-}
-
-// TestLegacyDirectoryMigratesOnFirstWrite covers a directory created
-// before directories had .metadata (attributes in its block's native
-// metadata): it reads correctly as-is, and its first attribute write
-// moves everything into .metadata without losing any of it.
-func TestLegacyDirectoryMigratesOnFirstWrite(t *testing.T) {
-	fsys, store := newTestFilesystem(t)
-	ctx := context.Background()
-	root := fsys.RootKey()
-
-	key, err := fsys.newKey()
-	if err != nil {
-		t.Fatalf("newKey: %v", err)
-	}
-	empty, err := (&block.Block{Kind: block.Leaf}).Encode()
-	if err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	legacyMtime := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
-	native := map[string]string{
-		dirMetaMode: "493", dirMetaUid: "11", dirMetaGid: "12", dirMetaNlink: "1",
-		dirMetaMtime: fmt.Sprint(legacyMtime.UnixNano()),
-	}
-	if _, err := store.Put(ctx, key, bytes.NewReader(empty), native, ""); err != nil {
-		t.Fatalf("put legacy block: %v", err)
-	}
-	if err := fsys.insertEntry(ctx, root, "old", key, TypeDir); err != nil {
-		t.Fatalf("insert: %v", err)
-	}
-
-	attr, err := fsys.Stat(ctx, key, TypeDir)
-	if err != nil {
-		t.Fatalf("stat legacy: %v", err)
-	}
-	if attr.Mode != 0755 || attr.Uid != 11 || attr.Gid != 12 || !attr.Mtime.Equal(legacyMtime) {
-		t.Fatalf("legacy attr = %+v", attr)
-	}
-
-	if err := fsys.TouchAtime(ctx, key, TypeDir); err != nil {
-		t.Fatalf("TouchAtime: %v", err)
-	}
-	if _, err := store.Head(ctx, metadataObjectKey(key)); err != nil {
-		t.Fatalf(".metadata after first write: %v", err)
-	}
-	after, err := fsys.Stat(ctx, key, TypeDir)
-	if err != nil {
-		t.Fatalf("stat migrated: %v", err)
-	}
-	if after.Mode != 0755 || after.Uid != 11 || after.Gid != 12 || !after.Mtime.Equal(legacyMtime) || after.Atime.IsZero() {
-		t.Fatalf("migrated attr = %+v", after)
 	}
 }
 

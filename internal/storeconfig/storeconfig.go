@@ -5,7 +5,6 @@
 package storeconfig
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 )
@@ -100,31 +99,4 @@ func (c Config) String() string {
 		return fmt.Sprintf("Azure container %s in %s", c.Azure.Container, c.Azure.ServiceURL())
 	}
 	return fmt.Sprintf("bucket %s via %s", c.S3.Bucket, c.S3.Endpoint)
-}
-
-// UnmarshalJSON reads a Config, and the form configurations had before
-// there was more than one kind of store: an S3 section's fields at the top
-// ({"endpoint": ..., "bucket": ..., "accessKey": ...}).
-func (c *Config) UnmarshalJSON(b []byte) error {
-	type plain Config
-	var v struct {
-		plain
-		Endpoint  string `json:"endpoint"`
-		Region    string `json:"region"`
-		Bucket    string `json:"bucket"`
-		AccessKey string `json:"accessKey"`
-		SecretKey string `json:"secretKey"`
-	}
-	if err := json.Unmarshal(b, &v); err != nil {
-		return err
-	}
-	*c = Config(v.plain)
-	flat := S3{Endpoint: v.Endpoint, Region: v.Region, Bucket: v.Bucket, AccessKey: v.AccessKey, SecretKey: v.SecretKey}
-	if flat != (S3{}) {
-		if c.S3 != (S3{}) || c.Azure != (Azure{}) || (c.Kind != "" && c.Kind != KindS3) {
-			return errors.New("a store's settings go in its section (\"s3\" or \"azure\"), not at the top as well")
-		}
-		c.S3 = flat
-	}
-	return nil
 }

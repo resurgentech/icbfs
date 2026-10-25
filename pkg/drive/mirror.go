@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-// A Mirror keeps a drive matching one source of documents (a SharePoint
-// library, say): a sync daemon says what each source item is
+// A Mirror keeps a drive matching one source of documents (a WebDAV
+// share, say): a sync daemon says what each source item is
 // now, and the mirror works out what that means on the drive, keyed by
 // the item's origin (the source drive and the item's id there).
 //

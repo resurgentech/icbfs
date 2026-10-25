@@ -321,7 +321,7 @@ func (f *Filesystem) undelete(ctx context.Context, e TrashEntry) error {
 	}
 	if e.Type != TypeDir {
 		// The last unlink left nlink 0 in .metadata; it has a name again.
-		return f.writeMetadata(ctx, e.ItemID, e.Type, true, func(a *Attr) { a.Nlink = 1 })
+		return f.writeMetadata(ctx, e.ItemID, true, func(a *Attr) { a.Nlink = 1 })
 	}
 	return nil
 }

@@ -18,7 +18,7 @@ import (
 )
 
 // Drive is one place in some backend's storage: a whole icbfs filesystem
-// or a directory in one, and later a SharePoint library, a file share, a
+// or a directory in one, and later a WebDAV share, a file share, a
 // Git repository. Paths are relative to the drive's root, '/'-separated,
 // with or without a leading '/'. An operation the backend can't do
 // returns ErrNotSupported.

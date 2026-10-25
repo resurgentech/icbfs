@@ -49,7 +49,7 @@ import (
 	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
 )
 
-const usage = `usage: icbfs-cli fs create|list|describe|resize|archive|prune [flags]
+const usage = `usage: icbfs-cli fs create|list|describe|check|resize|archive|prune [flags]
        icbfs-cli names create|list|delete [flags]
        icbfs-cli trash list|restore [flags]
 run "icbfs-cli <group> <command> -h" for a command's flags`

@@ -5,9 +5,7 @@ package icbfs
 
 import (
 	"errors"
-	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/cespare/xxhash/v2"
@@ -33,9 +31,15 @@ var (
 	ErrNoSpace         = errors.New("no space left on this filesystem")
 	ErrInvalidRename   = errors.New("new path is inside the directory being renamed")
 	ErrInvalidArgument = errors.New("invalid argument")
+	// ErrTooManyFilesystems is a new filesystem in a bucket that holds
+	// MaxFilesystems already.
+	ErrTooManyFilesystems = errors.New("this bucket holds as many filesystems as it can")
 	// ErrNewerFormat is an object, or the filesystem as a whole, in a
 	// format newer than this build knows (see FormatVersion).
 	ErrNewerFormat = block.ErrNewerFormat
+	// ErrUnknownFormat is an object, or the filesystem as a whole, that
+	// doesn't say it's in a format this build knows.
+	ErrUnknownFormat = block.ErrUnknownFormat
 )
 
 // The Windows FILE_ATTRIBUTE_* bits stored for an item: Win32's values,
@@ -82,9 +86,7 @@ func (a Attr) GenericReparse() (buf []byte, ok bool) {
 //   - For a directory (root included): everything is in its .metadata,
 //     mtime included (its block needn't change when its entries do), and
 //     ctime moves whenever an entry is added or removed; size comes from
-//     its block. A directory from before directories had .metadata keeps
-//     them in its block's native metadata (dirAttrFromObject) until its
-//     first attribute write migrates them.
+//     its block.
 type Attr struct {
 	Mode  uint32 // permission bits only (e.g. 0644) — type bits are not stored here
 	Uid   uint32
@@ -132,33 +134,6 @@ type Attr struct {
 
 	// nextStreamID is the last stream id handed out (see Streams).
 	nextStreamID uint64
-}
-
-// --- Legacy directory attributes: native object metadata on the block
-// object, read only for directories created before directories had
-// .metadata (see Attr's doc comment). Never written any more. ---
-
-const (
-	dirMetaMode    = "mode"
-	dirMetaUid     = "uid"
-	dirMetaGid     = "gid"
-	dirMetaNlink   = "nlink"
-	dirMetaMtime   = "mtime"
-	dirMetaAtime   = "atime"
-	dirMetaWinAttr = "winattr"
-)
-
-func parseMetaUint(m map[string]string, key string) uint32 {
-	v, _ := strconv.ParseUint(m[key], 10, 32)
-	return uint32(v)
-}
-
-func parseMetaTime(m map[string]string, key string) time.Time {
-	v, err := strconv.ParseInt(m[key], 10, 64)
-	if err != nil {
-		return time.Time{}
-	}
-	return time.Unix(0, v).UTC()
 }
 
 // --- File/symlink attributes: the dedicated <uuid>.metadata object,
@@ -232,12 +207,8 @@ func decodeFileMetadata(data []byte) (Attr, error) {
 	if err := proto.Unmarshal(data, &m); err != nil {
 		return Attr{}, err
 	}
-	if m.Layout > metadataLayout {
-		return Attr{}, fmt.Errorf("metadata layout %d: %w", m.Layout, ErrNewerFormat)
-	}
-	atime := timeOrZero(m.Atime)
-	if atime.IsZero() && m.AtimeUnixNano != 0 {
-		atime = time.Unix(0, m.AtimeUnixNano).UTC() // legacy field
+	if err := block.CheckLayout("metadata", m.Layout, metadataLayout); err != nil {
+		return Attr{}, err
 	}
 	mtimeOverride := timeOrZero(m.MtimeOverride)
 	btimeOverride := timeOrZero(m.BtimeOverride)
@@ -250,7 +221,7 @@ func decodeFileMetadata(data []byte) (Attr, error) {
 		PosixACLAccess:  m.PosixAclAccess,
 		PosixACLDefault: m.PosixAclDefault,
 		App:             m.App,
-		Atime:           atime,
+		Atime:           timeOrZero(m.Atime),
 		// Only the explicit override, if any; combineFileAttr falls back to
 		// the content's time.
 		Mtime:             mtimeOverride,
@@ -269,69 +240,12 @@ func decodeFileMetadata(data []byte) (Attr, error) {
 			a.WindowsAttrs, a.HasWindowsAttrs = *w.Attributes&windowsAttrMask, true
 		}
 	}
-	if m.Layout == 0 {
-		fromLegacyXattrs(&a)
-	}
 	return a, nil
 }
 
-// metadataLayout is the .metadata layout this package writes: users'
-// xattrs apart from icbfs's own state.
+// metadataLayout is the .metadata layout this package reads and writes:
+// users' xattrs apart from icbfs's own state.
 const metadataLayout = 1
-
-// legacyAppXattrs are the xattr names icbfs's tools used in layout-0
-// records, and the App keys they are now.
-var legacyAppXattrs = map[string]string{
-	"user.sync.sha256":       AppSyncHash,
-	"user.drive.contentType": AppDriveContentType,
-	"user.drive.origin":      AppDriveOrigin,
-}
-
-// fromLegacyXattrs moves a layout-0 record's internal entries out of
-// Xattrs into their own fields, leaving only users' xattrs.
-func fromLegacyXattrs(a *Attr) {
-	take := func(name string) ([]byte, bool) {
-		v, ok := a.Xattrs[name]
-		if ok {
-			delete(a.Xattrs, name)
-		}
-		return v, ok
-	}
-	if v, ok := take("windows.acl"); ok && len(v) > 0 {
-		a.WindowsSDDL = v
-	}
-	if v, ok := take("windows.attributes"); ok && len(v) > 0 {
-		a.WindowsAttrs, a.HasWindowsAttrs = uint32(v[0])&windowsAttrMask, true
-	}
-	if v, ok := take("windows.reparse"); ok && len(v) > 0 {
-		a.Reparse = v
-	}
-	if _, ok := take("windows.symlinkd"); ok {
-		a.WindowsDirSymlink = true
-	}
-	if v, ok := take("system.posix_acl_access"); ok {
-		a.PosixACLAccess = v
-	}
-	if v, ok := take("system.posix_acl_default"); ok {
-		a.PosixACLDefault = v
-	}
-	for name := range a.Xattrs {
-		key, ok := legacyAppXattrs[name]
-		if !ok && strings.HasPrefix(name, "user.side.") {
-			key, ok = AppSidePrefix+strings.TrimPrefix(name, "user.side."), true
-		}
-		if ok {
-			if a.App == nil {
-				a.App = map[string][]byte{}
-			}
-			a.App[key] = a.Xattrs[name]
-			delete(a.Xattrs, name)
-		}
-	}
-	if len(a.Xattrs) == 0 {
-		a.Xattrs = nil
-	}
-}
 
 // App keys of icbfs's own tools.
 const (

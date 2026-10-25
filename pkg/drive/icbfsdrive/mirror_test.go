@@ -40,7 +40,7 @@ func (s *readCounter) List(ctx context.Context, prefix string) ([]objstore.Objec
 	return s.Store.List(ctx, prefix)
 }
 
-const sp = "sharepoint:site/library"
+const srcDrive = "webdav:docs"
 
 // source is a stand-in for a source item at one version: Apply calls its
 // Open only when the bytes are needed, and the test counts how often.
@@ -50,7 +50,7 @@ type source struct {
 
 func (s *source) item(id, version, path, body string, mod time.Time) drive.SourceItem {
 	return drive.SourceItem{
-		Origin: drive.Origin{ID: id, Version: version, Path: "/sp" + path},
+		Origin: drive.Origin{ID: id, Version: version, Path: "/src" + path},
 		Path:   path, Type: drive.TypeFile, ModTime: mod, ContentType: "text/plain",
 		Open: func(context.Context) (io.ReadCloser, error) {
 			s.opens.Add(1)
@@ -75,7 +75,7 @@ func actions(t *testing.T, what string, a drive.Applied, err error, want ...driv
 	return a
 }
 
-// TestMirror follows a SharePoint mirror through what its source does: a
+// TestMirror follows a mirror through what its source does: a
 // new file, versions, a move, a delete and the recycle bin bringing it
 // back, a folder deleted and shared again, a bad pass undone. Each source
 // item is applied as it is now; the mirror decides what that means, and
@@ -94,14 +94,14 @@ func TestMirror(t *testing.T) {
 			if !indexed {
 				d = plainDrive{idrv}
 			}
-			m := drive.NewMirror(d, sp)
+			m := drive.NewMirror(d, srcDrive)
 			ctx := system()
 			src := &source{}
 			jan := time.Date(2026, 1, 15, 9, 30, 0, 0, time.UTC)
 
 			// A new file: created, with its time and origin in the write.
 			a := apply(t, ctx, m, "new file", src.item("doc", "1.0", "/Docs/report.txt", "v1", jan), drive.Created)
-			if !a.Item.Modified.Equal(jan) || a.Item.Origin == nil || a.Item.Origin.Version != "1.0" || a.Item.Origin.Drive != sp {
+			if !a.Item.Modified.Equal(jan) || a.Item.Origin == nil || a.Item.Origin.Version != "1.0" || a.Item.Origin.Drive != srcDrive {
 				t.Fatalf("created item %+v (origin %+v)", a.Item, a.Item.Origin)
 			}
 			if got := read(t, ctx, d, drive.ByPath("/Docs/report.txt"), drive.At{}); got != "v1" {
@@ -158,16 +158,16 @@ func TestMirror(t *testing.T) {
 
 			// A folder, unshared (delta reports its items deleted) and
 			// shared again: the folder comes back with what was in it.
-			folder := drive.SourceItem{Origin: drive.Origin{ID: "matter"}, Path: "/Matter", Type: drive.TypeDir}
+			folder := drive.SourceItem{Origin: drive.Origin{ID: "reports"}, Path: "/Reports", Type: drive.TypeDir}
 			apply(t, ctx, m, "folder", folder, drive.Created)
-			apply(t, ctx, m, "file in it", src.item("brief", "1.0", "/Matter/brief.txt", "brief", jan), drive.Created)
+			apply(t, ctx, m, "file in it", src.item("brief", "1.0", "/Reports/brief.txt", "brief", jan), drive.Created)
 			apply(t, ctx, m, "folder again", folder, drive.Unchanged)
-			if _, err := m.Remove(ctx, "matter"); err != nil {
+			if _, err := m.Remove(ctx, "reports"); err != nil {
 				t.Fatal(err)
 			}
 			apply(t, ctx, m, "folder shared again", folder, drive.Restored)
 			opens = src.opens.Load()
-			apply(t, ctx, m, "its file", src.item("brief", "1.0", "/Matter/brief.txt", "brief", jan), drive.Unchanged)
+			apply(t, ctx, m, "its file", src.item("brief", "1.0", "/Reports/brief.txt", "brief", jan), drive.Unchanged)
 			if src.opens.Load() != opens {
 				t.Fatal("a file restored with its folder was downloaded again")
 			}
@@ -175,7 +175,7 @@ func TestMirror(t *testing.T) {
 			// A bad pass (the source's listing came back empty) removes
 			// everything; undoing the pass puts it all back.
 			pass := drive.WithPass(ctx, "pass-7")
-			for _, id := range []string{"doc", "matter"} {
+			for _, id := range []string{"doc", "reports"} {
 				if _, err := m.Remove(pass, id); err != nil {
 					t.Fatal(err)
 				}
@@ -183,7 +183,7 @@ func TestMirror(t *testing.T) {
 			if n, err := m.Undo(ctx, "pass-7"); err != nil || n != 2 {
 				t.Fatalf("undo: %d, %v; want 2", n, err)
 			}
-			for _, p := range []string{"/Docs/report.txt", "/Matter", "/Matter/brief.txt"} {
+			for _, p := range []string{"/Docs/report.txt", "/Reports", "/Reports/brief.txt"} {
 				if _, err := d.Stat(ctx, drive.ByPath(p), drive.At{}); err != nil {
 					t.Fatalf("%s after the undo: %v", p, err)
 				}
@@ -216,17 +216,17 @@ func TestMirrorAdoptsItemsCopiedBeforeTheIndex(t *testing.T) {
 	d := newDrive(t, store, icbfs.Settings{Name: "adopt", Size: 1 << 30, RootMode: 0o777}, "")
 	ctx := system()
 	it := write(t, ctx, d, "/old.txt", "copied long ago", drive.Condition{})
-	data := []byte(`{"drive":"` + sp + `","id":"old","version":"4.0","path":"/sp/old.txt","copied":"2026-01-01T00:00:00Z"}`)
+	data := []byte(`{"drive":"` + srcDrive + `","id":"old","version":"4.0","path":"/src/old.txt","copied":"2026-01-01T00:00:00Z"}`)
 	if _, err := d.fs.SetAppData(context.Background(), it.ID, icbfs.TypeFile, icbfs.AppDriveOrigin, data); err != nil {
 		t.Fatal(err)
 	}
-	m := drive.NewMirror(d, sp)
+	m := drive.NewMirror(d, srcDrive)
 	src := &source{}
 	a := apply(t, ctx, m, "adopted", src.item("old", "4.0", "/old.txt", "unused", time.Time{}), drive.Unchanged)
 	if a.Item.ID != it.ID || src.opens.Load() != 0 {
 		t.Fatalf("adopted %+v, downloaded %d times", a.Item, src.opens.Load())
 	}
-	if _, _, err := d.FindByOrigin(ctx, sp, "old"); err != nil {
+	if _, _, err := d.FindByOrigin(ctx, srcDrive, "old"); err != nil {
 		t.Fatalf("not indexed after adopting: %v", err)
 	}
 }
@@ -238,7 +238,7 @@ func TestMirrorLookupsStayCheap(t *testing.T) {
 	counter := &readCounter{Store: miniotest.Store(t)}
 	d := newDrive(t, counter, icbfs.Settings{Name: "cheap", Size: 1 << 30, RootMode: 0o777}, "")
 	ctx := system()
-	m := drive.NewMirror(d, sp)
+	m := drive.NewMirror(d, srcDrive)
 	src := &source{}
 	if _, err := m.Apply(ctx, src.item("doc", "1.0", "/deep/a/b/doc.txt", "v1", time.Time{})); err != nil {
 		t.Fatal(err)

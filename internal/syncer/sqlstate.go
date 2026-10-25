@@ -40,19 +40,6 @@ func OpenState(path string) (*SQLState, error) {
 			return nil, fmt.Errorf("state %s: %w", path, err)
 		}
 	}
-	// A state from before creation times were kept: none recorded, so
-	// the next pass sets every item's (a metadata write each, no copy).
-	var has int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('base') WHERE name = 'created'`).Scan(&has); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("state %s: %w", path, err)
-	}
-	if has == 0 {
-		if _, err := db.Exec(`ALTER TABLE base ADD COLUMN created INTEGER NOT NULL DEFAULT 0`); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("state %s: %w", path, err)
-		}
-	}
 	return &SQLState{db: db}, nil
 }
 

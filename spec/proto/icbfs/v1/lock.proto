@@ -38,7 +38,7 @@ message LockRange {
 // range across every holder.
 message Lock {
   repeated LockRange ranges = 1;
-  // layout is this format: 1; 0, or absent, reads as 1. A reader refuses
-  // a layout it doesn't know (internal/icbfs's ErrNewerFormat).
+  // layout is this format: 1. A reader refuses any other (internal/icbfs's
+  // ErrNewerFormat for a newer one).
   uint32 layout = 2;
 }

@@ -44,7 +44,7 @@ type Info struct {
 	MaxFileSize     int64
 	DirBlockEntries int
 	Archived        bool
-	Created         time.Time // zero for filesystems created before it was recorded
+	Created         time.Time // when it was created
 	FormatVersion   int       // its objects' format as a whole (see FormatVersion)
 }
 
@@ -177,7 +177,7 @@ func DescribeFilesystem(ctx context.Context, store objstore.Store, name string) 
 
 func infoOf(id string, e *pb.FilesystemEntry) Info {
 	info := Info{Name: e.Name, ID: id, Size: e.Size, PrimaryWindows: e.PrimaryWindows, Archived: e.Archived, MaxFileSize: DefaultMaxFileSize,
-		DirBlockEntries: dirBlockEntries(e), FormatVersion: max(1, int(e.FormatVersion))}
+		DirBlockEntries: dirBlockEntries(e), FormatVersion: int(e.FormatVersion)}
 	if e.MaxFileSize != 0 && e.MaxFileSize <= DefaultMaxFileSize {
 		info.MaxFileSize = int64(e.MaxFileSize)
 	}

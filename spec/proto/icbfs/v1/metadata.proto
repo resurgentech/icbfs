@@ -23,10 +23,7 @@ message Metadata {
   // see them: only names users set (user.*, trusted.*, security.*).
   map<string, bytes> xattrs = 5;
 
-  // Legacy last-access time, nanoseconds since the Unix epoch. Superseded by atime (field 13), which also covers
-  // dates int64 nanoseconds can't (before 1678); still read when atime is
-  // unset, never written.
-  int64 atime_unix_nano = 6;
+  reserved 6;
 
   // The device number (encoded major/minor, same packing mknod(2)/
   // stat(2)'s st_rdev uses) for a char/block device entry — meaningless
@@ -73,8 +70,8 @@ message Metadata {
   // object except a read's atime update, which would otherwise make
   // every read look like a change. A directory's is also set when an
   // entry is added to or removed from it. For a file the reported ctime
-  // is the later of this and the content's last write. Unset (objects
-  // written before this field) = this object's own LastModified.
+  // is the later of this and the content's last write. Unset = this
+  // object's own LastModified.
   google.protobuf.Timestamp ctime = 16;
 
   // The item's Windows state; unset when it has none.
@@ -91,10 +88,8 @@ message Metadata {
   // origin, the side store's metadata. No mount shows it.
   map<string, bytes> app = 20;
 
-  // layout is 1 for a record written with the fields above. Records
-  // with 0 kept the Windows state, POSIX ACLs and tools' data in xattrs,
-  // under fixed names; decoding moves them out (internal/icbfs's
-  // fromLegacyXattrs).
+  // layout is this format: 1. A reader refuses any other (internal/icbfs's
+  // ErrNewerFormat for a newer one).
   uint32 layout = 21;
 }
 

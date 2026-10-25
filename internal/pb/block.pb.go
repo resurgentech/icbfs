@@ -259,12 +259,11 @@ type Block struct {
 	// and right the key of the block after it at the same level (a B-link
 	// tree: a split commits with one write of the splitting block, and
 	// anything looking for a name at or past high_key moves right). Both
-	// empty for a block with nothing after it, and in blocks written before
-	// they existed.
+	// empty for a block with nothing after it.
 	HighKey string `protobuf:"bytes,4,opt,name=high_key,json=highKey,proto3" json:"high_key,omitempty"`
 	Right   string `protobuf:"bytes,5,opt,name=right,proto3" json:"right,omitempty"`
-	// layout is this format: 1; 0, or absent, reads as 1. A reader refuses
-	// a layout it doesn't know (internal/block's ErrNewerFormat).
+	// layout is this format: 1. A reader refuses any other (internal/block's
+	// ErrNewerFormat for a newer one).
 	Layout        uint32 `protobuf:"varint,6,opt,name=layout,proto3" json:"layout,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

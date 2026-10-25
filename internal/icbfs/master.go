@@ -9,6 +9,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	"github.com/resurgentech/icbfs/internal/block"
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/internal/pb"
 )
@@ -49,7 +50,7 @@ func bootstrapMaster(ctx context.Context, store objstore.Store) error {
 // Layouts this package reads and writes; see the fields in
 // spec/proto/icbfs/v1/master.proto. FormatVersion is the format of a
 // filesystem's objects as a whole, recorded in its master-block entry at
-// creation: a filesystem with a newer one isn't opened at all.
+// creation: a filesystem with any other isn't opened at all.
 const (
 	masterLayout  = 1
 	FormatVersion = 1
@@ -76,9 +77,9 @@ func readMaster(ctx context.Context, store objstore.Store) (*pb.MasterBlock, *ob
 		if err := proto.Unmarshal(data, &mb); err != nil {
 			return nil, nil, err
 		}
-	}
-	if mb.Layout > masterLayout {
-		return nil, nil, fmt.Errorf("master block layout %d: %w", mb.Layout, ErrNewerFormat)
+		if err := block.CheckLayout("master block", mb.Layout, masterLayout); err != nil {
+			return nil, nil, err
+		}
 	}
 	return &mb, obj, nil
 }
@@ -117,6 +118,9 @@ func registerFilesystem(ctx context.Context, store objstore.Store, entry *pb.Fil
 			}
 		}
 		if idx == -1 {
+			if len(mb.Filesystems) >= MaxFilesystems {
+				return "", nil, false, fmt.Errorf("register filesystem %q: %w", name, ErrTooManyFilesystems)
+			}
 			idx = len(mb.Filesystems)
 			mb.Filesystems = append(mb.Filesystems, &pb.FilesystemEntry{})
 		}
@@ -138,6 +142,10 @@ func registerFilesystem(ctx context.Context, store objstore.Store, entry *pb.Fil
 	}
 	return "", nil, false, fmt.Errorf("register filesystem %q: exceeded %d retries", name, maxTreeRetries)
 }
+
+// MaxFilesystems is how many filesystems one bucket holds at once: as
+// many as a 4-hex-digit ID can name. A pruned one's slot is reused.
+const MaxFilesystems = 1 << 16
 
 // fsID zero-pads a slot index to the 4-hex-digit filesystem ID format
 // every object this filesystem owns is prefixed with.

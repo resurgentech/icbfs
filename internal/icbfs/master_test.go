@@ -164,6 +164,39 @@ func TestPruneFreesSlotForReuse(t *testing.T) {
 	}
 }
 
+// TestBucketHoldsAtMostMaxFilesystems: with every slot taken, a new
+// filesystem is refused, and once one is pruned its slot is free again.
+func TestBucketHoldsAtMostMaxFilesystems(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if _, _, err := registerName(ctx, store, "first", 1<<30); err != nil {
+		t.Fatal(err)
+	}
+	mb, obj, err := readMaster(ctx, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for len(mb.Filesystems) < MaxFilesystems {
+		mb.Filesystems = append(mb.Filesystems, &pb.FilesystemEntry{Name: fmt.Sprintf("fs-%d", len(mb.Filesystems)), Size: 1, FormatVersion: FormatVersion})
+	}
+	data, err := encodeMaster(mb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Put(ctx, masterBlockKey, bytes.NewReader(data), nil, obj.ETag); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := registerName(ctx, store, "one-too-many", 1<<30); !errors.Is(err, ErrTooManyFilesystems) {
+		t.Fatalf("register past the limit: %v, want ErrTooManyFilesystems", err)
+	}
+	if err := Prune(ctx, store, "first"); err != nil {
+		t.Fatal(err)
+	}
+	if id, _, err := registerName(ctx, store, "one-too-many", 1<<30); err != nil || id != "0000" {
+		t.Fatalf("register after a prune: %q, %v; want slot 0000", id, err)
+	}
+}
+
 // TestIDPrefixingIsPresentOnDisk: every key written for a file, a directory
 // and the root carries the "<id>-" prefix.
 func TestIDPrefixingIsPresentOnDisk(t *testing.T) {

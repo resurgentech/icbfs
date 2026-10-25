@@ -37,23 +37,20 @@ type FilesystemEntry struct {
 	// section. false (the default) means primary-POSIX.
 	PrimaryWindows bool `protobuf:"varint,4,opt,name=primary_windows,json=primaryWindows,proto3" json:"primary_windows,omitempty"`
 	// max_file_size: the largest file this filesystem holds, in bytes; set
-	// once at creation, immutable afterward. 0 (filesystems created before
-	// this field) means the default, 1 TiB.
+	// once at creation, immutable afterward. 0 means the default, 1 TiB.
 	MaxFileSize uint64 `protobuf:"varint,5,opt,name=max_file_size,json=maxFileSize,proto3" json:"max_file_size,omitempty"`
-	// created: when the filesystem was created (unset for filesystems
-	// created before this field).
+	// created: when the filesystem was created.
 	Created *timestamppb.Timestamp `protobuf:"bytes,6,opt,name=created,proto3" json:"created,omitempty"`
 	// dir_block_entries: how many entries a directory block holds (or, for
 	// a block over others, how many blocks it points to) before it splits;
 	// set once at creation. More means fewer requests per lookup and
-	// listing, and larger blocks rewritten per change. 0 (filesystems
-	// created before this field) means the default, 128.
+	// listing, and larger blocks rewritten per change. 0 means the
+	// default, 128.
 	DirBlockEntries uint32 `protobuf:"varint,7,opt,name=dir_block_entries,json=dirBlockEntries,proto3" json:"dir_block_entries,omitempty"`
 	// format_version is the format the filesystem's objects are in, as a
-	// whole: 1 now; 0 (filesystems created before this field) reads as 1. A
-	// mount of a filesystem whose format is newer than it knows is refused
-	// (internal/icbfs's ErrNewerFormat), so a binary can't misread or
-	// overwrite objects in a format it doesn't understand. Raising it is how
+	// whole: 1. A mount of a filesystem in any other format is refused
+	// (internal/icbfs's ErrNewerFormat for a newer one), so a binary can't
+	// misread or overwrite objects in a format it doesn't understand. Raising it is how
 	// a format change is committed, once every machine can read it.
 	FormatVersion uint32 `protobuf:"varint,8,opt,name=format_version,json=formatVersion,proto3" json:"format_version,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -155,8 +152,7 @@ func (x *FilesystemEntry) GetFormatVersion() uint32 {
 type MasterBlock struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	Filesystems []*FilesystemEntry     `protobuf:"bytes,1,rep,name=filesystems,proto3" json:"filesystems,omitempty"`
-	// layout is this list's format: 1; 0, or absent, reads as 1. A reader
-	// refuses a layout it doesn't know.
+	// layout is this list's format: 1. A reader refuses any other.
 	Layout        uint32 `protobuf:"varint,2,opt,name=layout,proto3" json:"layout,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

@@ -104,10 +104,18 @@ func (r *Runner) pair(name string) *pairRun {
 	return nil
 }
 
-// SyncNow starts a pass of a pair (or every pair, "") now.
+// SyncNow starts a pass of a pair (or every pair, "") now, one that
+// lists the drive even in one-way mode, where passes otherwise list it
+// only every remoteEvery.
 func (r *Runner) SyncNow(name string) {
 	for _, p := range r.pairs {
 		if name == "" || p.cfg.Name == name {
+			p.mu.Lock()
+			e := p.engine
+			p.mu.Unlock()
+			if e != nil {
+				e.ListRemoteNext()
+			}
 			p.poke()
 		}
 	}

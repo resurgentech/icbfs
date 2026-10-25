@@ -10,7 +10,7 @@ import (
 	"github.com/resurgentech/icbfs/pkg/drive"
 )
 
-// TestTrashEntriesCarryOrigin: a mirror (icbfs-sharepoint) trashes what
+// TestTrashEntriesCarryOrigin: a mirror trashes what
 // its source deleted, and when the source brings the item back with the
 // same id, finds the trash entry by origin and restores it, history and
 // all, instead of copying every version again.
@@ -26,7 +26,7 @@ func TestTrashEntriesCarryOrigin(t *testing.T) {
 	ctx := system()
 	copied := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
 	origin := func(id, version string) drive.Origin {
-		return drive.Origin{Drive: "sharepoint:site/library", ID: id, Version: version, Path: "/x", Copied: copied}
+		return drive.Origin{Drive: "webdav:docs", ID: id, Version: version, Path: "/x", Copied: copied}
 	}
 	setOrigin := func(p string, o drive.Origin) {
 		t.Helper()
@@ -39,7 +39,7 @@ func TestTrashEntriesCarryOrigin(t *testing.T) {
 	for _, body := range []string{"one", "one two", "one two three"} {
 		write(t, ctx, d, "/docs/report.docx", body, drive.Condition{})
 	}
-	setOrigin("/docs/report.docx", origin("sp-report", "3.0"))
+	setOrigin("/docs/report.docx", origin("src-report", "3.0"))
 	before, err := d.Versions(ctx, drive.ByPath("/docs/report.docx"))
 	if err != nil || len(before) != 3 {
 		t.Fatalf("versions before: %v, %v", before, err)
@@ -47,17 +47,17 @@ func TestTrashEntriesCarryOrigin(t *testing.T) {
 
 	// A folder and two files in it, each with its origin, and a file with
 	// none.
-	write(t, ctx, d, "/matter/a.txt", "a", drive.Condition{})
-	write(t, ctx, d, "/matter/b.txt", "b", drive.Condition{})
-	setOrigin("/matter", origin("sp-matter", ""))
-	setOrigin("/matter/a.txt", origin("sp-a", "1.0"))
-	setOrigin("/matter/b.txt", origin("sp-b", "1.0"))
+	write(t, ctx, d, "/reports/a.txt", "a", drive.Condition{})
+	write(t, ctx, d, "/reports/b.txt", "b", drive.Condition{})
+	setOrigin("/reports", origin("src-reports", ""))
+	setOrigin("/reports/a.txt", origin("src-a", "1.0"))
+	setOrigin("/reports/b.txt", origin("src-b", "1.0"))
 	write(t, ctx, d, "/local.txt", "made here", drive.Condition{})
 
 	if err := d.Delete(ctx, drive.ByPath("/docs/report.docx"), false, drive.Condition{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Delete(ctx, drive.ByPath("/matter"), true, drive.Condition{}); err != nil {
+	if err := d.Delete(ctx, drive.ByPath("/reports"), true, drive.Condition{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.Delete(ctx, drive.ByPath("/local.txt"), false, drive.Condition{}); err != nil {
@@ -72,12 +72,12 @@ func TestTrashEntriesCarryOrigin(t *testing.T) {
 	for _, e := range all.Entries {
 		byPath[e.Path] = e
 	}
-	for p, id := range map[string]string{"/docs/report.docx": "sp-report", "/matter": "sp-matter", "/matter/a.txt": "sp-a", "/matter/b.txt": "sp-b"} {
+	for p, id := range map[string]string{"/docs/report.docx": "src-report", "/reports": "src-reports", "/reports/a.txt": "src-a", "/reports/b.txt": "src-b"} {
 		e, ok := byPath[p]
 		if !ok {
 			t.Fatalf("no trash entry for %s in %+v", p, all.Entries)
 		}
-		if e.Origin == nil || e.Origin.ID != id || e.Origin.Drive != "sharepoint:site/library" || !e.Origin.Copied.Equal(copied) {
+		if e.Origin == nil || e.Origin.ID != id || e.Origin.Drive != "webdav:docs" || !e.Origin.Copied.Equal(copied) {
 			t.Errorf("%s: trash entry origin %+v, want id %s", p, e.Origin, id)
 		}
 	}
@@ -90,28 +90,28 @@ func TestTrashEntriesCarryOrigin(t *testing.T) {
 
 	// Filtering: by source drive (every entry with an origin), by source
 	// item (just that one), and a page of one still filtered.
-	fromSP, err := d.Trash(ctx, drive.TrashOptions{OriginDrive: "sharepoint:site/library"})
-	if err != nil || len(fromSP.Entries) != 4 {
-		t.Fatalf("filtered by origin drive: %d entries, %v; want 4", len(fromSP.Entries), err)
+	fromSrc, err := d.Trash(ctx, drive.TrashOptions{OriginDrive: "webdav:docs"})
+	if err != nil || len(fromSrc.Entries) != 4 {
+		t.Fatalf("filtered by origin drive: %d entries, %v; want 4", len(fromSrc.Entries), err)
 	}
-	one, err := d.Trash(ctx, drive.TrashOptions{OriginDrive: "sharepoint:site/library", OriginID: "sp-b"})
-	if err != nil || len(one.Entries) != 1 || one.Entries[0].Path != "/matter/b.txt" {
+	one, err := d.Trash(ctx, drive.TrashOptions{OriginDrive: "webdav:docs", OriginID: "src-b"})
+	if err != nil || len(one.Entries) != 1 || one.Entries[0].Path != "/reports/b.txt" {
 		t.Fatalf("filtered by origin id: %+v, %v", one.Entries, err)
 	}
 	if none, _ := d.Trash(ctx, drive.TrashOptions{OriginDrive: "other"}); len(none.Entries) != 0 {
 		t.Fatalf("another source drive matched: %+v", none.Entries)
 	}
-	page, err := d.Trash(ctx, drive.TrashOptions{OriginDrive: "sharepoint:site/library", Limit: 1})
+	page, err := d.Trash(ctx, drive.TrashOptions{OriginDrive: "webdav:docs", Limit: 1})
 	if err != nil || len(page.Entries) != 1 || page.Next == "" {
 		t.Fatalf("a page of one: %+v, next %q, %v", page.Entries, page.Next, err)
 	}
-	rest, err := d.Trash(ctx, drive.TrashOptions{OriginDrive: "sharepoint:site/library", Cursor: page.Next})
+	rest, err := d.Trash(ctx, drive.TrashOptions{OriginDrive: "webdav:docs", Cursor: page.Next})
 	if err != nil || len(rest.Entries) != 3 {
 		t.Fatalf("the rest after the cursor: %d entries, %v; want 3", len(rest.Entries), err)
 	}
 
 	// Restore the file by its origin, to where the source has it now.
-	found, _ := d.Trash(ctx, drive.TrashOptions{OriginDrive: "sharepoint:site/library", OriginID: "sp-report"})
+	found, _ := d.Trash(ctx, drive.TrashOptions{OriginDrive: "webdav:docs", OriginID: "src-report"})
 	if len(found.Entries) != 1 {
 		t.Fatalf("finding the report by origin: %+v", found.Entries)
 	}
@@ -119,7 +119,7 @@ func TestTrashEntriesCarryOrigin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("restore: %v", err)
 	}
-	if restored.Origin == nil || restored.Origin.ID != "sp-report" || restored.Origin.Version != "3.0" {
+	if restored.Origin == nil || restored.Origin.ID != "src-report" || restored.Origin.Version != "3.0" {
 		t.Fatalf("restored item's origin %+v", restored.Origin)
 	}
 	after, err := d.Versions(ctx, drive.ByPath("/moved/report.docx"))
@@ -140,16 +140,16 @@ func TestTrashEntriesCarryOrigin(t *testing.T) {
 
 	// Restore the folder: its batch comes back, and each file keeps its
 	// origin.
-	folder := byPath["/matter"]
+	folder := byPath["/reports"]
 	if _, err := d.Restore(ctx, folder.ID, drive.RestoreOptions{}); err != nil {
 		t.Fatalf("restore folder: %v", err)
 	}
-	for p, id := range map[string]string{"/matter": "sp-matter", "/matter/a.txt": "sp-a", "/matter/b.txt": "sp-b"} {
+	for p, id := range map[string]string{"/reports": "src-reports", "/reports/a.txt": "src-a", "/reports/b.txt": "src-b"} {
 		st, err := d.Stat(ctx, drive.ByPath(p), drive.At{})
 		if err != nil {
 			t.Fatalf("stat %s after restoring the folder: %v", p, err)
 		}
-		want := origin(id, map[string]string{"sp-matter": "", "sp-a": "1.0", "sp-b": "1.0"}[id])
+		want := origin(id, map[string]string{"src-reports": "", "src-a": "1.0", "src-b": "1.0"}[id])
 		if st.Origin == nil || !reflect.DeepEqual(*st.Origin, want) {
 			t.Errorf("%s after restore: origin %+v, want %+v", p, st.Origin, want)
 		}

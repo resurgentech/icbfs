@@ -20,23 +20,20 @@ message FilesystemEntry {
   // section. false (the default) means primary-POSIX.
   bool primary_windows = 4;
   // max_file_size: the largest file this filesystem holds, in bytes; set
-  // once at creation, immutable afterward. 0 (filesystems created before
-  // this field) means the default, 1 TiB.
+  // once at creation, immutable afterward. 0 means the default, 1 TiB.
   uint64 max_file_size = 5;
-  // created: when the filesystem was created (unset for filesystems
-  // created before this field).
+  // created: when the filesystem was created.
   google.protobuf.Timestamp created = 6;
   // dir_block_entries: how many entries a directory block holds (or, for
   // a block over others, how many blocks it points to) before it splits;
   // set once at creation. More means fewer requests per lookup and
-  // listing, and larger blocks rewritten per change. 0 (filesystems
-  // created before this field) means the default, 128.
+  // listing, and larger blocks rewritten per change. 0 means the
+  // default, 128.
   uint32 dir_block_entries = 7;
   // format_version is the format the filesystem's objects are in, as a
-  // whole: 1 now; 0 (filesystems created before this field) reads as 1. A
-  // mount of a filesystem whose format is newer than it knows is refused
-  // (internal/icbfs's ErrNewerFormat), so a binary can't misread or
-  // overwrite objects in a format it doesn't understand. Raising it is how
+  // whole: 1. A mount of a filesystem in any other format is refused
+  // (internal/icbfs's ErrNewerFormat for a newer one), so a binary can't
+  // misread or overwrite objects in a format it doesn't understand. Raising it is how
   // a format change is committed, once every machine can read it.
   uint32 format_version = 8;
 }
@@ -49,7 +46,6 @@ message FilesystemEntry {
 // are already permanently keyed with the old one.
 message MasterBlock {
   repeated FilesystemEntry filesystems = 1;
-  // layout is this list's format: 1; 0, or absent, reads as 1. A reader
-  // refuses a layout it doesn't know.
+  // layout is this list's format: 1. A reader refuses any other.
   uint32 layout = 2;
 }

@@ -11,7 +11,7 @@ import (
 )
 
 // OriginRecord is what the filesystem holds for one source item it was
-// copied from (a SharePoint document, say): which item here it
+// copied from (a document in another store, say): which item here it
 // became, and what of it was last copied. One small object per source
 // item, <id>-origin-<hash of source drive and id>, so a sync daemon finds
 // its item for a source id in one read, with no listing of the tree.

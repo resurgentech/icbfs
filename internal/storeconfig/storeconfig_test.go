@@ -9,25 +9,14 @@ func TestUnmarshal(t *testing.T) {
 	for name, tc := range map[string]struct {
 		in   string
 		want Config
-		bad  bool
 	}{
 		"s3": {in: `{"kind":"s3","s3":{"endpoint":"http://e","bucket":"b","accessKey":"a","secretKey":"s"}}`,
 			want: Config{Kind: KindS3, S3: S3{Endpoint: "http://e", Bucket: "b", AccessKey: "a", SecretKey: "s"}}},
 		"azure": {in: `{"kind":"azure","azure":{"account":"acct","container":"c","key":"k"}}`,
 			want: Config{Kind: KindAzure, Azure: Azure{Account: "acct", Container: "c", Key: "k"}}},
-		"flat, as before": {in: `{"endpoint":"http://e","region":"r","bucket":"b","accessKey":"a","secretKey":"s"}`,
-			want: Config{S3: S3{Endpoint: "http://e", Region: "r", Bucket: "b", AccessKey: "a", SecretKey: "s"}}},
-		"flat and a section": {in: `{"endpoint":"http://e","azure":{"account":"acct"}}`, bad: true},
-		"flat and azure":     {in: `{"kind":"azure","bucket":"b"}`, bad: true},
 	} {
 		var c Config
 		err := json.Unmarshal([]byte(tc.in), &c)
-		if tc.bad {
-			if err == nil {
-				t.Errorf("%s: no error", name)
-			}
-			continue
-		}
 		if err != nil || c != tc.want {
 			t.Errorf("%s: %+v, %v; want %+v", name, c, err, tc.want)
 		}

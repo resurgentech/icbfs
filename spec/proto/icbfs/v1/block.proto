@@ -48,11 +48,10 @@ message Block {
   // and right the key of the block after it at the same level (a B-link
   // tree: a split commits with one write of the splitting block, and
   // anything looking for a name at or past high_key moves right). Both
-  // empty for a block with nothing after it, and in blocks written before
-  // they existed.
+  // empty for a block with nothing after it.
   string high_key = 4;
   string right = 5;
-  // layout is this format: 1; 0, or absent, reads as 1. A reader refuses
-  // a layout it doesn't know (internal/block's ErrNewerFormat).
+  // layout is this format: 1. A reader refuses any other (internal/block's
+  // ErrNewerFormat for a newer one).
   uint32 layout = 6;
 }

@@ -49,13 +49,13 @@ func TestStatxReportsCreationTime(t *testing.T) {
 		}
 	}
 	set("brief.txt", icbfs.TypeFile)
-	if err := os.Mkdir(filepath.Join(dir, "Matters"), 0o755); err != nil {
+	if err := os.Mkdir(filepath.Join(dir, "Reports"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	set("Matters", icbfs.TypeDir)
+	set("Reports", icbfs.TypeDir)
 	// Past the kernel's attribute cache.
 	time.Sleep(2 * time.Second)
-	for _, name := range []string{"brief.txt", "Matters"} {
+	for _, name := range []string{"brief.txt", "Reports"} {
 		if got := birth(filepath.Join(dir, name)); !got.Equal(born) {
 			t.Fatalf("%s: creation time %v, want %v", name, got, born)
 		}

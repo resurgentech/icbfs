@@ -18,7 +18,7 @@ import (
 func TestMirrorKeepsSourceTimes(t *testing.T) {
 	store := miniotest.Store(t)
 	d := newDrive(t, store, icbfs.Settings{Name: "times", Size: 1 << 30, RootMode: 0o777}, "")
-	m := drive.NewMirror(d, sp)
+	m := drive.NewMirror(d, srcDrive)
 	ctx := system()
 	src := &source{}
 	born := time.Date(2019, 3, 4, 5, 6, 7, 0, time.UTC)
@@ -72,19 +72,19 @@ func TestMirrorKeepsSourceTimes(t *testing.T) {
 
 	// A folder: both times when it's made; after that only its creation
 	// time follows the source, its modified time being its entries'.
-	dir := drive.SourceItem{Origin: drive.Origin{ID: "folder", Path: "/sp/Matters"}, Path: "/Matters", Type: drive.TypeDir, ModTime: edited, Created: born}
+	dir := drive.SourceItem{Origin: drive.Origin{ID: "folder", Path: "/src/Reports"}, Path: "/Reports", Type: drive.TypeDir, ModTime: edited, Created: born}
 	a = apply(t, ctx, m, "new folder", dir, drive.Created)
 	same("new folder", a.Item, edited, born)
 	apply(t, ctx, m, "folder again", dir, drive.Unchanged)
 
 	// A folder the mirror adopts (made as a file's parent first) gets its
 	// creation time.
-	apply(t, ctx, m, "file in a new folder", timed(src.item("memo", "1.0", "/Clients/memo.txt", "m", edited), born), drive.Created)
-	parent, err := d.Stat(ctx, drive.ByPath("/Clients"), drive.At{})
+	apply(t, ctx, m, "file in a new folder", timed(src.item("memo", "1.0", "/Projects/memo.txt", "m", edited), born), drive.Created)
+	parent, err := d.Stat(ctx, drive.ByPath("/Projects"), drive.At{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	a = apply(t, ctx, m, "adopted folder", drive.SourceItem{Origin: drive.Origin{ID: "clients", Path: "/sp/Clients"}, Path: "/Clients", Type: drive.TypeDir, ModTime: edited, Created: born}, drive.Created)
+	a = apply(t, ctx, m, "adopted folder", drive.SourceItem{Origin: drive.Origin{ID: "projects", Path: "/src/Projects"}, Path: "/Projects", Type: drive.TypeDir, ModTime: edited, Created: born}, drive.Created)
 	same("adopted folder", a.Item, parent.Modified, born)
 }
 

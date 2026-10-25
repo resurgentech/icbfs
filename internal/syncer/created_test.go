@@ -2,7 +2,6 @@ package syncer_test
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 	"time"
 
@@ -41,26 +40,26 @@ var born = time.Date(2019, 3, 4, 5, 6, 7, 800, time.UTC)
 // gets them without copying anything.
 func TestCreationTimesAreCopied(t *testing.T) {
 	p := ntfsPair(t, syncer.OneWay)
-	p.local.Put("Matters/brief.docx", "brief", t0).Created = born
-	dir, _ := p.local.Get("Matters")
+	p.local.Put("Reports/brief.docx", "brief", t0).Created = born
+	dir, _ := p.local.Get("Reports")
 	dir.Created = born.Add(-time.Hour)
 	p.pass(t)
-	created(t, p.remote, "Matters/brief.docx", born)
-	created(t, p.remote, "Matters", born.Add(-time.Hour))
+	created(t, p.remote, "Reports/brief.docx", born)
+	created(t, p.remote, "Reports", born.Add(-time.Hour))
 	if rep := p.pass(t); rep.Planned != 0 {
 		t.Fatalf("second pass planned %d", rep.Planned)
 	}
 
 	// Only the creation time changes (set by a tool): copied, no upload.
-	writes := p.remote.Writes["Matters/brief.docx"]
-	it, _ := p.local.Get("Matters/brief.docx")
+	writes := p.remote.Writes["Reports/brief.docx"]
+	it, _ := p.local.Get("Reports/brief.docx")
 	it.Created = born.AddDate(-1, 0, 0)
 	if rep := p.pass(t); rep.Planned != 1 {
 		t.Fatalf("planned %d, want one set-created", rep.Planned)
 	}
-	created(t, p.remote, "Matters/brief.docx", born.AddDate(-1, 0, 0))
-	if p.remote.Writes["Matters/brief.docx"] != writes || p.local.Reads["Matters/brief.docx"] != 1 {
-		t.Fatalf("a creation time change copied the file: %d writes, %d reads", p.remote.Writes["Matters/brief.docx"], p.local.Reads["Matters/brief.docx"])
+	created(t, p.remote, "Reports/brief.docx", born.AddDate(-1, 0, 0))
+	if p.remote.Writes["Reports/brief.docx"] != writes || p.local.Reads["Reports/brief.docx"] != 1 {
+		t.Fatalf("a creation time change copied the file: %d writes, %d reads", p.remote.Writes["Reports/brief.docx"], p.local.Reads["Reports/brief.docx"])
 	}
 
 	// Seeded by a copy that kept the content but not the creation times:
@@ -79,12 +78,12 @@ func TestCreationTimesAreCopied(t *testing.T) {
 // creation time in the folder, and the next pass finds nothing to do.
 func TestCreationTimesComeDown(t *testing.T) {
 	p := ntfsPair(t, syncer.TwoWay)
-	p.remote.Put("Clients/new.txt", "n", t0).Created = born
-	d, _ := p.remote.Get("Clients")
+	p.remote.Put("Projects/new.txt", "n", t0).Created = born
+	d, _ := p.remote.Get("Projects")
 	d.Created = born
 	p.pass(t)
-	created(t, p.local, "Clients/new.txt", born)
-	created(t, p.local, "Clients", born)
+	created(t, p.local, "Projects/new.txt", born)
+	created(t, p.local, "Projects", born)
 	if rep := p.pass(t); rep.Planned != 0 {
 		t.Fatalf("second pass planned %d", rep.Planned)
 	}
@@ -104,43 +103,24 @@ func TestNoCreationTimesNoCopies(t *testing.T) {
 }
 
 // TestSQLStateKeepsCreationTimes: the base's creation times survive a
-// restart, and a state from before they were kept opens, with none.
+// restart.
 func TestSQLStateKeepsCreationTimes(t *testing.T) {
-	dir := t.TempDir()
-	old, err := sql.Open("sqlite", dir+"/old.db")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := old.Exec(`CREATE TABLE base (
-			key TEXT PRIMARY KEY, path TEXT NOT NULL, dir INTEGER NOT NULL, size INTEGER NOT NULL,
-			mtime INTEGER NOT NULL, local_id TEXT NOT NULL, remote_id TEXT NOT NULL,
-			remote_version TEXT NOT NULL, hash TEXT NOT NULL, acl_hash TEXT NOT NULL);
-		INSERT INTO base VALUES ('a', 'a', 0, 1, 0, '', '', '', '', '')`); err != nil {
-		t.Fatal(err)
-	}
-	old.Close()
-	st, err := syncer.OpenState(dir + "/old.db")
+	path := t.TempDir() + "/state.db"
+	st, err := syncer.OpenState(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	base, err := st.Load(ctx)
-	if err != nil || len(base) != 1 || !base["a"].Created.IsZero() {
-		t.Fatalf("old state: %+v, %v", base, err)
-	}
-	b := base["a"]
-	b.Created = born
-	base["a"] = b
-	if err := st.Save(ctx, base); err != nil {
+	if err := st.Save(ctx, map[string]syncer.Base{"a": {Path: "a", Size: 1, Created: born}}); err != nil {
 		t.Fatal(err)
 	}
 	st.Close()
-	st, err = syncer.OpenState(dir + "/old.db")
+	st, err = syncer.OpenState(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if base, err = st.Load(ctx); err != nil || !base["a"].Created.Equal(born) {
+	if base, err := st.Load(ctx); err != nil || !base["a"].Created.Equal(born) {
 		t.Fatalf("after a restart: %+v, %v", base, err)
 	}
 }

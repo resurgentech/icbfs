@@ -54,8 +54,8 @@ func (p *pair) same(t *testing.T) {
 func TestSeededDriveIsAdoptedWithoutCopying(t *testing.T) {
 	p := newPair(t, syncer.OneWay)
 	for _, s := range []*memside.Side{p.local, p.remote} {
-		s.Put("A/Adams/will.pdf", "will", t0)
-		s.Put("A/Adams/deed.pdf", "deed", t0)
+		s.Put("A/Apollo/plan.pdf", "plan", t0)
+		s.Put("A/Apollo/budget.pdf", "budget", t0)
 		s.Put("B/Brown/memo.docx", "memo", t0)
 	}
 	p.local.Put("B/Brown/memo.docx", "memo v2", t0.Add(time.Hour)) // changed since the copy

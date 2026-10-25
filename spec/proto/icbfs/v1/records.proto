@@ -8,13 +8,11 @@ import "spec/proto/icbfs/v1/block.proto";
 option go_package = "github.com/resurgentech/icbfs/internal/pb";
 
 // The records a filesystem keeps beside its tree: trash entries, named
-// versions and origin records. Records written before these messages
-// existed are JSON (they begin with '{', which no protobuf message here
-// does) and are still read; new ones are these.
+// versions and origin records.
 //
-// layout, in each, is the record's format: 1 for these fields; 0, or
-// absent, reads as 1. A reader refuses a layout it doesn't know rather
-// than guess at it (internal/icbfs's ErrNewerFormat).
+// layout, in each, is the record's format: 1 for these fields. A reader
+// refuses any other rather than guess at it (internal/icbfs's
+// ErrNewerFormat for a newer one).
 
 // TrashEntry is one deleted item: <id>-trash-<inverted time>-<entry id>.
 message TrashEntry {

@@ -75,7 +75,7 @@ type Block struct {
 	// left half, linked to the new right half), so a name at or past
 	// HighKey is found by moving right (Past), whether or not the parent
 	// lists the right half yet. Both are "" for a block with nothing after
-	// it, and in blocks written before they existed.
+	// it.
 	HighKey string
 	Right   string
 }
@@ -86,14 +86,31 @@ func (b *Block) Past(name string) bool {
 	return b.HighKey != "" && b.Collation.Compare(name, b.HighKey) >= 0
 }
 
-// Layout is the block format this package reads and writes. A block
-// written before blocks carried one reads as layout 0, the same format.
+// Layout is the block format this package reads and writes.
 const Layout = 1
 
-// ErrNewerFormat is a stored object in a format newer than this build
-// knows: refused, not guessed at, so an older binary can't misread it or
-// write over it in the old format.
-var ErrNewerFormat = errors.New("stored in a newer format than this build reads; upgrade icbfs")
+var (
+	// ErrNewerFormat is a stored object in a format newer than this build
+	// knows: refused, not guessed at, so an older binary can't misread it
+	// or write over it in its own format.
+	ErrNewerFormat = errors.New("stored in a newer format than this build reads; upgrade icbfs")
+	// ErrUnknownFormat is a stored object that doesn't say it's in a
+	// format this build knows.
+	ErrUnknownFormat = errors.New("not stored in a format icbfs reads")
+)
+
+// CheckLayout is nil if a stored kind of object's layout is want, the
+// one this build reads and writes, and otherwise why it can't be read.
+func CheckLayout(kind string, layout, want uint32) error {
+	switch {
+	case layout == want:
+		return nil
+	case layout > want:
+		return fmt.Errorf("%s layout %d: %w", kind, layout, ErrNewerFormat)
+	default:
+		return fmt.Errorf("%s layout %d: %w", kind, layout, ErrUnknownFormat)
+	}
+}
 
 // Decode parses a directory block body (Protobuf-encoded, per
 // spec/proto/icbfs/v1/block.proto). Empty input decodes to an empty leaf
@@ -106,8 +123,8 @@ func Decode(data []byte) (*Block, error) {
 	if err := proto.Unmarshal(data, &wire); err != nil {
 		return nil, fmt.Errorf("decode directory block: %w", err)
 	}
-	if wire.Layout > Layout {
-		return nil, fmt.Errorf("directory block layout %d: %w", wire.Layout, ErrNewerFormat)
+	if err := CheckLayout("directory block", wire.Layout, Layout); err != nil {
+		return nil, err
 	}
 	return fromWire(&wire), nil
 }

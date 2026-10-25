@@ -131,8 +131,8 @@ func (x *LockRange) GetShared() bool {
 type Lock struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Ranges []*LockRange           `protobuf:"bytes,1,rep,name=ranges,proto3" json:"ranges,omitempty"`
-	// layout is this format: 1; 0, or absent, reads as 1. A reader refuses
-	// a layout it doesn't know (internal/icbfs's ErrNewerFormat).
+	// layout is this format: 1. A reader refuses any other (internal/icbfs's
+	// ErrNewerFormat for a newer one).
 	Layout        uint32 `protobuf:"varint,2,opt,name=layout,proto3" json:"layout,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

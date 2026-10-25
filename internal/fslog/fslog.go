@@ -91,7 +91,5 @@ type Event struct {
 }
 
 // Creds is how to reach a filesystem's object store: which kind, and that
-// kind's section ({"kind": "s3", "s3": {...}}). A server that sends an S3
-// store's fields at the top, as before there was more than one kind, is
-// understood.
+// kind's section ({"kind": "s3", "s3": {...}}).
 type Creds = storeconfig.Config

@@ -3,40 +3,19 @@ package main
 import (
 	"context"
 	"encoding/binary"
-	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/syncer/icbfsside"
 	"github.com/resurgentech/icbfs/internal/testutil/miniotest"
 	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
 )
-
-// TestConfigBeforeAzure: a settings file from before the store could be
-// Azure, its S3 settings at the top of "store", still reads.
-func TestConfigBeforeAzure(t *testing.T) {
-	c, err := loadConfigRaw([]byte(`{"store": {"endpoint": "https://s3.example.com", "bucket": "documents",
-		"accessKey": "AK", "secretKeyProtected": "PROTECTED"}, "pairs": []}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := pkgicbfs.S3{Endpoint: "https://s3.example.com", Bucket: "documents", AccessKey: "AK"}
-	if c.Store.Kind != "" || c.Store.S3 != want || c.Store.SecretProtected != "PROTECTED" {
-		t.Fatalf("store %+v", c.Store)
-	}
-	data, err := json.Marshal(c.Store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var again Store
-	if err := json.Unmarshal(data, &again); err != nil || again != c.Store {
-		t.Fatalf("%s → %+v, %v", data, again, err)
-	}
-}
 
 func TestConfigValidation(t *testing.T) {
 	good := template()
@@ -127,4 +106,67 @@ func TestOnce(t *testing.T) {
 func sorted(s []string) []string {
 	sort.Strings(s)
 	return s
+}
+
+// TestSyncNowListsTheDrive: in one-way mode a pass lists the drive only
+// every remoteEvery, but Sync now's does, so a file put on the drive
+// behind the folder's back goes at once.
+func TestSyncNowListsTheDrive(t *testing.T) {
+	ctx := context.Background()
+	store, srv := miniotest.Start(t)
+	if _, err := icbfs.CreateFilesystem(ctx, store, icbfs.Settings{Name: "docs", Size: 1 << 30, RootMode: 0o755}); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	folder := filepath.Join(dir, "folder")
+	os.MkdirAll(folder, 0o755)
+	os.WriteFile(filepath.Join(folder, "kept.txt"), []byte("kept"), 0o644)
+	paths := Paths{Config: filepath.Join(dir, "config.json"), Data: filepath.Join(dir, "data")}
+	cfg := &Config{
+		Store: Store{StoreConfig: pkgicbfs.StoreConfig{S3: pkgicbfs.S3{Endpoint: srv.Endpoint, Bucket: srv.Bucket, AccessKey: srv.AccessKey, SecretKey: srv.SecretKey}}},
+		Pairs: []Pair{{Name: "docs", Folder: folder, Filesystem: "docs", Root: "/", Mode: "one-way", Interval: "1h", RemoteEvery: "1h"}},
+	}
+	log, err := openLog(logPath(paths), io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+	r, err := newRunner(cfg, paths, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Start(ctx)
+	defer r.Stop()
+	remote, err := icbfsside.Open(ctx, store, "docs", "/", "test", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer remote.Close()
+	onDrive := func() string {
+		es, err := remote.List(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, e := range es {
+			got = append(got, e.Path)
+		}
+		return strings.Join(sorted(got), " ")
+	}
+	until := func(what string, ok func() bool) {
+		t.Helper()
+		for deadline := time.Now().Add(20 * time.Second); !ok(); time.Sleep(100 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: drive has %q", what, onDrive())
+			}
+		}
+	}
+	until("the first pass", func() bool { return onDrive() == "kept.txt" })
+	until("the first pass to finish", func() bool { return strings.HasPrefix(r.Status()[0].State, "up to date") })
+
+	if _, err := remote.Write(ctx, "stray.txt", strings.NewReader("stray"), 5, time.Now(), time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	r.SyncNow("docs")
+	until("Sync now", func() bool { return onDrive() == "kept.txt" })
 }

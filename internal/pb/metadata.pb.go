@@ -38,10 +38,6 @@ type Metadata struct {
 	// The item's extended attributes, as a mount's getxattr and setxattr
 	// see them: only names users set (user.*, trusted.*, security.*).
 	Xattrs map[string][]byte `protobuf:"bytes,5,rep,name=xattrs,proto3" json:"xattrs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	// Legacy last-access time, nanoseconds since the Unix epoch. Superseded by atime (field 13), which also covers
-	// dates int64 nanoseconds can't (before 1678); still read when atime is
-	// unset, never written.
-	AtimeUnixNano int64 `protobuf:"varint,6,opt,name=atime_unix_nano,json=atimeUnixNano,proto3" json:"atime_unix_nano,omitempty"`
 	// The device number (encoded major/minor, same packing mknod(2)/
 	// stat(2)'s st_rdev uses) for a char/block device entry — meaningless
 	// and always 0 for every other entry type, including FIFOs and sockets
@@ -79,8 +75,8 @@ type Metadata struct {
 	// object except a read's atime update, which would otherwise make
 	// every read look like a change. A directory's is also set when an
 	// entry is added to or removed from it. For a file the reported ctime
-	// is the later of this and the content's last write. Unset (objects
-	// written before this field) = this object's own LastModified.
+	// is the later of this and the content's last write. Unset = this
+	// object's own LastModified.
 	Ctime *timestamppb.Timestamp `protobuf:"bytes,16,opt,name=ctime,proto3" json:"ctime,omitempty"`
 	// The item's Windows state; unset when it has none.
 	Windows *Windows `protobuf:"bytes,17,opt,name=windows,proto3" json:"windows,omitempty"`
@@ -93,10 +89,8 @@ type Metadata struct {
 	// icbfs-sync's content hash, the drive API's content type and copy
 	// origin, the side store's metadata. No mount shows it.
 	App map[string][]byte `protobuf:"bytes,20,rep,name=app,proto3" json:"app,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	// layout is 1 for a record written with the fields above. Records
-	// with 0 kept the Windows state, POSIX ACLs and tools' data in xattrs,
-	// under fixed names; decoding moves them out (internal/icbfs's
-	// fromLegacyXattrs).
+	// layout is this format: 1. A reader refuses any other (internal/icbfs's
+	// ErrNewerFormat for a newer one).
 	Layout        uint32 `protobuf:"varint,21,opt,name=layout,proto3" json:"layout,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -165,13 +159,6 @@ func (x *Metadata) GetXattrs() map[string][]byte {
 		return x.Xattrs
 	}
 	return nil
-}
-
-func (x *Metadata) GetAtimeUnixNano() int64 {
-	if x != nil {
-		return x.AtimeUnixNano
-	}
-	return 0
 }
 
 func (x *Metadata) GetRdev() uint32 {
@@ -343,14 +330,13 @@ var File_spec_proto_icbfs_v1_metadata_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\n" +
-	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xcc\a\n" +
+	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xaa\a\n" +
 	"\bMetadata\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\rR\x04mode\x12\x10\n" +
 	"\x03uid\x18\x02 \x01(\rR\x03uid\x12\x10\n" +
 	"\x03gid\x18\x03 \x01(\rR\x03gid\x12\x14\n" +
 	"\x05nlink\x18\x04 \x01(\rR\x05nlink\x126\n" +
-	"\x06xattrs\x18\x05 \x03(\v2\x1e.icbfs.v1.Metadata.XattrsEntryR\x06xattrs\x12&\n" +
-	"\x0fatime_unix_nano\x18\x06 \x01(\x03R\ratimeUnixNano\x12\x12\n" +
+	"\x06xattrs\x18\x05 \x03(\v2\x1e.icbfs.v1.Metadata.XattrsEntryR\x06xattrs\x12\x12\n" +
 	"\x04rdev\x18\a \x01(\rR\x04rdev\x12.\n" +
 	"\x13mtime_override_etag\x18\n" +
 	" \x01(\tR\x11mtimeOverrideEtag\x129\n" +
@@ -373,7 +359,7 @@ const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\x1a6\n" +
 	"\bAppEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01J\x04\b\b\x10\tJ\x04\b\t\x10\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01J\x04\b\x06\x10\aJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
 	"\"\x8c\x01\n" +
 	"\aWindows\x12\x12\n" +
 	"\x04sddl\x18\x01 \x01(\tR\x04sddl\x12#\n" +

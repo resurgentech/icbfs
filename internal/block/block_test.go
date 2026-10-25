@@ -152,6 +152,7 @@ func TestDecodeIgnoresUnknownField(t *testing.T) {
 		Entries: []*pb.Entry{
 			{Name: "a.txt", Uuid: "uuid-a", Type: pb.EntryType_ENTRY_TYPE_FILE},
 		},
+		Layout: Layout,
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -172,15 +173,19 @@ func TestDecodeIgnoresUnknownField(t *testing.T) {
 	}
 }
 
-// TestDecodeRefusesNewerLayout: a block in a layout newer than Layout is
-// refused, and the blocks Encode writes say Layout.
-func TestDecodeRefusesNewerLayout(t *testing.T) {
+// TestDecodeRefusesOtherLayouts: a block in a layout newer than Layout,
+// or in none, is refused, and the blocks Encode writes say Layout.
+func TestDecodeRefusesOtherLayouts(t *testing.T) {
 	data, err := proto.Marshal(&pb.Block{Kind: pb.BlockKind(Leaf), Layout: Layout + 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Decode(data); !errors.Is(err, ErrNewerFormat) {
 		t.Fatalf("decode a newer block: %v, want ErrNewerFormat", err)
+	}
+	data, _ = proto.Marshal(&pb.Block{Entries: []*pb.Entry{{Name: "a", Uuid: "u"}}})
+	if _, err := Decode(data); !errors.Is(err, ErrUnknownFormat) {
+		t.Fatalf("decode a block with no layout: %v, want ErrUnknownFormat", err)
 	}
 	b := &Block{Kind: Leaf, Entries: []Entry{{Name: "a", UUID: "u"}}}
 	data, _ = b.Encode()

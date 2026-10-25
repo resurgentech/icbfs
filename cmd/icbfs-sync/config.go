@@ -1,7 +1,6 @@
 package main
 
 import (
-	"cmp"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -23,23 +22,6 @@ type Config struct {
 type Store struct {
 	pkgicbfs.StoreConfig
 	SecretProtected string `json:"secretProtected,omitempty"`
-}
-
-// UnmarshalJSON reads a Store; secretKeyProtected is what SecretProtected
-// was called when the store could only be S3.
-func (s *Store) UnmarshalJSON(b []byte) error {
-	if err := s.StoreConfig.UnmarshalJSON(b); err != nil {
-		return err
-	}
-	var p struct {
-		SecretProtected    string `json:"secretProtected"`
-		SecretKeyProtected string `json:"secretKeyProtected"`
-	}
-	if err := json.Unmarshal(b, &p); err != nil {
-		return err
-	}
-	s.SecretProtected = cmp.Or(p.SecretProtected, p.SecretKeyProtected)
-	return nil
 }
 
 // Pair is a folder kept in step with an icbfs drive.

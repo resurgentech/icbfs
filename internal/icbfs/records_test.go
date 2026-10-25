@@ -3,7 +3,6 @@ package icbfs
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"reflect"
 	"strings"
@@ -44,30 +43,10 @@ func TestRecordsRoundTrip(t *testing.T) {
 	}
 }
 
-// TestRecordsReadLegacyJSON: records written as JSON, before they were
-// Protobuf, still read.
-func TestRecordsReadLegacyJSON(t *testing.T) {
-	at := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
-	te := TrashEntry{EntryID: "e", ItemID: "0000-x", Type: TypeFile, Name: "n", DeletedAt: at, Size: 3, Origin: []byte("o")}
-	data, _ := json.Marshal(te)
-	if got, err := decodeTrashEntry(data); err != nil || !reflect.DeepEqual(got, te) {
-		t.Fatalf("legacy trash entry = %+v, %v", got, err)
-	}
-	nv := NamedVersion{Name: "n", Time: at, CreatedAt: at}
-	data, _ = json.Marshal(nv)
-	if got, err := decodeNamedVersion(data); err != nil || !reflect.DeepEqual(got, nv) {
-		t.Fatalf("legacy named version = %+v, %v", got, err)
-	}
-	or := OriginRecord{Drive: "d", ID: "i", ItemID: "0000-x"}
-	data, _ = json.Marshal(or)
-	if got, err := decodeOriginRecord(data); err != nil || got != or {
-		t.Fatalf("legacy origin record = %+v, %v", got, err)
-	}
-}
-
-// TestNewerLayoutsRefused: every decoder refuses a layout newer than it
-// knows, with ErrNewerFormat, rather than reading what it can of it.
-func TestNewerLayoutsRefused(t *testing.T) {
+// TestOtherLayoutsRefused: every decoder refuses any layout but its own,
+// a newer one with ErrNewerFormat and one with none with
+// ErrUnknownFormat, rather than reading what it can of it.
+func TestOtherLayoutsRefused(t *testing.T) {
 	enc := func(m proto.Message) []byte {
 		data, err := proto.Marshal(m)
 		if err != nil {
@@ -75,27 +54,33 @@ func TestNewerLayoutsRefused(t *testing.T) {
 		}
 		return data
 	}
-	decoders := map[string]func() error{
-		"trash entry": func() error {
-			_, err := decodeTrashEntry(enc(&pb.TrashEntry{EntryId: "e", Layout: 2}))
+	decoders := map[string]func(layout uint32) error{
+		"trash entry": func(layout uint32) error {
+			_, err := decodeTrashEntry(enc(&pb.TrashEntry{EntryId: "e", Layout: layout}))
 			return err
 		},
-		"named version": func() error {
-			_, err := decodeNamedVersion(enc(&pb.NamedVersion{Name: "n", Layout: 2}))
+		"named version": func(layout uint32) error {
+			_, err := decodeNamedVersion(enc(&pb.NamedVersion{Name: "n", Layout: layout}))
 			return err
 		},
-		"origin record": func() error {
-			_, err := decodeOriginRecord(enc(&pb.OriginRecord{Drive: "d", Layout: 2}))
+		"origin record": func(layout uint32) error {
+			_, err := decodeOriginRecord(enc(&pb.OriginRecord{Drive: "d", Layout: layout}))
 			return err
 		},
-		"metadata": func() error {
-			_, err := decodeFileMetadata(enc(&pb.Metadata{Mode: 0644, Layout: 2}))
+		"metadata": func(layout uint32) error {
+			_, err := decodeFileMetadata(enc(&pb.Metadata{Mode: 0644, Layout: layout}))
 			return err
 		},
 	}
 	for name, decode := range decoders {
-		if err := decode(); !errors.Is(err, ErrNewerFormat) {
+		if err := decode(2); !errors.Is(err, ErrNewerFormat) {
 			t.Errorf("%s at layout 2: err = %v, want ErrNewerFormat", name, err)
+		}
+		if err := decode(0); !errors.Is(err, ErrUnknownFormat) {
+			t.Errorf("%s at layout 0: err = %v, want ErrUnknownFormat", name, err)
+		}
+		if err := decode(1); err != nil {
+			t.Errorf("%s at layout 1: %v", name, err)
 		}
 	}
 }
@@ -108,20 +93,6 @@ func TestNewerFormatsRefusedInStore(t *testing.T) {
 	ctx := context.Background()
 	root := f.RootKey()
 	key := writeNew(t, ctx, f, root, "a", "x")
-
-	// A legacy JSON trash entry, beside a new one, both listed.
-	old := TrashEntry{EntryID: "legacy", ItemID: f.id + "-old", Name: "old", ParentID: root, DeletedAt: time.Now().Add(-time.Hour).UTC()}
-	data, _ := json.Marshal(old)
-	if _, err := store.PutIfAbsent(ctx, f.trashKey(old), bytes.NewReader(data), nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := f.Unlink(ctx, root, "a"); err != nil {
-		t.Fatal(err)
-	}
-	trash, err := f.ListTrash(ctx, TrashOptions{})
-	if err != nil || len(trash) != 2 || trash[0].ItemID != key || trash[1].EntryID != "legacy" {
-		t.Fatalf("trash = %+v, %v; want the new entry, then the legacy one", trash, err)
-	}
 
 	// A lock object in a newer layout.
 	f.EnableLocking(true)
@@ -145,6 +116,16 @@ func TestNewerFormatsRefusedInStore(t *testing.T) {
 	}
 	if err := New(store, "test").Bootstrap(ctx, 1<<30, 0755, 0, 0, false); !errors.Is(err, ErrNewerFormat) {
 		t.Fatalf("bootstrap a newer filesystem: %v, want ErrNewerFormat", err)
+	}
+	// And one that says no format at all.
+	if err := updateFilesystemEntry(ctx, store, "test", func(e *pb.FilesystemEntry) { e.FormatVersion = 0 }); err != nil {
+		t.Fatal(err)
+	}
+	if err := New(store, "test").Attach(ctx); !errors.Is(err, ErrUnknownFormat) {
+		t.Fatalf("attach a filesystem of format 0: %v, want ErrUnknownFormat", err)
+	}
+	if err := updateFilesystemEntry(ctx, store, "test", func(e *pb.FilesystemEntry) { e.FormatVersion = FormatVersion + 1 }); err != nil {
+		t.Fatal(err)
 	}
 	info, err := DescribeFilesystem(ctx, store, "test")
 	if err != nil || info.FormatVersion != FormatVersion+1 {
