@@ -79,39 +79,33 @@ with its four-hex-digit ID, so one prefix listing finds all of it.
 | `<id>-trash-<inverted time>-<entry>` | one trash entry |
 | `<id>-trashby-<uuid>` | the key of the item's newest trash entry, so a trashed item's entry is one read |
 | `<id>-name-<name>` | a named version |
-| `<id>-origin-<hash>` | the item copied from one source item (a SharePoint document, say): its id, the source version, where it was last seen |
+| `<id>-origin-<hash>` | the item copied from one source item (an item in another document store, say): its id, the source version, where it was last seen |
 | `<id>-purged` | empty; each purge writes it again, telling history caches to drop what they kept (see Past views) |
 
 Item keys are **UUIDv7**. Their embedded millisecond timestamp gives each
 item a creation time for free and keeps keys roughly time-ordered.
 
-Encodings are Protobuf; the schemas are in [`spec/proto`](../spec/proto).
-Trash entries, named versions and origin records written before they were
-Protobuf are JSON, and are still read (a JSON record starts with `{`,
-which none of the Protobuf ones can).
+The objects icbfs encodes itself (directory blocks, `.metadata`, locks,
+the master block, trash entries, named versions and origin records) are
+Protobuf; the schemas are in [`spec/proto`](../spec/proto). A file's
+content and its streams are its bytes; `-trashby-` holds a key as text,
+and `-purged` is empty.
 
-**Format versions.** Every object carries the number of its format: a
-`layout` field in each message (directory blocks, `.metadata`, locks, the
-master block, the three records), and in the master block each
-filesystem's `format_version`, the format of its objects as a whole. All
-are 1 now; 0, or absent (objects from before the fields), reads as 1. A
-reader refuses a number newer than it knows (`ErrNewerFormat`): a binary
-that is too old won't open a filesystem in a newer format, or read an
-object in one, rather than misread it or write it back in the old one.
-A change a reader of the old format would mishandle raises the number;
-a new field it can ignore doesn't. Adopting a new format is then: every
-machine upgraded to a build that reads it, then `format_version` raised,
-then objects rewritten as they are next written (or all at once, by a
-tool). Old formats stay readable for good: past views and the trash read
-old versions. A rewrite only for the format must carry the item's times
-over explicitly and not stamp its ctime, since some times are still
-derived from the store's object times when none is stored.
+**Format versions.** Each Protobuf message carries the number of its
+format, a `layout` field, and the master block gives each filesystem a
+`format_version`, the format of its objects as a whole. All are 1. A
+reader refuses any number it doesn't know (a newer one with
+`ErrNewerFormat`): a binary that is too old won't open a filesystem in a
+newer format, or read an object in one, rather than misread it or write
+it back wrongly. An empty directory block reads as an empty directory. A change a
+reader would mishandle raises the number; a new field it can ignore
+doesn't.
 
 ## The master block
 
 The master block is a list of `FilesystemEntry` records: name, declared
 size, archived flag, primary mode (Windows or POSIX), max file size,
-creation time and format version. **A filesystem's ID is its position in the list.**
+entries per directory block, creation time and format version. **A filesystem's ID is its position in the list.**
 
 - Creating a filesystem reads the list, takes the first free slot (or
   appends one), and writes the list back with a conditional write.
@@ -119,10 +113,11 @@ creation time and format version. **A filesystem's ID is its position in the lis
   or reorders, because an entry that moved would change its ID, and every
   object it owns is keyed by that ID. A freed slot can be reused.
 - Sixteen bits of ID allow 65,536 filesystems to exist at once in one
-  bucket.
+  bucket; creating one more fails.
 
 Filesystems are created explicitly, by `icbfs-cli fs create` or the drive
-API, with every setting given then. A mount only attaches to an existing
+API, with every setting given then. Only the declared size changes later
+(`icbfs-cli fs resize`). A mount only attaches to an existing
 filesystem, so a mistyped name fails instead of making a new, empty one.
 
 **Lifecycle: active → archived → pruned.** An archived filesystem is
@@ -143,8 +138,9 @@ are copied on the server from the version the edit started from, so an edit
 uploads only what changed, but the result is still one object.
 
 - The part size is the smallest power-of-two MiB, at least 8 MiB, that fits
-  the filesystem's max file size into S3's 10,000 parts. That is 8 MiB for
-  an 8 GiB limit and 128 MiB for 1 TiB.
+  the filesystem's max file size into the store's most parts. On S3
+  (10,000 parts) that is 8 MiB for an 8 GiB limit and 128 MiB for 1 TiB;
+  on Azure (50,000 blocks), 32 MiB for 1 TiB.
 - The **max file size** is set per filesystem at creation; the default is
   1 TiB. A write or truncate past it fails with `EFBIG` on Linux, or
   `STATUS_FILE_TOO_LARGE` on Windows.
@@ -164,6 +160,13 @@ file, for a mapping's pages written back after the close.
   removes the scratch file. Opening a file already open picks up another
   machine's newer version if nothing here is unflushed (close-to-open);
   otherwise the next flush merges onto it.
+- A file removed while it's open here lives until its last close, as on a
+  local disk. The removal takes the name away and marks `.metadata` with a
+  link count of 0 at once, so every mount sees the file gone; the open
+  sessions keep reading and writing, their writes are discarded, and the
+  objects are deleted at the last close. A crash in between leaves the
+  marked objects behind, unreferenced. Opens on other machines aren't
+  tracked: a file deleted elsewhere disappears under them.
 
 **Directories are B-trees of blocks.** A block holds `name → UUID + type`
 rows. When a block overflows, it splits at the **median key actually in
@@ -283,10 +286,7 @@ no other machine's kernel strips capabilities when this mount writes.
 attributes hold only names a user set; icbfs's state has typed fields of
 its own, and its tools' data a separate table keyed by tool. Nothing a user
 does through an xattr call can read or change icbfs's state, and nothing
-icbfs keeps shows up as an xattr. Records written before this split, which
-kept that state in the xattr table under fixed names, are sorted into the
-new fields when read (they are marked by a layout number), and the next
-write stores the new layout.
+icbfs keeps shows up as an xattr.
 
 **Why a separate object.** An S3 ETag is a hash of the object's body. A
 change to an object's native metadata doesn't change its ETag, so a
@@ -301,24 +301,29 @@ object.
 **Derived, never stored twice:**
 
 - **Size** is the content object's length.
-- **mtime** is the content object's `Last-Modified`, unless an explicit
+- **mtime**, for a file, is the content object's `Last-Modified`, unless an explicit
   time was set (`utimensat`, `SetFileTime`). An explicit time holds only
   while the content is still the version it was set on, so a later write
   moves mtime again, as on any local filesystem. One set on a file with
   writes not yet flushed (`cp -a`, `tar` and robocopy set a copy's time
   before closing it) is set again on the version the flush writes, unless
-  another write came after it.
+  another write came after it. A directory's mtime is stored in its
+  `.metadata` and moves whenever an entry is added or removed, by the
+  clock of the machine that made the change.
 - **ctime** is the later of the recorded change time and the content's last
   write.
-- **Creation time** is the time in the UUIDv7 key, unless overridden
-  (`SetFileTime`, the sync, the drive API's `WriteOptions.Created`); an
-  override stays through later writes. Linux mounts report it through
+- **Creation time** is the time in the UUIDv7 key (the creating machine's
+  clock), unless overridden (`SetFileTime`, the sync, the drive API's
+  `WriteOptions.Created`); an override stays through later writes. The
+  root's key isn't a UUID, so its creation time is zero until one is set. Linux mounts report it through
   `statx` (Linux 6.6 and later); Linux has no way to set one.
 - **Access time** is recorded in `.metadata` on a file's first read in each
   open, and on a directory listing, subject to the access-time mode:
   Linux mounts default to relatime, which skips the write unless the
-  recorded access is no newer than the last change or a day old; strict
-  and never are the other modes, and directories can be left out. It is
+  recorded access is no newer than the last change or a day old; Windows
+  mounts default to hourly, which skips it unless the recorded access is
+  over an hour old, as NTFS does; strict and never are the other modes,
+  and directories can be left out. It is
   best-effort: a lost race never
   fails the read, and it doesn't count as a change for ctime. As-of mounts
   record nothing.
@@ -351,10 +356,12 @@ land, as they would on a local disk.
 
 - Retrying is bounded by time: 5 seconds, rather than a count, because a
   retry of a large file costs more than one of a small file.
-- When the time runs out, the writer takes the file's lock (below) and
-  makes one last conditional attempt while holding it.
-- Every access layer follows this sequence. That is what guarantees a
-  writer under contention eventually makes progress.
+- When the time runs out on a filesystem with locking on (Linux mounts
+  turn it on by default), the writer takes the file's lock (below) and
+  makes one last conditional attempt while holding it, so a writer under
+  contention eventually gets through.
+- Everywhere else (Windows mounts, the drive API, icbfs-sync) the write
+  then fails with a contention error, and the caller can try again.
 
 When two link-count changes race, the one reaching zero first writes a
 tombstone under the same conditional write before the object is deleted,
@@ -414,8 +421,9 @@ write.
   conditionally.
 - **Leases.** Every lock has a 30-second lease, renewed every 10 seconds
   while it is held, so a crashed holder's locks expire. A lease's expiry is
-  computed from the store's `Last-Modified` time for the lock write, not
-  the client's clock. Stealing an expired lock is itself a conditional
+  the store's clock (the `Date` of a response, read just before the lock
+  write) plus the lease, stored with the entry; whether an entry has
+  expired is checked by the client's clock. Stealing an expired lock is itself a conditional
   write, so clock skew can only shift when a lease looks expired; it can't
   let two clients take the same lock.
 - **Waiting** is polling. With `-notify` on MinIO, a change notification on
@@ -450,8 +458,9 @@ Optional (`icbfs mount -notify`), and MinIO only for mounts. A notification
 is a hint to "go look". It never says authoritatively what changed.
 
 - **On a FUSE mount**, a notification for a file the kernel knows about
-  is passed on to the kernel to invalidate it. The mount sets no kernel
-  cache timeouts and doesn't keep page cache across opens: within one
+  is passed on to the kernel to invalidate it. The kernel trusts names
+  and attributes for `-meta-cache` (above), and the mount doesn't keep
+  page cache across opens: within one
   open, reads come from the kernel's page cache, and each open starts
   again from the store (close-to-open, as NFS). So a notification only
   matters to a file open at the time it changes. The
@@ -498,7 +507,7 @@ runs on top of it.
 - Each object's version list is fetched once into a history cache, a
   local SQLite database shared by views of every time. Moving a view to
   another time needs nothing more from the store, which is what lets a
-  program that browses history move through time fast. A mount keeps it
+  program that browses history (`pkg/history`) move through time fast. A mount keeps it
   between mounts, one per store and credential, in the user's cache
   directory (`objstore.HistoryCache`; WAL, so as-of mounts and such
   programs share it).
@@ -510,8 +519,8 @@ runs on top of it.
   later session as well.
 - The past doesn't change, except by a purge, which the cache can't see
   for itself. So each purge writes a new version of an empty object,
-  `<id>-purged`, after it has erased. A program browsing history checks it
-  every so often, and an as-of mount when it starts (`icbfs.ForgetPurged`); a
+  `<id>-purged`, after it has erased. `pkg/history` checks it at most
+  every 30 seconds, and an as-of mount when it starts (`icbfs.ForgetPurged`); a
   new version since the cache last looked drops everything it kept of
   that filesystem. A view that finds a cached version erased forgets that
   key and asks again. And everything is fetched again once it's older
@@ -523,7 +532,11 @@ runs on top of it.
 **Named versions** are one object each, `<id>-name-<name>`, holding a time.
 A name made "now" holds no time: its time is the store's timestamp for
 writing it, which orders it after every write that had already finished.
-Names are created and deleted, never moved, and can't look like a time.
+Names are created and deleted, never moved, and can't look like a time:
+up to 63 letters, digits, `.`, `_`, `-` and spaces, starting with a letter
+or digit. A name can record the subtree it was made for (its scope): the
+drive API shows it only to drives at or above that path, though its time
+covers the whole filesystem.
 
 **Limits:**
 
@@ -547,9 +560,12 @@ directory, writes a trash entry. This covers `unlink`, `rmdir`, and a rename
 over an existing item, from any mount or the API.
 
 - An entry records the item's ID, name, parent, path, who deleted it,
-  when, its size and its version.
+  when, its size and its version; the batch it went in (everything one
+  recursive delete removed); where it was copied from, if it was a copy;
+  and the sync pass that removed it, if one did, so a whole pass can be
+  undone.
 - The key's inverted time lists entries newest first.
-- Entries are kept forever; there is no emptying the trash.
+- Nothing expires: an entry stays until the item is purged.
 
 **Restoring** removes the delete markers on the item's objects (content,
 `.metadata`, streams), so the history simply continues. It then gives the
@@ -558,7 +574,8 @@ restore is told to replace it. A recursive delete through the API is one
 batch, and restoring its directory restores the batch.
 
 **Purge** permanently erases every version of an item's objects, its trash
-entries, and its drafts. For a directory, that includes every block its tree
+entries, and its drafts (the drive API's autosaves, kept in the drive's
+side store). For a directory, that includes every block its tree
 has had and everything under it.
 
 - The item's name stays in its parent directory's history: a past listing

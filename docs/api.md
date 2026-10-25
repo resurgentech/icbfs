@@ -19,7 +19,7 @@ The Go models and client are generated from it into
 | **filesystem** | an icbfs filesystem in a bucket's master block. One filesystem can back several drives (the whole tree, or subtrees). |
 | **registered bucket** | a bucket the host knows: endpoint, name, credentials. Filesystems are created in registered buckets. |
 | **actor** | who is acting: a user or an agent, named by the host. |
-| **profile** | who the actor is on a drive's storage: a Windows SID and its groups' SIDs, or a POSIX uid and gids. |
+| **profile** | who the actor is on a drive's storage: a Windows SID, its groups' SIDs and its domain's, or a POSIX uid and gids. `ByMode` is for an actor with no uid on a primary-POSIX drive (a Windows user's, say): items are checked by their mode bits alone, as a Windows mount does. `System` skips the item checks, for the library's own housekeeping, never for a user. |
 | **version** | one state of a file's content: shown as a time, carried with an ID. |
 | **named version** | a name for a time, on a drive or a whole filesystem: a snapshot that copies nothing. |
 | **side store** | an icbfs filesystem where the library keeps its own data about documents (drafts), whatever drive the document is on. |
@@ -42,7 +42,7 @@ supplies:
 
 | field | what it is |
 |---|---|
-| `Drive` | finds a drive by its registry ID (`ErrNotFound` if there's none, or the actor may not know of it) |
+| `Drive` | finds a drive by its registry ID, with its name and kind (a `DriveEntry`); `ErrNotFound` if there's none, or the actor may not know of it |
 | `Authorize` | may this request's actor do this permission on this drive? Answers the actor and the actor's profile on the drive. |
 | `AuthorizeBucket` | the same for a registered bucket. The profile is who a new filesystem's root is owned by. |
 | `Bucket` | opens a registered bucket |
@@ -66,14 +66,16 @@ type Drive interface {
 
     Versions(ctx, item ItemRef) ([]Version, error)
     Names(ctx) ([]Name, error)
-    CreateName(ctx, name string, at time.Time) (Name, error)
+    CreateName(ctx, name string, at time.Time, filesystemWide bool) (Name, error)
     DeleteName(ctx, name string) error
     Trash(ctx, opts TrashOptions) (TrashPage, error)
-    Restore(ctx, entry string, to string, opts RestoreOptions) (Item, error)
+    Restore(ctx, entry string, opts RestoreOptions) (Item, error)
     Purge(ctx, item ItemRef, allNames bool) error
     Changes(ctx) (<-chan Change, error)
-    Identities(ctx) (Job, error)
-    Permissions(ctx, item ItemRef) (ACL, error)
+    Identities(ctx, progress func(scanned int)) ([]Identity, error)
+    Permissions(ctx, item ItemRef) (Permissions, error)
+
+    SetOrigin(ctx, item ItemRef, o Origin) error
 }
 ```
 
@@ -83,36 +85,38 @@ type Drive interface {
 - Who is acting, and as which profile, comes in the context
   (`drive.WithActor`, `drive.WithProfile`).
 
-**Copy** (within a drive, or between drives) is the library's own: it
-reads from the source, writes to the target, and records where the copy
-came from (drive, ID, version) on targets that can keep it. It reads as
-the actor's profile on the source and writes as the actor's profile on the
-target. **Diff** is the library's own too.
+**Copy** (within a drive, or between drives) is the library's own:
+`drive.Copy(ctx, src, srcID, from, at, dst, to, cond) (Item, error)` reads
+from the source, writes to the target, and records where the copy came
+from (drive, ID, version) on targets that can keep it. It reads as the
+actor's profile on the source and writes as the actor's profile on the
+target. **Diff** is the library's own too: `drive.Diff(ctx, d, item, from,
+to) (string, error)`, a unified diff of two versions of a text file.
 
 `WriteOptions.ModTime`, `WriteOptions.Created` and `WriteOptions.Origin`
 set a file's modified and creation times at its source and where it was
-copied from in the same write, instead of a `SetAttr` and a `SetOrigin`
+copied from in the same write, instead of a `SetTimes` and a `SetOrigin`
 after it. The creation time stays through later writes; the modified time
 is the write's again at the next write without one.
 
 A drive that's a `drive.TimeSetter` (icbfs's is) sets an item's times
-alone, with no new version: `SetTimes(ctx, item, modified, created)`, a
-zero time left as it is. It's how a folder gets its times (`Mkdir` takes
+alone, with no new version: `SetTimes(ctx, item, modified, created)
+(Item, error)`, a zero time left as it is. It's how a folder gets its times (`Mkdir` takes
 none), and how an item copied before its source's times were passed gets
 them.
 
 ### Mirroring a source: `drive.Mirror`
 
-A sync daemon (a SharePoint mirror, say) keeps a drive matching a
-source of documents. `drive.NewMirror(d, sourceDrive)` does the
+A sync daemon keeps a drive matching a source of documents (another
+document store, say). `drive.NewMirror(d, sourceDrive)` does the
 bookkeeping, keyed by each item's origin (the source drive and the item's
 id there), so the daemon only says what each source item is now:
 
 ```go
-m := drive.NewMirror(d, "sharepoint:site/library")
+m := drive.NewMirror(d, "webdav:docs")
 applied, err := m.Apply(ctx, drive.SourceItem{
-    Origin: drive.Origin{ID: id, Version: "4.0", Path: spPath},
-    Path:   "/Matters/brief.docx", Type: drive.TypeFile, ModTime: modified, Created: created,
+    Origin: drive.Origin{ID: id, Version: "4.0", Path: srcPath},
+    Path:   "/Reports/brief.docx", Type: drive.TypeFile, ModTime: modified, Created: created,
     Open:   func(ctx context.Context) (io.ReadCloser, error) { return download(ctx, id) },
 })
 removed, err := m.Remove(drive.WithPass(ctx, passID), id) // to the trash
@@ -129,6 +133,11 @@ n, err := m.Undo(ctx, passID)                              // a bad pass, undone
 | it, at another path | moves it (`moved`), then writes only if the version differs |
 | it, in the trash | restores it, history and all (`restored`), then as above |
 
+`Apply` returns an `Applied`: the item, and the actions it took. Setting
+times alone (`retimed`) needs a drive that's a `TimeSetter`; elsewhere a
+change of times alone waits for the next version. A directory is made with
+`Mkdir`, then given its times and origin.
+
 - `Open` is called only when the bytes are needed: never for a move, a
   restore of the version held, or an item already up to date.
 - The trash is the undo. An item the source deletes and brings back with
@@ -137,8 +146,8 @@ n, err := m.Undo(ctx, passID)                              // a bad pass, undone
   everything one pass removed. A daemon needn't cap how much a pass may
   remove.
 - A path taken by an item not copied from that source item is refused
-  (`ErrNotMirrored`); a directory there is adopted. An item copied before
-  origins were indexed, still at its path with its origin, is adopted too.
+  (`ErrNotMirrored`); a directory there is adopted, and so is an item at
+  the path that carries the source item's origin but has no origin record.
 - Two items claiming one source item (a copy made twice): the newest
   claim is the one the mirror works on.
 - On icbfs, finding a source item is a lookup (`OriginFinder`: an origin
@@ -184,7 +193,9 @@ There are two checks, in order.
    - **POSIX:** mode bits, owner and group against the profile's uid and
      gids.
 
-An actor without a profile on the drive is refused with `no_access`.
+An actor without a profile on the drive is refused with `no_access`, and
+so is a profile of the other kind (a Windows profile on a primary-POSIX
+drive) unless it's `ByMode`.
 
 | permission | operations |
 |---|---|
@@ -237,8 +248,8 @@ doesn't make an open editor see a conflict.
 drive read-only as it was then.
 
 - A time before the filesystem existed answers 404.
-- A time in the future answers 400. A time up to about a second ahead is
-  waited for.
+- A time in the future, by the store's clock, answers 400. A time up to two
+  seconds ahead is waited for.
 
 **Named versions.**
 
@@ -256,15 +267,20 @@ Mounts read names too: `icbfs mount -as-of q3-signoff`.
 
 **Browsing the past: `pkg/history`.** A program that moves through a
 filesystem's history (a slider over time, say) opens it with
-`history.Open(ctx, history.Config{Store, Filesystem, Root})` and asks, as
-the profile in each call's context:
+`history.Open(ctx, history.Config{Store, Filesystem, Root, CacheDir, TTL})`
+(a store configuration, not an open store; `CacheDir` and `TTL` default to
+the user's cache directory and 30 days) and asks, as the profile in each
+call's context:
 
 - `List(ctx, dir, at)`: a directory as it was at a moment (now, for the
   zero time);
 - `Versions(ctx, item)`: a file's versions, by id even once it's in the
   trash;
-- `Search(ctx, query, limit)`: names in the tree now and in the trash,
-  each hit with a moment to see it at (just before a deleted one went);
+- `Search(ctx, query, limit)`: names in the tree now and in the trash. Each
+  `Hit` has the item's id, path, name, type, when it last changed (or was
+  deleted), whether it's `Deleted` (and its `TrashID`), and `See`, a moment
+  to see it at: just before a deleted one went, the zero time for one
+  that's there now. `Results.Truncated` says the limit cut the hits short;
 - `Span(ctx)`: from the filesystem's creation to now, by the store's
   clock.
 
@@ -272,7 +288,34 @@ It reads through the history cache as-of mounts share (by default in the
 user's cache directory, kept 30 days), so a directory listed at some
 moments is listed at them again with no store requests, in later runs
 too. A purge is noticed within 30 seconds (`CheckPurges`); `Purges`
-counts them, for a caller keeping listings of its own.
+counts them, for a caller keeping listings of its own. `IsNotFound` tells a
+path or item that wasn't there at that moment, and `Close` closes the
+cache.
+
+## Opening drives and filesystems in Go
+
+```go
+store, err := pkgicbfs.Open(pkgicbfs.StoreConfig{Kind: "s3", S3: pkgicbfs.S3{...}})
+d, err := icbfsdrive.New(ctx, icbfsdrive.Config{
+    Store: store, Filesystem: "docs", Root: "/", ID: "docs", CacheDir: dir})
+defer d.Close()
+```
+
+- `pkg/icbfs` opens a store (`Open`, or `OpenS3` and `OpenAzure`) and
+  administers its filesystems: `CreateFilesystem`, `ListFilesystems`,
+  `DescribeFilesystem` (with the bytes used), `Resize`, `Archive` and
+  `Prune` (archived filesystems only). `WatchMinIO` is below, under change
+  events.
+- `icbfsdrive.Config` names the filesystem, the drive's root directory in
+  it, and the drive's registry `ID` (recorded in the origin of copies made
+  from it). `History` is a history cache to share with other views; without
+  one the drive opens a temporary one in `CacheDir`, which `Close` removes.
+  `Filesystem` returns the drive's icbfs filesystem.
+- `icbfsdrive.OpenSideStore(ctx, store, name)` opens a side store,
+  creating its filesystem the first time.
+- `pkg/icbfstest` is for tests of programs built on icbfs: `Store(t)` is
+  a fresh bucket on a throwaway MinIO in Docker, and `Start(t)` also
+  returns its store configuration, for code that opens a store itself.
 
 ## Endpoints
 
@@ -286,8 +329,8 @@ host's drive ID.
 
 ### The drive
 
-- `GET /api/v1/drives/{drive}` returns the drive's name, kind,
-  capabilities, and the actor's profile and permissions.
+- `GET /api/v1/drives/{drive}` returns the drive's id, name, kind and
+  capabilities, and the actor and its profile.
 
 ### Reading
 
@@ -319,11 +362,11 @@ host's drive ID.
   - The body can be up to the filesystem's max file size; anything larger
     answers 413.
 - `POST …/mkdir` takes `{"path", "parents"}`.
-- `POST …/move` takes `{"from", "to", "replace"}`. The item's ID doesn't
-  change.
-- `POST …/copy` takes `{"from", "version", "to", "toDrive"}`. It copies
-  within the drive or to another drive, optionally from an old or named
-  version.
+- `POST …/move` takes `{"from"` or `"fromId", "to", "replace"}`. The
+  item's ID doesn't change.
+- `POST …/copy` takes `{"from"` or `"fromId", "version"` or `"asOf", "to",
+  "toDrive"}`. It copies within the drive or to another drive, optionally
+  from an old or named version, or as the source was at a time.
 - `DELETE …/content?path=` moves the item to the trash. `recursive=1`
   deletes a non-empty directory as one trash batch. `If-Match` is honored.
 - `POST …/restore-version` takes `{"id", "version"}`. That version's content
@@ -333,9 +376,9 @@ host's drive ID.
 
 A delete from the API or from any mount records a trash entry when a file's
 last name goes or a directory is removed. An entry holds the ID, name,
-original parent and path, when, by whom, the last version and size, and
-the item's origin (where it had been copied from: `origin`, as on an item)
-if it had one. Entries are kept forever.
+original path, when, by whom, the last version and size, and the item's
+origin (where it had been copied from: `origin`, as on an item) if it had
+one. Nothing expires: an entry stays until the item is purged.
 
 - `GET …/trash?path=` lists deleted items, newest first, optionally only
   those from under a directory. A trashed item's versions and content can
@@ -343,7 +386,8 @@ if it had one. Entries are kept forever.
 - `originDrive=` keeps only entries whose item had been copied from that
   drive, and `originId=` only from that item there. A mirror finds this
   way what it trashed when its source brings an item back with the same
-  id, restores it, and copies only the versions after its origin's.
+  id, restores it, then writes a new version only if the source's version
+  differs.
 - `POST …/trash/{entry}/restore` takes `{"to", "parents", "replace"}`.
   - Without `to`, the item goes back to its original path.
   - A taken name answers 409.
@@ -397,7 +441,8 @@ Every other drive uses the deployment's side store.
 - `GET …/identities/{job}` reports the scan's progress. When it's done, it
   lists every SID or uid/gid found, with how many items each appears on.
   icbfs holds SIDs, not names, so the host resolves names its own way.
-- `GET …/permissions?id=` returns one item's ACL (SDDL and parsed), or its
+- `GET …/permissions?id=` returns one item's security descriptor (SDDL,
+  and the ancestor it's inherited from when it has none of its own), or its
   owner, group and mode.
 
 ### Change events
@@ -435,7 +480,8 @@ a registered bucket's ID.
 
 ## Errors
 
-Errors are JSON, `{"error", "code"}`:
+Errors are JSON, `{"error", "code"}`; a 412 also has the current version
+in `currentVersion`, as well as in the `x-drive-current-version` header.
 
 | condition | status | code |
 |---|---|---|
@@ -449,9 +495,11 @@ Errors are JSON, `{"error", "code"}`:
 | other names exist (purge) | 409 | `has_other_names` |
 | stale version (`If-Match`, a draft's base) | 412 | `precondition_failed` |
 | bad name or path | 400 | `invalid_name` |
+| a malformed request | 400 | `invalid` |
 | past the max file size | 413 | `too_large` |
-| write to an as-of view or an archived filesystem | 409 | `read_only` |
+| write to an as-of view or an archived filesystem; prune of one that isn't archived | 409 | `read_only` |
 | write contention exhausted the retries | 503 | `busy` |
+| anything else | 500 | `internal` |
 
 ## Consistency
 
@@ -484,14 +532,15 @@ The configuration (`driveapi.Standalone`) stands in for a host:
 ```
 
 - Each bucket is a store configuration, S3 or Azure, as in
-  [mount.md](mount.md); one with its S3 fields at the top, as before Azure,
-  reads as S3.
+  [mount.md](mount.md).
 - Requests carry `Authorization: Bearer <token>` and `X-Drive-Actor: <actor>`.
 - An actor not listed in `permissions` has every permission.
 - `driveProfiles` gives a drive its own profiles, and `bucketSideStores`
   gives a bucket its own side store.
 - `notify` feeds a bucket's drives' event streams with changes made
   elsewhere (`"minio"`).
+- `cacheDir` holds the drives' temporary files, as-of reads' history
+  caches among them (the system's temporary directory if it's empty).
 - `-audit` writes every operation to stdout as one JSON line.
 
 ## Not supported

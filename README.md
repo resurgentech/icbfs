@@ -101,8 +101,8 @@ flowchart LR
 ## Status
 
 The core filesystem, both mounts, the drive API, and icbfs-sync are built
-and tested, against MinIO and, for the store layer and a short
-multi-machine set, AWS S3 and Azure Blob Storage. What has been tested:
+and tested against MinIO, and the Linux mount against AWS S3 and Azure
+Blob Storage as well. What has been tested:
 
 - **icbfs's own Go tests**, with the race detector, against a real MinIO
   and real FUSE mounts.
@@ -131,20 +131,19 @@ multi-machine set, AWS S3 and Azure Blob Storage. What has been tested:
   - Linux: `cp -a`, `cp -rp`, `rsync -aAXH` and `tar --xattrs --acls`
     keep exactly what they keep on a local disk.
   - Windows: robocopy (`/COPY:DAT` and `/COPY:DATSO`), `Copy-Item` and DISM
-    keep exactly what they keep on NTFS. `xcopy /O` loses the inherited
-    entries of the ACLs it copies (WinFsp drops them at create); use
-    `robocopy /SEC`. Hard links can't be made on a Windows mount (WinFsp
+    keep exactly what they keep on NTFS. `xcopy /O` fails: WinFsp drops
+    the inherited entries of the ACLs it copies at create, leaving an
+    empty DACL; use `robocopy /SEC`. Hard links can't be made on a Windows mount (WinFsp
     has no way to).
 - **End to end:** the managed-mount logging chain, icbfs-sync against a
   drive, and large files (6 GiB, multipart edits, the maximum size).
-- **The store layer** on AWS S3 and Azure Blob Storage: its conformance
-  suite, and two machines sharing a filesystem on each.
+- **On AWS S3 and Azure Blob Storage:** the store layer's conformance
+  suite, and on a FUSE mount of each, pjdfstest, Connectathon and the full
+  multi-machine set, all passing as on MinIO.
 
 **Not yet tested:**
 
-- **Long runs on AWS S3 and Azure** (pjdfstest, xfstests, the full
-  multi-machine set): so far they've had the store tests and a short
-  two-machine set.
+- **xfstests on AWS S3 and Azure**: it has run against MinIO only.
 - **The rest of xfstests** beyond the quick group, and long fsx and
   fsstress runs.
 - **Scale:** millions of files, many concurrent machines, and performance

@@ -2,7 +2,8 @@
 
 On a managed machine, a FUSE mount doesn't hold store credentials of its
 own. It names a **drive** and gets everything else from a server, through
-a local daemon. Everything done on the mount is logged to that server.
+a local daemon. Reads, writes, deletes and listings on the mount are
+logged to that server.
 
 ```mermaid
 flowchart LR
@@ -24,8 +25,10 @@ flowchart LR
   server doesn't know can't be mounted.
 - **icbfs-cli** with `-daemon` sends its command through the daemon
   instead of using credentials. The daemon sets who is asking from the
-  socket's peer credentials (`host/uid:N`), whatever the client claims.
-  The server checks the command and runs it as that account.
+  socket's peer credentials (`host/uid:N` on Linux), whatever the client
+  claims. The server records who asked, refuses a command it doesn't
+  allow (`-allow-commands`), and runs it; the mock server checks nothing
+  per account.
 
 ## Running it
 
@@ -43,18 +46,31 @@ set of store credentials for every drive, and a JSON-lines log. It takes
 the store the way the mounts do (`-store`, and the S3 or `-azure-*` flags;
 see [mount.md](mount.md)), and hands it to mounts as a store
 configuration: `{"kind": "s3", "s3": {...}}` or `{"kind": "azure",
-"azure": {...}}`. A mount also understands a server that sends an S3
-store's fields at the top level, as before Azure.
+"azure": {...}}`.
 
 | flag | meaning |
 |---|---|
 | `-drives` | the registry, comma-separated: `id=filesystem[:/root][:ro]` |
-| `-allow-commands` | which side commands daemons may run (`"names create,trash list"`); empty allows all |
+| `-secret` | the secret daemons must present |
+| `-log` | the JSON-lines file events are appended to (`icbfs-events.jsonl`) |
+| `-allow-commands` | which side commands daemons may run, comma-separated with no spaces (`"names create,trash list"`); empty allows all |
 | `-store-endpoint` | the store's endpoint (S3) or service URL (Azure) as the server reaches it, if that differs from what mounts use |
 | `-addr` | listen address (`:8090`) |
 
-`icbfs-logd` and `icbfs-mockserver` read the secret from
-`ICBFS_LOGD_SECRET` if `-secret` isn't given.
+`icbfs-logd` takes:
+
+| flag | meaning |
+|---|---|
+| `-socket` | the Unix socket mounts and `icbfs-cli` connect to (`/run/icbfs-logd.sock`) |
+| `-server` | the server's websocket URL (`ws://127.0.0.1:8090/ws/daemon`) |
+| `-secret` | the secret the server expects |
+
+Both read the secret from `ICBFS_LOGD_SECRET` if `-secret` isn't given.
+
+A drive marked `:ro` is mounted read-only, and `trash restore` is refused
+on it; `names create` and `names delete` still work. The `fs` commands
+act on any filesystem in the bucket, not only the registry's drives, so
+`-allow-commands` is what keeps `fs prune` from a daemon.
 
 ## What is logged
 

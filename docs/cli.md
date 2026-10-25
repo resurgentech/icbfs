@@ -5,21 +5,21 @@ filesystems, naming versions, and the trash.
 
 ```
 icbfs-cli fs create   -fs NAME [-primary-windows] [-size N] [-max-file-size N] [-dir-block-entries N] [root options]
-icbfs-cli fs list
-icbfs-cli fs describe -fs NAME
+icbfs-cli fs list     [-json]
+icbfs-cli fs describe -fs NAME [-json]
 icbfs-cli fs check    -fs NAME [-json]
 icbfs-cli fs resize   -fs NAME -size N
 icbfs-cli fs archive  -fs NAME
 icbfs-cli fs prune    -fs NAME -yes
 icbfs-cli names create DRIVE -name NAME [-at TIME] [-filesystem-wide]
-icbfs-cli names list   DRIVE
+icbfs-cli names list   DRIVE [-json]
 icbfs-cli names delete DRIVE -name NAME
-icbfs-cli trash list    DRIVE [-path PATH] [-limit N]
+icbfs-cli trash list    DRIVE [-path PATH] [-limit N] [-json]
 icbfs-cli trash restore DRIVE -id ENTRY [-to PATH [-parents]] [-replace]
 ```
 
 `icbfs-cli <group> <command> -h` lists a command's flags. `-json` gives
-JSON output for the `list` and `describe` commands.
+JSON output where it's shown.
 
 ## Connecting
 
@@ -45,8 +45,9 @@ A DRIVE is then `-fs NAME`, optionally with `-root DIR` for a directory
 in the filesystem.
 
 **Through the daemon**, with `-daemon SOCKET` (or `ICBFS_DAEMON`). The
-command goes to the server, which checks it and runs it as this machine's
-account; no store credentials are needed on the machine. A DRIVE is then
+command goes to the server, which records who asked (`host/uid:N`, from
+the daemon), may refuse it, and runs it; no store credentials are needed
+on the machine. A DRIVE is then
 `-drive ID`, the server's ID for it. See [daemon.md](daemon.md).
 
 The `fs` commands always name a filesystem with `-fs`, either way.
@@ -120,7 +121,8 @@ Mount a named version with `-as-of NAME` (see [mount.md](mount.md)).
 ## Trash
 
 Every delete from a mount or the API that removes a file's last name, or a
-directory, is recorded in the filesystem's trash, and kept forever.
+directory, is recorded in the filesystem's trash, and kept until the item
+is purged.
 
 ```
 icbfs-cli trash list    -fs docs [-path /reports] [-limit 20]

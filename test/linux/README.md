@@ -27,10 +27,17 @@ and an SSH key at `~/.ssh/id_ed25519.pub`.
 ## Runs
 
 ```
-./run-pjdfstest.sh <ip>        # pjdfstest against a fresh mount, as root (~7 min)
-./run-logging-test.sh <ip>     # mount → icbfs-logd → icbfs-mockserver (~1 min)
-./run-largefile-test.sh <ip>   # 6 GiB file; opt-in (~10 min, ~20 GB of traffic)
+./run-pjdfstest.sh <ip>          # pjdfstest against a fresh mount, as root (~7 min)
+./run-xfstests.sh <ip> [args]    # xfstests, -g quick by default (most of a day)
+./run-cthon.sh <ip>              # Connectathon: basic, general, special and lock tests
+./run-mount-helper-test.sh <ip>  # mount -t fuse.icbfs through the helper
+./run-logging-test.sh <ip>       # mount → icbfs-logd → icbfs-mockserver (~1 min)
+./run-largefile-test.sh <ip>     # 6 GiB file; opt-in (~10 min, ~20 GB of traffic)
+../metadata/run-linux.sh <ip>    # metadata copies (see test/metadata)
 ```
+
+`ICBFS_TEST_STORE=s3` or `azure` runs pjdfstest or Connectathon on the
+real bucket or container instead of MinIO (`test/store.sh`).
 
 **pjdfstest** builds pjdfstest on the VM, mounts a fresh filesystem under
 `/mnt` with `-allow-other`, and runs the whole suite with `prove -r`.

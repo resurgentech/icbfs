@@ -1,8 +1,8 @@
 #!/bin/bash
 # The Windows copy tests on the Windows 11 test VM, as Administrator,
-# against a throwaway MinIO: robocopy, xcopy, Copy-Item, Explorer's copy
-# and a DISM image copy the test tree onto NTFS and onto a fresh icbfs
-# mount, and the copies are compared. A few minutes. See README.md.
+# against a throwaway MinIO: robocopy, xcopy, Copy-Item and a DISM image
+# copy the test tree onto NTFS and onto a fresh icbfs mount, and the
+# copies are compared. A few minutes. See README.md.
 #
 #   test/metadata/run-windows.sh
 #
@@ -44,8 +44,8 @@ scp_vm "$envfile" "Administrator@${IP}:C:/Windows/Temp/metadata-store.env"
 rm -f "$envfile"
 
 # On the logged-on desktop (auto-logon, run-in-desktop.ps1), not in this
-# SSH session: Explorer's copy needs a desktop, and the mount must be in
-# the same session as the copies. It writes exit.txt when it's done.
+# SSH session, as a person's copies would run; the mount must be in the
+# same session as the copies. It writes exit.txt when it's done.
 ssh_vm "$IP" "Remove-Item C:\\Windows\\Temp\\metadata-results -Recurse -Force -ErrorAction SilentlyContinue; powershell -NoProfile -ExecutionPolicy Bypass -File C:\\icbfs-test\\test\\windows\\run-in-desktop.ps1 -Exe C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -Arguments '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File C:\\icbfs-test\\test\\metadata\\copy-tests-windows.ps1 -Src C:\\icbfs-test -EnvFile C:\\Windows\\Temp\\metadata-store.env'" 2>&1 | grep -v -i "$FILTER" || true
 rc=
 for _ in $(seq 1 120); do

@@ -1,28 +1,26 @@
 # Protobuf sources
 
-`.proto` files here define the wire format for this project's own
-object bodies (directory/root blocks, `.metadata`, `.lock`, and the
-master block). Generated Go code lives in `internal/pb/` and is
-**checked into git**: `go build`/`go test` never need `protoc`
-installed, only regenerating after a schema change does.
+`.proto` files here define the wire format of the objects icbfs encodes
+itself: directory blocks (`block.proto`), `.metadata` (`metadata.proto`),
+`.lock` (`lock.proto`), the master block (`master.proto`), and trash
+entries, named versions and origin records (`records.proto`). Generated Go
+code lives in `internal/pb/` and is **checked into git**: `go build` and
+`go test` never need `protoc` installed, only regenerating after a schema
+change does.
 
 ## Regenerating after editing a `.proto` file
 
 ```sh
-go install google.golang.org/protobuf/cmd/protoc-gen-go@latest   # once
-export PATH="$PATH:$(go env GOPATH)/bin"                          # once per shell
+go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12   # once
+export PATH="$PATH:$(go env GOPATH)/bin"                            # once per shell
 
 protoc --go_out=. --go_opt=module=github.com/resurgentech/icbfs \
   spec/proto/icbfs/v1/<the-file-you-changed>.proto
 ```
 
-Requires `protoc` itself (the compiler binary, not the Go plugin) to
-already be installed — this project assumes it's present as a system
-package (confirmed via `protoc --version` during development; install
-via your OS package manager if it's missing, e.g. `apt install
-protobuf-compiler` on Debian/Ubuntu).
+This needs `protoc` itself, the compiler, from your OS's packages
+(`apt install protobuf-compiler` on Debian and Ubuntu). `just generate`
+runs it for every file.
 
-Commit the resulting `internal/pb/*.pb.go` changes alongside your
-`.proto` edit — they're generated, but they're also the thing everyone
-else's `go build` actually depends on, not just a build artifact to
-gitignore.
+Commit the regenerated `internal/pb/*.pb.go` with the `.proto` change:
+they're generated, but everyone else's `go build` depends on them.

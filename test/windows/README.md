@@ -6,8 +6,9 @@ Disposable KVM/libvirt VMs for the suites that need a real WinFsp mount:
   (Server Core), the default.
 - `icbfs-win11-test`: Windows 11 Enterprise LTSC 2024 evaluation, with a
   desktop and Explorer, for anything with a window. Every script here
-  takes it with `ICBFS_WIN_VM=icbfs-win11-test`. Each run copies
-the working tree to `C:\icbfs-test` on the VM, builds it there with the
+  takes it with `ICBFS_WIN_VM=icbfs-win11-test`.
+
+Each run copies the working tree to `C:\icbfs-test` on the VM, builds it there with the
 VM's own Go, and uses a throwaway MinIO on the host
 (`test/minio/with-minio.sh`) that is removed when the run ends. See
 [docs/testing.md](../../docs/testing.md) for what each suite covers, and
@@ -69,8 +70,7 @@ on (auto-logon), `virsh shutdown` is ignored; shut it down from inside:
 - **winfsp-tests**, from the same release, unzipped to
   `C:\Windows\Temp\winfsp-tests\`.
 - **The .NET SDK** and **llvm-mingw** (a C compiler, for cgo), on the
-  machine `Path`, for native Windows apps built on icbfs: a WinUI front
-  end over a Go core built as a DLL.
+  machine `Path`, for building native Windows programs on icbfs.
 - **Defender exclusions** for the Go module cache, the build cache and
   `C:\icbfs-test`. Defender takes a generated file in `modernc.org/sqlite`
   (`sqlite_g_*.go`) for malware (`TrojanDropper:VBS/Mikey.A!MSR`) and
@@ -121,9 +121,6 @@ out: 180 days for Windows Server, 90 for Windows 11 Enterprise LTSC.
 - After that, `destroy-vm.sh` and `create-vm.sh` again. The install is
   unattended.
 
-The current `clean-base` snapshots expire on 2027-04-08 (Server, with one
-rearm left) and 2027-01-21 (Windows 11, activated 2026-10-23).
-
 ## Runs
 
 ```
@@ -133,6 +130,9 @@ rearm left) and 2027-01-21 (Windows 11, activated 2026-10-23).
 ./run-winfsp-tests.sh icbfs-cs -- -Only querydir_test,stream_create_test
 ./run-winfsp-tests.sh --no-deploy ...    # skip the copy and rebuild
 ./run-sync-test.sh [--no-deploy]         # icbfs-sync's Go tests on NTFS, then end to end
+./run-consistency.sh                     # two mounts as two machines (after a deploy)
+./run-bench.sh [--no-deploy]             # timings of what Explorer and Office do
+../metadata/run-windows.sh               # metadata copies (Windows 11 VM; see test/metadata)
 ```
 
 Both runners first set the VM's clock to the host's: a snapshot saved

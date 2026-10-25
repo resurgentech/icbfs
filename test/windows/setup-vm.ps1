@@ -38,9 +38,8 @@ Install-Msi "$release/winfsp-$WinFspBuild.msi" 'winfsp.msi'
 Invoke-WebRequest "$release/winfsp-tests-$WinFspBuild.zip" -OutFile "$tmp\winfsp-tests.zip"
 Expand-Archive "$tmp\winfsp-tests.zip" -DestinationPath "$tmp\winfsp-tests" -Force
 
-# For native apps built on icbfs: the .NET SDK, which builds a WinUI
-# front end, and a MinGW C compiler for cgo, which builds a Go core as a
-# DLL the front end loads.
+# For building native Windows programs on icbfs: the .NET SDK, and a
+# MinGW C compiler for cgo.
 Invoke-WebRequest https://dot.net/v1/dotnet-install.ps1 -OutFile "$tmp\dotnet-install.ps1"
 & "$tmp\dotnet-install.ps1" -Version $DotnetVersion -InstallDir 'C:\Program Files\dotnet' | Out-Null
 $mingw = "llvm-mingw-$LlvmMingwVersion-ucrt-x86_64"

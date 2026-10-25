@@ -18,6 +18,10 @@ last pass, and acts on the differences. That makes it work on folders that
 can't report changes, such as a WebDAV drive, and lets it catch up after
 any amount of time away.
 
+It's built for Windows. `icbfs-sync run` and `once` also work on Linux,
+for testing: there a folder has inode numbers for IDs, nanosecond times,
+and no ACLs or creation times.
+
 It runs **in the user's session, not as a service.** A mapped network
 drive belongs to the user's logon and exists only while they're logged in,
 so a service couldn't see it.
@@ -102,10 +106,6 @@ The settings file is JSON: one `store`, and a list of `pairs`.
 | `azure` | an Azure Blob Storage container: `account`, `container`, optionally `endpoint` (the blob service URL), and `key` in the clear or left out for `set-secret` |
 | `secretProtected` | the secret (the S3 secret key or the Azure account key) encrypted for this Windows account (DPAPI), written by `set-secret` |
 
-A settings file from before Azure, with the S3 settings directly in
-`store` and `secretKeyProtected`, still reads; `icbfs-sync` writes it back
-in this form.
-
 **pairs**
 
 | setting | default | meaning |
@@ -139,7 +139,8 @@ in this form.
 - `~$*`, `~*.tmp`, `*.tmp` and `.~lock.*`: editors' lock and temporary
   files;
 - `Thumbs.db`, `desktop.ini` and `.DS_Store`;
-- `$RECYCLE.BIN` and `System Volume Information`.
+- `$RECYCLE.BIN` and `System Volume Information`;
+- `.icbfs-sync-tmp-*`: icbfs-sync's own downloads in progress.
 
 Patterns are matched case-insensitively against each part of a path. A
 matching directory is skipped with everything in it. Ignored files are not
@@ -157,12 +158,11 @@ last pass. The base records:
 - the ACL's hash;
 - the folder's creation time.
 
-**Creation times** are copied with the content, both ways, and a change
-to one alone (a tool that set it, a copy made before they were copied) is
-set on the drive with no copy and no new version. Every Windows volume
-keeps them; a Linux folder can't set them, so there they're left to the
-drive. A state from before they were kept has none recorded, so the first
-pass after an upgrade sets every item's: a metadata write each.
+**Creation times** are copied with the content, both ways. A change to the
+folder's alone (a tool that set it) is set on the drive with no copy and no
+new version; a change to the drive's alone isn't carried to the folder,
+even in two-way mode. Every Windows volume keeps them; a Linux folder
+can't set them, so there they're left to the drive.
 
 A pass works in this order:
 
@@ -194,6 +194,9 @@ A pass works in this order:
    | unchanged | removed | upload again | remove from the folder |
    | changed | removed | upload again | upload (the change wins) |
    | new | new, same size and time | adopt | adopt |
+   | new | new, different | upload | upload (the drive's copy stays in its history) |
+   | new directory | new directory | adopt | adopt |
+   | a file | a directory, or the other way round | replace the drive's with the folder's | replace the drive's with the folder's |
 
 5. **Checks** the plan against `maxRemovals`.
 6. **Carries out** the plan in order: moves, new directories (shallowest
@@ -206,7 +209,7 @@ same size as a file that's gone:
 
 1. The new file is read once, into a spool file, and hashed (SHA-256).
 2. It is compared with the gone file's hash. That hash comes from the base,
-   or from the drive's stored hash (`user.sync.sha256`), or failing both,
+   or from the hash icbfs-sync stored with the drive's copy, or failing both,
    from reading the drive's copy.
 3. If they match, the drive's file is **moved** instead of a new one being
    uploaded.
@@ -224,7 +227,8 @@ original. The temporary names are ignored, so what the pass sees is the
 same path with new content: a new version on the drive, not a delete and a
 new file.
 
-**ACLs.** Where both sides keep real ACLs, a file's or directory's ACL is
+**ACLs.** Where both sides keep real ACLs (a folder on NTFS or ReFS, and a
+primary-Windows drive), a file's or directory's ACL is
 copied to the drive when it changes, as SDDL.
 
 ## Safety
@@ -281,7 +285,9 @@ icbfs-sync uninstall
 icbfs-sync paths           where the settings, state and log are
 ```
 
-Every command takes `-config FILE` and `-data DIR` to use other locations.
+Every command takes `-config FILE` and `-data DIR` (the state and the log)
+to use other locations, after the command: `icbfs-sync once -config
+X:\sync.json`.
 
 ## Where things are
 
@@ -313,19 +319,19 @@ On the drive, the changes are recorded as made by
   old content is still in the drive's trash.
 - **A change made on the drive doesn't show up in one-way mode**: this is
   expected. One-way mode overwrites the drive from the folder, and the
-  drive's change stays in its history. Use *Sync now* to list the drive at
-  once.
+  drive's change stays in its history. *Sync now* lists the drive on the
+  next pass, so a change made on the drive shows up there.
 
 ## Tested, and not
 
 - **Go tests** for the planner, the engine, both sides and the command
   pass, including under the race detector. The folder side's Windows tests
   run on NTFS.
-- **End to end on Windows Server 2025** (`test/windows/run-sync-test.sh`):
-  the real `icbfs-sync.exe` against MinIO, checked through a real mount.
-  Three pairs: an NTFS folder; an NTFS folder made to behave as a WebDAV
-  drive does (no IDs, no ACLs, whole seconds); and a drive seeded by
-  robocopy. All 12 checks pass. See [testing.md](testing.md).
+- **End to end on Windows** (`test/windows/run-sync-test.sh`): the real
+  `icbfs-sync.exe` against MinIO, checked through a real mount. Three
+  pairs: an NTFS folder; an NTFS folder made to behave as a WebDAV drive
+  does (no IDs, no ACLs, whole seconds); and a drive seeded by robocopy.
+  [testing.md](testing.md) has the results.
 - **Not yet tested:**
   - a real WebDAV redirector drive (the test machine has no WebDAV
     client);

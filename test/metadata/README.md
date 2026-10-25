@@ -39,7 +39,13 @@ Hard links aren't compared on Windows: WinFsp has no way for a filesystem
 to make one ("The request is not supported", before icbfs sees it).
 xcopy `/O` fails on icbfs: given an ACL of inherited entries at create
 (what `/O` copies), WinFsp computes the new item's descriptor without
-them, an empty DACL, and xcopy is then shut out of what it made.
+them, an empty DACL, and xcopy is then shut out of what it made. robocopy
+`/COPY:DATSO` (or `/SEC`) copies the same ACLs whole.
+
+The Windows mount's `-atime` follows the VM's NTFS: `noatime` when
+`fsutil behavior query disablelastaccess` says last-access updates are
+disabled (Windows 11's default), `hourly` otherwise, so both copies record
+access times alike.
 
 What can't be compared, by design: status-change times (no tool can set
 them), and on Linux creation times, which nothing can set; there a copy's

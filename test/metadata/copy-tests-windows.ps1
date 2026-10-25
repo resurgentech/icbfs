@@ -16,7 +16,7 @@ $work = "C:\metadata-test"
 Remove-Item $Out, $work -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory $Out, $work | Out-Null
 
-# It runs on the logged-on desktop (Explorer's copy needs one), so what it
+# It runs on the logged-on desktop, not in an SSH session, so what it
 # says goes to summary.txt too, and its exit code to exit.txt, for
 # run-windows.sh to wait for.
 function Say([string]$s) { $s; Add-Content -Encoding UTF8 "$Out\summary.txt" $s }

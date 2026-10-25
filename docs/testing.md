@@ -9,23 +9,31 @@ icbfs is tested in layers:
 
 ## Latest results
 
-Each run against a fresh MinIO. The first six are from 2026-10-16; the
-last three from 2026-10-14.
+Each run against a fresh store: MinIO unless the row says otherwise.
 
-| suite | where | result |
-|---|---|---|
-| Go tests (`-race`) | Linux host, Docker | all 19 packages with tests pass |
-| pjdfstest | Ubuntu 24.04 VM, FUSE, root | 238 files, 8,798 assertions; 0 unexpected failures, 4 accepted |
-| xfstests `-g quick` | Ubuntu 24.04 VM, FUSE | 647 tests: 169 pass, 467 don't run, 11 fail, each listed with its reason |
-| several machines | Linux VM and two small VMs, one MinIO | 3 machines: all 6 workloads pass; `fs check` clean |
-| winfsp-tests `--external`, case-insensitive | Windows Server 2025 VM | 78 / 78 pass |
-| winfsp-tests `--external`, case-sensitive | Windows Server 2025 VM | 77 / 78 pass; `getfileinfo_name_test` fails, as on WinFsp's memfs |
-| logging chain | Ubuntu 24.04 VM | 5 / 5 checks pass |
-| icbfs-sync end to end | Windows Server 2025 VM | 12 / 12 checks pass; its Go tests pass on NTFS |
-| large files (6 GiB, opt-in) | Ubuntu 24.04 VM | 7 / 7 checks pass (6 GiB written in 73 s; a one-byte edit in 22 s) |
-| metadata copies (test/metadata), 2026-10-24 | Ubuntu 24.04 VM, FUSE, root | `cp -a`, `cp -rp`, `rsync -aAXH(U)`, `tar --xattrs --acls`: all keep exactly what they keep on tmpfs |
-| metadata copies (test/metadata), 2026-10-24 | Windows 11 VM, WinFsp | robocopy (`/COPY:DAT /DCOPY:DAT` and `/COPY:DATSO`), Copy-Item and DISM keep exactly what they keep on NTFS; hard links not compared (WinFsp can't make them); xcopy `/O` fails: WinFsp drops the inherited entries of an ACL given at create |
-| Connectathon (cthon04), 2026-10-17 | Ubuntu 24.04 VM, FUSE | basic, general, special and lock tests all pass; one warning (lock 13.1, mandatory locking) |
+| suite | when | where | result |
+|---|---|---|---|
+| Go tests (`-race`) | 2026-10-24 | Linux host, Docker | all 24 packages with tests pass |
+| pjdfstest | 2026-10-16 | Ubuntu 24.04 VM, FUSE, root | 238 files, 8,798 assertions; 0 unexpected failures, 4 accepted |
+| pjdfstest, on AWS S3 and on Azure | 2026-10-18 | Linux VM, FUSE, root | the same on each: 0 unexpected failures, 4 accepted |
+| xfstests `-g quick` | 2026-10-16 | Ubuntu 24.04 VM, FUSE | 647 tests: 169 pass, 467 don't run, 11 fail, each listed with its reason |
+| several machines | 2026-10-17 | Linux VM and two small VMs, one MinIO | 3 machines: every workload passes (14 checks); `fs check` clean |
+| several machines, on AWS S3 and on Azure | 2026-10-18 | 3 Linux VMs | all 8 workloads on each, fsstress at 2,000 operations per machine; `fs check` clean |
+| Connectathon (cthon04) | 2026-10-17 | Ubuntu 24.04 VM, FUSE | basic, general, special and lock tests all pass; one warning (lock 13.1, mandatory locking) |
+| Connectathon, on AWS S3 and on Azure | 2026-10-18 | Linux VM, FUSE | all groups pass on each; the same warning |
+| winfsp-tests `--external`, case-insensitive | 2026-10-17 | Windows Server 2025 VM | 78 / 78 pass, at the default `-meta-cache` and at 0 |
+| winfsp-tests `--external`, case-sensitive | 2026-10-16 | Windows Server 2025 VM | 77 / 78 pass; `getfileinfo_name_test` fails, as on WinFsp's memfs |
+| logging chain | 2026-10-14 | Ubuntu 24.04 VM | 5 / 5 checks pass |
+| icbfs-sync end to end | 2026-10-14 | Windows Server 2025 VM | 12 / 12 checks pass; its Go tests pass on NTFS |
+| large files (6 GiB, opt-in) | 2026-10-14 | Ubuntu 24.04 VM | 7 / 7 checks pass (6 GiB written in 73 s; a one-byte edit in 22 s) |
+| metadata copies (test/metadata) | 2026-10-24 | Ubuntu 24.04 VM, FUSE, root | `cp -a`, `cp -rp`, `rsync -aAXH(U)`, `tar --xattrs --acls`: all keep exactly what they keep on tmpfs |
+| metadata copies (test/metadata) | 2026-10-24 | Windows 11 VM, WinFsp | robocopy (`/COPY:DAT /DCOPY:DAT` and `/COPY:DATSO`), Copy-Item and DISM keep exactly what they keep on NTFS; hard links not compared (WinFsp can't make them); xcopy `/O` fails: WinFsp drops the inherited entries of an ACL given at create, leaving an empty DACL |
+
+A later xfstests quick run (2026-10-18, MinIO) stopped at its 8-hour limit
+partway through the group: 98 passed, and generic/103 and generic/213
+failed, both a preallocation past the space left, which want `ENOSPC` and
+got `EFBIG`. That is fixed since (2026-10-19, with a Go test of its own),
+but xfstests hasn't been run again to confirm it.
 
 ## Go tests
 
@@ -36,7 +44,7 @@ just test-ci                  # with -race, as CI does
 just test-windows             # the packages that run on Windows without Docker
 ```
 
-CI runs `just ci` on every push and pull request, on GitHub's Linux
+CI runs `just ci` on every push to `main` and every pull request, on GitHub's Linux
 runners (Docker and FUSE available), and `just build-windows` and
 `just test-windows` on Windows runners.
 
@@ -56,11 +64,15 @@ What they cover:
 | `internal/objstore` | conditional writes, versions, delete markers, as-of views, the server clock |
 | `internal/icbfs` | the filesystem core: directories, links, rename, CAS races, retry and escalation, locks and leases, the master block, names, trash, purge, streams, max file size, multipart edits, the disk cache |
 | `internal/fuseserver` | real mounts: permissions, POSIX ACLs (enforcement, inheritance, `chmod`), extended attributes, rename, `flock`/`fcntl` across processes, lease renewal, notifications, logging |
-| `internal/winfspserver` | path resolution and case folding (portable parts); the driver itself is tested by winfsp-tests |
+| `internal/winfspserver` | path resolution and case folding (portable parts); on Windows only, ACL control flags and inheritance marks (`security_test.go`, run by `test/metadata/run-windows.sh`); the driver itself is tested by winfsp-tests |
 | `internal/acl` | the Windows access check and inheritance |
 | `internal/notify/...` | MinIO notifications for real; SQS and Azure against fakes |
 | `internal/logd`, `logserver`, `fslog`, `sidecmd` | the daemon chain |
-| `pkg/drive/...` | the drive library, the icbfs backend, the HTTP handlers, drafts, copy, diff |
+| `pkg/drive/...` | the drive library, the icbfs backend, the HTTP handlers, drafts, copy, diff, mirroring, times |
+| `pkg/history` | a filesystem's past for programs browsing it, and that revisiting a moment costs no store requests |
+| `internal/namecache` | the mounts' name cache |
+| `internal/storeconfig`, `internal/storeflags` | store configurations and the store flags |
+| `cmd/icbfs` | the mount(8) helper's options |
 | `internal/syncer/...`, `cmd/icbfs-sync` | the sync planner and engine, the folder and drive sides, the command's pass |
 
 ## Conformance suites
@@ -150,12 +162,14 @@ just multi-test [workload]  # test/multi/run-multi.sh
 
 | workload | each machine | checked |
 |---|---|---|
+| smoke | one machine creates, writes, renames, links, symlinks, `chmod`s, sets an xattr and an ACL, takes a `flock`, and writes a 20 MB file | each step, and another machine reads the 20 MB file intact |
 | storm | creates 300 names in one shared directory | all are there, and every machine lists the same |
 | exclusive | creates the same 100 names with `O_EXCL` | each is created exactly once |
 | counter | increments one file 40 times under `flock` | none is lost |
 | append | appends 100 lines to one file under `flock` | none is lost or torn |
 | rename | moves 50 files between two shared directories 4 times | none is lost or doubled |
 | fsstress | 2,000 random operations in a directory of its own | `fs check` |
+| cthon | Connectathon's basic, general, special and lock tests, in a directory of its own (built by `test/linux/run-cthon.sh`) | every group passes everywhere |
 
 ### Real stores: AWS S3 and Azure Blob Storage
 
@@ -172,8 +186,10 @@ test/azure/run-conformance.sh   # .env.azure names the account; key from the az 
 `.env.aws` and `.env.azure` are gitignored and hold names only. Each test
 writes under a prefix of its own, and the bucket's and account's lifecycle
 rules expire what's left after two days. The multi-machine tests run on
-either with `ICBFS_MULTI_STORE=s3` or `azure` (and `MULTI_MACHINES`,
-`STORM`, `EXCL`, `COUNT`, `APPEND`, `RENAMES` to size a short run).
+either with `ICBFS_MULTI_STORE=s3` or `azure`. `MULTI_MACHINES` limits how
+many machines take part, `ICBFS_MULTI_ONLY=1` leaves out the Linux VM (the
+small VMs alone), and `STORM`, `EXCL`, `COUNT`, `APPEND`, `RENAMES` and
+`FSSTRESS_OPS` size the workloads.
 
 **Shared test state.** What the test scripts keep outside git (`.env.aws`,
 `.env.azure`, and each VM kind's `work/`: the Windows VMs' password and
@@ -184,7 +200,9 @@ a gitignored `.env.test` at its root: `ICBFS_TEST_HOME=/path/to/icbfs`.
 
 On 2026-10-17, against AWS S3 (us-east-1) and Azure (westus2): all 14
 conformance tests pass on each, and on two machines the smoke, storm,
-exclusive and counter workloads pass, with `fs check` clean. Where the
+exclusive and counter workloads pass, with `fs check` clean. On
+2026-10-18, on each: pjdfstest and Connectathon on a FUSE mount, and the
+full multi-machine set on three machines, all pass (see Latest results). Where the
 stores differ (Azure moves the ETag on a metadata change and has no
 minimum part size; AWS and Azure enforce `If-Match` on deletes, MinIO
 doesn't), the tests record each behaviour. Locks are slow on a remote
@@ -236,13 +254,26 @@ case-sensitive.
 - **Large files** (`test/linux/run-largefile-test.sh`, opt-in): a 6 GiB
   multipart file, a one-byte edit in the middle, and the max-file-size
   limit.
+- **Metadata copies** ([test/metadata](../test/metadata/README.md)):
+  `test/metadata/run-linux.sh <vm-ip>` and `test/metadata/run-windows.sh`
+  copy a reference tree onto a mount and onto a local disk with each
+  platform's ordinary tools, and compare the copies field by field.
+- **Two Windows mounts as two machines** (`test/windows/run-consistency.sh`):
+  what one changes, an open on the other sees at once, and the other's
+  listings within `-meta-cache`.
+- **Timings on Windows** (`test/windows/run-bench.sh`): what Explorer and
+  Office do to a mount (listing many files, opening small ones, a deep
+  path, an Office-style save, copying a folder in) and the mount's peak
+  memory, once per `-meta-cache` value.
 
 From the repository root, `just pjdfstest`, `just xfstests [tests]`,
 `just mount-helper-test`, `just logging-test`, `just largefile-test`,
 `just winfsp-tests [icbfs-ci|icbfs-cs|cmemfs-ci]` and `just sync-test`
-run the VM suites (the Linux ones find the VM's address themselves), and
-`just vm-tests` runs all but the large-file one and xfstests, which takes
-most of a day.
+run the VM suites (the Linux ones find the VM's address themselves).
+`just vm-tests` runs pjdfstest, the mount-helper test, the logging chain,
+the multi-machine set, both winfsp-tests runs and the sync test: not the
+large-file test, xfstests (most of a day), the single-machine Connectathon
+run (`test/linux/run-cthon.sh`), or the metadata copies.
 
 The VMs, and how to set them up, are described in
 [test/linux](../test/linux/README.md) and
@@ -269,12 +300,9 @@ test/minio/down.sh             # remove it; --all removes any left behind
 
 ## Not tested
 
-- **Long runs on AWS S3 and Azure:** pjdfstest, xfstests and the full
-  multi-machine set have run against MinIO only; S3 and Azure have had the
-  store conformance tests and a short multi-machine set (above). SQS
+- **xfstests on AWS S3 and Azure:** it has run against MinIO only. SQS
   notifications and Azure's change feed are tested against fakes.
-- **xfstests and fsx.** fuse-xfstests is built for gocryptfs's mount
-  conventions and would need its own wrapper.
+- **xfstests beyond the quick group**, and long fsx and fsstress runs.
 - **A real WebDAV drive** for icbfs-sync. The test VM has no WebDAV
   client, so a folder that behaves as one stands in.
 - **The icbfs-sync tray's menus**, by hand.

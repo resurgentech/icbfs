@@ -65,8 +65,8 @@ What doesn't wait:
   and releasing one stores what was written under it.
 - An `O_EXCL` create is always decided by the store.
 
-`-meta-cache 0` trusts nothing, as before 2026-10-17: slower, with every
-change elsewhere visible at once.
+`-meta-cache 0` trusts nothing: slower, with every change elsewhere
+visible at once.
 
 ```
 export ICBFS_ENDPOINT=http://minio:9000 ICBFS_ACCESS_KEY=… ICBFS_SECRET_KEY=…
@@ -93,11 +93,14 @@ docs  /mnt/docs  fuse.icbfs  allow_other,_netdev  0  0
 - The store connection comes from the `ICBFS_*` variables, or failing
   those from `/etc/icbfs.env` (`ICBFS_ENDPOINT=...` lines; keep it mode
   600).
-- Options: `ro`, `allow_other`, `nolocking`, `notify`, `debug`, `relatime`,
-  `strictatime`, `noatime`, `nodiratime`, `dev`, `suid`, `noexec`, `cache_dir=DIR`,
-  `cache_size=BYTES`, `meta_cache=DURATION` and `as_of=TIME`. Generic
-  options such as `rw` and `_netdev` are accepted and ignored; anything
-  else is refused.
+- Options: `ro`, `allow_other`, `locking`, `nolocking`, `notify`, `debug`,
+  `relatime`, `strictatime`, `noatime`, `nodiratime`, `dev`, `suid`,
+  `noexec`, `cache_dir=DIR`, `cache_size=BYTES`, `meta_cache=DURATION` and
+  `as_of=TIME`. Generic options that mean nothing here (`rw`, `defaults`,
+  `auto`, `noauto`, `user`, `nouser`, `nodev`, `nosuid`, `exec`, `atime`,
+  `norelatime`, `diratime`, `async`, `_netdev`, `nofail`,
+  `default_permissions`) are accepted and ignored; anything else is
+  refused.
 - `mount -o remount,ro` (or `rw`, `noexec`, `noatime` and the other
   generic flags) changes a mount's flags in the kernel; icbfs keeps
   running. Its own access-time recording follows the options it was
@@ -150,7 +153,7 @@ own tools (`winfsp-tests`, `launchctl`) need it. If you add it, restart any
 service that should see the change, such as `sshd`.
 
 WinFsp supports Windows 7 through 11 on x86, x64 and ARM64. icbfs is
-tested on Windows Server 2025, x64.
+tested on Windows Server 2025 and Windows 11, x64.
 
 ### Mount
 
@@ -168,7 +171,7 @@ unmount.
 |---|---|---|
 | `-case-insensitive` | `true` | look names up case-insensitively, as NTFS does. Names are always stored as given. |
 | `-atime MODE` | `hourly` | when reads and folder listings record access times: `hourly` (when the recorded one is over an hour old, as NTFS does when it keeps access times at all), `relatime`, `strict` (every read and listing: a store write each) or `noatime` (never, as most Windows machines since 1803, which turn access times off on volumes over 128 GB). `-nodiratime` leaves folders' alone. |
-| `-meta-cache D` | `5s` (unlimited for `-as-of`) | how long names and file and folder details are trusted, as on Linux (above): another machine's renames, creates, deletes and attribute changes can take this long to show in a listing or a file's properties; an open still reads its name and content from the store. `0` trusts nothing. |
+| `-meta-cache D` | `5s` (for `-as-of`, file and folder details without limit, names a day) | how long names and file and folder details are trusted, as on Linux (above): another machine's renames, creates, deletes and attribute changes can take this long to show in a listing or a file's properties; an open still reads its name and content from the store. `0` trusts nothing. |
 
 WinFsp keeps no names of its own: every open hands the driver a whole
 path. So the driver keeps a small name cache (at most 32 MB; at the
@@ -195,7 +198,25 @@ another SSH session.
 - Symlinks, shown as reparse points.
 - Hard links made on Linux open as ordinary files. Windows can't create
   them: WinFsp has no hard-link callback.
-- The four file times, each settable.
+- The four file times, each settable, creation time included.
+
+### Copying onto a Windows mount
+
+Copies keep what they would onto NTFS (tested: see
+[testing.md](testing.md)), but:
+
+- **Use robocopy for ACLs**: `robocopy SRC X:\DST /E /COPY:DATSO` (or
+  `/SEC`). `xcopy /O` doesn't work: WinFsp's own security computation at
+  create drops the inherited entries of the ACL a copy supplies, so the
+  new item gets an empty DACL, and xcopy is then shut out of it.
+  `robocopy /COPY:DAT` and `Copy-Item` keep data, attributes and times.
+- **Hard links** can't be made on the mount (`mklink /H` fails). robocopy
+  copies a source's hard links as separate files, as it does onto NTFS.
+
+Match `-atime` to the machine's own volumes, so a copy's access times
+come out as they would on NTFS: `fsutil behavior query
+disablelastaccess` reports whether NTFS records them, and if it says
+they're disabled, mount with `-atime noatime`.
 
 Byte-range locks (`LockFileEx`) stay local to the Windows machine. WinFsp
 handles them in its kernel driver, so they don't reach icbfs. Change
@@ -218,8 +239,8 @@ icbfs mount -as-of q3-signoff … /mnt/q3                  # a named version
   mounts, one per store and credential: `-history-cache-dir` (by
   default `icbfs/history` in the user's cache directory, e.g.
   `~/.cache` or `%LOCALAPPDATA%`), and `-history-ttl` for how long it
-  keeps what it fetched (`720h`, 30 days, by default). A purged file's
-  name and times can stay in it until then. Other programs that read the
+  keeps what it fetched (`720h`, 30 days, by default). After a purge, a
+  mount drops what the cache kept of that filesystem when it starts. Other programs that read the
   same filesystem's history (`pkg/history`) share the cache, so a mount
   starts with what they've fetched.
 - If the shared cache can't be opened, the mount logs why and uses a
