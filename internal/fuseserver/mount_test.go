@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -828,6 +829,9 @@ func runFcntlLockHolderHelper() {
 			os.Exit(1)
 		}
 		time.Sleep(20 * time.Millisecond)
+		// The lock lives as long as the descriptor, and f's finalizer
+		// closes it once f is unreachable.
+		runtime.KeepAlive(f)
 	}
 }
 
