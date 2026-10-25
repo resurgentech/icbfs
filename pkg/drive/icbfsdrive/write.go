@@ -29,6 +29,9 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 		return drive.Item{}, err
 	}
 	defer done()
+	if _, err := appData(opts.App, nil); err != nil { // refused before anything is written
+		return drive.Item{}, err
+	}
 	parent, name, err := d.resolveParent(ctx, p, opts.Parents)
 	if err != nil {
 		return drive.Item{}, err
@@ -59,9 +62,6 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 			}
 			cur, err := d.fs.Store().Head(ctx, n.key)
 			if err != nil {
-				return drive.Item{}, mapErr(err)
-			}
-			if err := icbfs.CheckOrder(ctx, cur); err != nil {
 				return drive.Item{}, mapErr(err)
 			}
 			if cond.IfNoneMatch || cond.IfMatch != "" && cond.IfMatch != cur.VersionID {
@@ -240,23 +240,21 @@ func (d *Drive) writeContent(ctx context.Context, key string, data []byte, spool
 // its content type, its times at the source, its origin, and its
 // checksums; and indexes the origin.
 func (d *Drive) afterWrite(ctx context.Context, key, p, written string, opts drive.WriteOptions, sums icbfs.Checksums) error {
-	app := map[string][]byte{}
+	app, err := appData(opts.App, opts.Origin)
+	if err != nil {
+		return err
+	}
 	if opts.ContentType != "" {
 		app[icbfs.AppDriveContentType] = []byte(opts.ContentType)
 	}
-	if opts.Origin != nil {
-		data, err := json.Marshal(opts.Origin)
-		if err != nil {
-			return err
-		}
-		app[icbfs.AppDriveOrigin] = data
+	mtime := timeOrNil(opts.ModTime)
+	if t, ok := drive.SourceTime(ctx); ok && mtime == nil {
+		mtime = &t // a version written in source time is modified then
 	}
-	mtime, btime := timeOrNil(opts.ModTime), timeOrNil(opts.Created)
-	if len(app) > 0 || mtime != nil || btime != nil {
-		if _, err := d.fs.SetItemInfo(ctx, key, icbfs.TypeFile, mtime, btime, written, app, &sums); err != nil {
-			return mapErr(err)
-		}
-	} else if err := d.fs.SetChecksums(ctx, key, written, sums); err != nil {
+	if _, err := d.fs.SetItemInfo(ctx, key, icbfs.TypeFile, icbfs.ItemInfo{
+		Mtime: mtime, Btime: timeOrNil(opts.Created), ContentETag: written,
+		Mode: opts.Mode, WindowsAttrs: opts.WindowsAttrs, App: app, Checksums: &sums,
+	}); err != nil {
 		return mapErr(err)
 	}
 	if opts.Origin != nil {
@@ -516,17 +514,23 @@ func (d *Drive) begin(ctx context.Context) (context.Context, func(), error) {
 	if t.After(time.Now().Add(maxSourceTimeAhead)) {
 		return ctx, nil, fmt.Errorf("source time %s is in the future: %w", t.Format(time.RFC3339), drive.ErrInvalid)
 	}
-	ctx = objstore.WithDeclaredTime(ctx, t)
+	rec := &objstore.Recorder{}
+	ctx = objstore.WithRecorder(objstore.WithDeclaredTime(ctx, t), rec)
 	return ctx, func() {
+		// What was written is dated, and anything written behind its
+		// item's current state is put right: the item's current version
+		// back on top, and a directory's copies from t on rewritten with
+		// the change. Best effort, like a trash entry: the write itself
+		// has happened, and the mirror's next pass finds what's undated.
+		restored, _ := d.fs.RecordDates(ctx, rec)
+		d.repairLateFolders(ctx, rec, restored)
 		_ = d.fs.MarkPastChanged(ctx)
 		d.views.lookAgain()
 	}, nil
 }
 
 // maxSourceTimeAhead is how far past this machine's clock a source time
-// may be: a source's clock and ours differ a little. A version's time is
-// never after the store wrote it (views of the past rely on that), so a
-// time further ahead is refused.
+// may be: a source's clock and ours differ a little.
 const maxSourceTimeAhead = time.Second
 
 // SetOrigin records where an item was copied from.
@@ -553,6 +557,12 @@ func (d *Drive) SetOrigin(ctx context.Context, ref drive.ItemRef, o drive.Origin
 // SetTimes sets an item's times at its source (drive.TimeSetter), in one
 // metadata write: no new version of its content.
 func (d *Drive) SetTimes(ctx context.Context, ref drive.ItemRef, modified, created time.Time) (drive.Item, error) {
+	return d.SetInfo(ctx, ref, drive.ItemInfo{Modified: modified, Created: created})
+}
+
+// SetInfo records info about an item (drive.InfoSetter) in one metadata
+// write: no new version of its content.
+func (d *Drive) SetInfo(ctx context.Context, ref drive.ItemRef, info drive.ItemInfo) (drive.Item, error) {
 	ctx, done, err := d.begin(ctx)
 	if err != nil {
 		return drive.Item{}, err
@@ -565,10 +575,51 @@ func (d *Drive) SetTimes(ctx context.Context, ref drive.ItemRef, modified, creat
 	if err := d.check(ctx, n, needWrite); err != nil {
 		return drive.Item{}, err
 	}
-	if _, err := d.fs.SetAttr(ctx, n.key, n.typ, nil, nil, nil, nil, nil, timeOrNil(modified), timeOrNil(created)); err != nil {
+	app, err := appData(info.App, info.Origin)
+	if err != nil {
+		return drive.Item{}, err
+	}
+	fi := icbfs.ItemInfo{Btime: timeOrNil(info.Created), Mode: info.Mode, WindowsAttrs: info.WindowsAttrs, App: app}
+	if mtime := timeOrNil(info.Modified); mtime != nil {
+		fi.Mtime = mtime
+		if n.typ != icbfs.TypeDir {
+			// Tied to the content version it's set on, as SetAttr's is.
+			head, err := d.fs.Store().Head(ctx, n.key)
+			if err != nil {
+				return drive.Item{}, mapErr(err)
+			}
+			fi.ContentETag = head.ETag
+		}
+	}
+	if _, err := d.fs.SetItemInfo(ctx, n.key, n.typ, fi); err != nil {
 		return drive.Item{}, mapErr(err)
 	}
+	if info.Origin != nil {
+		if err := d.recordOrigin(ctx, n.key, n.path, *info.Origin); err != nil {
+			return drive.Item{}, err
+		}
+	}
 	return d.statItem(ctx, n.path)
+}
+
+// appData is the app map a caller's app keys and origin make: each key
+// checked (drive.CheckAppKey), the origin as the drive's own key.
+func appData(app map[string][]byte, origin *drive.Origin) (map[string][]byte, error) {
+	out := make(map[string][]byte, len(app)+2)
+	for k, v := range app {
+		if err := drive.CheckAppKey(k); err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	if origin != nil {
+		data, err := json.Marshal(origin)
+		if err != nil {
+			return nil, err
+		}
+		out[icbfs.AppDriveOrigin] = data
+	}
+	return out, nil
 }
 
 // timeOrNil is t, or nil for the zero time: an icbfs time left as it is.

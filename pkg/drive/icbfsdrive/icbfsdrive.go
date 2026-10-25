@@ -88,7 +88,7 @@ func (d *Drive) Capabilities() drive.Capabilities {
 		perms = "windows"
 	}
 	return drive.Capabilities{IDs: true, Versions: true, AsOf: true, Names: true, Trash: true, Purge: true,
-		ConditionalWrite: true, Events: true, Origin: true, Permissions: perms, Diff: "computed"}
+		ConditionalWrite: true, Events: true, Origin: true, Permissions: perms, Diff: "computed", AppObjects: true}
 }
 
 // --- paths ---
@@ -340,7 +340,8 @@ func (d *Drive) item(ctx context.Context, n *node, withVersion bool) drive.Item 
 		}
 		if withVersion {
 			if obj, err := n.fsys.Store().Head(ctx, n.key); err == nil {
-				it.Version = &drive.Version{ID: obj.VersionID, Time: obj.Time(), Stored: obj.LastModified, Size: obj.Size, Current: true,
+				dates, _ := objstore.ReadDates(ctx, n.fsys.Store(), n.key)
+				it.Version = &drive.Version{ID: obj.VersionID, Time: dates.Time(obj), Stored: obj.LastModified, Size: obj.Size, Current: true,
 					Checksums: toChecksums(n.attr.Checksums[obj.ETag])}
 			}
 		}
@@ -351,6 +352,11 @@ func (d *Drive) item(ctx context.Context, n *node, withVersion bool) drive.Item 
 	}
 	if o, ok := n.attr.App[icbfs.AppDriveOrigin]; ok {
 		it.Origin = decodeOrigin(o)
+	}
+	it.App = n.attr.App
+	it.Mode = n.attr.Mode
+	if bits, ok := n.attr.WindowsAttributes(); ok {
+		it.WindowsAttrs = &bits
 	}
 	return it
 }
@@ -367,7 +373,7 @@ func mapErr(err error) error {
 	case err == nil:
 		return nil
 	case errors.Is(err, drive.ErrNotFound), errors.Is(err, drive.ErrForbidden), errors.Is(err, drive.ErrPrecondition),
-		errors.Is(err, drive.ErrNoAccess), errors.Is(err, drive.ErrReadOnly), errors.Is(err, drive.ErrOutOfOrder),
+		errors.Is(err, drive.ErrNoAccess), errors.Is(err, drive.ErrReadOnly),
 		errors.Is(err, drive.ErrInvalid), errors.Is(err, drive.ErrChecksum):
 		return err
 	case errors.Is(err, icbfs.ErrNotFound), objstore.IsNotFound(err):
@@ -390,8 +396,6 @@ func mapErr(err error) error {
 		return fmt.Errorf("%w (%v)", drive.ErrReadOnly, err)
 	case objstore.IsPreconditionFailed(err):
 		return fmt.Errorf("%w (%v)", drive.ErrBusy, err)
-	case errors.Is(err, icbfs.ErrOutOfOrder):
-		return fmt.Errorf("%w (%v)", drive.ErrOutOfOrder, err)
 	}
 	return err
 }

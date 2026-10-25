@@ -628,6 +628,13 @@ func (p profileSwitch) SetTimes(ctx context.Context, ref drive.ItemRef, modified
 	}
 	return ts.SetTimes(p.with(ctx), ref, modified, created)
 }
+func (p profileSwitch) SetInfo(ctx context.Context, ref drive.ItemRef, info drive.ItemInfo) (drive.Item, error) {
+	is, ok := p.Drive.(drive.InfoSetter)
+	if !ok {
+		return drive.Item{}, drive.ErrNotSupported
+	}
+	return is.SetInfo(p.with(ctx), ref, info)
+}
 
 func (s *server) restoreVersion(r *req) error {
 	var in RestoreVersionRequest

@@ -1,6 +1,7 @@
 package drive
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -41,9 +42,9 @@ func NewMirror(d Drive, source string) *Mirror {
 // ModTime, a move made at its Changed time; Remove deletes at ctx's
 // source time, which the daemon sets to when the source deleted it. A
 // time the source item doesn't give is ctx's source time, if it has one,
-// else now. The daemon applies a source's changes oldest first: a change
-// dated before what it changes fails with ErrOutOfOrder. The drive's
-// filesystem has to start before the source's history does.
+// else now. Changes come in any order, though oldest first costs least.
+// The drive's filesystem has to start before the source's history does
+// (Settings.Created).
 func (m *Mirror) InSourceTime() *Mirror {
 	m.sourceTimes = true
 	return m
@@ -87,6 +88,12 @@ type SourceItem struct {
 	// known: what a move is dated with in source time (InSourceTime).
 	Changed     time.Time
 	ContentType string
+	// App, Mode and WindowsAttrs are recorded on the item as ItemInfo
+	// says, in the same write as its times and origin; nil leaves the
+	// item's as they are. An item is Unchanged only when none differ.
+	App          map[string][]byte
+	Mode         *uint32
+	WindowsAttrs *uint32
 	// Open gives the content; it's called only when the bytes are needed,
 	// never for a move, a restore of the version held, or an item already
 	// up to date.
@@ -193,26 +200,20 @@ func (m *Mirror) Apply(ctx context.Context, src SourceItem) (Applied, error) {
 	}
 
 	if src.Type == TypeDir || item.Origin != nil && item.Origin.Version == o.Version {
-		// Nothing to write; the origin is kept current (the source item's
-		// path there, say) without a new version.
-		if !sameOrigin(item.Origin, o) {
-			if err := m.d.SetOrigin(ctx, ItemRef{ID: item.ID, Path: item.Path}, o); err != nil {
-				return Applied{}, err
-			}
-			item.Origin = &o
-		}
-		// A directory's modified time is its entries', here as anywhere,
-		// so only its creation time follows the source after it's made.
+		// Nothing to write but what the item's record lacks: its times,
+		// app data, mode, Windows attributes and origin (the source item's
+		// path there, say), in one write and no new version. A
+		// directory's modified time is its entries', here as anywhere, so
+		// only its creation time follows the source after it's made.
 		modified := src.ModTime
 		if src.Type == TypeDir {
 			modified = time.Time{}
 		}
-		retimed, ok, err := m.retime(ctx, item, modified, src.Created)
+		item, changed, err := m.reinfo(ctx, item, modified, src, o)
 		if err != nil {
 			return Applied{}, err
 		}
-		if ok {
-			item = retimed
+		if changed {
 			done = append(done, Retimed)
 		}
 		if len(done) == 0 {
@@ -271,15 +272,9 @@ func (m *Mirror) create(ctx context.Context, src SourceItem, o Origin) (Applied,
 		} else if existing.Type != TypeDir {
 			return Applied{}, fmt.Errorf("%s: %w", src.Path, ErrNotMirrored)
 		}
-		if retimed, ok, err := m.retime(ctx, item, modified, src.Created); err != nil {
-			return Applied{}, err
-		} else if ok {
-			item = retimed
-		}
-		if err := m.d.SetOrigin(ctx, ItemRef{ID: item.ID, Path: item.Path}, o); err != nil {
+		if item, _, err = m.reinfo(ctx, item, modified, src, o); err != nil {
 			return Applied{}, err
 		}
-		item.Origin = &o
 		return Applied{Item: item, Actions: []Action{Created}}, nil
 	}
 	if taken {
@@ -304,27 +299,74 @@ func (m *Mirror) write(ctx context.Context, src SourceItem, o Origin, cond Condi
 	defer body.Close()
 	return m.d.Write(ctx, src.Path, body, cond, WriteOptions{
 		Parents: true, ContentType: src.ContentType, ModTime: src.ModTime, Created: src.Created, Origin: &o,
+		App: src.App, Mode: src.Mode, WindowsAttrs: src.WindowsAttrs,
 	})
 }
 
-// retime sets item's times to modified and created where they're set and
-// differ from its own, on a drive that's a TimeSetter, and reports
-// whether it did.
-func (m *Mirror) retime(ctx context.Context, item Item, modified, created time.Time) (Item, bool, error) {
+// reinfo records on item what src says and item's record doesn't yet
+// have: modified (zero to leave it) and src.Created where they differ,
+// app keys whose values differ, a differing mode or Windows attributes,
+// and origin o if it isn't item's; in one write on a drive that's an
+// InfoSetter, else times (TimeSetter) and origin separately, and app
+// keys, mode and attributes not at all (ErrNotSupported if given). It
+// reports whether anything but the origin was written.
+func (m *Mirror) reinfo(ctx context.Context, item Item, modified time.Time, src SourceItem, o Origin) (Item, bool, error) {
+	info := ItemInfo{}
+	if !modified.IsZero() && !modified.Equal(item.Modified) {
+		info.Modified = modified
+	}
+	if !src.Created.IsZero() && !src.Created.Equal(item.Created) {
+		info.Created = src.Created
+	}
+	for k, v := range src.App {
+		cur, has := item.App[k]
+		if v == nil && has || v != nil && (!has || !bytes.Equal(cur, v)) {
+			if info.App == nil {
+				info.App = map[string][]byte{}
+			}
+			info.App[k] = v
+		}
+	}
+	if src.Mode != nil && *src.Mode != item.Mode {
+		info.Mode = src.Mode
+	}
+	if src.WindowsAttrs != nil && (item.WindowsAttrs == nil || *item.WindowsAttrs != *src.WindowsAttrs) {
+		info.WindowsAttrs = src.WindowsAttrs
+	}
+	changed := !info.Modified.IsZero() || !info.Created.IsZero() || len(info.App) > 0 || info.Mode != nil || info.WindowsAttrs != nil
+	if !sameOrigin(item.Origin, o) {
+		info.Origin = &o
+	} else if !changed {
+		return item, false, nil
+	}
+	ref := ItemRef{ID: item.ID, Path: item.Path}
+	if is, ok := m.d.(InfoSetter); ok {
+		set, err := is.SetInfo(ctx, ref, info)
+		if err != nil {
+			return item, false, fmt.Errorf("record %s: %w", item.Path, err)
+		}
+		if set.Origin == nil {
+			set.Origin = &o
+		}
+		return set, changed, nil
+	}
+	if len(info.App) > 0 || info.Mode != nil || info.WindowsAttrs != nil {
+		return item, false, fmt.Errorf("app data, mode or attributes on %s: %w", item.Path, ErrNotSupported)
+	}
+	if info.Origin != nil {
+		if err := m.d.SetOrigin(ctx, ref, o); err != nil {
+			return item, false, err
+		}
+		item.Origin = &o
+	}
+	if !changed {
+		return item, false, nil
+	}
 	ts, ok := m.d.(TimeSetter)
 	if !ok {
 		return item, false, nil
 	}
-	if modified.Equal(item.Modified) {
-		modified = time.Time{}
-	}
-	if created.Equal(item.Created) {
-		created = time.Time{}
-	}
-	if modified.IsZero() && created.IsZero() {
-		return item, false, nil
-	}
-	retimed, err := ts.SetTimes(ctx, ItemRef{ID: item.ID, Path: item.Path}, modified, created)
+	retimed, err := ts.SetTimes(ctx, ref, info.Modified, info.Created)
 	if err != nil {
 		return item, false, fmt.Errorf("set the times of %s: %w", item.Path, err)
 	}

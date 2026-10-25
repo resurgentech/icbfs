@@ -64,29 +64,14 @@ func ChecksumsOf(r io.Reader) (Checksums, error) {
 	return h.Sum(), nil
 }
 
-type keepTimeKey struct{}
-
-// keepTime marks a .metadata write that isn't a change to the item's
-// history (an access time, checksums): its new version keeps the time of
-// the one it replaces, so views of the past, and the order a mirror's
-// dated writes are checked in, don't see it.
-func keepTime(ctx context.Context) context.Context {
-	return context.WithValue(undeclared(ctx), keepTimeKey{}, true)
-}
-
-func keepingTime(ctx context.Context) bool {
-	v, _ := ctx.Value(keepTimeKey{}).(bool)
-	return v
-}
-
 // SetChecksums records c as the checksums of key's content version etag,
 // adding to what's there (a part c lacks stays as it was). It isn't a
-// change to the item (see keepTime).
+// status change: ctime stays.
 func (f *Filesystem) SetChecksums(ctx context.Context, key, etag string, c Checksums) error {
 	if err := f.checkWritable(); err != nil {
 		return err
 	}
-	return f.writeMetadataIf(keepTime(ctx), key, false, func(a *Attr) bool {
+	return f.writeMetadataIf(ctx, key, false, func(a *Attr) bool {
 		old := a.Checksums[etag]
 		merged := old
 		if len(c.MD5) > 0 {

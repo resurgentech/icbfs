@@ -163,7 +163,7 @@ func etagString(e *azcore.ETag) string {
 func (s *Store) Put(ctx context.Context, key string, body io.Reader, metadata map[string]string, ifMatchETag string) (*objstore.Object, error) {
 	resp, err := s.blob(key).UploadStream(ctx, body, &blockblob.UploadStreamOptions{
 		BlockSize:        azureBlockSize,
-		Metadata:         toAzureMeta(objstore.Declare(ctx, metadata)),
+		Metadata:         toAzureMeta(metadata),
 		AccessConditions: ifMatch(ifMatchETag),
 	})
 	if err != nil {
@@ -184,7 +184,7 @@ func (s *Store) PutIfAbsent(ctx context.Context, key string, body io.Reader, met
 	}
 	resp, err := s.blob(key).UploadStream(ctx, body, &blockblob.UploadStreamOptions{
 		BlockSize: azureBlockSize,
-		Metadata:  toAzureMeta(objstore.Declare(ctx, metadata)),
+		Metadata:  toAzureMeta(metadata),
 		AccessConditions: &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{
 			IfNoneMatch: to.Ptr(azcore.ETagAny)}},
 	})
@@ -309,7 +309,7 @@ func (s *Store) listVersions(ctx context.Context, prefix string) ([]objstore.Obj
 		}
 		for _, b := range page.Segment.BlobItems {
 			key := strings.TrimPrefix(deref(b.Name), s.keyPrefix)
-			o := objstore.Object{Key: key, VersionID: deref(b.VersionID), Deleted: isMarker(b.Metadata), Metadata: fromAzureMeta(b.Metadata)}
+			o := objstore.Object{Key: key, VersionID: deref(b.VersionID), Deleted: isMarker(b.Metadata)}
 			if b.Properties != nil {
 				o.ETag = etagString(b.Properties.ETag)
 				o.Size = deref(b.Properties.ContentLength)
@@ -348,7 +348,7 @@ func (s *Store) Delete(ctx context.Context, key string) error {
 	// version, no longer current. If another write lands between the two,
 	// the blob isn't deleted: the write came after the delete.
 	resp, err := s.blob(key).Upload(ctx, nopSeekCloser{bytes.NewReader(nil)}, &blockblob.UploadOptions{
-		Metadata: toAzureMeta(objstore.Declare(ctx, map[string]string{markerKey: "1"})),
+		Metadata: map[string]*string{markerKey: to.Ptr("1")},
 	})
 	if err != nil {
 		return azureErr("delete", key, err)
@@ -490,7 +490,7 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 		}
 	}
 	resp, err := bb.CommitBlockList(ctx, ids, &blockblob.CommitBlockListOptions{
-		Metadata:         toAzureMeta(objstore.Declare(ctx, metadata)),
+		Metadata:         toAzureMeta(metadata),
 		AccessConditions: ifMatch(ifMatchETag),
 	})
 	if err != nil {

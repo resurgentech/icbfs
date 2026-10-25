@@ -13,7 +13,9 @@ package drive
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -59,10 +61,9 @@ type TimeSetter interface {
 }
 
 // FolderHistorian is a drive whose folders' history can be read and
-// written over: for a caller (a mirror) that learned of a change late,
-// after the folder had moved on, so it couldn't be made in order
-// (ErrOutOfOrder), and puts the folder's past right itself. Changes made
-// in order never need it.
+// written over: for a caller (a mirror) correcting a folder's past, say
+// for a date its source got wrong. A change that merely arrives late is
+// put in at its date by the drive itself (WithSourceTime).
 type FolderHistorian interface {
 	// FolderHistory is dir's whole history: each state it has been in,
 	// oldest first, as the drive's views of the past see it.
@@ -75,6 +76,40 @@ type FolderHistorian interface {
 	// FolderHistory returned: a PreconditionError if dir has changed
 	// since. The caller makes no other change to dir while it runs.
 	ReplaceFolderHistory(ctx context.Context, dir ItemRef, states []FolderState, cond Condition) error
+}
+
+// FileHistorian is a drive whose files' history can be read and written
+// over, as a FolderHistorian's folders' can: for a caller correcting a
+// file's past.
+type FileHistorian interface {
+	// FileHistory is item's content versions, newest first by date, and
+	// the current version's id (for ReplaceFileHistory's condition).
+	FileHistory(ctx context.Context, item ItemRef) (FileHistory, error)
+
+	// ReplaceFileHistory erases item's history and writes states in its
+	// place, oldest first; the last is the file now. A state keeps an
+	// existing version (copied, nothing downloaded) or gives new content.
+	// cond.IfMatch is the Version FileHistory returned: a
+	// PreconditionError if the file has changed since. The caller makes no
+	// other change to the file while it runs.
+	ReplaceFileHistory(ctx context.Context, item ItemRef, states []FileState, cond Condition) error
+}
+
+// FileHistory is a file's history: its versions, and its current
+// version's id.
+type FileHistory struct {
+	Versions []Version `json:"versions"`
+	Version  string    `json:"version"`
+}
+
+// FileState is a file's state from At: content Version (an existing
+// version's id) or Content (new bytes), and its record then (Info: a
+// zero Modified is At; the rest, if unset, is the file's record now).
+type FileState struct {
+	At      time.Time
+	Version string
+	Content io.Reader
+	Info    ItemInfo
 }
 
 // FolderHistory is a folder's history. Version names its current state,
@@ -111,6 +146,21 @@ type Capabilities struct {
 	Origin           bool   `json:"origin"`      // keeps a copy's origin
 	Permissions      string `json:"permissions"` // "windows", "posix", or "" for none
 	Diff             string `json:"diff"`        // "computed" or "native"
+	AppObjects       bool   `json:"appObjects"`  // keeps a tool's objects beside the drive (AppObjects)
+}
+
+// AppObjects is a drive that keeps objects for a tool beside its
+// storage, not in the tree: a mirror's table of the ids its app keys use,
+// say. Named like app keys, "<tool>.<name>" (CheckAppKey); small (a few
+// MB); versioned, so a view of the past reads the one current then. Not
+// in the HTTP API. Reading one needs the right to read the drive's root,
+// writing one the right to write it.
+type AppObjects interface {
+	AppObject(ctx context.Context, name string) ([]byte, error)
+	SetAppObject(ctx context.Context, name string, data []byte) error
+	DeleteAppObject(ctx context.Context, name string) error
+	// ListAppObjects lists the names starting with prefix ("" for all).
+	ListAppObjects(ctx context.Context, prefix string) ([]string, error)
 }
 
 // ItemRef names an item by its id or by its path; ID wins if both are set.
@@ -167,6 +217,58 @@ type WriteOptions struct {
 	// (from its source): the write fails with ErrChecksum, writing
 	// nothing, if what arrived doesn't match. Either may be empty.
 	Checksums *Checksums
+	// App, Mode and WindowsAttrs are recorded in the same metadata write
+	// as the times and the origin (see ItemInfo).
+	App          map[string][]byte
+	Mode         *uint32
+	WindowsAttrs *uint32
+}
+
+// ItemInfo is what SetInfo records about an item in one metadata write,
+// with no new version of its content. Every field is optional.
+type ItemInfo struct {
+	// Modified and Created are the item's times at its source; a zero
+	// time is left as it is. A file's modified time is tied to its content
+	// now, as WriteOptions.ModTime's is.
+	Modified, Created time.Time
+	// App is app data the caller keeps on the item, keyed "<tool>.<name>"
+	// (CheckAppKey); "drive." keys are the drive's own. A nil value removes
+	// the key. App data is bookkeeping, not a change to the item: it
+	// doesn't move the item's changed time.
+	App map[string][]byte
+	// Mode is the item's permission bits; WindowsAttrs its ReadOnly,
+	// Hidden, System and Archive bits. A source item locked at its source
+	// is shown read-only on every mount with Mode 0444 (0555 for a
+	// directory) and WindowsAttrs ReadOnly.
+	Mode         *uint32
+	WindowsAttrs *uint32
+	// Origin, if set, records where the item was copied from.
+	Origin *Origin
+}
+
+// An InfoSetter is a drive that records ItemInfo in one write: SetTimes
+// with the rest of what a mirror knows.
+type InfoSetter interface {
+	SetInfo(ctx context.Context, item ItemRef, info ItemInfo) (Item, error)
+}
+
+// CheckAppKey is nil if key is a valid app key for a caller to set:
+// "<tool>.<name>", with a tool of lowercase letters and digits, and not
+// the drive's own ("drive.").
+func CheckAppKey(key string) error {
+	tool, name, ok := strings.Cut(key, ".")
+	if !ok || tool == "" || name == "" {
+		return fmt.Errorf("app key %q: want <tool>.<name>: %w", key, ErrInvalid)
+	}
+	for _, r := range tool {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9') {
+			return fmt.Errorf("app key %q: the tool is lowercase letters and digits: %w", key, ErrInvalid)
+		}
+	}
+	if tool == "drive" {
+		return fmt.Errorf("app key %q: drive.* keys are the drive's own: %w", key, ErrInvalid)
+	}
+	return nil
 }
 
 // Checksums are a file version's MD5 and SHA-256, in hex; one not
@@ -223,8 +325,14 @@ type Item struct {
 	Origin      *Origin   `json:"origin,omitempty"`
 	// Checksums are a file's current content's, when computed.
 	Checksums *Checksums `json:"checksums,omitempty"`
-	HasDraft  bool       `json:"hasDraft,omitempty"` // filled in by the HTTP layer, from the drafts
-	DraftsBy  []string   `json:"draftsBy,omitempty"`
+	// App, Mode and WindowsAttrs are the item's app data, permission bits
+	// and Windows attribute bits (nil if it has none), as ItemInfo sets
+	// them. For callers of the library; not in the HTTP API.
+	App          map[string][]byte `json:"-"`
+	Mode         uint32            `json:"-"`
+	WindowsAttrs *uint32           `json:"-"`
+	HasDraft     bool              `json:"hasDraft,omitempty"` // filled in by the HTTP layer, from the drafts
+	DraftsBy     []string          `json:"draftsBy,omitempty"`
 
 	// Stat only.
 	ParentID string   `json:"parentId,omitempty"`
@@ -361,7 +469,6 @@ var (
 	ErrReadOnly     = errors.New("read-only")
 	ErrBusy         = errors.New("busy")
 	ErrInvalid      = errors.New("invalid request")
-	ErrOutOfOrder   = errors.New("source time before the item's current state")
 	ErrChecksum     = errors.New("the content doesn't match the checksum given")
 )
 

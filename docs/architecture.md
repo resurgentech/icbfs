@@ -80,6 +80,8 @@ with its four-hex-digit ID, so one prefix listing finds all of it.
 | `<id>-trashby-<uuid>` | the key of the item's newest trash entry, so a trashed item's entry is one read |
 | `<id>-name-<name>` | a named version |
 | `<id>-origin-<hash>` | the item copied from one source item (an item in another document store, say): its id, the source version, where it was last seen |
+| `<id>-<uuid>.version` | the dates of the item's versions the store's timestamp is wrong for (a mirror's, written in its source's time); only items with one (see Past views) |
+| `<id>-app-<tool>.<name>` | an object a tool keeps beside the filesystem, not about any item: a mirror's table of the ids its app keys use |
 | `<id>-past` | empty; written again whenever the filesystem's past changes (a purge, a change made under a source time), telling history caches to drop what they kept (see Past views) |
 
 Item keys are **UUIDv7**. Their embedded millisecond timestamp gives each
@@ -253,7 +255,9 @@ content:
   them, like an access time, isn't a change: the new `.metadata` version
   keeps the time of the one it replaces, and ctime doesn't move;
 - data icbfs's own tools keep about the item, such as the drive API's
-  content type and copy origin.
+  content type and copy origin, and a mirror's record of its source item.
+  Like access times and checksums, it's bookkeeping, not a change to the
+  item: writing it doesn't move ctime.
 
 **Extended attributes and POSIX ACLs.** A Linux mount offers the `user.`,
 `trusted.` and `security.` namespaces, with Linux's limits (names up to 255
@@ -551,25 +555,37 @@ store received each copy. A change made under `objstore.WithDeclaredTime`
 (the drive API's `drive.WithSourceTime`) happened at that time as far as
 the filesystem's history goes:
 
-- every object version it writes carries the time, as store metadata
-  (`icbfs_at`), and a view picks by it. On Azure a version listing gives
-  each version's metadata; on S3 it doesn't, so a view reads it
-  (`HeadVersion`, kept in the history cache) for the few versions its
-  binary search looks at, and only those later than T by the store;
+- a version's date is the store's `LastModified` unless the item's
+  `.version` object says otherwise: a table, version id → time, for the
+  versions of the item's content, `.metadata` and (for a directory) blocks
+  that came to be at another time. The filesystem's store records what a
+  dated operation writes (`objstore.Recording`, a `Recorder` in the
+  context), and the operation ends by dating it (`RecordDates`). A view
+  reads an item's current `.version` once (the record is the authority on
+  the item's timeline, whatever the view's time) and picks each version
+  by effective date from the cached listing. An ordinary filesystem has
+  no `.version` and reads exactly as before;
 - a new item's key is minted at the time, so that's its creation time; a
   directory's mtime becomes it; a trash entry is deleted at it. ctime
   stays icbfs's own clock;
-- each key's times only go forward. A change dated before the version it
-  would replace fails (`ErrOutOfOrder`) and changes nothing; a time in the
-  future is refused. A filesystem whose history starts before the store
-  wrote it gives `Settings.Created`.
+- changes come in any order. One dated behind its item's current state is
+  written as given, and then what should be current is put back on top: a
+  file's current content and `.metadata` by a server-side copy, dated as
+  they were (`restoreCurrent`; the `.metadata` references by ETag, the
+  mtime override and the checksums, follow the copy's ETag); a directory
+  by rewriting its history from that date on with the change in every
+  later copy (the drive's `repairLateFolders`, through
+  `ReplaceDirHistory`). A time in the future is refused. A filesystem
+  whose history starts before the store wrote it gives `Settings.Created`.
 
-A change that arrives too late to be made in order is the caller's to put
-right: `DirHistory` reads every version of a directory's blocks, and
-`ReplaceDirHistory` erases them and writes a series of states in their
-place, each a whole tree dated at its time, the last the directory as it
-is now, conditional on the directory not having changed since it was read
-(`DirVersion`). Items themselves aren't touched.
+Corrections, for a date the source got wrong, are the caller's:
+`DirHistory` / `ReplaceDirHistory` and `FileHistory` /
+`ReplaceFileHistory` erase an item's history and write a series of dated
+states in its place (a directory's blocks and `.metadata`; a file's content
+versions, copied on the server or given anew, and `.metadata`), the last
+being the item now, conditional on the item not having changed since it
+was read. Nothing else is touched: a file's name in its directory is the
+directory's history.
 
 **Limits:**
 

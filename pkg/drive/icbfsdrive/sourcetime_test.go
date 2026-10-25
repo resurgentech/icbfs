@@ -146,32 +146,83 @@ func TestMoveInSourceTime(t *testing.T) {
 	}
 }
 
-// TestSourceTimeInOrder: a change dated before the state it would change
-// fails and changes nothing; a source time in the future is refused.
-func TestSourceTimeInOrder(t *testing.T) {
+// TestSourceTimeAnyOrder: a change dated before the item's current state
+// goes into the past at its date and leaves the present as it was: an
+// older version of a file written after a newer one, and a file written
+// into a folder that had changed since. A source time in the future is
+// refused.
+func TestSourceTimeAnyOrder(t *testing.T) {
 	d, _ := sourceDrive(t, "order")
 	ctx := system()
-	if _, err := d.Write(at(ctx, 2022), "/dir/new.txt", strings.NewReader("new"), drive.Condition{}, drive.WriteOptions{Parents: true}); err != nil {
+	if _, err := d.Mkdir(at(ctx, 2020), "/dir", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.Write(at(ctx, 2021), "/dir/new.txt", strings.NewReader("older"), drive.Condition{}, drive.WriteOptions{}); !errors.Is(err, drive.ErrOutOfOrder) {
-		t.Fatalf("an older version over a newer one: %v; want ErrOutOfOrder", err)
+	if _, err := d.Write(at(ctx, 2022), "/dir/new.txt", strings.NewReader("new"), drive.Condition{}, drive.WriteOptions{}); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := d.Write(at(ctx, 2021), "/dir/old.txt", strings.NewReader("old"), drive.Condition{}, drive.WriteOptions{}); !errors.Is(err, drive.ErrOutOfOrder) {
-		t.Fatalf("a file into a folder changed since: %v; want ErrOutOfOrder", err)
-	}
-	if exists(t, d, "/dir/old.txt", time.Time{}) {
-		t.Fatal("the refused file was made")
+	// An older version, late: the present keeps the newer one.
+	if _, err := d.Write(at(ctx, 2021), "/dir/new.txt", strings.NewReader("older"), drive.Condition{}, drive.WriteOptions{}); err != nil {
+		t.Fatal(err)
 	}
 	if got := read(t, ctx, d, drive.ByPath("/dir/new.txt"), drive.At{}); got != "new" {
 		t.Fatalf("the newer version became %q", got)
 	}
+	if got := read(t, ctx, d, drive.ByPath("/dir/new.txt"), drive.At{Time: year(2022).AddDate(0, 6, 0)}); got != "new" {
+		t.Fatalf("mid-2022: %q, want the newer version", got)
+	}
+	// Two versions: the 2022 one, current again (put back on top, the
+	// displaced copy gone), and the late 2021 one, with its checksums.
+	versions, err := d.Versions(ctx, drive.ByPath("/dir/new.txt"))
+	if err != nil || len(versions) != 2 || !versions[0].Time.Equal(year(2022)) || !versions[0].Current || !versions[1].Time.Equal(year(2021)) {
+		t.Fatalf("versions: %+v, %v; want the 2022 one current, then the 2021 one", versions, err)
+	}
+	if versions[1].Checksums == nil || *versions[1].Checksums != sumsOf([]byte("older")) {
+		t.Fatalf("the late version's checksums: %+v", versions[1].Checksums)
+	}
+	if got := read(t, ctx, d, drive.ByPath("/dir/new.txt"), drive.At{Version: versions[1].ID}); got != "older" {
+		t.Fatalf("the 2021 version: %q, want the older content", got)
+	}
+	// The file's name went into /dir in 2022: a view of 2021 doesn't reach
+	// the late version by path (the mirror creates a file at its Created
+	// time, so its name is there from the start).
+	if exists(t, d, "/dir/new.txt", year(2021).AddDate(0, 6, 0)) {
+		t.Fatal("mid-2021: the file is reachable by a name it didn't have yet")
+	}
+	it, err := d.Stat(ctx, drive.ByPath("/dir/new.txt"), drive.At{})
+	if err != nil || !it.Modified.Equal(year(2022)) {
+		t.Fatalf("now: modified %v, %v; want 2022", it.Modified, err)
+	}
+
+	// A file into a folder that changed since: there now, and from 2021.
+	if _, err := d.Write(at(ctx, 2021), "/dir/old.txt", strings.NewReader("old"), drive.Condition{}, drive.WriteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		when time.Time
+		want string
+	}{
+		{year(2020).AddDate(0, 6, 0), ""},
+		{year(2021).AddDate(0, 6, 0), "old.txt"},
+		{year(2022).AddDate(0, 6, 0), "new.txt,old.txt"},
+		{time.Time{}, "new.txt,old.txt"},
+	} {
+		if got := names(t, d, "/dir", tc.when); got != tc.want {
+			t.Fatalf("/dir as of %v: %q, want %q", tc.when, got, tc.want)
+		}
+	}
+	if got := read(t, ctx, d, drive.ByPath("/dir/old.txt"), drive.At{Time: year(2021).AddDate(0, 6, 0)}); got != "old" {
+		t.Fatalf("the late file as of mid-2021: %q", got)
+	}
+
 	if _, err := d.Write(drive.WithSourceTime(ctx, time.Now().Add(time.Hour)), "/dir/later.txt", strings.NewReader("x"), drive.Condition{}, drive.WriteOptions{}); !errors.Is(err, drive.ErrInvalid) {
 		t.Fatalf("a source time an hour ahead: %v; want ErrInvalid", err)
 	}
-	// Without a source time a change is now's, and always in order.
+	// An ordinary write on top of it all is now's.
 	if _, err := d.Write(ctx, "/dir/old.txt", strings.NewReader("now"), drive.Condition{}, drive.WriteOptions{}); err != nil {
 		t.Fatal(err)
+	}
+	if got := read(t, ctx, d, drive.ByPath("/dir/old.txt"), drive.At{}); got != "now" {
+		t.Fatalf("after an undated write: %q", got)
 	}
 }
 
@@ -305,41 +356,9 @@ func TestReplaceFolderHistory(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := put(at(ctx, 2022), "/P/late"); !errors.Is(err, drive.ErrOutOfOrder) {
-		t.Fatalf("a 2022 file in a folder changed in 2023: %v; want ErrOutOfOrder", err)
-	}
-	if err := put(ctx, "/P/late"); err != nil {
-		t.Fatal(err)
-	}
-	h, err := d.FolderHistory(ctx, drive.ByPath("/P"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(h.States) != 4 || !h.States[0].At.Equal(year(2020)) || len(h.States[0].Entries) != 0 ||
-		!h.States[1].At.Equal(year(2021)) || len(h.States[1].Entries) != 3 || !h.States[2].At.Equal(year(2023)) || len(h.States[3].Entries) != 8 {
-		t.Fatalf("history: %+v", h)
-	}
-	cur := h.States[3]
-	var late drive.FolderEntry
-	for _, e := range cur.Entries {
-		if e.Name == "late" {
-			late = e
-		}
-	}
-	with := func(s drive.FolderState) drive.FolderState {
-		s.Entries = append(append([]drive.FolderEntry(nil), s.Entries...), late)
-		return s
-	}
-	fixed := []drive.FolderState{h.States[0], h.States[1], with(drive.FolderState{At: year(2022), Entries: h.States[1].Entries}), with(h.States[2])}
-
-	// The last state must be the folder now, and the folder as read.
-	if err := d.ReplaceFolderHistory(ctx, drive.ByPath("/P"), fixed[:3], drive.Condition{IfMatch: h.Version}); !errors.Is(err, drive.ErrInvalid) {
-		t.Fatalf("a last state that isn't now: %v; want ErrInvalid", err)
-	}
-	if err := d.ReplaceFolderHistory(ctx, drive.ByPath("/P"), fixed, drive.Condition{IfMatch: "stale"}); !errors.Is(err, drive.ErrPrecondition) {
-		t.Fatalf("a stale version: %v; want a precondition error", err)
-	}
-	if err := d.ReplaceFolderHistory(ctx, drive.ByPath("/P"), fixed, drive.Condition{IfMatch: h.Version}); err != nil {
+	// A late file: the drive puts it into the folder's history at its
+	// date, every later copy included, with no help.
+	if err := put(at(ctx, 2022), "/P/late"); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
@@ -353,16 +372,151 @@ func TestReplaceFolderHistory(t *testing.T) {
 		{time.Time{}, "fa,fb,fc,fd,fe,ff,fg,late"},
 	} {
 		if got := names(t, d, "/P", tc.when); got != tc.want {
-			t.Fatalf("as of %v: %q, want %q", tc.when, got, tc.want)
+			t.Fatalf("after the late file, as of %v: %q, want %q", tc.when, got, tc.want)
+		}
+	}
+	if got := read(t, ctx, d, drive.ByPath("/P/late"), drive.At{Time: year(2022).AddDate(0, 6, 0)}); got != "/P/late" {
+		t.Fatalf("the late file as of mid-2022: %q", got)
+	}
+	h, err := d.FolderHistory(ctx, drive.ByPath("/P"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(h.States) != 4 || !h.States[0].At.Equal(year(2020)) || len(h.States[0].Entries) != 0 ||
+		!h.States[1].At.Equal(year(2021)) || len(h.States[1].Entries) != 3 || !h.States[2].At.Equal(year(2022)) || len(h.States[2].Entries) != 4 ||
+		!h.States[3].At.Equal(year(2023)) || len(h.States[3].Entries) != 8 {
+		t.Fatalf("history: %+v", h)
+	}
+
+	// A correction: the source says "late" was really created in June
+	// 2022, and "fa" was deleted in 2024 (so the present changes too).
+	without := func(s drive.FolderState, name string) drive.FolderState {
+		s.Entries = nil
+		for _, e := range h.States[3].Entries {
+			if e.Name != name {
+				s.Entries = append(s.Entries, e)
+			}
+		}
+		return s
+	}
+	fixed := []drive.FolderState{h.States[0], h.States[1], {At: year(2022).AddDate(0, 5, 0), Entries: h.States[2].Entries}, h.States[3],
+		without(drive.FolderState{At: year(2024)}, "fa")}
+	if err := d.ReplaceFolderHistory(ctx, drive.ByPath("/P"), fixed, drive.Condition{IfMatch: "stale"}); !errors.Is(err, drive.ErrPrecondition) {
+		t.Fatalf("a stale version: %v; want a precondition error", err)
+	}
+	if err := d.ReplaceFolderHistory(ctx, drive.ByPath("/P"), fixed, drive.Condition{IfMatch: h.Version}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		when time.Time
+		want string
+	}{
+		{year(2021).AddDate(0, 6, 0), "fa,fb,fc"},
+		{year(2022).AddDate(0, 3, 0), "fa,fb,fc"},
+		{year(2022).AddDate(0, 9, 0), "fa,fb,fc,late"},
+		{year(2023).AddDate(0, 6, 0), "fa,fb,fc,fd,fe,ff,fg,late"},
+		{time.Time{}, "fb,fc,fd,fe,ff,fg,late"},
+	} {
+		if got := names(t, d, "/P", tc.when); got != tc.want {
+			t.Fatalf("after the correction, as of %v: %q, want %q", tc.when, got, tc.want)
 		}
 	}
 	again, err := d.FolderHistory(ctx, drive.ByPath("/P"))
-	if err != nil || len(again.States) != 4 || !again.States[2].At.Equal(year(2022)) {
+	if err != nil || len(again.States) != 5 || !again.States[2].At.Equal(year(2022).AddDate(0, 5, 0)) {
 		t.Fatalf("history after: %+v, %v", again, err)
 	}
+	if st, err := d.Stat(ctx, drive.ByPath("/P"), drive.At{}); err != nil || !st.Modified.Equal(year(2024)) {
+		t.Fatalf("the folder's mtime after: %v, %v; want 2024", st.Modified, err)
+	}
 	// In order again: the next change goes on top.
-	if err := put(at(ctx, 2024), "/P/next"); err != nil {
+	if err := put(at(ctx, 2025), "/P/next"); err != nil {
 		t.Fatal(err)
+	}
+	report, err := d.Filesystem().Check(context.Background())
+	if err != nil || len(report.Problems) != 0 {
+		t.Fatalf("fsck: %+v, %v", report.Problems, err)
+	}
+}
+
+// TestReplaceFileHistory: a file's history, corrected: versions
+// re-dated, one dropped, one added with new content, the record of each
+// state kept; conditional on the file's version; the present changes as
+// the last state says; nothing downloaded to keep a version.
+func TestReplaceFileHistory(t *testing.T) {
+	store := &contentReads{Store: miniotest.Store(t)}
+	d := newDrive(t, store, icbfs.Settings{Name: "filefix", Size: 1 << 30, RootMode: 0o777, Created: year(2015)}, "")
+	ctx := system()
+	var it drive.Item
+	for _, v := range []struct {
+		year int
+		body string
+	}{{2021, "one"}, {2022, "two"}, {2023, "three"}} {
+		var err error
+		if it, err = d.Write(at(ctx, v.year), "/f.txt", strings.NewReader(v.body), drive.Condition{}, drive.WriteOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h, err := d.FileHistory(ctx, drive.ByPath("/f.txt"))
+	if err != nil || len(h.Versions) != 3 || !h.Versions[0].Time.Equal(year(2023)) || !h.Versions[2].Time.Equal(year(2021)) || h.Version != h.Versions[0].ID {
+		t.Fatalf("history: %+v, %v", h, err)
+	}
+	store.key.Store(it.ID)
+	// The source says: "one" was really 2020, "two" never existed, and a
+	// "four" was saved in 2024 (so the present changes).
+	states := []drive.FileState{
+		{At: year(2020), Version: h.Versions[2].ID},
+		{At: year(2023), Version: h.Versions[0].ID, Info: drive.ItemInfo{App: map[string][]byte{"clio.version": []byte("3")}}},
+		{At: year(2024), Content: strings.NewReader("four"), Info: drive.ItemInfo{App: map[string][]byte{"clio.version": []byte("4")}}},
+	}
+	if err := d.ReplaceFileHistory(ctx, drive.ByPath("/f.txt"), states, drive.Condition{IfMatch: "stale"}); !errors.Is(err, drive.ErrPrecondition) {
+		t.Fatalf("a stale version: %v; want a precondition error", err)
+	}
+	reads := store.n.Load()
+	if err := d.ReplaceFileHistory(ctx, drive.ByPath("/f.txt"), states, drive.Condition{IfMatch: h.Version}); err != nil {
+		t.Fatal(err)
+	}
+	if n := store.n.Load() - reads; n != 0 {
+		t.Fatalf("keeping versions read their content %d times; want 0", n)
+	}
+	after, err := d.FileHistory(ctx, drive.ByPath("/f.txt"))
+	if err != nil || len(after.Versions) != 3 || !after.Versions[0].Time.Equal(year(2024)) || !after.Versions[1].Time.Equal(year(2023)) || !after.Versions[2].Time.Equal(year(2020)) {
+		t.Fatalf("history after: %+v, %v", after, err)
+	}
+	// By path from 2021, when its name went into the folder (the folder's
+	// history is its own); the 2020 version by id.
+	if got := read(t, ctx, d, drive.ByPath("/f.txt"), drive.At{Version: after.Versions[2].ID}); got != "one" {
+		t.Fatalf("the 2020 version: %q", got)
+	}
+	if c := after.Versions[2].Checksums; c == nil || *c != sumsOf([]byte("one")) {
+		t.Fatalf("the kept version's checksums: %+v", c)
+	}
+	for _, tc := range []struct {
+		when time.Time
+		want string
+	}{
+		{year(2019), ""},
+		{year(2021).AddDate(0, 6, 0), "one"},
+		{year(2022).AddDate(0, 6, 0), "one"},
+		{year(2023).AddDate(0, 6, 0), "three"},
+		{time.Time{}, "four"},
+	} {
+		if tc.want == "" {
+			if exists(t, d, "/f.txt", tc.when) {
+				t.Fatalf("as of %v: the file is there", tc.when)
+			}
+			continue
+		}
+		if got := read(t, ctx, d, drive.ByPath("/f.txt"), drive.At{Time: tc.when}); got != tc.want {
+			t.Fatalf("as of %v: %q, want %q", tc.when, got, tc.want)
+		}
+	}
+	now, err := d.Stat(ctx, drive.ByPath("/f.txt"), drive.At{})
+	if err != nil || string(now.App["clio.version"]) != "4" || !now.Modified.Equal(year(2024)) {
+		t.Fatalf("now: app %q, modified %v, %v", now.App, now.Modified, err)
+	}
+	then, err := d.Stat(ctx, drive.ByPath("/f.txt"), drive.At{Time: year(2023).AddDate(0, 6, 0)})
+	if err != nil || string(then.App["clio.version"]) != "3" || !then.Modified.Equal(year(2023)) {
+		t.Fatalf("mid-2023: app %q, modified %v, %v", then.App, then.Modified, err)
 	}
 	report, err := d.Filesystem().Check(context.Background())
 	if err != nil || len(report.Problems) != 0 {

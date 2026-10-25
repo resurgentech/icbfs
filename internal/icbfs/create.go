@@ -103,10 +103,14 @@ func CreateFilesystem(ctx context.Context, store objstore.Store, s Settings) (In
 		attr.WindowsSDDL = []byte(s.RootSDDL)
 	}
 	rootCtx := ctx
+	rec := &objstore.Recorder{}
 	if !s.Created.IsZero() {
-		rootCtx = objstore.WithDeclaredTime(ctx, s.Created)
+		rootCtx = objstore.WithRecorder(objstore.WithDeclaredTime(ctx, s.Created), rec)
 	}
 	if err := f.createRoot(rootCtx, attr); err != nil {
+		return Info{}, err
+	}
+	if _, err := f.RecordDates(ctx, rec); err != nil {
 		return Info{}, err
 	}
 	return infoOf(id, entry), nil
@@ -218,6 +222,6 @@ func (f *Filesystem) createRoot(ctx context.Context, attr Attr) error {
 	if _, err := f.store.Put(ctx, metadataObjectKey(rootKey), bytes.NewReader(metaData), nil, ""); err != nil {
 		return err
 	}
-	_, err = f.store.Put(ctx, rootKey, bytes.NewReader(empty), nil, "")
+	_, err = f.store.Put(objstore.AsBlock(ctx, rootKey), rootKey, bytes.NewReader(empty), nil, "")
 	return err
 }

@@ -124,7 +124,7 @@ func (h *History) creation(ctx context.Context) (time.Time, error) {
 	if err != nil || len(versions) == 0 {
 		return time.Time{}, fmt.Errorf("when filesystem %q was made: %v", h.cfg.Filesystem, err)
 	}
-	return versions[len(versions)-1].Time(), nil
+	return versions[len(versions)-1].LastModified, nil
 }
 
 // Span is the moments there are to see: from the filesystem's creation

@@ -38,7 +38,7 @@ func Run(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	t.Run("HistoryCacheLastsForItsTTL", func(t *testing.T) { historyCacheLastsForItsTTL(t, newStore) })
 	t.Run("AsOfAfterErase", func(t *testing.T) { asOfAfterErase(t, newStore) })
 	t.Run("HistoryCacheKeepsVersions", func(t *testing.T) { historyCacheKeepsVersions(t, newStore) })
-	t.Run("AsOfByDeclaredTime", func(t *testing.T) { asOfByDeclaredTime(t, newStore) })
+	t.Run("AsOfByVersionDates", func(t *testing.T) { asOfByVersionDates(t, newStore) })
 }
 
 // pause lets the store's clock pass a whole second, so a time taken
@@ -679,15 +679,16 @@ func historyCacheLastsForItsTTL(t *testing.T, newStore func(*testing.T) objstore
 		}
 		return store.listings - before
 	}
-	if n := look(time.Hour, now); n != 2 {
-		t.Fatalf("an empty cache asked the store %d times; want 2", n)
+	// Three listings: the key, its .version record (none), the prefix.
+	if n := look(time.Hour, now); n != 3 {
+		t.Fatalf("an empty cache asked the store %d times; want 3", n)
 	}
 	if n := look(time.Hour, middle); n != 0 {
 		t.Fatalf("a reopened cache, at an earlier time, asked the store %d times; want 0", n)
 	}
 	time.Sleep(10 * time.Millisecond)
-	if n := look(time.Millisecond, middle); n != 2 {
-		t.Fatalf("a cache past its TTL asked the store %d times; want 2", n)
+	if n := look(time.Millisecond, middle); n != 3 {
+		t.Fatalf("a cache past its TTL asked the store %d times; want 3", n)
 	}
 }
 
@@ -796,29 +797,45 @@ func historyCacheKeepsVersions(t *testing.T, newStore func(*testing.T) objstore.
 	}
 }
 
-// asOfByDeclaredTime: versions written under declared times (in order,
-// years before the store wrote them) say so, and a view picks by them.
-func asOfByDeclaredTime(t *testing.T, newStore func(*testing.T) objstore.Store) {
-	store := newStore(t)
+// asOfByVersionDates: versions written years after they came to be, under
+// declared times through a Recording store, are recorded and dated in the
+// item's .version record (AddDates), and a view picks by those dates. The
+// versions themselves carry nothing; a key with no record is dated by the
+// store.
+func asOfByVersionDates(t *testing.T, newStore func(*testing.T) objstore.Store) {
+	store := objstore.Recording(newStore(t))
 	ctx := context.Background()
 	at := func(year int) time.Time { return time.Date(year, 1, 1, 0, 0, 0, 0, time.UTC) }
+	rec := &objstore.Recorder{}
 	for _, v := range []struct {
 		year int
 		body string
 	}{{2021, "one"}, {2022, "two"}, {2023, "three"}} {
-		if _, err := store.Put(objstore.WithDeclaredTime(ctx, at(v.year)), "d/k", strings.NewReader(v.body), map[string]string{"m": "1"}, ""); err != nil {
+		wctx := objstore.WithRecorder(objstore.WithDeclaredTime(ctx, at(v.year)), rec)
+		if _, err := store.Put(wctx, "d/k", strings.NewReader(v.body), map[string]string{"m": "1"}, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := store.Delete(objstore.WithDeclaredTime(ctx, at(2024)), "d/gone"); err != nil && !objstore.IsNotFound(err) {
+	recorded := rec.Dates()
+	if len(recorded) != 1 || len(recorded["d/k"]) != 3 {
+		t.Fatalf("recorded %v", recorded)
+	}
+	if err := objstore.AddDates(ctx, store, "d/k", recorded["d/k"]); err != nil {
 		t.Fatal(err)
 	}
 	head, err := store.Head(ctx, "d/k")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, ok := head.Declared(); !ok || !got.Equal(at(2023)) || !head.Time().Equal(at(2023)) || head.Metadata["m"] != "1" {
-		t.Fatalf("head: declared %v %v, time %v, metadata %v; want 2023 and m=1", got, ok, head.Time(), head.Metadata)
+	if head.Metadata["m"] != "1" || len(head.Metadata) != 1 {
+		t.Fatalf("head metadata %v; want only m=1", head.Metadata)
+	}
+	dates, err := objstore.ReadDates(ctx, store, "d/k")
+	if err != nil || len(dates) != 3 || !dates.Time(head).Equal(at(2023)) {
+		t.Fatalf("dates %v, %v; want three, the current at 2023", dates, err)
+	}
+	if none, err := objstore.ReadDates(ctx, store, "d/other"); err != nil || len(none) != 0 {
+		t.Fatalf("a key with no record: %v, %v", none, err)
 	}
 	pause()
 	hist, err := objstore.OpenTempHistoryCache(ctx, store, t.TempDir())

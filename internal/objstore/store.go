@@ -43,51 +43,23 @@ type Object struct {
 	Metadata     map[string]string
 
 	// Deleted marks an entry recording a deletion: the key didn't exist
-	// from Time until its next version. It has no content.
+	// from LastModified until its next version. It has no content.
 	Deleted bool
-
-	// MetadataUnknown marks a history entry whose Metadata the store's
-	// listing doesn't give (S3's versions): its Time needs a HeadVersion.
-	MetadataUnknown bool
-}
-
-// DeclaredKey is the metadata a version written under WithDeclaredTime
-// carries: the time declared for it, RFC 3339.
-const DeclaredKey = "icbfs_at"
-
-// Time is when this version came to be: the time declared for it when it
-// was written (WithDeclaredTime), else the store's LastModified. A
-// history entry with MetadataUnknown says LastModified until its metadata
-// is read; a declared time is never later than LastModified, so that is
-// an upper bound.
-func (o *Object) Time() time.Time {
-	if t, ok := o.Declared(); ok {
-		return t
-	}
-	return o.LastModified
-}
-
-// Declared is the time declared for this version, if one was.
-func (o *Object) Declared() (time.Time, bool) {
-	v, ok := o.Metadata[DeclaredKey]
-	if !ok {
-		return time.Time{}, false
-	}
-	t, err := time.Parse(time.RFC3339Nano, v)
-	return t, err == nil
 }
 
 type declaredKey struct{}
 
-// WithDeclaredTime makes every version written under ctx say it came to
-// be at t rather than when the store wrote it: a mirror copying what
-// happened at its source at t. Views of the past (AsOf) go by it.
+// WithDeclaredTime says the versions written under ctx came to be at t,
+// not when the store writes them: a mirror copying what happened at its
+// source at t. The store itself doesn't record it; a Recording store
+// notes each version written (Recorder), and the caller dates them in
+// the item's .version object (AddDates), which views of the past go by.
 func WithDeclaredTime(ctx context.Context, t time.Time) context.Context {
 	return context.WithValue(ctx, declaredKey{}, t)
 }
 
 // WithoutDeclaredTime is ctx with no declared time: for a write under it
-// that happens now (a mark that something changed).
+// that happens now (a mark that something changed, a .version record).
 func WithoutDeclaredTime(ctx context.Context) context.Context {
 	return context.WithValue(ctx, declaredKey{}, nil)
 }
@@ -96,27 +68,6 @@ func WithoutDeclaredTime(ctx context.Context) context.Context {
 func DeclaredTime(ctx context.Context) (time.Time, bool) {
 	t, ok := ctx.Value(declaredKey{}).(time.Time)
 	return t, ok
-}
-
-// Declare is the metadata a store writes: metadata with ctx's declared
-// time, if it has one, and without any other (one carried over from the
-// version being replaced): a version's time is only ever what its own
-// write declared. metadata itself isn't changed.
-func Declare(ctx context.Context, metadata map[string]string) map[string]string {
-	t, ok := DeclaredTime(ctx)
-	if _, carried := metadata[DeclaredKey]; !ok && !carried {
-		return metadata
-	}
-	out := make(map[string]string, len(metadata)+1)
-	for k, v := range metadata {
-		if k != DeclaredKey {
-			out[k] = v
-		}
-	}
-	if ok {
-		out[DeclaredKey] = t.UTC().Format(time.RFC3339Nano)
-	}
-	return out
 }
 
 // Part is one part of a PutParts write: Size bytes, either uploaded from

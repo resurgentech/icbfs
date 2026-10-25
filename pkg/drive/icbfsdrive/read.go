@@ -291,9 +291,17 @@ func (d *Drive) Versions(ctx context.Context, ref drive.ItemRef) ([]drive.Versio
 	if err != nil {
 		return nil, mapErr(err)
 	}
-	if err := d.versionTimes(ctx, objs); err != nil {
+	dates, err := objstore.ReadDates(ctx, d.fs.Store(), id)
+	if err != nil {
 		return nil, mapErr(err)
 	}
+	// Newest first by effective date (a version written late sorts where
+	// it belongs); the store's order breaks ties.
+	current := ""
+	if len(objs) > 0 {
+		current = objs[0].VersionID
+	}
+	sort.SliceStable(objs, func(i, j int) bool { return dates.Time(&objs[i]).After(dates.Time(&objs[j])) })
 	var sums map[string]icbfs.Checksums
 	if n != nil {
 		sums = n.attr.Checksums
@@ -306,16 +314,16 @@ func (d *Drive) Versions(ctx context.Context, ref drive.ItemRef) ([]drive.Versio
 		if o.Deleted {
 			continue
 		}
-		v := drive.Version{ID: o.VersionID, Time: o.Time(), Stored: o.LastModified, Size: o.Size, Current: i == 0,
+		v := drive.Version{ID: o.VersionID, Time: dates.Time(&o), Stored: o.LastModified, Size: o.Size, Current: o.VersionID == current,
 			Checksums: toChecksums(sums[o.ETag])}
 		// Current at a name's time: written at or before it, and the next
 		// version (or delete) came after it.
 		until := time.Now().Add(time.Hour)
 		if i > 0 {
-			until = objs[i-1].Time()
+			until = dates.Time(&objs[i-1])
 		}
 		for _, nm := range names {
-			if !nm.Time.Before(o.Time()) && nm.Time.Before(until) {
+			if !nm.Time.Before(dates.Time(&o)) && nm.Time.Before(until) {
 				v.Names = append(v.Names, nm.Name)
 			}
 		}
@@ -325,31 +333,6 @@ func (d *Drive) Versions(ctx context.Context, ref drive.ItemRef) ([]drive.Versio
 		out = []drive.Version{}
 	}
 	return out, nil
-}
-
-// versionTimes fills in the metadata of the history entries whose
-// listing didn't give it (S3's), for their times: read once per version
-// and kept by the drive's history cache.
-func (d *Drive) versionTimes(ctx context.Context, objs []objstore.Object) error {
-	var cache *objstore.HistoryCache
-	for i := range objs {
-		o := &objs[i]
-		if !o.MetadataUnknown || o.Deleted {
-			continue
-		}
-		if cache == nil {
-			var err error
-			if cache, err = d.views.cache(ctx); err != nil {
-				return err
-			}
-		}
-		head, err := cache.HeadVersion(ctx, o.Key, o.VersionID)
-		if err != nil {
-			return err
-		}
-		o.Metadata, o.MetadataUnknown = head.Metadata, false
-	}
-	return nil
 }
 
 var _ drive.Checksummer = (*Drive)(nil)

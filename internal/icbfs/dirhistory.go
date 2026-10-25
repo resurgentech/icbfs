@@ -1,6 +1,7 @@
 package icbfs
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -118,11 +119,11 @@ func (f *Filesystem) DirVersion(ctx context.Context, dirKey string) (string, err
 	return hex.EncodeToString(h.Sum(nil)[:16]), nil
 }
 
-// ReplaceDirHistory erases directory dirKey's history and writes states
-// in its place, oldest first, each dated at its time (At, strictly
-// increasing and not in the future); the last is the directory now, so
-// it must hold exactly the entries the directory holds now (the items
-// themselves, their links and the trash are left as they are). ifMatch,
+// ReplaceDirHistory erases directory dirKey's history (its blocks' and
+// its .metadata's) and writes states in its place, oldest first, each
+// dated at its time (At, strictly increasing and not in the future); the
+// last is the directory now. The items themselves, their links and the
+// trash are left as they are: an entry names an item that exists. ifMatch,
 // if set, is the DirVersion the caller read: ErrDirChanged if the
 // directory has changed since. A change to the directory made while this
 // runs can be lost: the caller stops its own writes to it meanwhile.
@@ -156,26 +157,42 @@ func (f *Filesystem) ReplaceDirHistory(ctx context.Context, dirKey string, state
 			return ErrDirChanged
 		}
 	}
-	current, err := f.collectEntries(ctx, dirKey)
-	if err != nil {
-		return err
-	}
-	if !sameEntries(current, sorted[len(sorted)-1]) {
-		return fmt.Errorf("the last state isn't the directory as it is now: %w", ErrInvalidArgument)
-	}
 	oldKeys, oldVersions, err := f.dirBlockHistory(ctx, dirKey)
 	if err != nil {
 		return err
 	}
+	oldMeta, err := f.store.History(ctx, metadataObjectKey(dirKey))
+	if err != nil {
+		return err
+	}
+	attr, err := f.statDir(ctx, dirKey)
+	if err != nil {
+		return err
+	}
 
-	// The new history, written in order; each state's blocks below the
-	// root are new, and a state's go once the next one is written (a
-	// deletion now, which views of the past see past).
+	// The new history, written in order and recorded: each state's blocks
+	// below the root are new, and a state's go once the next one is
+	// written (a deletion now, which views of the past see past); its
+	// .metadata is the directory's attributes now with the state's time as
+	// mtime, the directory's mtime being its entries'.
+	rec := &objstore.Recorder{}
 	var superseded []string
 	for i, s := range states {
-		sctx := objstore.WithDeclaredTime(ctx, s.At)
+		sctx := objstore.WithRecorder(objstore.WithDeclaredTime(ctx, s.At), rec)
 		below, err := f.writeDirTree(sctx, dirKey, sorted[i])
 		if err != nil {
+			return err
+		}
+		ma := attr
+		ma.Mtime = s.At
+		if ma.Ctime.IsZero() || ma.Ctime.Before(s.At) {
+			ma.Ctime = s.At
+		}
+		data, err := encodeFileMetadata(ma)
+		if err != nil {
+			return err
+		}
+		if _, err := f.store.Put(sctx, metadataObjectKey(dirKey), bytes.NewReader(data), nil, ""); err != nil {
 			return err
 		}
 		for _, k := range superseded {
@@ -183,10 +200,28 @@ func (f *Filesystem) ReplaceDirHistory(ctx context.Context, dirKey string, state
 		}
 		superseded = below
 	}
-	// Then the old history goes: every version of the root block before
-	// the new ones, and every other block it had, whole.
+	// The record: the new versions' dates, and nothing else (the old ones
+	// are going).
+	byBase := rec.Dates()
+	if err := objstore.SetDates(ctx, f.store, dirKey, byBase[dirKey]); err != nil {
+		return err
+	}
+	for base, dates := range byBase {
+		if base != dirKey {
+			if err := objstore.AddDates(ctx, f.store, base, dates); err != nil {
+				return err
+			}
+		}
+	}
+	// Then the old history goes: every version of the root block and of
+	// .metadata before the new ones, and every other block it had, whole.
 	for _, v := range oldVersions[dirKey] {
 		if err := f.store.Erase(ctx, dirKey, v.VersionID); err != nil && !objstore.IsNotFound(err) {
+			return err
+		}
+	}
+	for _, v := range oldMeta {
+		if err := f.store.Erase(ctx, metadataObjectKey(dirKey), v.VersionID); err != nil && !objstore.IsNotFound(err) {
 			return err
 		}
 	}
@@ -239,7 +274,7 @@ func sameEntries(a, b []block.Entry) bool {
 func (f *Filesystem) writeDirTree(ctx context.Context, dirKey string, entries []block.Entry) ([]string, error) {
 	n, c := f.dirBlockEntries, f.collation()
 	if len(entries) <= n {
-		return nil, f.putBlock(ctx, dirKey, &block.Block{Kind: block.Leaf, Collation: c, Entries: entries}, nil, "")
+		return nil, f.putBlock(ctx, dirKey, dirKey, &block.Block{Kind: block.Leaf, Collation: c, Entries: entries}, nil, "")
 	}
 	// A level: blocks and, for the level above, each one's least name.
 	type node struct {
@@ -263,14 +298,14 @@ func (f *Filesystem) writeDirTree(ctx context.Context, dirKey string, entries []
 		}
 		if len(level) == 1 {
 			// The top: it goes under the directory's own key instead.
-			return below, f.putBlock(ctx, dirKey, level[0].blk, nil, "")
+			return below, f.putBlock(ctx, dirKey, dirKey, level[0].blk, nil, "")
 		}
 		// Written right to left, so a block's right sibling is there first.
 		for i := len(level) - 1; i >= 0; i-- {
 			if i+1 < len(level) {
 				level[i].blk.HighKey, level[i].blk.Right = level[i+1].min, keys[i+1]
 			}
-			if err := f.putBlock(ctx, keys[i], level[i].blk, nil, ""); err != nil {
+			if err := f.putBlock(ctx, dirKey, keys[i], level[i].blk, nil, ""); err != nil {
 				return nil, err
 			}
 		}

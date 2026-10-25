@@ -50,7 +50,7 @@ type HistoryCache struct {
 
 // historyLayout is the database's layout (PRAGMA user_version). A cache
 // of another layout, older or newer, is dropped and started again.
-const historyLayout = 3
+const historyLayout = 4
 
 // maxCachedContent is the largest content a HistoryCache keeps: a
 // directory block or a .metadata object is far smaller.
@@ -190,8 +190,7 @@ func (c *HistoryCache) Close() error {
 }
 
 // The database: versions holds keys' histories as the store listed them
-// (pos is the order it listed them in; declared is a version's declared
-// time, NULL for none, and unknown says the listing didn't say), and covered says what has been
+// (pos is the order it listed them in), and covered says what has been
 // fetched: every key starting with prefix (whole = 0), or the one key
 // prefix (whole = 1), complete for every time up to upto. blobs holds
 // versions' metadata, and content where it was asked for (else NULL);
@@ -221,8 +220,6 @@ func (c *HistoryCache) init(ctx context.Context) error {
 				etag     TEXT NOT NULL,
 				size     INTEGER NOT NULL,
 				modified INTEGER NOT NULL,
-				declared INTEGER,
-				unknown  INTEGER NOT NULL,
 				deleted  INTEGER NOT NULL,
 				fetched  INTEGER NOT NULL,
 				PRIMARY KEY (key, pos)
@@ -302,7 +299,7 @@ func (c *HistoryCache) history(ctx context.Context, key string, at time.Time) ([
 		return nil, err
 	}
 	if ok {
-		return c.read(ctx, `SELECT key, version, etag, size, modified, declared, unknown, deleted FROM versions WHERE key = ? ORDER BY pos`, key)
+		return c.read(ctx, `SELECT key, version, etag, size, modified, deleted FROM versions WHERE key = ? ORDER BY pos`, key)
 	}
 	upto, err := c.upto(ctx, at)
 	if err != nil {
@@ -324,7 +321,7 @@ func (c *HistoryCache) historyUnder(ctx context.Context, prefix string, at time.
 	}
 	if ok {
 		where, args := underPrefix(prefix)
-		return c.read(ctx, `SELECT key, version, etag, size, modified, declared, unknown, deleted FROM versions WHERE `+where+` ORDER BY key, pos`, args...)
+		return c.read(ctx, `SELECT key, version, etag, size, modified, deleted FROM versions WHERE `+where+` ORDER BY key, pos`, args...)
 	}
 	upto, err := c.upto(ctx, at)
 	if err != nil {
@@ -356,14 +353,10 @@ func (c *HistoryCache) read(ctx context.Context, query string, args ...any) ([]O
 	for rows.Next() {
 		var o Object
 		var modified int64
-		var declared sql.NullInt64
-		if err := rows.Scan(&o.Key, &o.VersionID, &o.ETag, &o.Size, &modified, &declared, &o.MetadataUnknown, &o.Deleted); err != nil {
+		if err := rows.Scan(&o.Key, &o.VersionID, &o.ETag, &o.Size, &modified, &o.Deleted); err != nil {
 			return nil, err
 		}
 		o.LastModified = time.Unix(0, modified).UTC()
-		if declared.Valid {
-			o.Metadata = map[string]string{DeclaredKey: time.Unix(0, declared.Int64).UTC().Format(time.RFC3339Nano)}
-		}
 		out = append(out, o)
 	}
 	return out, rows.Err()
@@ -384,18 +377,14 @@ func (c *HistoryCache) save(ctx context.Context, keyOrPrefix string, whole bool,
 	if _, err := tx.ExecContext(ctx, `DELETE FROM versions WHERE `+where, args...); err != nil {
 		return err
 	}
-	insert, err := tx.PrepareContext(ctx, `INSERT INTO versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	insert, err := tx.PrepareContext(ctx, `INSERT INTO versions VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
 	defer insert.Close()
 	fetched := time.Now().UnixNano()
 	for i, o := range list {
-		var declared sql.NullInt64
-		if t, ok := o.Declared(); ok {
-			declared = sql.NullInt64{Int64: t.UnixNano(), Valid: true}
-		}
-		if _, err := insert.ExecContext(ctx, o.Key, i, o.VersionID, o.ETag, o.Size, o.LastModified.UnixNano(), declared, o.MetadataUnknown, o.Deleted, fetched); err != nil {
+		if _, err := insert.ExecContext(ctx, o.Key, i, o.VersionID, o.ETag, o.Size, o.LastModified.UnixNano(), o.Deleted, fetched); err != nil {
 			return err
 		}
 	}

@@ -1,0 +1,304 @@
+package objstore
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"io"
+	"strings"
+	"sync"
+	"time"
+
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
+
+	"github.com/resurgentech/icbfs/internal/pb"
+)
+
+// A version's date is the store's LastModified, unless the item's
+// .version object says otherwise: a table, version id -> time, for the
+// versions of an item's objects that came to be at another time (a
+// mirror's, written in its source's time: WithDeclaredTime). Views of the
+// past (AsOf) and version listings go by the effective date.
+//
+// A .version object is <base>.version, where base is the item's key: the
+// one object serving its content (or a directory's root block) and its
+// companions (.metadata, .ads.N, .lock). A directory's split blocks, under
+// keys of their own, have their own.
+
+// VersionSuffix names an item's .version object.
+const VersionSuffix = ".version"
+
+// versionDatesLayout is the .version format this package reads and writes.
+const versionDatesLayout = 1
+
+// Dates is the override table of one item: version id -> time.
+type Dates map[string]time.Time
+
+// BaseKey is the item key a key belongs to: the key itself, or the one
+// before a companion suffix (.metadata, .ads.N, .lock, .version).
+func BaseKey(key string) string {
+	for _, suffix := range []string{".metadata", ".lock", VersionSuffix} {
+		if base, ok := strings.CutSuffix(key, suffix); ok {
+			return base
+		}
+	}
+	if i := strings.LastIndex(key, ".ads."); i > 0 {
+		return key[:i]
+	}
+	return key
+}
+
+// Time is o's effective date: dates' entry for it, else the store's.
+func (d Dates) Time(o *Object) time.Time {
+	if t, ok := d[o.VersionID]; ok {
+		return t
+	}
+	return o.LastModified
+}
+
+// Pick is, from one key's history (newest first), the version current at
+// at by effective date: the latest-dated version at or before at, the
+// newest stored of several dated alike. ok is false if the key didn't
+// exist then (no version, or a deletion).
+func (d Dates) Pick(history []Object, at time.Time) (Object, bool) {
+	var best *Object
+	var bestAt time.Time
+	for i := range history {
+		o := &history[i]
+		t := d.Time(o)
+		if t.After(at) {
+			continue
+		}
+		if best == nil || t.After(bestAt) {
+			best, bestAt = o, t
+		}
+	}
+	if best == nil {
+		return Object{}, false
+	}
+	return *best, !best.Deleted
+}
+
+// UpTo is the entries of history dated at or before at, in the order given.
+func (d Dates) UpTo(history []Object, at time.Time) []Object {
+	var out []Object
+	for _, o := range history {
+		if !d.Time(&o).After(at) {
+			out = append(out, o)
+		}
+	}
+	return out
+}
+
+func encodeDates(d Dates) ([]byte, error) {
+	w := &pb.VersionDates{Dates: make(map[string]*timestamppb.Timestamp, len(d)), Layout: versionDatesLayout}
+	for id, t := range d {
+		w.Dates[id] = timestamppb.New(t)
+	}
+	return proto.Marshal(w)
+}
+
+func decodeDates(data []byte) (Dates, error) {
+	if len(data) == 0 {
+		return Dates{}, nil
+	}
+	var w pb.VersionDates
+	if err := proto.Unmarshal(data, &w); err != nil {
+		return nil, fmt.Errorf("decode .version: %w", err)
+	}
+	if w.Layout != versionDatesLayout {
+		return nil, fmt.Errorf(".version layout %d, this build reads %d", w.Layout, versionDatesLayout)
+	}
+	d := make(Dates, len(w.Dates))
+	for id, ts := range w.Dates {
+		d[id] = ts.AsTime()
+	}
+	return d, nil
+}
+
+// ReadDates is base's override table as it is now: empty if it has none.
+func ReadDates(ctx context.Context, store Store, base string) (Dates, error) {
+	d, _, err := readDates(ctx, store, base)
+	return d, err
+}
+
+func readDates(ctx context.Context, store Store, base string) (Dates, *Object, error) {
+	body, obj, err := store.Get(CacheContent(WithoutDeclaredTime(ctx)), base+VersionSuffix)
+	if IsNotFound(err) {
+		return Dates{}, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	defer body.Close()
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return nil, nil, err
+	}
+	d, err := decodeDates(data)
+	return d, obj, err
+}
+
+// AddDates merges add into base's override table, under compare-and-swap.
+// Nothing is written for an empty add.
+func AddDates(ctx context.Context, store Store, base string, add Dates) error {
+	if len(add) == 0 {
+		return nil
+	}
+	return writeDates(ctx, store, base, func(d Dates) Dates {
+		for id, t := range add {
+			d[id] = t
+		}
+		return d
+	})
+}
+
+// SetDates replaces base's override table with dates, under
+// compare-and-swap; an empty dates removes the object.
+func SetDates(ctx context.Context, store Store, base string, dates Dates) error {
+	if len(dates) == 0 {
+		err := store.Delete(WithoutDeclaredTime(ctx), base+VersionSuffix)
+		if IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	return writeDates(ctx, store, base, func(Dates) Dates { return dates })
+}
+
+func writeDates(ctx context.Context, store Store, base string, mutate func(Dates) Dates) error {
+	ctx = WithoutDeclaredTime(ctx) // the record is news now, not part of the history it records
+	key := base + VersionSuffix
+	for attempt := 0; attempt < 8; attempt++ {
+		cur, obj, err := readDates(ctx, store, base)
+		if err != nil {
+			return err
+		}
+		data, err := encodeDates(mutate(cur))
+		if err != nil {
+			return err
+		}
+		if obj == nil {
+			_, err = store.PutIfAbsent(ctx, key, bytes.NewReader(data), nil)
+		} else {
+			_, err = store.Put(ctx, key, bytes.NewReader(data), nil, obj.ETag)
+		}
+		if !IsPreconditionFailed(err) {
+			return err
+		}
+	}
+	return fmt.Errorf("write %s: lost the race %d times", key, 8)
+}
+
+// --- Recording what a dated operation writes ---
+
+// Written is one version a store wrote under a declared time. Dir, if
+// set, says it's a block of that directory (AsBlock), whose place in the
+// directory's history is the directory's to put right, not the key's.
+type Written struct {
+	Key, VersionID string
+	At             time.Time
+	Dir            string
+}
+
+type blockKey struct{}
+
+// AsBlock marks the writes under ctx as blocks of directory dir
+// (Written.Dir).
+func AsBlock(ctx context.Context, dir string) context.Context {
+	return context.WithValue(ctx, blockKey{}, dir)
+}
+
+// A Recorder collects the versions written under a declared time through
+// a Recording store, for the caller to date (AddDates) once the operation
+// is done: no write path needs to hand its version ids out.
+type Recorder struct {
+	mu      sync.Mutex
+	written []Written
+}
+
+// Written is what was recorded so far.
+func (r *Recorder) Written() []Written {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]Written(nil), r.written...)
+}
+
+// Dates groups what was recorded by base key: what AddDates takes.
+func (r *Recorder) Dates() map[string]Dates {
+	out := map[string]Dates{}
+	for _, w := range r.Written() {
+		base := BaseKey(w.Key)
+		if out[base] == nil {
+			out[base] = Dates{}
+		}
+		out[base][w.VersionID] = w.At
+	}
+	return out
+}
+
+func (r *Recorder) add(w Written) {
+	r.mu.Lock()
+	r.written = append(r.written, w)
+	r.mu.Unlock()
+}
+
+type recorderKey struct{}
+
+// WithRecorder makes rec record what's written under ctx (through a
+// Recording store, while ctx has a declared time).
+func WithRecorder(ctx context.Context, rec *Recorder) context.Context {
+	return context.WithValue(ctx, recorderKey{}, rec)
+}
+
+// Recording wraps store so that every version it writes under a context
+// with a declared time and a Recorder is recorded. A .version object's
+// own writes aren't: they're the record, not the history.
+func Recording(store Store) Store {
+	if _, ok := store.(*recording); ok {
+		return store
+	}
+	return &recording{store}
+}
+
+// Unwrap is the store under a Recording one, else store itself.
+func Unwrap(store Store) Store {
+	if r, ok := store.(*recording); ok {
+		return r.Store
+	}
+	return store
+}
+
+type recording struct{ Store }
+
+func (r *recording) note(ctx context.Context, key string, obj *Object, err error) {
+	if err != nil || obj == nil || strings.HasSuffix(key, VersionSuffix) {
+		return
+	}
+	rec, _ := ctx.Value(recorderKey{}).(*Recorder)
+	t, ok := DeclaredTime(ctx)
+	if rec == nil || !ok {
+		return
+	}
+	dir, _ := ctx.Value(blockKey{}).(string)
+	rec.add(Written{Key: key, VersionID: obj.VersionID, At: t, Dir: dir})
+}
+
+func (r *recording) Put(ctx context.Context, key string, body io.Reader, metadata map[string]string, ifMatch string) (*Object, error) {
+	obj, err := r.Store.Put(ctx, key, body, metadata, ifMatch)
+	r.note(ctx, key, obj, err)
+	return obj, err
+}
+
+func (r *recording) PutIfAbsent(ctx context.Context, key string, body io.Reader, metadata map[string]string) (*Object, error) {
+	obj, err := r.Store.PutIfAbsent(ctx, key, body, metadata)
+	r.note(ctx, key, obj, err)
+	return obj, err
+}
+
+func (r *recording) PutParts(ctx context.Context, key string, parts []Part, metadata map[string]string, ifMatch string) (*Object, error) {
+	obj, err := r.Store.PutParts(ctx, key, parts, metadata, ifMatch)
+	r.note(ctx, key, obj, err)
+	return obj, err
+}

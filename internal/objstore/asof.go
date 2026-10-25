@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sort"
+	"sync"
 	"time"
 )
 
@@ -27,6 +27,10 @@ type AsOf struct {
 	cache *HistoryCache
 	store Store
 	at    time.Time
+
+	// dates memoizes each item's override table (its .version object as
+	// it is now), by base key, for this view.
+	dates sync.Map
 }
 
 var _ Store = (*AsOf)(nil)
@@ -75,67 +79,54 @@ func (a *AsOf) At() time.Time { return a.at }
 // Live is the store this is a view of, as it is now.
 func (a *AsOf) Live() Store { return a.store }
 
-// asOfVersion picks, from one key's history (newest first), the version
-// current at at, by the times the history says: ok is false if the key
-// didn't exist then. An entry with MetadataUnknown counts as at its
-// LastModified, which may be later than a declared time it has.
-func asOfVersion(history []Object, at time.Time) (Object, bool) {
-	for _, v := range history {
-		if !v.Time().After(at) {
-			return v, !v.Deleted
+// Dates is the override table of the item key belongs to, as its
+// .version object has it now (the newest version, whatever a.at: the
+// record is the authority on the item's timeline), from the history
+// cache; empty for an item with none. Read once per item per view.
+func (a *AsOf) Dates(ctx context.Context, key string) (Dates, error) {
+	base := BaseKey(key)
+	if d, ok := a.dates.Load(base); ok {
+		return d.(Dates), nil
+	}
+	vkey := base + VersionSuffix
+	history, err := a.cache.history(ctx, vkey, a.at)
+	if err != nil {
+		return nil, err
+	}
+	d := Dates{}
+	if len(history) > 0 && !history[0].Deleted {
+		body, _, err := a.cache.getVersion(CacheContent(ctx), vkey, history[0].VersionID)
+		if err != nil && !IsNotFound(err) {
+			return nil, err
+		}
+		if err == nil {
+			data, rerr := io.ReadAll(body)
+			body.Close()
+			if rerr != nil {
+				return nil, rerr
+			}
+			if d, err = decodeDates(data); err != nil {
+				return nil, err
+			}
 		}
 	}
-	return Object{}, false
+	a.dates.Store(base, d)
+	return d, nil
 }
 
-// resolve returns the version of key current at a.at.
+// resolve returns the version of key current at a.at, by effective date
+// (Dates.Pick).
 func (a *AsOf) resolve(ctx context.Context, key string) (Object, bool, error) {
 	history, err := a.cache.history(ctx, key, a.at)
 	if err != nil {
 		return Object{}, false, err
 	}
-	i, err := a.firstAtOrBefore(ctx, history)
-	if err != nil || i == len(history) {
+	dates, err := a.Dates(ctx, key)
+	if err != nil {
 		return Object{}, false, err
 	}
-	return history[i], !history[i].Deleted, nil
-}
-
-// firstAtOrBefore is the index of the first entry of history (newest
-// first) whose time is at or before a.at, or len(history). A key's times
-// only fall going back through its history (icbfs refuses a write
-// declared earlier than the version it replaces), so it's a binary
-// search, which reads the metadata of only a few entries the listing
-// didn't give it for.
-func (a *AsOf) firstAtOrBefore(ctx context.Context, history []Object) (int, error) {
-	var ferr error
-	i := sort.Search(len(history), func(i int) bool {
-		t, err := a.timeOf(ctx, &history[i])
-		if err != nil && ferr == nil {
-			ferr = err
-		}
-		return !t.After(a.at)
-	})
-	return i, ferr
-}
-
-// timeOf is o's time, as far as deciding whether it's after a.at needs:
-// an entry the listing gave no metadata for is read (HeadVersion, kept
-// by the cache) only if its LastModified is after a.at, since a declared
-// time is never later than that.
-func (a *AsOf) timeOf(ctx context.Context, o *Object) (time.Time, error) {
-	if !o.MetadataUnknown || o.Deleted || !o.LastModified.After(a.at) {
-		return o.Time(), nil
-	}
-	head, err := a.cache.headVersion(ctx, o.Key, o.VersionID)
-	if IsNotFound(err) {
-		return o.LastModified, nil // erased since: a purge's, which resolve's caller retries
-	}
-	if err != nil {
-		return o.LastModified, err
-	}
-	o.Metadata, o.MetadataUnknown = head.Metadata, false
-	return o.Time(), nil
+	v, ok := dates.Pick(history, a.at)
+	return v, ok, nil
 }
 
 // notAt is the not-found error (satisfying IsNotFound) for a key that
@@ -193,38 +184,32 @@ func (a *AsOf) HeadVersion(ctx context.Context, key, versionID string) (*Object,
 	return a.cache.headVersion(ctx, key, versionID)
 }
 
-// History is key's history up to a.at.
+// History is key's history up to a.at, by effective date.
 func (a *AsOf) History(ctx context.Context, key string) ([]Object, error) {
 	all, err := a.cache.history(ctx, key, a.at)
 	if err != nil {
 		return nil, err
 	}
-	i, err := a.firstAtOrBefore(ctx, all)
+	dates, err := a.Dates(ctx, key)
 	if err != nil {
 		return nil, err
 	}
-	return all[i:], nil
+	return dates.UpTo(all, a.at), nil
 }
 
-// HistoryUnder is the history under prefix up to a.at, by the times the
-// listing gives (see asOfVersion).
+// HistoryUnder is the history under prefix up to a.at, by the store's
+// dates: a listing of many items doesn't consult each one's .version.
 func (a *AsOf) HistoryUnder(ctx context.Context, prefix string) ([]Object, error) {
 	all, err := a.cache.historyUnder(ctx, prefix, a.at)
 	if err != nil {
 		return nil, err
 	}
-	var out []Object
-	for _, v := range all {
-		if !v.Time().After(a.at) {
-			out = append(out, v)
-		}
-	}
-	return out, nil
+	return Dates{}.UpTo(all, a.at), nil
 }
 
 // List lists every key under prefix that existed at a.at, with its size
-// then, by the times the listing gives (see asOfVersion: on S3, a key
-// written under a declared time counts from when it was stored) — every
+// then, by the store's dates (a listing of many items doesn't consult each
+// one's .version) — every
 // version under the prefix has to be listed for that, so
 // the first time it's as slow as the prefix's whole history is long.
 // After that it's the history cache's, for a view of any time.
@@ -239,7 +224,7 @@ func (a *AsOf) List(ctx context.Context, prefix string) ([]Object, error) {
 		for j < len(all) && all[j].Key == all[i].Key {
 			j++
 		}
-		if v, ok := asOfVersion(all[i:j], a.at); ok {
+		if v, ok := (Dates{}).Pick(all[i:j], a.at); ok {
 			out = append(out, Object{Key: v.Key, Size: v.Size})
 		}
 		i = j

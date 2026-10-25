@@ -46,9 +46,10 @@ type (
 // their source, not now: a mirror copying a source's history. Write,
 // Mkdir, Move, Delete, SetTimes, SetOrigin and Restore honour it: what
 // they write is dated t, so Versions, Trash and views of the past (At)
-// show the source's history. Changes to one item or folder must be made
-// in order (one dated before its current state fails with ErrOutOfOrder),
-// and t can't be in the future.
+// show the source's history. Changes come in any order: one dated behind
+// its item's current state goes into the past at t, and the present
+// stays as it was (a file's current version is put back on top; a
+// folder's copies from t on gain the change). t can't be in the future.
 func WithSourceTime(ctx context.Context, t time.Time) context.Context {
 	return context.WithValue(ctx, sourceTimeKey{}, t)
 }

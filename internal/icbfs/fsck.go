@@ -213,12 +213,15 @@ func (f *Filesystem) checkUnreachable(ctx context.Context, items map[string]*che
 		}
 		k := v.Key
 		if blocks[k] || k == f.pastKey() || strings.HasPrefix(k, f.trashPrefix()) || strings.HasPrefix(k, nameKey(f.id, "")) ||
-			strings.HasPrefix(k, f.id+"-trashby-") || strings.HasPrefix(k, f.id+"-origin-") {
+			strings.HasPrefix(k, f.id+"-trashby-") || strings.HasPrefix(k, f.id+"-origin-") || strings.HasPrefix(k, f.appPrefix()) {
 			continue
 		}
 		base := k
-		for _, suffix := range []string{".metadata", ".lock"} {
+		for _, suffix := range []string{".metadata", ".lock", ".version"} {
 			base = strings.TrimSuffix(base, suffix)
+		}
+		if blocks[base] {
+			continue // a split block's .version record
 		}
 		if i := strings.Index(base, streamKeyInfix); i >= 0 {
 			base = base[:i]

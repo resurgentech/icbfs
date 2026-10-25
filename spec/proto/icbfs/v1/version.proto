@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package icbfs.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/resurgentech/icbfs/internal/pb";
+
+// VersionDates is the body of a <key>.version object: the dates of the
+// versions of <key> and its companions (<key>.metadata, <key>.ads.N) that
+// the store's own timestamp is wrong for, by version id. A version with
+// no entry is dated by the store. Only items with an overridden history
+// (a mirror's, written in its source's time) have one.
+message VersionDates {
+  map<string, google.protobuf.Timestamp> dates = 1;
+  // layout is this format: 1. A reader refuses any other.
+  uint32 layout = 2;
+}

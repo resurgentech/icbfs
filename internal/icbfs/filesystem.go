@@ -134,7 +134,8 @@ func New(store objstore.Store, fsName string) *Filesystem {
 	if err != nil {
 		mountID = fmt.Sprintf("mount-%d-%d", os.Getpid(), time.Now().UnixNano())
 	}
-	return &Filesystem{store: store, fsName: fsName, cache: newDiskCache(cacheDir, defaultCacheMaxBytes), mountID: mountID}
+	// The store records what's written under a declared time (RecordDates).
+	return &Filesystem{store: objstore.Recording(store), fsName: fsName, cache: newDiskCache(cacheDir, defaultCacheMaxBytes), mountID: mountID}
 }
 
 // LockHolder names a lock holder of this Filesystem's: local (a FUSE lock
@@ -326,7 +327,7 @@ func (f *Filesystem) BootstrapReadOnly(ctx context.Context) error {
 	// entry as it is now, whose settings are fixed at creation; whether
 	// the filesystem existed at the view's time is its root's to say.
 	masterStore := f.store
-	if v, ok := f.store.(*objstore.AsOf); ok {
+	if v, ok := objstore.Unwrap(f.store).(*objstore.AsOf); ok {
 		masterStore = v.Live()
 	}
 	mb, _, err := readMaster(ctx, masterStore)
@@ -498,7 +499,7 @@ func combineFileAttr(key string, metaData []byte, metaLastModified time.Time, co
 	}
 	attr.mtimeOverrideETag = ""
 	if attr.Mtime.IsZero() {
-		attr.Mtime = contentObj.Time()
+		attr.Mtime = contentObj.LastModified
 		// S3's Last-Modified has 1-second resolution and is floored, so a
 		// write just after creation can report an mtime before the key's
 		// (millisecond) creation time. Content can't change before it
@@ -550,7 +551,7 @@ func combineDirAttr(key string, metaData []byte, metaLastModified time.Time, blo
 	attr.mtimeOverrideETag = ""
 	attr.Size = blockObj.Size
 	if attr.Mtime.IsZero() {
-		attr.Mtime = blockObj.Time()
+		attr.Mtime = blockObj.LastModified
 	}
 	if attr.Btime.IsZero() {
 		attr.Btime = Btime(key)
@@ -891,13 +892,10 @@ func (f *Filesystem) tryInsert(ctx context.Context, rootKey, name, uuid string, 
 // can't move, so it splits into two new blocks and becomes an internal
 // node over them.
 func (f *Filesystem) writeBack(ctx context.Context, rootKey string, step pathStep, blk *block.Block) error {
-	if err := checkOrder(ctx, step.obj); err != nil {
-		return err
-	}
 	overflowing := (blk.Kind == block.Leaf && len(blk.Entries) > f.dirBlockEntries) ||
 		(blk.Kind == block.Internal && len(blk.Children) > f.dirBlockEntries)
 	if !overflowing {
-		err := f.putBlock(ctx, step.key, blk, step.obj.Metadata, step.obj.ETag)
+		err := f.putBlock(ctx, rootKey, step.key, blk, step.obj.Metadata, step.obj.ETag)
 		if objstore.IsPreconditionFailed(err) {
 			return errRetry
 		}
@@ -915,7 +913,7 @@ func (f *Filesystem) writeBack(ctx context.Context, rootKey string, step pathSte
 	if err != nil {
 		return err
 	}
-	if err := f.putBlock(ctx, rightKey, right, step.obj.Metadata, ""); err != nil {
+	if err := f.putBlock(ctx, rootKey, rightKey, right, step.obj.Metadata, ""); err != nil {
 		return err
 	}
 	left.Right = rightKey
@@ -925,21 +923,21 @@ func (f *Filesystem) writeBack(ctx context.Context, rootKey string, step pathSte
 		if err != nil {
 			return err
 		}
-		if err := f.putBlock(ctx, leftKey, left, step.obj.Metadata, ""); err != nil {
+		if err := f.putBlock(ctx, rootKey, leftKey, left, step.obj.Metadata, ""); err != nil {
 			return err
 		}
 		top := &block.Block{Kind: block.Internal, Collation: blk.Collation, Children: []block.Child{
 			{MinKey: "", UUID: leftKey},
 			{MinKey: sep, UUID: rightKey},
 		}}
-		err = f.putBlock(ctx, rootKey, top, step.obj.Metadata, step.obj.ETag)
+		err = f.putBlock(ctx, rootKey, rootKey, top, step.obj.Metadata, step.obj.ETag)
 		if objstore.IsPreconditionFailed(err) {
 			return errRetry
 		}
 		return err
 	}
 
-	err = f.putBlock(ctx, step.key, left, step.obj.Metadata, step.obj.ETag)
+	err = f.putBlock(ctx, rootKey, step.key, left, step.obj.Metadata, step.obj.ETag)
 	if objstore.IsPreconditionFailed(err) {
 		return errRetry // the right half is left unreferenced, which is harmless
 	}
@@ -998,12 +996,12 @@ func (f *Filesystem) tryLinkChild(ctx context.Context, rootKey, leftKey string, 
 	}
 }
 
-func (f *Filesystem) putBlock(ctx context.Context, key string, blk *block.Block, metadata map[string]string, ifMatch string) error {
+func (f *Filesystem) putBlock(ctx context.Context, dirKey, key string, blk *block.Block, metadata map[string]string, ifMatch string) error {
 	data, err := blk.Encode()
 	if err != nil {
 		return err
 	}
-	_, err = f.store.Put(ctx, key, bytes.NewReader(data), metadata, ifMatch)
+	_, err = f.store.Put(objstore.AsBlock(ctx, dirKey), key, bytes.NewReader(data), metadata, ifMatch)
 	return err
 }
 
@@ -1051,14 +1049,11 @@ func (f *Filesystem) tryRemove(ctx context.Context, rootKey, name string, check 
 			return block.Entry{}, err // nothing written: the removal was only in this copy
 		}
 	}
-	if err := checkOrder(ctx, leaf.obj); err != nil {
-		return block.Entry{}, err
-	}
 	data, err := leaf.blk.Encode()
 	if err != nil {
 		return block.Entry{}, err
 	}
-	_, err = f.store.Put(ctx, leaf.key, bytes.NewReader(data), leaf.obj.Metadata, leaf.obj.ETag)
+	_, err = f.store.Put(objstore.AsBlock(ctx, rootKey), leaf.key, bytes.NewReader(data), leaf.obj.Metadata, leaf.obj.ETag)
 	if objstore.IsPreconditionFailed(err) {
 		return block.Entry{}, errRetry
 	}
@@ -1171,7 +1166,7 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 	if err != nil {
 		return "", Attr{}, err
 	}
-	blockObj, err := f.store.Put(ctx, newUUID, bytes.NewReader(empty), nil, "")
+	blockObj, err := f.store.Put(objstore.AsBlock(ctx, newUUID), newUUID, bytes.NewReader(empty), nil, "")
 	if err != nil {
 		_ = f.store.Delete(ctx, metadataObjectKey(newUUID))
 		return "", Attr{}, err
@@ -1488,14 +1483,6 @@ func (f *Filesystem) writeMetadataIf(ctx context.Context, key string, statusChan
 		if !mutate(&attr) {
 			return nil
 		}
-		wctx := ctx
-		if keepingTime(ctx) {
-			// Not a change to the item's history: the new version keeps
-			// the time of the one it replaces.
-			wctx = objstore.WithDeclaredTime(ctx, obj.Time())
-		} else if err := checkOrder(ctx, obj); err != nil {
-			return err
-		}
 		if statusChange {
 			attr.Ctime = time.Now()
 		} else if attr.Ctime.IsZero() {
@@ -1505,7 +1492,7 @@ func (f *Filesystem) writeMetadataIf(ctx context.Context, key string, statusChan
 		if err != nil {
 			return err
 		}
-		_, err = f.store.Put(wctx, mk, bytes.NewReader(newData), nil, obj.ETag)
+		_, err = f.store.Put(ctx, mk, bytes.NewReader(newData), nil, obj.ETag)
 		if objstore.IsPreconditionFailed(err) {
 			continue
 		}
@@ -1595,47 +1582,66 @@ func (f *Filesystem) SetWindowsACL(ctx context.Context, uuid string, typ EntryTy
 
 // SetAppData sets (or, with a nil value, removes) one entry of the data
 // icbfs's own tools keep about an item (Attr.App), never visible through
-// a mount.
+// a mount. App data is icbfs's bookkeeping, not a change to the item:
+// like an access time or checksums, writing it doesn't move ctime.
 func (f *Filesystem) SetAppData(ctx context.Context, uuid string, typ EntryType, key string, value []byte) (Attr, error) {
-	if err := f.checkWritable(); err != nil {
-		return Attr{}, err
-	}
-	return f.updateMetadata(ctx, uuid, typ, func(a *Attr) {
-		if value == nil {
-			delete(a.App, key)
-			return
-		}
-		if a.App == nil {
-			a.App = make(map[string][]byte)
-		}
-		a.App[key] = value
-	})
+	return f.SetItemInfo(ctx, uuid, typ, ItemInfo{App: map[string][]byte{key: value}})
 }
 
-// SetItemInfo records, in one metadata write, what a writer knows about an
-// item it just wrote: its times at the source it was copied from (mtime,
-// if set: for a file an override tied to the content version contentETag,
-// so a later real write puts mtime back to the content's, as SetAttr's
-// does; for a directory its mtime; btime, if set, its creation time,
-// which stays through later writes), app data (a nil value removes the
-// key) and the checksums of content version contentETag, if sums is set.
-// A sync daemon's write then costs one metadata write, not one per time
-// and one per app key.
-func (f *Filesystem) SetItemInfo(ctx context.Context, uuid string, typ EntryType, mtime, btime *time.Time, contentETag string, app map[string][]byte, sums *Checksums) (Attr, error) {
+// ItemInfo is what SetItemInfo records about an item in one metadata
+// write. Every field is optional: nil, or an empty map, leaves that part
+// as it is.
+type ItemInfo struct {
+	// Mtime is the item's time at the source it was copied from: for a
+	// file an override tied to the content version ContentETag, so a later
+	// real write puts mtime back to the content's (as SetAttr's does); for
+	// a directory its mtime.
+	Mtime *time.Time
+	// Btime is the item's creation time, which stays through later writes.
+	Btime *time.Time
+	// ContentETag names the content version Mtime and Checksums are for.
+	ContentETag string
+	// Mode is the item's permission bits (its access ACL follows, as with
+	// chmod); WindowsAttrs its ReadOnly, Hidden, System and Archive bits.
+	Mode         *uint32
+	WindowsAttrs *uint32
+	// App is app data to set; a nil value removes the key.
+	App map[string][]byte
+	// Checksums are content version ContentETag's.
+	Checksums *Checksums
+}
+
+// SetItemInfo records info about an item in one metadata write, so a sync
+// daemon's write costs one metadata write, not one per field. A time or
+// a mode is a change to the item and moves ctime; app data and checksums
+// are icbfs's bookkeeping and don't.
+func (f *Filesystem) SetItemInfo(ctx context.Context, uuid string, typ EntryType, info ItemInfo) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
 	}
-	return f.updateMetadata(ctx, uuid, typ, func(a *Attr) {
-		if btime != nil {
-			a.Btime = *btime
+	statusChange := info.Mtime != nil || info.Btime != nil || info.Mode != nil || info.WindowsAttrs != nil
+	if info.Mtime == nil && info.Btime == nil && info.Mode == nil && info.WindowsAttrs == nil && len(info.App) == 0 && info.Checksums == nil {
+		return f.Stat(ctx, uuid, typ)
+	}
+	key := uuid
+	err := f.writeMetadata(ctx, key, statusChange, func(a *Attr) {
+		if info.Btime != nil {
+			a.Btime = *info.Btime
 		}
-		if mtime != nil {
-			a.Mtime = *mtime
+		if info.Mtime != nil {
+			a.Mtime = *info.Mtime
 			if typ != TypeDir {
-				a.mtimeOverrideETag = contentETag
+				a.mtimeOverrideETag = info.ContentETag
 			}
 		}
-		for k, v := range app {
+		if info.Mode != nil {
+			a.Mode = *info.Mode
+			chmodACL(a, *info.Mode)
+		}
+		if info.WindowsAttrs != nil {
+			a.WindowsAttrs, a.HasWindowsAttrs = *info.WindowsAttrs&windowsAttrMask, true
+		}
+		for k, v := range info.App {
 			if v == nil {
 				delete(a.App, k)
 				continue
@@ -1645,13 +1651,17 @@ func (f *Filesystem) SetItemInfo(ctx context.Context, uuid string, typ EntryType
 			}
 			a.App[k] = v
 		}
-		if sums != nil {
+		if info.Checksums != nil {
 			if a.Checksums == nil {
 				a.Checksums = map[string]Checksums{}
 			}
-			a.Checksums[contentETag] = *sums
+			a.Checksums[info.ContentETag] = *info.Checksums
 		}
 	})
+	if err != nil {
+		return Attr{}, err
+	}
+	return f.Stat(ctx, uuid, typ)
 }
 
 // SetGenericReparseData stores a file's raw, non-symlink reparse point
@@ -2165,7 +2175,7 @@ func (f *Filesystem) TouchAtime(ctx context.Context, key string, typ EntryType) 
 			return nil
 		}
 	}
-	err := f.writeMetadataIf(keepTime(ctx), key, false, func(a *Attr) bool {
+	err := f.writeMetadataIf(ctx, key, false, func(a *Attr) bool {
 		a.Atime = now
 		return true
 	})

@@ -99,11 +99,38 @@ copied from in the same write, instead of a `SetTimes` and a `SetOrigin`
 after it. The creation time stays through later writes; the modified time
 is the write's again at the next write without one.
 
-A drive that's a `drive.TimeSetter` (icbfs's is) sets an item's times
-alone, with no new version: `SetTimes(ctx, item, modified, created)
-(Item, error)`, a zero time left as it is. It's how a folder gets its times (`Mkdir` takes
-none), and how an item copied before its source's times were passed gets
-them.
+`WriteOptions.App`, `WriteOptions.Mode` and `WriteOptions.WindowsAttrs`
+go in that same write too: app data the caller keeps on the item (keys
+`<tool>.<name>`, `drive.CheckAppKey`; never `drive.*`, which are the
+drive's own; a nil value removes a key), its permission bits, and its
+Windows ReadOnly/Hidden/System/Archive bits. A source item locked at its
+source is written with mode 0444 (0555 for a folder) and ReadOnly, and
+every mount shows it read-only; a mount's own chmod still works. An item
+reports them back as `Item.App`, `Item.Mode` and `Item.WindowsAttrs`, to
+callers of the library only (not over HTTP).
+
+A drive that's a `drive.InfoSetter` (icbfs's is) records all of that on
+an existing item in one metadata write and no new version:
+`SetInfo(ctx, item, ItemInfo{Modified, Created, App, Mode, WindowsAttrs,
+Origin}) (Item, error)`, every field optional. `SetTimes` (a
+`drive.TimeSetter`) is `SetInfo` with only the times. It's how a folder
+gets its record (`Mkdir` takes none), and how an item copied before its
+source's record was passed gets it.
+
+App data is bookkeeping, not a change to the item: writing it moves
+neither the modified time nor the changed time (ctime), as an access-time
+update or checksums don't. A time or a mode in the same write does move
+ctime.
+
+**App objects.** A drive that's a `drive.AppObjects` (icbfs's is;
+`Capabilities.AppObjects`) keeps a tool's objects beside the drive, not in
+the tree and not about any one item: a mirror's table of the ids its app
+keys use, say. `AppObject(ctx, name)`, `SetAppObject(ctx, name, data)`,
+`DeleteAppObject(ctx, name)` and `ListAppObjects(ctx, prefix)`; names are
+app keys (`<tool>.<name>`), objects are small (4 MiB at most), and
+versioned, so a view of the past reads the one current then. Reading one
+needs the right to read the drive's root, writing one the right to write
+it. No mount shows them, and nothing over HTTP.
 
 **Source time.** `drive.WithSourceTime(ctx, t)` says the changes made
 under ctx happened at t at their source: a mirror copying a source's
@@ -113,31 +140,52 @@ the trash and views of the past show the source's history; a new item is
 created at t, and a file's modified time is t unless `ModTime` says
 otherwise.
 
-- Changes to one file or folder are made in order: one dated before its
-  current state fails with `ErrOutOfOrder` and changes nothing. A time in
-  the future is refused (`ErrInvalid`).
+- Changes come in any order, though oldest first costs least. One dated
+  behind its item's current state goes into the past at its date and the
+  present stays as it was: a file's current version is put back on top
+  (its older versions list where they belong), and a folder's copies from
+  that date on gain the change. A time in the future is refused
+  (`ErrInvalid`).
+- A file's name is in its folder from the time it was written there: a
+  version dated earlier than that is listed by `Versions` and read by id,
+  not found by path in a view of then. A mirror writes a file at its
+  `Created` time, so its name is there from the start.
 - The filesystem has to start before the source's history does:
   `Settings.Created` when creating it.
 - The HTTP API doesn't take a source time: it's for a mirror using the
   library.
 
-**Folder history.** A change that arrives too late to be made in order is
-put right by the caller, with a drive that's a `drive.FolderHistorian`
-(icbfs's is):
+**Corrections.** A past the source got wrong (a date, a version that
+shouldn't be there) is put right by the caller, with a drive that's a
+`drive.FolderHistorian` and a `drive.FileHistorian` (icbfs's is both):
 
 ```go
 h, err := fh.FolderHistory(ctx, drive.ByPath("/Project"))  // every state, oldest first
-// ... states: h.States with the late change put in ...
 err = fh.ReplaceFolderHistory(ctx, drive.ByPath("/Project"), states, drive.Condition{IfMatch: h.Version})
+
+f, err := fh.FileHistory(ctx, drive.ByPath("/Project/brief.txt"))  // every version, newest first by date
+err = fh.ReplaceFileHistory(ctx, drive.ByPath("/Project/brief.txt"), []drive.FileState{
+    {At: t1, Version: f.Versions[1].ID},                 // kept: copied on the server, nothing downloaded
+    {At: t2, Content: body, Info: drive.ItemInfo{…}},    // new
+}, drive.Condition{IfMatch: f.Version})
 ```
 
 - `FolderHistory` is the folder's state at each time it changed (`At`,
   and its entries' names, ids and types), and `Version`, its state now.
-- `ReplaceFolderHistory` erases the folder's history and writes the states
-  in its place, oldest first. The last must be the folder as it is now;
-  items aren't touched (an entry names an existing item by id). It fails
-  with a `PreconditionError` if the folder has changed since `Version`;
-  the caller makes no other change to the folder while it runs.
+  `ReplaceFolderHistory` erases the folder's history (its blocks' and its
+  attributes') and writes the states in its place, oldest first; the last
+  is the folder now, which may differ from before. Each state's attributes
+  are the folder's now with the state's time as its modified time (a
+  folder's modified time is its entries'). Items aren't touched: an entry
+  names an existing item by id.
+- `FileHistory` is the file's versions and its current version's id.
+  `ReplaceFileHistory` erases the file's history (its content's and its
+  attributes') and writes the states in its place; a state keeps an
+  existing version or gives new bytes, with its record then (`Info`; a
+  zero `Modified` is `At`). Streams and the file's name are left as they
+  are.
+- Both fail with a `PreconditionError` if the item has changed since
+  `Version`; the caller makes no other change to it while they run.
 
 ### Mirroring a source: `drive.Mirror`
 
@@ -162,7 +210,7 @@ n, err := m.Undo(ctx, passID)                              // a bad pass, undone
 |---|---|
 | nothing | writes it (`created`), its times and origin in the write |
 | it, same version | nothing (`unchanged`); the content isn't downloaded |
-| it, same version, other times | sets them (`retimed`): no download, no new version |
+| it, same version, another record (times, app keys, mode, attributes) | sets it (`retimed`): one write, no download, no new version |
 | it, another version | a new version (`updated`) |
 | it, at another path | moves it (`moved`), then writes only if the version differs |
 | it, in the trash | restores it, history and all (`restored`), then as above |
@@ -174,10 +222,16 @@ at its `Changed` time, and `Remove` deletes at the context's source time,
 which the daemon sets to when the source deleted it. The daemon applies a
 source's changes oldest first.
 
-`Apply` returns an `Applied`: the item, and the actions it took. Setting
-times alone (`retimed`) needs a drive that's a `TimeSetter`; elsewhere a
-change of times alone waits for the next version. A directory is made with
-`Mkdir`, then given its times and origin.
+`Apply` returns an `Applied`: the item, and the actions it took. A
+`SourceItem` carries, besides its content, what the mirror records on the
+item: `ModTime`, `Created`, `Changed`, `App`, `Mode`, `WindowsAttrs`. All
+of it goes in the one metadata write of a create or a new version, and
+on the no-content path (`retimed`) in one `SetInfo`, only what differs;
+an item is `unchanged` only when none of it differs, and then nothing is
+written. That needs a drive that's an `InfoSetter`; on one that's only a
+`TimeSetter` the times go through, and app data, mode and attributes are
+`not_supported`. A directory is made with `Mkdir`, then given its record
+and origin in one write.
 
 - `Open` is called only when the bytes are needed: never for a move, a
   restore of the version held, or an item already up to date.
