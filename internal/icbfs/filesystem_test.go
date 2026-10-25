@@ -336,7 +336,7 @@ func TestInternalStateIsNotXattrs(t *testing.T) {
 	if _, err := fsys.SetWindowsCreateMetadata(ctx, uuid, TypeFile, WindowsAttrHidden, []byte("O:BAG:BAD:(A;;FA;;;WD)")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fsys.SetAppData(ctx, uuid, TypeFile, AppSyncHash, []byte("abc123")); err != nil {
+	if _, err := fsys.SetAppData(ctx, uuid, TypeFile, AppDriveContentType, []byte("text/plain")); err != nil {
 		t.Fatal(err)
 	}
 	got, err := fsys.Stat(ctx, uuid, TypeFile)
@@ -352,7 +352,7 @@ func TestInternalStateIsNotXattrs(t *testing.T) {
 	if bits, ok := got.WindowsAttributes(); !ok || bits != WindowsAttrHidden {
 		t.Fatalf("Windows attributes = %#x, %v", bits, ok)
 	}
-	if string(got.App[AppSyncHash]) != "abc123" {
+	if string(got.App[AppDriveContentType]) != "text/plain" {
 		t.Fatalf("app data = %v", got.App)
 	}
 }

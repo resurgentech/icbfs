@@ -39,6 +39,7 @@ const (
 // Defines values for ErrorCode.
 const (
 	Busy               ErrorCode = "busy"
+	ChecksumMismatch   ErrorCode = "checksum_mismatch"
 	Exists             ErrorCode = "exists"
 	Forbidden          ErrorCode = "forbidden"
 	HasOtherNames      ErrorCode = "has_other_names"
@@ -106,6 +107,12 @@ type Capabilities struct {
 
 // CapabilitiesPermissions defines model for Capabilities.Permissions.
 type CapabilitiesPermissions string
+
+// Checksums A version's checksums, hex; one not computed yet is absent.
+type Checksums struct {
+	Md5    *string `json:"md5,omitempty"`
+	Sha256 *string `json:"sha256,omitempty"`
+}
 
 // CopyRequest defines model for CopyRequest.
 type CopyRequest struct {
@@ -213,7 +220,10 @@ type IdentityKind string
 
 // Item defines model for Item.
 type Item struct {
-	Changed     time.Time  `json:"changed"`
+	Changed time.Time `json:"changed"`
+
+	// Checksums A version's checksums, hex; one not computed yet is absent.
+	Checksums   *Checksums `json:"checksums,omitempty"`
 	ContentType *string    `json:"contentType,omitempty"`
 	Created     *time.Time `json:"created,omitempty"`
 	DraftsBy    *[]string  `json:"draftsBy,omitempty"`
@@ -358,9 +368,11 @@ type TrashPage struct {
 
 // Version defines model for Version.
 type Version struct {
-	Current *bool     `json:"current,omitempty"`
-	Names   *[]string `json:"names,omitempty"`
-	Size    int64     `json:"size"`
+	// Checksums A version's checksums, hex; one not computed yet is absent.
+	Checksums *Checksums `json:"checksums,omitempty"`
+	Current   *bool      `json:"current,omitempty"`
+	Names     *[]string  `json:"names,omitempty"`
+	Size      int64      `json:"size"`
 
 	// Stored When the store wrote it.
 	Stored time.Time `json:"stored"`
@@ -393,6 +405,18 @@ type PathParam = string
 
 // VersionParam defines model for VersionParam.
 type VersionParam = string
+
+// GetChecksumsParams defines parameters for GetChecksums.
+type GetChecksumsParams struct {
+	// Path The item's path from the drive's root.
+	Path *PathParam `form:"path,omitempty" json:"path,omitempty"`
+
+	// Id The item's id (wins over path).
+	Id *IDParam `form:"id,omitempty" json:"id,omitempty"`
+
+	// Version A version id.
+	Version *string `form:"version,omitempty" json:"version,omitempty"`
+}
 
 // DeleteItemParams defines parameters for DeleteItem.
 type DeleteItemParams struct {
@@ -431,6 +455,12 @@ type PutContentParams struct {
 	Parents     *bool   `form:"parents,omitempty" json:"parents,omitempty"`
 	IfMatch     *string `json:"If-Match,omitempty"`
 	IfNoneMatch *string `json:"If-None-Match,omitempty"`
+
+	// XDriveMD5 The content's MD5, hex, as the caller knows it: a mismatch writes nothing (checksum_mismatch).
+	XDriveMD5 *string `json:"X-Drive-MD5,omitempty"`
+
+	// XDriveSHA256 The content's SHA-256, hex, likewise.
+	XDriveSHA256 *string `json:"X-Drive-SHA256,omitempty"`
 }
 
 // DiffVersionsParams defines parameters for DiffVersions.
@@ -665,6 +695,9 @@ type ClientInterface interface {
 	// GetDrive request
 	GetDrive(ctx context.Context, drive DriveParam, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetChecksums request
+	GetChecksums(ctx context.Context, drive DriveParam, params *GetChecksumsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// DeleteItem request
 	DeleteItem(ctx context.Context, drive DriveParam, params *DeleteItemParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -851,6 +884,18 @@ func (c *Client) ArchiveFilesystem(ctx context.Context, bucket BucketParam, name
 
 func (c *Client) GetDrive(ctx context.Context, drive DriveParam, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetDriveRequest(c.Server, drive)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetChecksums(ctx context.Context, drive DriveParam, params *GetChecksumsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetChecksumsRequest(c.Server, drive, params)
 	if err != nil {
 		return nil, err
 	}
@@ -1525,6 +1570,94 @@ func NewGetDriveRequest(server string, drive DriveParam) (*http.Request, error) 
 	return req, nil
 }
 
+// NewGetChecksumsRequest generates requests for GetChecksums
+func NewGetChecksumsRequest(server string, drive DriveParam, params *GetChecksumsParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "drive", runtime.ParamLocationPath, drive)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/drives/%s/checksums", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Path != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "path", runtime.ParamLocationQuery, *params.Path); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Id != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "id", runtime.ParamLocationQuery, *params.Id); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Version != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "version", runtime.ParamLocationQuery, *params.Version); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewDeleteItemRequest generates requests for DeleteItem
 func NewDeleteItemRequest(server string, drive DriveParam, params *DeleteItemParams) (*http.Request, error) {
 	var err error
@@ -1863,6 +1996,28 @@ func NewPutContentRequestWithBody(server string, drive DriveParam, params *PutCo
 			}
 
 			req.Header.Set("If-None-Match", headerParam1)
+		}
+
+		if params.XDriveMD5 != nil {
+			var headerParam2 string
+
+			headerParam2, err = runtime.StyleParamWithLocation("simple", false, "X-Drive-MD5", runtime.ParamLocationHeader, *params.XDriveMD5)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-Drive-MD5", headerParam2)
+		}
+
+		if params.XDriveSHA256 != nil {
+			var headerParam3 string
+
+			headerParam3, err = runtime.StyleParamWithLocation("simple", false, "X-Drive-SHA256", runtime.ParamLocationHeader, *params.XDriveSHA256)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("X-Drive-SHA256", headerParam3)
 		}
 
 	}
@@ -3360,6 +3515,9 @@ type ClientWithResponsesInterface interface {
 	// GetDriveWithResponse request
 	GetDriveWithResponse(ctx context.Context, drive DriveParam, reqEditors ...RequestEditorFn) (*GetDriveResponse, error)
 
+	// GetChecksumsWithResponse request
+	GetChecksumsWithResponse(ctx context.Context, drive DriveParam, params *GetChecksumsParams, reqEditors ...RequestEditorFn) (*GetChecksumsResponse, error)
+
 	// DeleteItemWithResponse request
 	DeleteItemWithResponse(ctx context.Context, drive DriveParam, params *DeleteItemParams, reqEditors ...RequestEditorFn) (*DeleteItemResponse, error)
 
@@ -3602,6 +3760,29 @@ func (r GetDriveResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r GetDriveResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetChecksumsResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *Checksums
+	JSONDefault  *Error
+}
+
+// Status returns HTTPResponse.Status
+func (r GetChecksumsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetChecksumsResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -4254,6 +4435,15 @@ func (c *ClientWithResponses) GetDriveWithResponse(ctx context.Context, drive Dr
 	return ParseGetDriveResponse(rsp)
 }
 
+// GetChecksumsWithResponse request returning *GetChecksumsResponse
+func (c *ClientWithResponses) GetChecksumsWithResponse(ctx context.Context, drive DriveParam, params *GetChecksumsParams, reqEditors ...RequestEditorFn) (*GetChecksumsResponse, error) {
+	rsp, err := c.GetChecksums(ctx, drive, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetChecksumsResponse(rsp)
+}
+
 // DeleteItemWithResponse request returning *DeleteItemResponse
 func (c *ClientWithResponses) DeleteItemWithResponse(ctx context.Context, drive DriveParam, params *DeleteItemParams, reqEditors ...RequestEditorFn) (*DeleteItemResponse, error) {
 	rsp, err := c.DeleteItem(ctx, drive, params, reqEditors...)
@@ -4734,6 +4924,39 @@ func ParseGetDriveResponse(rsp *http.Response) (*GetDriveResponse, error) {
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest DriveInfo
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && true:
+		var dest Error
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSONDefault = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetChecksumsResponse parses an HTTP response from a GetChecksumsWithResponse call
+func ParseGetChecksumsResponse(rsp *http.Response) (*GetChecksumsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetChecksumsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest Checksums
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

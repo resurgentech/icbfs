@@ -294,13 +294,20 @@ func (d *Drive) Versions(ctx context.Context, ref drive.ItemRef) ([]drive.Versio
 	if err := d.versionTimes(ctx, objs); err != nil {
 		return nil, mapErr(err)
 	}
+	var sums map[string]icbfs.Checksums
+	if n != nil {
+		sums = n.attr.Checksums
+	} else if attr, err := d.fs.Stat(ctx, id, icbfs.TypeFile); err == nil {
+		sums = attr.Checksums
+	}
 	names, _ := d.Names(ctx)
 	var out []drive.Version
 	for i, o := range objs {
 		if o.Deleted {
 			continue
 		}
-		v := drive.Version{ID: o.VersionID, Time: o.Time(), Stored: o.LastModified, Size: o.Size, Current: i == 0}
+		v := drive.Version{ID: o.VersionID, Time: o.Time(), Stored: o.LastModified, Size: o.Size, Current: i == 0,
+			Checksums: toChecksums(sums[o.ETag])}
 		// Current at a name's time: written at or before it, and the next
 		// version (or delete) came after it.
 		until := time.Now().Add(time.Hour)
@@ -343,4 +350,42 @@ func (d *Drive) versionTimes(ctx context.Context, objs []objstore.Object) error 
 		o.Metadata, o.MetadataUnknown = head.Metadata, false
 	}
 	return nil
+}
+
+var _ drive.Checksummer = (*Drive)(nil)
+
+// Checksums are a file version's ("" for the current one), computed and
+// kept if they weren't: by its path or id, or by id once it's in the
+// trash.
+func (d *Drive) Checksums(ctx context.Context, ref drive.ItemRef, version string) (drive.Checksums, error) {
+	id := ref.ID
+	n, err := d.resolve(ctx, d.fs, ref)
+	switch {
+	case err == nil:
+		if n.typ != icbfs.TypeFile {
+			return drive.Checksums{}, drive.ErrIsDir
+		}
+		if err := d.check(ctx, n, needRead); err != nil {
+			return drive.Checksums{}, err
+		}
+		id = n.key
+	case ref.ID != "":
+		if _, terr := d.trashedItem(ctx, ref.ID); terr != nil {
+			return drive.Checksums{}, err
+		}
+		root, rerr := d.rootNode(ctx, d.fs)
+		if rerr != nil {
+			return drive.Checksums{}, rerr
+		}
+		if err := d.check(ctx, root, needRead); err != nil {
+			return drive.Checksums{}, err
+		}
+	default:
+		return drive.Checksums{}, err
+	}
+	c, err := d.fs.VersionChecksums(ctx, id, version)
+	if err != nil {
+		return drive.Checksums{}, mapErr(err)
+	}
+	return *toChecksums(c), nil
 }

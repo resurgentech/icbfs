@@ -163,6 +163,26 @@ type WriteOptions struct {
 	// Origin, if set, records where the content was copied from, in the
 	// same write (as SetOrigin would after it).
 	Origin *Origin
+	// Checksums, if set, are what the caller knows the content's to be
+	// (from its source): the write fails with ErrChecksum, writing
+	// nothing, if what arrived doesn't match. Either may be empty.
+	Checksums *Checksums
+}
+
+// Checksums are a file version's MD5 and SHA-256, in hex; one not
+// computed is empty. A drive computes both as a write's bytes go by, and
+// any version's on demand (Checksummer).
+type Checksums struct {
+	MD5    string `json:"md5,omitempty"`
+	SHA256 string `json:"sha256,omitempty"`
+}
+
+// Checksummer is a drive that gives any version's checksums, computing
+// them (once: it keeps them) if they're missing.
+type Checksummer interface {
+	// Checksums are item's content version version's ("" for the
+	// current one).
+	Checksums(ctx context.Context, item ItemRef, version string) (Checksums, error)
 }
 
 // ListOptions for List.
@@ -201,8 +221,10 @@ type Item struct {
 	Created     time.Time `json:"created,omitempty"`
 	Target      string    `json:"target,omitempty"` // a symlink's
 	Origin      *Origin   `json:"origin,omitempty"`
-	HasDraft    bool      `json:"hasDraft,omitempty"` // filled in by the HTTP layer, from the drafts
-	DraftsBy    []string  `json:"draftsBy,omitempty"`
+	// Checksums are a file's current content's, when computed.
+	Checksums *Checksums `json:"checksums,omitempty"`
+	HasDraft  bool       `json:"hasDraft,omitempty"` // filled in by the HTTP layer, from the drafts
+	DraftsBy  []string   `json:"draftsBy,omitempty"`
 
 	// Stat only.
 	ParentID string   `json:"parentId,omitempty"`
@@ -229,6 +251,8 @@ type Version struct {
 	Size    int64     `json:"size"`
 	Current bool      `json:"current,omitempty"`
 	Names   []string  `json:"names,omitempty"` // named versions it was current at
+	// Checksums, when computed.
+	Checksums *Checksums `json:"checksums,omitempty"`
 }
 
 // Name is a named version: a name for a moment.
@@ -338,6 +362,7 @@ var (
 	ErrBusy         = errors.New("busy")
 	ErrInvalid      = errors.New("invalid request")
 	ErrOutOfOrder   = errors.New("source time before the item's current state")
+	ErrChecksum     = errors.New("the content doesn't match the checksum given")
 )
 
 // PreconditionError is ErrPrecondition with the current version.

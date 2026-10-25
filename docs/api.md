@@ -287,6 +287,22 @@ doesn't make an open editor see a conflict.
   tell them apart.
 - A file the API creates starts with one version, its content.
 
+**Checksums.** Each version can have an MD5 and a SHA-256 (`checksums`,
+hex), on the item, on each version, and from `Checksums` (`drive.Checksummer`
+in Go, `GET …/checksums` over HTTP), which computes and keeps them for any
+version that hasn't any.
+
+- A write through the drive API computes both as its bytes go by. A mount
+  writing a file in one piece gets them at its flush; a mount's part-edit
+  of a big file (a multipart write) doesn't, until they're asked for, not
+  to read gigabytes for a few bytes.
+- `WriteOptions.Checksums` (`X-Drive-MD5`, `X-Drive-SHA256`) are what the
+  caller knows them to be: a mismatch fails with `ErrChecksum` and writes
+  nothing.
+- They're kept in the item's `.metadata`, by the version's ETag. Recording
+  them isn't a change to the item: its ctime, its versions and its past
+  are as they were.
+
 **As of a time.** `asOf=<time>` on `list`, `stat` and `content` shows the
 drive read-only as it was then.
 
@@ -382,7 +398,7 @@ host's drive ID.
   - Options: `depth`, `limit`, `cursor`, `sort`, and `asOf` or `version`.
   - Each entry has: name, path, ID, type (`file`, `dir`, `symlink`), size,
     contentType, the current version (time and ID), modified, changed,
-    created, `hasDraft` and `draftsBy`.
+    created, `checksums` (when computed), `hasDraft` and `draftsBy`.
   - FIFOs, sockets, devices, and anything the profile may not see are left
     out.
 - `GET …/stat?path=` returns one item: the same fields, plus every path to
@@ -395,6 +411,8 @@ host's drive ID.
   - Options: `version=`, `asOf=`, and `download=1` for an attachment.
   - `HEAD` returns the headers only.
 - `GET …/versions?id=` lists a file's versions.
+- `GET …/checksums?path=` (or `id=`, and `version=`) returns a version's
+  `{"md5", "sha256"}`, computing and keeping them if they weren't.
 - `GET …/diff?id=&from=&to=` returns a unified diff of two versions of a
   text file.
 
@@ -403,6 +421,9 @@ host's drive ID.
 - `PUT …/content?path=` makes the body the file's content.
   - It takes `If-Match`, `If-None-Match`, or neither for an unconditional
     write; and `parents=1` to create missing directories.
+  - `X-Drive-MD5` and `X-Drive-SHA256` (hex) are the content's checksums as
+    the caller knows them: if what arrived doesn't match, nothing is
+    written (400, `checksum_mismatch`).
   - The body can be up to the filesystem's max file size; anything larger
     answers 413.
 - `POST …/mkdir` takes `{"path", "parents"}`.
@@ -540,6 +561,7 @@ in `currentVersion`, as well as in the `x-drive-current-version` header.
 | stale version (`If-Match`, a draft's base) | 412 | `precondition_failed` |
 | bad name or path | 400 | `invalid_name` |
 | a malformed request | 400 | `invalid` |
+| the content doesn't match `X-Drive-MD5` or `X-Drive-SHA256` | 400 | `checksum_mismatch` |
 | past the max file size | 413 | `too_large` |
 | write to an as-of view or an archived filesystem; prune of one that isn't archived | 409 | `read_only` |
 | write contention exhausted the retries | 503 | `busy` |

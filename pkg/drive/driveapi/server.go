@@ -88,6 +88,7 @@ func Mount(r fiber.Router, cfg Config) {
 	d.Put("/content", s.op("drive.write", s.putContent))
 	d.Delete("/content", s.op("drive.delete", s.deleteItem))
 	d.Get("/versions", s.op("drive.read", s.versions))
+	d.Get("/checksums", s.op("drive.read", s.checksums))
 	d.Get("/diff", s.op("drive.read", s.diff))
 	d.Post("/mkdir", s.op("drive.write", s.mkdir))
 	d.Post("/move", s.op("drive.write", s.move))
@@ -243,6 +244,7 @@ var errCodes = []struct {
 	{drive.ErrPrecondition, http.StatusPreconditionFailed, "precondition_failed"},
 	{drive.ErrInvalidName, http.StatusBadRequest, "invalid_name"},
 	{drive.ErrInvalid, http.StatusBadRequest, "invalid"},
+	{drive.ErrChecksum, http.StatusBadRequest, "checksum_mismatch"},
 	{drive.ErrTooLarge, http.StatusRequestEntityTooLarge, "too_large"},
 	{drive.ErrReadOnly, http.StatusConflict, "read_only"},
 	{drive.ErrBusy, http.StatusServiceUnavailable, "busy"},
@@ -454,7 +456,11 @@ func (s *server) putContent(r *req) error {
 	if ct == "application/octet-stream" {
 		ct = "" // the default: the name's type decides
 	}
-	it, err := r.d.Write(r.ctx, p, body(r.c), condition(r.c), drive.WriteOptions{Parents: r.flag("parents"), ContentType: ct})
+	opts := drive.WriteOptions{Parents: r.flag("parents"), ContentType: ct}
+	if md5, sha := r.c.Get("X-Drive-MD5"), r.c.Get("X-Drive-SHA256"); md5 != "" || sha != "" {
+		opts.Checksums = &drive.Checksums{MD5: md5, SHA256: sha}
+	}
+	it, err := r.d.Write(r.ctx, p, body(r.c), condition(r.c), opts)
 	if err != nil {
 		return writeErr(r.c, err)
 	}
@@ -484,6 +490,18 @@ func (s *server) versions(r *req) error {
 		}
 	}
 	return r.c.JSON(map[string]any{"id": id, "versions": vs})
+}
+
+func (s *server) checksums(r *req) error {
+	cs, ok := r.d.(drive.Checksummer)
+	if !ok {
+		return writeErr(r.c, fmt.Errorf("checksums: %w", drive.ErrNotSupported))
+	}
+	c, err := cs.Checksums(r.ctx, r.ref(), r.query("version"))
+	if err != nil {
+		return writeErr(r.c, err)
+	}
+	return r.c.JSON(c)
 }
 
 func (s *server) diff(r *req) error {

@@ -481,6 +481,7 @@ func combineFileAttr(key string, metaData []byte, metaLastModified time.Time, co
 		ctime = metaLastModified
 	}
 	attr.Size = contentObj.Size
+	attr.contentETag = contentObj.ETag
 	// attr.Mtime and attr.Btime from decodeFileMetadata are only explicit
 	// overrides (SetAttr); real content writes never set them. Without an
 	// override, mtime is the content's last write and btime the time in the
@@ -1487,7 +1488,12 @@ func (f *Filesystem) writeMetadataIf(ctx context.Context, key string, statusChan
 		if !mutate(&attr) {
 			return nil
 		}
-		if err := checkOrder(ctx, obj); err != nil {
+		wctx := ctx
+		if keepingTime(ctx) {
+			// Not a change to the item's history: the new version keeps
+			// the time of the one it replaces.
+			wctx = objstore.WithDeclaredTime(ctx, obj.Time())
+		} else if err := checkOrder(ctx, obj); err != nil {
 			return err
 		}
 		if statusChange {
@@ -1499,7 +1505,7 @@ func (f *Filesystem) writeMetadataIf(ctx context.Context, key string, statusChan
 		if err != nil {
 			return err
 		}
-		_, err = f.store.Put(ctx, mk, bytes.NewReader(newData), nil, obj.ETag)
+		_, err = f.store.Put(wctx, mk, bytes.NewReader(newData), nil, obj.ETag)
 		if objstore.IsPreconditionFailed(err) {
 			continue
 		}
@@ -1611,10 +1617,11 @@ func (f *Filesystem) SetAppData(ctx context.Context, uuid string, typ EntryType,
 // if set: for a file an override tied to the content version contentETag,
 // so a later real write puts mtime back to the content's, as SetAttr's
 // does; for a directory its mtime; btime, if set, its creation time,
-// which stays through later writes) and app data (a nil value removes
-// the key). A sync daemon's write then costs one metadata write, not one
-// per time and one per app key.
-func (f *Filesystem) SetItemInfo(ctx context.Context, uuid string, typ EntryType, mtime, btime *time.Time, contentETag string, app map[string][]byte) (Attr, error) {
+// which stays through later writes), app data (a nil value removes the
+// key) and the checksums of content version contentETag, if sums is set.
+// A sync daemon's write then costs one metadata write, not one per time
+// and one per app key.
+func (f *Filesystem) SetItemInfo(ctx context.Context, uuid string, typ EntryType, mtime, btime *time.Time, contentETag string, app map[string][]byte, sums *Checksums) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
 	}
@@ -1637,6 +1644,12 @@ func (f *Filesystem) SetItemInfo(ctx context.Context, uuid string, typ EntryType
 				a.App = make(map[string][]byte)
 			}
 			a.App[k] = v
+		}
+		if sums != nil {
+			if a.Checksums == nil {
+				a.Checksums = map[string]Checksums{}
+			}
+			a.Checksums[contentETag] = *sums
 		}
 	})
 }
@@ -2152,7 +2165,7 @@ func (f *Filesystem) TouchAtime(ctx context.Context, key string, typ EntryType) 
 			return nil
 		}
 	}
-	err := f.writeMetadataIf(ctx, key, false, func(a *Attr) bool {
+	err := f.writeMetadataIf(keepTime(ctx), key, false, func(a *Attr) bool {
 		a.Atime = now
 		return true
 	})

@@ -93,6 +93,8 @@ paths:
         - {name: parents, in: query, schema: {type: boolean}}
         - {name: If-Match, in: header, schema: {type: string}}
         - {name: If-None-Match, in: header, schema: {type: string}}
+        - {name: X-Drive-MD5, in: header, schema: {type: string}, description: 'The content''s MD5, hex, as the caller knows it: a mismatch writes nothing (checksum_mismatch).'}
+        - {name: X-Drive-SHA256, in: header, schema: {type: string}, description: 'The content''s SHA-256, hex, likewise.'}
       requestBody:
         required: true
         content: {application/octet-stream: {schema: {type: string, format: binary}}}
@@ -124,6 +126,20 @@ paths:
         - {$ref: '#/components/parameters/IDParam'}
       responses:
         '200': {description: The versions., content: {application/json: {schema: {$ref: '#/components/schemas/Versions'}}}}
+        default: {$ref: '#/components/responses/Error'}
+  /drives/{drive}/checksums:
+    parameters: [{$ref: '#/components/parameters/DriveParam'}]
+    get:
+      operationId: getChecksums
+      tags: [drive]
+      x-permission: drive.read
+      summary: A file version's MD5 and SHA-256 (the current version's without version), computed and kept if they weren't. A trashed file's too, by id.
+      parameters:
+        - {$ref: '#/components/parameters/PathParam'}
+        - {$ref: '#/components/parameters/IDParam'}
+        - {name: version, in: query, schema: {type: string}, description: A version id.}
+      responses:
+        '200': {description: The checksums., content: {application/json: {schema: {$ref: '#/components/schemas/Checksums'}}}}
         default: {$ref: '#/components/responses/Error'}
   /drives/{drive}/diff:
     parameters: [{$ref: '#/components/parameters/DriveParam'}]
@@ -425,7 +441,7 @@ components:
         code:
           type: string
           enum: [not_found, forbidden, no_access, not_supported, exists, not_empty, not_dir, is_dir, has_other_names,
-                 precondition_failed, invalid_name, invalid, too_large, read_only, busy, internal]
+                 precondition_failed, invalid_name, invalid, checksum_mismatch, too_large, read_only, busy, internal]
         currentVersion: {type: string, description: 'With precondition_failed: the version the file is at now.'}
     Capabilities:
       type: object
@@ -484,6 +500,13 @@ components:
         size: {type: integer, format: int64}
         current: {type: boolean}
         names: {type: array, items: {type: string}}
+        checksums: {$ref: '#/components/schemas/Checksums'}
+    Checksums:
+      type: object
+      description: A version's checksums, hex; one not computed yet is absent.
+      properties:
+        md5: {type: string}
+        sha256: {type: string}
     Versions:
       type: object
       required: [id, versions]
@@ -523,6 +546,7 @@ components:
         created: {type: string, format: date-time}
         target: {type: string}
         origin: {$ref: '#/components/schemas/Origin'}
+        checksums: {$ref: '#/components/schemas/Checksums'}
         hasDraft: {type: boolean}
         draftsBy: {type: array, items: {type: string}}
         parentId: {type: string}

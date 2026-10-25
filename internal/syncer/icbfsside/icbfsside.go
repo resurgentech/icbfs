@@ -6,6 +6,7 @@ package icbfsside
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -191,22 +192,32 @@ func (s *Side) SetACL(ctx context.Context, p, sddl string) error {
 
 // --- syncer.Hashes ---
 
+// StoredHash is the current content's SHA-256, from icbfs's checksums:
+// every write through the drive API computes them.
 func (s *Side) StoredHash(ctx context.Context, p string) (string, bool) {
 	_, attr, err := s.stat(ctx, p)
 	if err != nil {
 		return "", false
 	}
-	h, ok := attr.App[icbfs.AppSyncHash]
-	return string(h), ok && len(h) > 0
+	c, ok := attr.ContentChecksums()
+	if !ok || len(c.SHA256) == 0 {
+		return "", false
+	}
+	return hex.EncodeToString(c.SHA256), true
 }
 
+// StoreHash records hash as the current content's SHA-256, for content
+// written without one.
 func (s *Side) StoreHash(ctx context.Context, p, hash string) error {
-	it, err := s.d.Stat(s.ctx(ctx), drive.ByPath(abs(p)), drive.At{})
+	sum, err := hex.DecodeString(hash)
 	if err != nil {
-		return notExist(err)
+		return err
 	}
-	_, err = s.fs.SetAppData(ctx, it.ID, icbfs.TypeFile, icbfs.AppSyncHash, []byte(hash))
-	return err
+	it, attr, err := s.stat(ctx, p)
+	if err != nil {
+		return err
+	}
+	return s.fs.SetChecksums(ctx, it.ID, attr.ContentETag(), icbfs.Checksums{SHA256: sum})
 }
 
 // --- syncer.Trash ---

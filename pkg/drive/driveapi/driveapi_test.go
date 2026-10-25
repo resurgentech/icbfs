@@ -147,6 +147,16 @@ func TestAPI(t *testing.T) {
 		t.Fatalf("put: %d %s", r1.StatusCode(), r1.Body)
 	}
 	v1, id := r1.JSON200.Version.Version, r1.JSON200.Id
+	// checksums: on the item, checked on a write, and asked for
+	if c := r1.JSON200.Checksums; c == nil || c.Sha256 == nil || *c.Sha256 != "2c8b08da5ce60398e1f19af0e5dccc744df274b826abe585eaba68c525434806" {
+		t.Fatalf("put's checksums: %s", r1.Body)
+	}
+	if r := put(alice, "/notes/a.md", "tampered\n", PutContentParams{XDriveSHA256: ptr("2c8b08da5ce60398e1f19af0e5dccc744df274b826abe585eaba68c525434806")}); r.StatusCode() != 400 || code(t, r.Body) != "checksum_mismatch" {
+		t.Fatalf("a wrong checksum: %d %s", r.StatusCode(), r.Body)
+	}
+	if cr, err := alice.GetChecksumsWithResponse(ctx, "docs", &GetChecksumsParams{Path: ptr("/notes/a.md")}); err != nil || cr.StatusCode() != 200 || cr.JSON200.Md5 == nil || *cr.JSON200.Md5 != "5bbf5a52328e7439ae6e719dfe712200" {
+		t.Fatalf("checksums: %v %s", err, cr.Body)
+	}
 	time.Sleep(1100 * time.Millisecond)
 	r2 := put(alice, "/notes/a.md", "one\ntwo\n", PutContentParams{IfMatch: ptr(`"` + v1 + `"`)})
 	if r2.StatusCode() != 200 {

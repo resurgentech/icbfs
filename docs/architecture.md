@@ -248,8 +248,12 @@ content:
   directory symlink;
 - the POSIX ACLs (access and default);
 - the user's extended attributes;
-- data icbfs's own tools keep about the item, such as icbfs-sync's
-  content hash and the drive API's content type.
+- the content versions' checksums (MD5 and SHA-256), by each version's
+  ETag: computed as a whole file is written, or later on demand. Recording
+  them, like an access time, isn't a change: the new `.metadata` version
+  keeps the time of the one it replaces, and ctime doesn't move;
+- data icbfs's own tools keep about the item, such as the drive API's
+  content type and copy origin.
 
 **Extended attributes and POSIX ACLs.** A Linux mount offers the `user.`,
 `trusted.` and `security.` namespaces, with Linux's limits (names up to 255

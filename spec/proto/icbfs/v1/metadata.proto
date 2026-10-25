@@ -31,7 +31,7 @@ message Metadata {
   // (neither has a device number at all).
   uint32 rdev = 7;
 
-  reserved 8, 9; // replaced by mtime_override / btime_override below
+  reserved 8, 9;
 
   // The content object's ETag when mtime_override was set.
   // The override only applies while the content is still that version:
@@ -84,13 +84,25 @@ message Metadata {
   bytes posix_acl_default = 19;
 
   // Data icbfs's own tools keep about the item, keyed "<tool>.<name>":
-  // icbfs-sync's content hash, the drive API's content type and copy
-  // origin, the side store's metadata. No mount shows it.
+  // the drive API's content type and copy origin, the side store's
+  // metadata. No mount shows it.
   map<string, bytes> app = 20;
 
   // layout is this format: 1. A reader refuses any other (internal/icbfs's
   // ErrNewerFormat for a newer one).
   uint32 layout = 21;
+
+  // The checksums of the content's versions, by each version's ETag:
+  // computed as a write's bytes went by, or later, on demand. A version
+  // without an entry has none yet.
+  map<string, Checksums> checksums = 22;
+}
+
+// Checksums are a content version's MD5 and SHA-256; either may be empty
+// (not computed).
+message Checksums {
+  bytes md5 = 1;
+  bytes sha256 = 2;
 }
 
 // Windows is an item's Windows state.

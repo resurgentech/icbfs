@@ -86,12 +86,16 @@ type Metadata struct {
 	PosixAclAccess  []byte `protobuf:"bytes,18,opt,name=posix_acl_access,json=posixAclAccess,proto3" json:"posix_acl_access,omitempty"`
 	PosixAclDefault []byte `protobuf:"bytes,19,opt,name=posix_acl_default,json=posixAclDefault,proto3" json:"posix_acl_default,omitempty"`
 	// Data icbfs's own tools keep about the item, keyed "<tool>.<name>":
-	// icbfs-sync's content hash, the drive API's content type and copy
-	// origin, the side store's metadata. No mount shows it.
+	// the drive API's content type and copy origin, the side store's
+	// metadata. No mount shows it.
 	App map[string][]byte `protobuf:"bytes,20,rep,name=app,proto3" json:"app,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// layout is this format: 1. A reader refuses any other (internal/icbfs's
 	// ErrNewerFormat for a newer one).
-	Layout        uint32 `protobuf:"varint,21,opt,name=layout,proto3" json:"layout,omitempty"`
+	Layout uint32 `protobuf:"varint,21,opt,name=layout,proto3" json:"layout,omitempty"`
+	// The checksums of the content's versions, by each version's ETag:
+	// computed as a write's bytes went by, or later, on demand. A version
+	// without an entry has none yet.
+	Checksums     map[string]*Checksums `protobuf:"bytes,22,rep,name=checksums,proto3" json:"checksums,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -252,6 +256,67 @@ func (x *Metadata) GetLayout() uint32 {
 	return 0
 }
 
+func (x *Metadata) GetChecksums() map[string]*Checksums {
+	if x != nil {
+		return x.Checksums
+	}
+	return nil
+}
+
+// Checksums are a content version's MD5 and SHA-256; either may be empty
+// (not computed).
+type Checksums struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Md5           []byte                 `protobuf:"bytes,1,opt,name=md5,proto3" json:"md5,omitempty"`
+	Sha256        []byte                 `protobuf:"bytes,2,opt,name=sha256,proto3" json:"sha256,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Checksums) Reset() {
+	*x = Checksums{}
+	mi := &file_spec_proto_icbfs_v1_metadata_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Checksums) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Checksums) ProtoMessage() {}
+
+func (x *Checksums) ProtoReflect() protoreflect.Message {
+	mi := &file_spec_proto_icbfs_v1_metadata_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Checksums.ProtoReflect.Descriptor instead.
+func (*Checksums) Descriptor() ([]byte, []int) {
+	return file_spec_proto_icbfs_v1_metadata_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *Checksums) GetMd5() []byte {
+	if x != nil {
+		return x.Md5
+	}
+	return nil
+}
+
+func (x *Checksums) GetSha256() []byte {
+	if x != nil {
+		return x.Sha256
+	}
+	return nil
+}
+
 // Windows is an item's Windows state.
 type Windows struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -270,7 +335,7 @@ type Windows struct {
 
 func (x *Windows) Reset() {
 	*x = Windows{}
-	mi := &file_spec_proto_icbfs_v1_metadata_proto_msgTypes[1]
+	mi := &file_spec_proto_icbfs_v1_metadata_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -282,7 +347,7 @@ func (x *Windows) String() string {
 func (*Windows) ProtoMessage() {}
 
 func (x *Windows) ProtoReflect() protoreflect.Message {
-	mi := &file_spec_proto_icbfs_v1_metadata_proto_msgTypes[1]
+	mi := &file_spec_proto_icbfs_v1_metadata_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -295,7 +360,7 @@ func (x *Windows) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Windows.ProtoReflect.Descriptor instead.
 func (*Windows) Descriptor() ([]byte, []int) {
-	return file_spec_proto_icbfs_v1_metadata_proto_rawDescGZIP(), []int{1}
+	return file_spec_proto_icbfs_v1_metadata_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *Windows) GetSddl() string {
@@ -330,7 +395,7 @@ var File_spec_proto_icbfs_v1_metadata_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\n" +
-	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xaa\a\n" +
+	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xbe\b\n" +
 	"\bMetadata\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\rR\x04mode\x12\x10\n" +
 	"\x03uid\x18\x02 \x01(\rR\x03uid\x12\x10\n" +
@@ -350,7 +415,8 @@ const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\x10posix_acl_access\x18\x12 \x01(\fR\x0eposixAclAccess\x12*\n" +
 	"\x11posix_acl_default\x18\x13 \x01(\fR\x0fposixAclDefault\x12-\n" +
 	"\x03app\x18\x14 \x03(\v2\x1b.icbfs.v1.Metadata.AppEntryR\x03app\x12\x16\n" +
-	"\x06layout\x18\x15 \x01(\rR\x06layout\x1a9\n" +
+	"\x06layout\x18\x15 \x01(\rR\x06layout\x12?\n" +
+	"\tchecksums\x18\x16 \x03(\v2!.icbfs.v1.Metadata.ChecksumsEntryR\tchecksums\x1a9\n" +
 	"\vXattrsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\x1a:\n" +
@@ -359,8 +425,14 @@ const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\x1a6\n" +
 	"\bAppEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01J\x04\b\x06\x10\aJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
-	"\"\x8c\x01\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\x1aQ\n" +
+	"\x0eChecksumsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12)\n" +
+	"\x05value\x18\x02 \x01(\v2\x13.icbfs.v1.ChecksumsR\x05value:\x028\x01J\x04\b\x06\x10\aJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
+	"\"5\n" +
+	"\tChecksums\x12\x10\n" +
+	"\x03md5\x18\x01 \x01(\fR\x03md5\x12\x16\n" +
+	"\x06sha256\x18\x02 \x01(\fR\x06sha256\"\x8c\x01\n" +
 	"\aWindows\x12\x12\n" +
 	"\x04sddl\x18\x01 \x01(\tR\x04sddl\x12#\n" +
 	"\n" +
@@ -383,29 +455,33 @@ func file_spec_proto_icbfs_v1_metadata_proto_rawDescGZIP() []byte {
 	return file_spec_proto_icbfs_v1_metadata_proto_rawDescData
 }
 
-var file_spec_proto_icbfs_v1_metadata_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_spec_proto_icbfs_v1_metadata_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_spec_proto_icbfs_v1_metadata_proto_goTypes = []any{
 	(*Metadata)(nil),              // 0: icbfs.v1.Metadata
-	(*Windows)(nil),               // 1: icbfs.v1.Windows
-	nil,                           // 2: icbfs.v1.Metadata.XattrsEntry
-	nil,                           // 3: icbfs.v1.Metadata.StreamsEntry
-	nil,                           // 4: icbfs.v1.Metadata.AppEntry
-	(*timestamppb.Timestamp)(nil), // 5: google.protobuf.Timestamp
+	(*Checksums)(nil),             // 1: icbfs.v1.Checksums
+	(*Windows)(nil),               // 2: icbfs.v1.Windows
+	nil,                           // 3: icbfs.v1.Metadata.XattrsEntry
+	nil,                           // 4: icbfs.v1.Metadata.StreamsEntry
+	nil,                           // 5: icbfs.v1.Metadata.AppEntry
+	nil,                           // 6: icbfs.v1.Metadata.ChecksumsEntry
+	(*timestamppb.Timestamp)(nil), // 7: google.protobuf.Timestamp
 }
 var file_spec_proto_icbfs_v1_metadata_proto_depIdxs = []int32{
-	2, // 0: icbfs.v1.Metadata.xattrs:type_name -> icbfs.v1.Metadata.XattrsEntry
-	3, // 1: icbfs.v1.Metadata.streams:type_name -> icbfs.v1.Metadata.StreamsEntry
-	5, // 2: icbfs.v1.Metadata.atime:type_name -> google.protobuf.Timestamp
-	5, // 3: icbfs.v1.Metadata.mtime_override:type_name -> google.protobuf.Timestamp
-	5, // 4: icbfs.v1.Metadata.btime_override:type_name -> google.protobuf.Timestamp
-	5, // 5: icbfs.v1.Metadata.ctime:type_name -> google.protobuf.Timestamp
-	1, // 6: icbfs.v1.Metadata.windows:type_name -> icbfs.v1.Windows
-	4, // 7: icbfs.v1.Metadata.app:type_name -> icbfs.v1.Metadata.AppEntry
-	8, // [8:8] is the sub-list for method output_type
-	8, // [8:8] is the sub-list for method input_type
-	8, // [8:8] is the sub-list for extension type_name
-	8, // [8:8] is the sub-list for extension extendee
-	0, // [0:8] is the sub-list for field type_name
+	3,  // 0: icbfs.v1.Metadata.xattrs:type_name -> icbfs.v1.Metadata.XattrsEntry
+	4,  // 1: icbfs.v1.Metadata.streams:type_name -> icbfs.v1.Metadata.StreamsEntry
+	7,  // 2: icbfs.v1.Metadata.atime:type_name -> google.protobuf.Timestamp
+	7,  // 3: icbfs.v1.Metadata.mtime_override:type_name -> google.protobuf.Timestamp
+	7,  // 4: icbfs.v1.Metadata.btime_override:type_name -> google.protobuf.Timestamp
+	7,  // 5: icbfs.v1.Metadata.ctime:type_name -> google.protobuf.Timestamp
+	2,  // 6: icbfs.v1.Metadata.windows:type_name -> icbfs.v1.Windows
+	5,  // 7: icbfs.v1.Metadata.app:type_name -> icbfs.v1.Metadata.AppEntry
+	6,  // 8: icbfs.v1.Metadata.checksums:type_name -> icbfs.v1.Metadata.ChecksumsEntry
+	1,  // 9: icbfs.v1.Metadata.ChecksumsEntry.value:type_name -> icbfs.v1.Checksums
+	10, // [10:10] is the sub-list for method output_type
+	10, // [10:10] is the sub-list for method input_type
+	10, // [10:10] is the sub-list for extension type_name
+	10, // [10:10] is the sub-list for extension extendee
+	0,  // [0:10] is the sub-list for field type_name
 }
 
 func init() { file_spec_proto_icbfs_v1_metadata_proto_init() }
@@ -413,14 +489,14 @@ func file_spec_proto_icbfs_v1_metadata_proto_init() {
 	if File_spec_proto_icbfs_v1_metadata_proto != nil {
 		return
 	}
-	file_spec_proto_icbfs_v1_metadata_proto_msgTypes[1].OneofWrappers = []any{}
+	file_spec_proto_icbfs_v1_metadata_proto_msgTypes[2].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_spec_proto_icbfs_v1_metadata_proto_rawDesc), len(file_spec_proto_icbfs_v1_metadata_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   5,
+			NumMessages:   7,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

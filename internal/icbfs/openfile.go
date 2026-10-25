@@ -682,9 +682,18 @@ func (c *content) uploadLocked(ctx context.Context) (Attr, error) {
 	}
 	var obj *objstore.Object
 	var err error
+	// A file written in one piece gets its checksums now, from the local
+	// copy; a multipart write's (a part-edit of a big file) wait until
+	// asked for (VersionChecksums), not to read gigabytes for a few bytes.
+	var sums *Checksums
 	if partSize := c.fsys.partSize(); c.size > partSize {
 		obj, err = c.fsys.store.PutParts(ctx, c.key, c.partsLocked(partSize), nil, c.etag)
 	} else {
+		s, serr := ChecksumsOf(io.NewSectionReader(c.file, 0, c.size))
+		if serr != nil {
+			return Attr{}, serr
+		}
+		sums = &s
 		obj, err = c.fsys.store.Put(ctx, c.key, io.NewSectionReader(c.file, 0, c.size), nil, c.etag)
 	}
 	if err != nil {
@@ -701,7 +710,17 @@ func (c *content) uploadLocked(ctx context.Context) (Attr, error) {
 		return c.fsys.updateFileMetadata(ctx, c.key, func(a *Attr) {
 			a.Mtime = t
 			a.mtimeOverrideETag = obj.ETag
+			if sums != nil {
+				if a.Checksums == nil {
+					a.Checksums = map[string]Checksums{}
+				}
+				a.Checksums[obj.ETag] = *sums
+			}
 		})
+	}
+	if sums != nil {
+		// Best effort: a version without them can have them computed later.
+		_ = c.fsys.SetChecksums(ctx, c.key, obj.ETag, *sums)
 	}
 	return c.fsys.statFile(ctx, c.key)
 }

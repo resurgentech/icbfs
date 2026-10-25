@@ -109,7 +109,7 @@ func TestMountXattrs(t *testing.T) {
 	// icbfs's own state is never an xattr.
 	key := lookupKey(t, fsys, "tagged.txt")
 	ctx := context.Background()
-	if _, err := fsys.SetAppData(ctx, key, icbfs.TypeFile, icbfs.AppSyncHash, []byte("abc")); err != nil {
+	if _, err := fsys.SetAppData(ctx, key, icbfs.TypeFile, icbfs.AppDriveContentType, []byte("text/plain")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fsys.SetWindowsAttributes(ctx, key, icbfs.TypeFile, icbfs.WindowsAttrHidden); err != nil {
@@ -118,7 +118,7 @@ func TestMountXattrs(t *testing.T) {
 	if names := listXattrs(t, path); strings.Join(names, ",") != "user.color,user.shape" {
 		t.Fatalf("listxattr = %v, want only the user's two", names)
 	}
-	for _, name := range []string{"windows.attributes", "sync.sha256", "user.sync.sha256"} {
+	for _, name := range []string{"windows.attributes", "drive.contentType", "user.drive.contentType"} {
 		if _, err := syscall.Getxattr(path, name, buf); err == nil {
 			t.Fatalf("internal state visible as %q", name)
 		}

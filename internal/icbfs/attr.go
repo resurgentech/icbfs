@@ -119,13 +119,20 @@ type Attr struct {
 	PosixACLDefault []byte
 
 	// App is data icbfs's own tools keep about the item, keyed
-	// "<tool>.<name>" (AppSyncHash and the like). No mount shows it.
+	// "<tool>.<name>" (AppDriveOrigin and the like). No mount shows it.
 	App map[string][]byte
+
+	// Checksums are the content versions' checksums, by ETag (see
+	// Checksums); a file's current one is ContentChecksums.
+	Checksums map[string]Checksums
 
 	// Streams maps a named data stream's name to its id (see StreamKey)
 	// — Windows alternate data streams; nil when there are none.
 	Streams map[string]uint64
 	Rdev    uint32 // TypeCharDevice/TypeBlockDevice only; 0 for every other type
+
+	// contentETag is a file's current content ETag, as Stat read it.
+	contentETag string
 
 	// mtimeOverrideETag is the content ETag an explicit mtime override
 	// (Mtime, as decoded from .metadata) was set against — see
@@ -172,6 +179,7 @@ func encodeFileMetadata(a Attr) ([]byte, error) {
 		PosixAclAccess:    a.PosixACLAccess,
 		PosixAclDefault:   a.PosixACLDefault,
 		App:               a.App,
+		Checksums:         checksumsToWire(a.Checksums),
 		Rdev:              a.Rdev,
 		Atime:             timestampOrNil(a.Atime),
 		MtimeOverride:     timestampOrNil(a.Mtime),
@@ -221,6 +229,7 @@ func decodeFileMetadata(data []byte) (Attr, error) {
 		PosixACLAccess:  m.PosixAclAccess,
 		PosixACLDefault: m.PosixAclDefault,
 		App:             m.App,
+		Checksums:       checksumsFromWire(m.Checksums),
 		Atime:           timeOrZero(m.Atime),
 		// Only the explicit override, if any; combineFileAttr falls back to
 		// the content's time.
@@ -249,7 +258,6 @@ const metadataLayout = 1
 
 // App keys of icbfs's own tools.
 const (
-	AppSyncHash         = "sync.sha256"       // icbfs-sync: the content's SHA-256, hex
 	AppDriveContentType = "drive.contentType" // the drive API: the content type a write gave
 	AppDriveOrigin      = "drive.origin"      // the drive API: where a copy came from
 	AppSidePrefix       = "side."             // the drive API's side store: an object's metadata

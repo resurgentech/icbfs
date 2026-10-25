@@ -335,9 +335,13 @@ func (d *Drive) item(ctx context.Context, n *node, withVersion bool) drive.Item 
 	switch n.typ {
 	case icbfs.TypeFile:
 		it.ContentType = contentType(n.name, n.attr)
+		if c, ok := n.attr.ContentChecksums(); ok {
+			it.Checksums = toChecksums(c)
+		}
 		if withVersion {
 			if obj, err := n.fsys.Store().Head(ctx, n.key); err == nil {
-				it.Version = &drive.Version{ID: obj.VersionID, Time: obj.Time(), Stored: obj.LastModified, Size: obj.Size, Current: true}
+				it.Version = &drive.Version{ID: obj.VersionID, Time: obj.Time(), Stored: obj.LastModified, Size: obj.Size, Current: true,
+					Checksums: toChecksums(n.attr.Checksums[obj.ETag])}
 			}
 		}
 	case icbfs.TypeSymlink:
@@ -364,7 +368,7 @@ func mapErr(err error) error {
 		return nil
 	case errors.Is(err, drive.ErrNotFound), errors.Is(err, drive.ErrForbidden), errors.Is(err, drive.ErrPrecondition),
 		errors.Is(err, drive.ErrNoAccess), errors.Is(err, drive.ErrReadOnly), errors.Is(err, drive.ErrOutOfOrder),
-		errors.Is(err, drive.ErrInvalid):
+		errors.Is(err, drive.ErrInvalid), errors.Is(err, drive.ErrChecksum):
 		return err
 	case errors.Is(err, icbfs.ErrNotFound), objstore.IsNotFound(err):
 		return fmt.Errorf("%w (%v)", drive.ErrNotFound, err)

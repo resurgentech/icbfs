@@ -3,11 +3,13 @@ package icbfsdrive
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
@@ -31,12 +33,15 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 	if err != nil {
 		return drive.Item{}, err
 	}
-	data, spool, err := d.readBody(body)
+	data, spool, sums, err := d.readBody(body)
 	if err != nil {
 		return drive.Item{}, err
 	}
 	if spool != nil {
 		defer func() { spool.Close(); os.Remove(spool.Name()) }()
+	}
+	if err := checkSums(opts.Checksums, sums); err != nil {
+		return drive.Item{}, err
 	}
 
 	for attempt := 0; attempt < 3; attempt++ {
@@ -77,7 +82,7 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 				}
 				return drive.Item{}, mapErr(err)
 			}
-			if err := d.afterWrite(ctx, n.key, n.path, written, opts); err != nil {
+			if err := d.afterWrite(ctx, n.key, n.path, written, opts, sums); err != nil {
 				return drive.Item{}, err
 			}
 			d.changed(parent)
@@ -113,7 +118,7 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 		if err != nil {
 			return drive.Item{}, mapErr(err)
 		}
-		if err := d.afterWrite(ctx, key, joinPath(parent.path, name), written, opts); err != nil {
+		if err := d.afterWrite(ctx, key, joinPath(parent.path, name), written, opts, sums); err != nil {
 			return drive.Item{}, err
 		}
 		// Creating made an empty version before the content's; a file the
@@ -129,23 +134,26 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 }
 
 // readBody reads up to the filesystem's max file size: into memory when
-// small, else into a temporary file.
-func (d *Drive) readBody(body io.Reader) ([]byte, *os.File, error) {
+// small, else into a temporary file; and the content's checksums, as it
+// goes by.
+func (d *Drive) readBody(body io.Reader) ([]byte, *os.File, icbfs.Checksums, error) {
 	max := d.fs.MaxFileSize()
+	sum := icbfs.NewChecksummer()
+	body = io.TeeReader(body, sum)
 	buf := &bytes.Buffer{}
 	n, err := io.CopyN(buf, body, inMemoryWrite+1)
 	if err != nil && err != io.EOF {
-		return nil, nil, err
+		return nil, nil, icbfs.Checksums{}, err
 	}
 	if n <= inMemoryWrite {
 		if int64(buf.Len()) > max {
-			return nil, nil, drive.ErrTooLarge
+			return nil, nil, icbfs.Checksums{}, drive.ErrTooLarge
 		}
-		return buf.Bytes(), nil, nil
+		return buf.Bytes(), nil, sum.Sum(), nil
 	}
 	f, err := os.CreateTemp(d.cfg.CacheDir, "drive-write-")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, icbfs.Checksums{}, err
 	}
 	total, err := io.Copy(f, io.MultiReader(buf, io.LimitReader(body, max-n+1)))
 	if err == nil && total > max {
@@ -154,9 +162,32 @@ func (d *Drive) readBody(body io.Reader) ([]byte, *os.File, error) {
 	if err != nil {
 		f.Close()
 		os.Remove(f.Name())
-		return nil, nil, err
+		return nil, nil, icbfs.Checksums{}, err
 	}
-	return nil, f, nil
+	return nil, f, sum.Sum(), nil
+}
+
+// checkSums fails with ErrChecksum if a checksum the caller gave isn't
+// the content's.
+func checkSums(want *drive.Checksums, got icbfs.Checksums) error {
+	if want == nil {
+		return nil
+	}
+	if want.MD5 != "" && !strings.EqualFold(want.MD5, hex.EncodeToString(got.MD5)) {
+		return fmt.Errorf("MD5 %s given, %x arrived: %w", want.MD5, got.MD5, drive.ErrChecksum)
+	}
+	if want.SHA256 != "" && !strings.EqualFold(want.SHA256, hex.EncodeToString(got.SHA256)) {
+		return fmt.Errorf("SHA-256 %s given, %x arrived: %w", want.SHA256, got.SHA256, drive.ErrChecksum)
+	}
+	return nil
+}
+
+// toChecksums is c in the drive API's form; nil for none.
+func toChecksums(c icbfs.Checksums) *drive.Checksums {
+	if len(c.MD5) == 0 && len(c.SHA256) == 0 {
+		return nil
+	}
+	return &drive.Checksums{MD5: hex.EncodeToString(c.MD5), SHA256: hex.EncodeToString(c.SHA256)}
 }
 
 // writeContent replaces key's content, if it's still at etag, and returns
@@ -206,9 +237,9 @@ func (d *Drive) writeContent(ctx context.Context, key string, data []byte, spool
 
 // afterWrite records, in one metadata write, what opts say about content
 // just written to the file key at drive path p (its ETag now written):
-// its content type, its times at the source, its origin; and indexes the
-// origin.
-func (d *Drive) afterWrite(ctx context.Context, key, p, written string, opts drive.WriteOptions) error {
+// its content type, its times at the source, its origin, and its
+// checksums; and indexes the origin.
+func (d *Drive) afterWrite(ctx context.Context, key, p, written string, opts drive.WriteOptions, sums icbfs.Checksums) error {
 	app := map[string][]byte{}
 	if opts.ContentType != "" {
 		app[icbfs.AppDriveContentType] = []byte(opts.ContentType)
@@ -222,9 +253,11 @@ func (d *Drive) afterWrite(ctx context.Context, key, p, written string, opts dri
 	}
 	mtime, btime := timeOrNil(opts.ModTime), timeOrNil(opts.Created)
 	if len(app) > 0 || mtime != nil || btime != nil {
-		if _, err := d.fs.SetItemInfo(ctx, key, icbfs.TypeFile, mtime, btime, written, app); err != nil {
+		if _, err := d.fs.SetItemInfo(ctx, key, icbfs.TypeFile, mtime, btime, written, app, &sums); err != nil {
 			return mapErr(err)
 		}
+	} else if err := d.fs.SetChecksums(ctx, key, written, sums); err != nil {
+		return mapErr(err)
 	}
 	if opts.Origin != nil {
 		return d.recordOrigin(ctx, key, p, *opts.Origin)
