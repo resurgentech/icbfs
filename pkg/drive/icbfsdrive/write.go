@@ -117,6 +117,7 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 			_ = d.fs.Store().Erase(ctx, key, created.VersionID)
 		}
 		d.changed(parent)
+		d.idPaths.put(key, joinPath(parent.path, name))
 		return d.statItem(ctx, joinPath(parent.path, name))
 	}
 	return drive.Item{}, drive.ErrBusy
@@ -273,7 +274,11 @@ func (d *Drive) mkdirIn(ctx context.Context, parent *node, name string) (*node, 
 		}
 	}
 	d.changed(parent)
-	return d.resolvePath(ctx, d.fs, joinPath(parent.path, name))
+	n, err := d.resolvePath(ctx, d.fs, joinPath(parent.path, name))
+	if err == nil {
+		d.idPaths.put(n.key, n.path)
+	}
+	return n, err
 }
 
 // mkdirAll makes p and every missing directory above it.

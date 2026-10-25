@@ -222,6 +222,15 @@ func (d *Drive) resolve(ctx context.Context, fsys *icbfs.Filesystem, ref drive.I
 	if ref.ID == d.rootKey {
 		return d.rootNode(ctx, fsys)
 	}
+	// The id decides, but a path given with it says where to look: one
+	// walk down, checked against the id. Without it a new item, which no
+	// search has found yet, costs a search of the whole tree (one read
+	// per directory) to learn a path the caller had in hand.
+	if ref.Path != "" {
+		if n, err := d.resolvePath(ctx, fsys, ref.Path); err == nil && n.key == ref.ID {
+			return n, nil
+		}
+	}
 	if p, ok := d.idPaths.get(ref.ID); ok {
 		if n, err := d.resolvePath(ctx, fsys, p); err == nil && n.key == ref.ID {
 			return n, nil
