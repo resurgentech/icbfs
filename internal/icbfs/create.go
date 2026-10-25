@@ -33,6 +33,12 @@ type Settings struct {
 	// is a folder like any other, so these can be changed later.
 	RootMode, RootUid, RootGid uint32
 	RootSDDL                   string
+
+	// Created is when the filesystem's history starts, if not now: a
+	// mirror of a source whose history is older gives a time before
+	// anything it will copy, which it then writes in order under the
+	// times it happened at (objstore.WithDeclaredTime).
+	Created time.Time
 }
 
 // Info describes one filesystem in a bucket.
@@ -70,10 +76,14 @@ func CreateFilesystem(ctx context.Context, store objstore.Store, s Settings) (In
 	if n := s.DirBlockEntries; n != 0 && (n < minDirBlockEntries || n > maxDirBlockEntries) {
 		return Info{}, fmt.Errorf("directory block entries %d: %d to %d", n, minDirBlockEntries, maxDirBlockEntries)
 	}
+	created := time.Now()
+	if !s.Created.IsZero() {
+		created = s.Created
+	}
 	id, entry, existed, err := registerFilesystem(ctx, store, &pb.FilesystemEntry{
 		Name: s.Name, Size: s.Size, PrimaryWindows: s.PrimaryWindows, MaxFileSize: s.MaxFileSize,
 		DirBlockEntries: s.DirBlockEntries,
-		Created:         timestamppb.Now(),
+		Created:         timestamppb.New(created),
 	})
 	if err != nil {
 		return Info{}, err
@@ -92,7 +102,11 @@ func CreateFilesystem(ctx context.Context, store objstore.Store, s Settings) (In
 	if s.PrimaryWindows && s.RootSDDL != "" {
 		attr.WindowsSDDL = []byte(s.RootSDDL)
 	}
-	if err := f.createRoot(ctx, attr); err != nil {
+	rootCtx := ctx
+	if !s.Created.IsZero() {
+		rootCtx = objstore.WithDeclaredTime(ctx, s.Created)
+	}
+	if err := f.createRoot(rootCtx, attr); err != nil {
 		return Info{}, err
 	}
 	return infoOf(id, entry), nil
@@ -195,8 +209,7 @@ func (f *Filesystem) createRoot(ctx context.Context, attr Attr) error {
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	attr.Nlink, attr.Mtime, attr.Ctime = 1, now, now
+	attr.Nlink, attr.Mtime, attr.Ctime = 1, changeTime(ctx), time.Now()
 	metaData, err := encodeFileMetadata(attr)
 	if err != nil {
 		return err

@@ -38,6 +38,7 @@ func Run(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	t.Run("HistoryCacheLastsForItsTTL", func(t *testing.T) { historyCacheLastsForItsTTL(t, newStore) })
 	t.Run("AsOfAfterErase", func(t *testing.T) { asOfAfterErase(t, newStore) })
 	t.Run("HistoryCacheKeepsVersions", func(t *testing.T) { historyCacheKeepsVersions(t, newStore) })
+	t.Run("AsOfByDeclaredTime", func(t *testing.T) { asOfByDeclaredTime(t, newStore) })
 }
 
 // pause lets the store's clock pass a whole second, so a time taken
@@ -792,5 +793,69 @@ func historyCacheKeepsVersions(t *testing.T, newStore func(*testing.T) objstore.
 	}
 	if n := reads(read(ctx)); n != 3 {
 		t.Fatalf("three reads of file data reached the store %d times; want 3", n)
+	}
+}
+
+// asOfByDeclaredTime: versions written under declared times (in order,
+// years before the store wrote them) say so, and a view picks by them.
+func asOfByDeclaredTime(t *testing.T, newStore func(*testing.T) objstore.Store) {
+	store := newStore(t)
+	ctx := context.Background()
+	at := func(year int) time.Time { return time.Date(year, 1, 1, 0, 0, 0, 0, time.UTC) }
+	for _, v := range []struct {
+		year int
+		body string
+	}{{2021, "one"}, {2022, "two"}, {2023, "three"}} {
+		if _, err := store.Put(objstore.WithDeclaredTime(ctx, at(v.year)), "d/k", strings.NewReader(v.body), map[string]string{"m": "1"}, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Delete(objstore.WithDeclaredTime(ctx, at(2024)), "d/gone"); err != nil && !objstore.IsNotFound(err) {
+		t.Fatal(err)
+	}
+	head, err := store.Head(ctx, "d/k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := head.Declared(); !ok || !got.Equal(at(2023)) || !head.Time().Equal(at(2023)) || head.Metadata["m"] != "1" {
+		t.Fatalf("head: declared %v %v, time %v, metadata %v; want 2023 and m=1", got, ok, head.Time(), head.Metadata)
+	}
+	pause()
+	hist, err := objstore.OpenTempHistoryCache(ctx, store, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hist.Close()
+	for _, tc := range []struct {
+		at   time.Time
+		want string // "" = didn't exist
+	}{
+		{at(2020), ""},
+		{at(2021).Add(time.Hour), "one"},
+		{at(2022), "two"},
+		{at(2022).Add(-time.Nanosecond), "one"},
+		{at(2025), "three"},
+		{serverNow(t, store).Add(-time.Second), "three"},
+	} {
+		for round := 0; round < 2; round++ { // the second answer comes from the cache
+			v, err := objstore.NewAsOf(ctx, hist, tc.at)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := read(t, v, "d/k")
+			if tc.want == "" {
+				if !objstore.IsNotFound(err) {
+					t.Fatalf("as of %v (round %d): %q, %v; want not found", tc.at, round, got, err)
+				}
+				continue
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("as of %v (round %d): %q, %v; want %q", tc.at, round, got, err, tc.want)
+			}
+			wantVersions := map[string]int{"one": 1, "two": 2, "three": 3}[tc.want]
+			if versions, err := v.History(ctx, "d/k"); err != nil || len(versions) != wantVersions {
+				t.Fatalf("as of %v (round %d): %d versions, %v; want %d", tc.at, round, len(versions), err, wantVersions)
+			}
+		}
 	}
 }

@@ -58,6 +58,46 @@ type TimeSetter interface {
 	SetTimes(ctx context.Context, item ItemRef, modified, created time.Time) (Item, error)
 }
 
+// FolderHistorian is a drive whose folders' history can be read and
+// written over: for a caller (a mirror) that learned of a change late,
+// after the folder had moved on, so it couldn't be made in order
+// (ErrOutOfOrder), and puts the folder's past right itself. Changes made
+// in order never need it.
+type FolderHistorian interface {
+	// FolderHistory is dir's whole history: each state it has been in,
+	// oldest first, as the drive's views of the past see it.
+	FolderHistory(ctx context.Context, dir ItemRef) (FolderHistory, error)
+
+	// ReplaceFolderHistory erases dir's history and writes states in its
+	// place, oldest first; the last is dir now, so it must hold exactly
+	// what dir holds now. Items are untouched: an entry names an existing
+	// item by id, whatever folder it's in now. cond.IfMatch is the Version
+	// FolderHistory returned: a PreconditionError if dir has changed
+	// since. The caller makes no other change to dir while it runs.
+	ReplaceFolderHistory(ctx context.Context, dir ItemRef, states []FolderState, cond Condition) error
+}
+
+// FolderHistory is a folder's history. Version names its current state,
+// for a ReplaceFolderHistory conditional on nothing having changed since.
+type FolderHistory struct {
+	States  []FolderState `json:"states"`
+	Version string        `json:"version"`
+}
+
+// FolderState is a folder's entries from At until the next state.
+type FolderState struct {
+	At      time.Time     `json:"at"`
+	Entries []FolderEntry `json:"entries"`
+}
+
+// FolderEntry is one name in a folder: the item it names, by id, and the
+// item's type.
+type FolderEntry struct {
+	Name string `json:"name"`
+	ID   string `json:"id"`
+	Type string `json:"type"`
+}
+
 // Capabilities says what a drive's backend can do.
 type Capabilities struct {
 	IDs              bool   `json:"ids"`      // ids stable across renames
@@ -179,10 +219,13 @@ type Rights struct {
 	ChangePermissions bool `json:"changePermissions"`
 }
 
-// Version is one state of a file's content.
+// Version is one state of a file's content. Time is when it came to be:
+// at its source, when it was written under WithSourceTime, else when it
+// was stored, which Stored always is.
 type Version struct {
 	ID      string    `json:"version"`
 	Time    time.Time `json:"time"`
+	Stored  time.Time `json:"stored"`
 	Size    int64     `json:"size"`
 	Current bool      `json:"current,omitempty"`
 	Names   []string  `json:"names,omitempty"` // named versions it was current at
@@ -294,6 +337,7 @@ var (
 	ErrReadOnly     = errors.New("read-only")
 	ErrBusy         = errors.New("busy")
 	ErrInvalid      = errors.New("invalid request")
+	ErrOutOfOrder   = errors.New("source time before the item's current state")
 )
 
 // PreconditionError is ErrPrecondition with the current version.

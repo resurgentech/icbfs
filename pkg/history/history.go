@@ -39,9 +39,10 @@ type Config struct {
 	TTL      time.Duration `json:"ttl,omitempty"`
 }
 
-// purgeCheck is how often a history looks for a purge since the last
-// look: until then a purged item can still show in the past.
-const purgeCheck = 30 * time.Second
+// pastCheck is how often a history looks for a change to the past (a
+// purge, a mirror writing what happened before) since the last look:
+// until then the past can show as it was.
+const pastCheck = 30 * time.Second
 
 // openStore opens a store (a var, for tests to count its requests).
 var openStore = pkgicbfs.Open
@@ -54,9 +55,9 @@ type History struct {
 	live    *icbfs.Filesystem
 	created time.Time
 
-	mu         sync.Mutex
-	purgesSeen time.Time
-	purges     uint64
+	mu          sync.Mutex
+	pastSeen    time.Time
+	pastChanges uint64
 }
 
 // Open opens cfg's filesystem's history.
@@ -89,7 +90,7 @@ func Open(ctx context.Context, cfg Config) (*History, error) {
 		h.Close()
 		return nil, err
 	}
-	if _, err := h.CheckPurges(ctx); err != nil {
+	if _, err := h.CheckPast(ctx); err != nil {
 		h.Close()
 		return nil, err
 	}
@@ -123,7 +124,7 @@ func (h *History) creation(ctx context.Context) (time.Time, error) {
 	if err != nil || len(versions) == 0 {
 		return time.Time{}, fmt.Errorf("when filesystem %q was made: %v", h.cfg.Filesystem, err)
 	}
-	return versions[len(versions)-1].LastModified, nil
+	return versions[len(versions)-1].Time(), nil
 }
 
 // Span is the moments there are to see: from the filesystem's creation
@@ -134,42 +135,44 @@ func (h *History) Span(ctx context.Context) (from, to time.Time, err error) {
 	return h.created, now, err
 }
 
-// CheckPurges drops from the cache what a purge has erased, if one has
-// run since the last look (at most every 30 seconds), and reports
-// whether it dropped anything: listings kept from before may then name
-// what's gone. List calls it.
-func (h *History) CheckPurges(ctx context.Context) (bool, error) {
+// CheckPast drops from the cache what it kept of the past if the past
+// has changed since the last look (at most every 30 seconds): a purge
+// erased something, or a mirror wrote what happened earlier. It reports
+// whether it dropped anything: listings kept from before may then be
+// wrong. List calls it.
+func (h *History) CheckPast(ctx context.Context) (bool, error) {
 	h.mu.Lock()
-	due := time.Since(h.purgesSeen) >= purgeCheck
+	due := time.Since(h.pastSeen) >= pastCheck
 	h.mu.Unlock()
 	if !due {
 		return false, nil
 	}
-	forgot, err := icbfs.ForgetPurged(ctx, h.live, h.hist)
+	forgot, err := h.drive.CheckPast(ctx)
 	if err != nil {
 		return false, err
 	}
 	h.mu.Lock()
-	h.purgesSeen = time.Now()
+	h.pastSeen = time.Now()
 	if forgot {
-		h.purges++
+		h.pastChanges++
 	}
 	h.mu.Unlock()
 	return forgot, nil
 }
 
-// Purges counts the purges this history has dropped from the cache: a
-// caller keeping listings of its own drops them when it moves.
-func (h *History) Purges() uint64 {
+// PastChanges counts the changes to the past this history has dropped
+// from the cache: a caller keeping listings of its own drops them when
+// it moves.
+func (h *History) PastChanges() uint64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.purges
+	return h.pastChanges
 }
 
 // List lists directory dir (drive-relative, "/" for the top) as it was at
 // at (now, if at is zero), as ctx's profile sees it.
 func (h *History) List(ctx context.Context, dir string, at time.Time) ([]drive.Item, error) {
-	if _, err := h.CheckPurges(ctx); err != nil {
+	if _, err := h.CheckPast(ctx); err != nil {
 		return nil, err
 	}
 	opts := drive.ListOptions{At: drive.At{Time: at}}

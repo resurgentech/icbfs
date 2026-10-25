@@ -337,7 +337,7 @@ func (d *Drive) item(ctx context.Context, n *node, withVersion bool) drive.Item 
 		it.ContentType = contentType(n.name, n.attr)
 		if withVersion {
 			if obj, err := n.fsys.Store().Head(ctx, n.key); err == nil {
-				it.Version = &drive.Version{ID: obj.VersionID, Time: obj.LastModified, Size: obj.Size, Current: true}
+				it.Version = &drive.Version{ID: obj.VersionID, Time: obj.Time(), Stored: obj.LastModified, Size: obj.Size, Current: true}
 			}
 		}
 	case icbfs.TypeSymlink:
@@ -363,7 +363,8 @@ func mapErr(err error) error {
 	case err == nil:
 		return nil
 	case errors.Is(err, drive.ErrNotFound), errors.Is(err, drive.ErrForbidden), errors.Is(err, drive.ErrPrecondition),
-		errors.Is(err, drive.ErrNoAccess), errors.Is(err, drive.ErrReadOnly):
+		errors.Is(err, drive.ErrNoAccess), errors.Is(err, drive.ErrReadOnly), errors.Is(err, drive.ErrOutOfOrder),
+		errors.Is(err, drive.ErrInvalid):
 		return err
 	case errors.Is(err, icbfs.ErrNotFound), objstore.IsNotFound(err):
 		return fmt.Errorf("%w (%v)", drive.ErrNotFound, err)
@@ -385,6 +386,8 @@ func mapErr(err error) error {
 		return fmt.Errorf("%w (%v)", drive.ErrReadOnly, err)
 	case objstore.IsPreconditionFailed(err):
 		return fmt.Errorf("%w (%v)", drive.ErrBusy, err)
+	case errors.Is(err, icbfs.ErrOutOfOrder):
+		return fmt.Errorf("%w (%v)", drive.ErrOutOfOrder, err)
 	}
 	return err
 }

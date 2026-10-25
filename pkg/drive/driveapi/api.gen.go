@@ -361,6 +361,11 @@ type Version struct {
 	Current *bool     `json:"current,omitempty"`
 	Names   *[]string `json:"names,omitempty"`
 	Size    int64     `json:"size"`
+
+	// Stored When the store wrote it.
+	Stored time.Time `json:"stored"`
+
+	// Time When the version came to be; at its source, for one a mirror wrote in source time.
 	Time    time.Time `json:"time"`
 	Version string    `json:"version"`
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
+	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/pkg/drive"
 )
 
@@ -290,21 +291,24 @@ func (d *Drive) Versions(ctx context.Context, ref drive.ItemRef) ([]drive.Versio
 	if err != nil {
 		return nil, mapErr(err)
 	}
+	if err := d.versionTimes(ctx, objs); err != nil {
+		return nil, mapErr(err)
+	}
 	names, _ := d.Names(ctx)
 	var out []drive.Version
 	for i, o := range objs {
 		if o.Deleted {
 			continue
 		}
-		v := drive.Version{ID: o.VersionID, Time: o.LastModified, Size: o.Size, Current: i == 0}
+		v := drive.Version{ID: o.VersionID, Time: o.Time(), Stored: o.LastModified, Size: o.Size, Current: i == 0}
 		// Current at a name's time: written at or before it, and the next
 		// version (or delete) came after it.
 		until := time.Now().Add(time.Hour)
 		if i > 0 {
-			until = objs[i-1].LastModified
+			until = objs[i-1].Time()
 		}
 		for _, nm := range names {
-			if !nm.Time.Before(o.LastModified) && nm.Time.Before(until) {
+			if !nm.Time.Before(o.Time()) && nm.Time.Before(until) {
 				v.Names = append(v.Names, nm.Name)
 			}
 		}
@@ -314,4 +318,29 @@ func (d *Drive) Versions(ctx context.Context, ref drive.ItemRef) ([]drive.Versio
 		out = []drive.Version{}
 	}
 	return out, nil
+}
+
+// versionTimes fills in the metadata of the history entries whose
+// listing didn't give it (S3's), for their times: read once per version
+// and kept by the drive's history cache.
+func (d *Drive) versionTimes(ctx context.Context, objs []objstore.Object) error {
+	var cache *objstore.HistoryCache
+	for i := range objs {
+		o := &objs[i]
+		if !o.MetadataUnknown || o.Deleted {
+			continue
+		}
+		if cache == nil {
+			var err error
+			if cache, err = d.views.cache(ctx); err != nil {
+				return err
+			}
+		}
+		head, err := cache.HeadVersion(ctx, o.Key, o.VersionID)
+		if err != nil {
+			return err
+		}
+		o.Metadata, o.MetadataUnknown = head.Metadata, false
+	}
+	return nil
 }

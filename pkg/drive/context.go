@@ -1,6 +1,9 @@
 package drive
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Profile is who an actor is on a drive's storage: on a primary-Windows
 // filesystem a SID and its groups' SIDs, on a primary-POSIX one a uid and
@@ -33,10 +36,28 @@ type POSIXProfile struct {
 }
 
 type (
-	actorKey   struct{}
-	profileKey struct{}
-	passKey    struct{}
+	actorKey      struct{}
+	profileKey    struct{}
+	passKey       struct{}
+	sourceTimeKey struct{}
 )
+
+// WithSourceTime says that the changes made under ctx happened at t at
+// their source, not now: a mirror copying a source's history. Write,
+// Mkdir, Move, Delete, SetTimes, SetOrigin and Restore honour it: what
+// they write is dated t, so Versions, Trash and views of the past (At)
+// show the source's history. Changes to one item or folder must be made
+// in order (one dated before its current state fails with ErrOutOfOrder),
+// and t can't be in the future.
+func WithSourceTime(ctx context.Context, t time.Time) context.Context {
+	return context.WithValue(ctx, sourceTimeKey{}, t)
+}
+
+// SourceTime is ctx's source time, if it has one.
+func SourceTime(ctx context.Context) (time.Time, bool) {
+	t, ok := ctx.Value(sourceTimeKey{}).(time.Time)
+	return t, ok
+}
 
 // WithPass attaches a sync pass's id to ctx: what a Delete with it sends to
 // the trash is recorded as that pass's, so the pass's removals can be

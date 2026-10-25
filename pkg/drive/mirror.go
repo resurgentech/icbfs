@@ -21,8 +21,9 @@ import (
 // daemon needn't cap how much a pass may remove to limit the damage of a
 // bad listing.
 type Mirror struct {
-	d      Drive
-	source string
+	d           Drive
+	source      string
+	sourceTimes bool
 }
 
 // NewMirror is a mirror of the source drive source (an Origin.Drive) on d.
@@ -31,6 +32,38 @@ type Mirror struct {
 // (a listing of the whole drive and its trash per lookup).
 func NewMirror(d Drive, source string) *Mirror {
 	return &Mirror{d: d, source: source}
+}
+
+// InSourceTime makes the mirror write the source's history in the
+// source's time (WithSourceTime), so the drive's versions, trash and
+// views of the past show when things happened there: an item is created
+// at its Created time (else its ModTime), a new version written at its
+// ModTime, a move made at its Changed time; Remove deletes at ctx's
+// source time, which the daemon sets to when the source deleted it. A
+// time the source item doesn't give is ctx's source time, if it has one,
+// else now. The daemon applies a source's changes oldest first: a change
+// dated before what it changes fails with ErrOutOfOrder. The drive's
+// filesystem has to start before the source's history does.
+func (m *Mirror) InSourceTime() *Mirror {
+	m.sourceTimes = true
+	return m
+}
+
+// at is ctx for a change that happened at t at the source, when the
+// mirror writes in source time and t is known.
+func (m *Mirror) at(ctx context.Context, t time.Time) context.Context {
+	if !m.sourceTimes || t.IsZero() {
+		return ctx
+	}
+	return WithSourceTime(ctx, t)
+}
+
+// born is when src came to be at the source, as far as it says.
+func born(src SourceItem) time.Time {
+	if !src.Created.IsZero() {
+		return src.Created
+	}
+	return src.ModTime
 }
 
 // OriginFinder is what a backend implements to find an item by its origin
@@ -45,11 +78,14 @@ type SourceItem struct {
 	// Origin is the source item: its id, the version to hold, its path
 	// there. Origin.Drive is the mirror's source if left empty; Copied
 	// is now if zero.
-	Origin      Origin
-	Path        string    // where it belongs on the drive
-	Type        string    // TypeFile or TypeDir
-	ModTime     time.Time // its time at the source, if known
-	Created     time.Time // its creation time at the source, if known
+	Origin  Origin
+	Path    string    // where it belongs on the drive
+	Type    string    // TypeFile or TypeDir
+	ModTime time.Time // its time at the source, if known
+	Created time.Time // its creation time at the source, if known
+	// Changed is when it was last renamed or moved at the source, if
+	// known: what a move is dated with in source time (InSourceTime).
+	Changed     time.Time
 	ContentType string
 	// Open gives the content; it's called only when the bytes are needed,
 	// never for a move, a restore of the version held, or an item already
@@ -138,16 +174,17 @@ func (m *Mirror) Apply(ctx context.Context, src SourceItem) (Applied, error) {
 	case err != nil:
 		return Applied{}, err
 	case trashed != nil:
-		item, err = m.d.Restore(ctx, trashed.ID, RestoreOptions{To: src.Path, Parents: true})
+		item, err = m.d.Restore(m.at(ctx, src.Changed), trashed.ID, RestoreOptions{To: src.Path, Parents: true})
 		if err != nil {
 			return Applied{}, fmt.Errorf("restore %s: %w", src.Path, err)
 		}
 		done = append(done, Restored)
 	case item.Path != src.Path:
-		if err := m.parentOf(ctx, src.Path); err != nil {
+		mctx := m.at(ctx, src.Changed)
+		if err := m.parentOf(mctx, src.Path); err != nil {
 			return Applied{}, err
 		}
-		moved, err := m.d.Move(ctx, ItemRef{ID: item.ID, Path: item.Path}, src.Path, false)
+		moved, err := m.d.Move(mctx, ItemRef{ID: item.ID, Path: item.Path}, src.Path, false)
 		if err != nil {
 			return Applied{}, fmt.Errorf("move %s to %s: %w", item.Path, src.Path, err)
 		}
@@ -187,7 +224,7 @@ func (m *Mirror) Apply(ctx context.Context, src SourceItem) (Applied, error) {
 	if item.Version != nil {
 		cond.IfMatch = item.Version.ID
 	}
-	item, err = m.write(ctx, src, o, cond)
+	item, err = m.write(m.at(ctx, src.ModTime), src, o, cond)
 	if err != nil {
 		return Applied{}, err
 	}
@@ -217,6 +254,7 @@ func sameOrigin(a *Origin, o Origin) bool {
 
 // create makes a source item the drive has never held.
 func (m *Mirror) create(ctx context.Context, src SourceItem, o Origin) (Applied, error) {
+	ctx = m.at(ctx, born(src))
 	existing, err := m.d.Stat(ctx, ByPath(src.Path), At{})
 	taken := err == nil
 	if err != nil && !errors.Is(err, ErrNotFound) {
@@ -299,7 +337,9 @@ func (m *Mirror) retime(ctx context.Context, item Item, modified, created time.T
 // Remove sends the item copied from the source item to the trash (a
 // directory with everything in it), recorded as ctx's pass if it has one
 // (WithPass). It reports whether there was a live item to remove; one
-// already in the trash, or never held, is nothing to do.
+// already in the trash, or never held, is nothing to do. In source time
+// (InSourceTime), the deletion is dated with ctx's source time: when the
+// source deleted it.
 func (m *Mirror) Remove(ctx context.Context, sourceID string) (bool, error) {
 	item, trashed, err := m.find(ctx, sourceID)
 	if errors.Is(err, ErrNotFound) || err == nil && trashed != nil {

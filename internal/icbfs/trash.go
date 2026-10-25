@@ -126,7 +126,7 @@ func (f *Filesystem) recordTrash(ctx context.Context, itemID string, typ EntryTy
 	}
 	e := TrashEntry{
 		EntryID: id, ItemID: itemID, Type: typ, Name: name, ParentID: dirKey,
-		Path: info.Path, DeletedAt: time.Now().UTC(), DeletedBy: info.By,
+		Path: info.Path, DeletedAt: changeTime(ctx).UTC(), DeletedBy: info.By,
 		Size: size, Version: version, Batch: info.Batch, Origin: origin, Pass: info.Pass,
 	}
 	data, err := encodeTrashEntry(e)

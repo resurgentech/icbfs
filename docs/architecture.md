@@ -80,7 +80,7 @@ with its four-hex-digit ID, so one prefix listing finds all of it.
 | `<id>-trashby-<uuid>` | the key of the item's newest trash entry, so a trashed item's entry is one read |
 | `<id>-name-<name>` | a named version |
 | `<id>-origin-<hash>` | the item copied from one source item (an item in another document store, say): its id, the source version, where it was last seen |
-| `<id>-purged` | empty; each purge writes it again, telling history caches to drop what they kept (see Past views) |
+| `<id>-past` | empty; written again whenever the filesystem's past changes (a purge, a change made under a source time), telling history caches to drop what they kept (see Past views) |
 
 Item keys are **UUIDv7**. Their embedded millisecond timestamp gives each
 item a creation time for free and keeps keys roughly time-ordered.
@@ -89,7 +89,7 @@ The objects icbfs encodes itself (directory blocks, `.metadata`, locks,
 the master block, trash entries, named versions and origin records) are
 Protobuf; the schemas are in [`spec/proto`](../spec/proto). A file's
 content and its streams are its bytes; `-trashby-` holds a key as text,
-and `-purged` is empty.
+and `-past` is empty.
 
 **Format versions.** Each Protobuf message carries the number of its
 format, a `layout` field, and the master block gives each filesystem a
@@ -495,13 +495,15 @@ read-only as it was at T. T can be:
 - a named version.
 
 There is no separate walking code. `objstore.AsOf` is a read-only view of
-the store at T: each read returns the newest version at or before T, or
-"not found" if the item didn't exist then. The ordinary filesystem code
-runs on top of it.
+the store at T: each read returns the newest version whose time is at or
+before T, or "not found" if the item didn't exist then. The ordinary
+filesystem code runs on top of it. A version's time is the store's, unless
+it was written under a source time (see below).
 
-- The master block is read as of T too. Mounting a filesystem that didn't
-  exist at T fails, and a name reused since T resolves to the filesystem
-  that had it then.
+- The master block is read as it is now: it's the bucket's, and the
+  settings in a filesystem's entry are fixed at creation. Whether the
+  filesystem existed at T is its root's history to say: mounting one that
+  didn't exist then fails.
 - A T later than the store's own clock is refused, except within two
   seconds, which is waited out (the store's clock reads in whole seconds).
 - Each object's version list is fetched once into a history cache, a
@@ -517,11 +519,12 @@ runs on top of it.
   block; never file data). Once a directory has been listed at some
   moments, listing it at them again needs nothing from the store, in a
   later session as well.
-- The past doesn't change, except by a purge, which the cache can't see
-  for itself. So each purge writes a new version of an empty object,
-  `<id>-purged`, after it has erased. `pkg/history` checks it at most
-  every 30 seconds, and an as-of mount when it starts (`icbfs.ForgetPurged`); a
-  new version since the cache last looked drops everything it kept of
+- The past changes only by a purge or by a change made under a source
+  time (below), which the cache can't see for itself. So each writes a new
+  version of an empty object, `<id>-past`, after it's done.
+  `pkg/history` and the drive API's views check it at most every 30
+  seconds, and an as-of mount when it starts (`icbfs.ForgetChangedPast`);
+  a new version since the cache last looked drops everything it kept of
   that filesystem. A view that finds a cached version erased forgets that
   key and asks again. And everything is fetched again once it's older
   than the cache's TTL (30 days by default), so nothing stays in it
@@ -538,10 +541,36 @@ or digit. A name can record the subtree it was made for (its scope): the
 drive API shows it only to drives at or above that path, though its time
 covers the whole filesystem.
 
+**Source time.** A mirror copies a source that has a history of its own,
+and a user browsing icbfs wants the source's dates, not the moment the
+store received each copy. A change made under `objstore.WithDeclaredTime`
+(the drive API's `drive.WithSourceTime`) happened at that time as far as
+the filesystem's history goes:
+
+- every object version it writes carries the time, as store metadata
+  (`icbfs_at`), and a view picks by it. On Azure a version listing gives
+  each version's metadata; on S3 it doesn't, so a view reads it
+  (`HeadVersion`, kept in the history cache) for the few versions its
+  binary search looks at, and only those later than T by the store;
+- a new item's key is minted at the time, so that's its creation time; a
+  directory's mtime becomes it; a trash entry is deleted at it. ctime
+  stays icbfs's own clock;
+- each key's times only go forward. A change dated before the version it
+  would replace fails (`ErrOutOfOrder`) and changes nothing; a time in the
+  future is refused. A filesystem whose history starts before the store
+  wrote it gives `Settings.Created`.
+
+A change that arrives too late to be made in order is the caller's to put
+right: `DirHistory` reads every version of a directory's blocks, and
+`ReplaceDirHistory` erases them and writes a series of states in their
+place, each a whole tree dated at its time, the last the directory as it
+is now, conditional on the directory not having changed since it was read
+(`DirVersion`). Items themselves aren't touched.
+
 **Limits:**
 
-- T is compared with the store's timestamps. MinIO lists milliseconds;
-  AWS S3 lists seconds.
+- T is compared with each version's time: declared, or the store's
+  timestamp. MinIO lists milliseconds; AWS S3 lists seconds.
 - An operation that touches several objects and is in flight at T (a
   rename is a remove plus an insert) can show half done, as when copying a
   live filesystem.

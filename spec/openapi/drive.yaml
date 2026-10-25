@@ -470,10 +470,17 @@ components:
         actor: {type: string}
     Version:
       type: object
-      required: [version, time, size]
+      required: [version, time, stored, size]
       properties:
         version: {type: string}
-        time: {type: string, format: date-time}
+        time:
+          type: string
+          format: date-time
+          description: When the version came to be; at its source, for one a mirror wrote in source time.
+        stored:
+          type: string
+          format: date-time
+          description: When the store wrote it.
         size: {type: integer, format: int64}
         current: {type: boolean}
         names: {type: array, items: {type: string}}

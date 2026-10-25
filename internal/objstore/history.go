@@ -50,7 +50,7 @@ type HistoryCache struct {
 
 // historyLayout is the database's layout (PRAGMA user_version). A cache
 // of another layout, older or newer, is dropped and started again.
-const historyLayout = 2
+const historyLayout = 3
 
 // maxCachedContent is the largest content a HistoryCache keeps: a
 // directory block or a .metadata object is far smaller.
@@ -102,11 +102,32 @@ func OpenHistoryCache(ctx context.Context, store Store, path string, ttl time.Du
 	// wait on the busy timeout.
 	db.SetMaxOpenConns(1)
 	c := &HistoryCache{store: store, db: db, ttl: ttl}
-	if err := c.init(ctx); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("history cache %s: %w", path, err)
+	// Opening the database can find it busy beyond what the busy timeout
+	// covers (another process switching it to WAL, or creating it): try
+	// again for a while.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		err := c.init(ctx)
+		if err == nil {
+			return c, nil
+		}
+		if !isBusy(err) || time.Now().After(deadline) {
+			db.Close()
+			return nil, fmt.Errorf("history cache %s: %w", path, err)
+		}
+		select {
+		case <-ctx.Done():
+			db.Close()
+			return nil, ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
-	return c, nil
+}
+
+// isBusy reports whether err is SQLite's "database is locked" (SQLITE_BUSY).
+func isBusy(err error) bool {
+	var coded interface{ Code() int }
+	return errors.As(err, &coded) && coded.Code()&0xff == 5
 }
 
 // OpenTempHistoryCache opens a history cache that lasts until Close, in a
@@ -169,7 +190,8 @@ func (c *HistoryCache) Close() error {
 }
 
 // The database: versions holds keys' histories as the store listed them
-// (pos is the order it listed them in), and covered says what has been
+// (pos is the order it listed them in; declared is a version's declared
+// time, NULL for none, and unknown says the listing didn't say), and covered says what has been
 // fetched: every key starting with prefix (whole = 0), or the one key
 // prefix (whole = 1), complete for every time up to upto. blobs holds
 // versions' metadata, and content where it was asked for (else NULL);
@@ -199,6 +221,8 @@ func (c *HistoryCache) init(ctx context.Context) error {
 				etag     TEXT NOT NULL,
 				size     INTEGER NOT NULL,
 				modified INTEGER NOT NULL,
+				declared INTEGER,
+				unknown  INTEGER NOT NULL,
 				deleted  INTEGER NOT NULL,
 				fetched  INTEGER NOT NULL,
 				PRIMARY KEY (key, pos)
@@ -278,7 +302,7 @@ func (c *HistoryCache) history(ctx context.Context, key string, at time.Time) ([
 		return nil, err
 	}
 	if ok {
-		return c.read(ctx, `SELECT key, version, etag, size, modified, deleted FROM versions WHERE key = ? ORDER BY pos`, key)
+		return c.read(ctx, `SELECT key, version, etag, size, modified, declared, unknown, deleted FROM versions WHERE key = ? ORDER BY pos`, key)
 	}
 	upto, err := c.upto(ctx, at)
 	if err != nil {
@@ -300,7 +324,7 @@ func (c *HistoryCache) historyUnder(ctx context.Context, prefix string, at time.
 	}
 	if ok {
 		where, args := underPrefix(prefix)
-		return c.read(ctx, `SELECT key, version, etag, size, modified, deleted FROM versions WHERE `+where+` ORDER BY key, pos`, args...)
+		return c.read(ctx, `SELECT key, version, etag, size, modified, declared, unknown, deleted FROM versions WHERE `+where+` ORDER BY key, pos`, args...)
 	}
 	upto, err := c.upto(ctx, at)
 	if err != nil {
@@ -332,10 +356,14 @@ func (c *HistoryCache) read(ctx context.Context, query string, args ...any) ([]O
 	for rows.Next() {
 		var o Object
 		var modified int64
-		if err := rows.Scan(&o.Key, &o.VersionID, &o.ETag, &o.Size, &modified, &o.Deleted); err != nil {
+		var declared sql.NullInt64
+		if err := rows.Scan(&o.Key, &o.VersionID, &o.ETag, &o.Size, &modified, &declared, &o.MetadataUnknown, &o.Deleted); err != nil {
 			return nil, err
 		}
 		o.LastModified = time.Unix(0, modified).UTC()
+		if declared.Valid {
+			o.Metadata = map[string]string{DeclaredKey: time.Unix(0, declared.Int64).UTC().Format(time.RFC3339Nano)}
+		}
 		out = append(out, o)
 	}
 	return out, rows.Err()
@@ -356,14 +384,18 @@ func (c *HistoryCache) save(ctx context.Context, keyOrPrefix string, whole bool,
 	if _, err := tx.ExecContext(ctx, `DELETE FROM versions WHERE `+where, args...); err != nil {
 		return err
 	}
-	insert, err := tx.PrepareContext(ctx, `INSERT INTO versions VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+	insert, err := tx.PrepareContext(ctx, `INSERT INTO versions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
 	defer insert.Close()
 	fetched := time.Now().UnixNano()
 	for i, o := range list {
-		if _, err := insert.ExecContext(ctx, o.Key, i, o.VersionID, o.ETag, o.Size, o.LastModified.UnixNano(), o.Deleted, fetched); err != nil {
+		var declared sql.NullInt64
+		if t, ok := o.Declared(); ok {
+			declared = sql.NullInt64{Int64: t.UnixNano(), Valid: true}
+		}
+		if _, err := insert.ExecContext(ctx, o.Key, i, o.VersionID, o.ETag, o.Size, o.LastModified.UnixNano(), declared, o.MetadataUnknown, o.Deleted, fetched); err != nil {
 			return err
 		}
 	}
@@ -475,6 +507,11 @@ func (c *HistoryCache) keepBlob(ctx context.Context, o *Object, content []byte) 
 			content = coalesce(excluded.content, blobs.content), fetched = excluded.fetched`,
 		o.Key, o.VersionID, string(object), content, time.Now().UnixNano())
 	return err
+}
+
+// HeadVersion is the store's HeadVersion, kept: a version never changes.
+func (c *HistoryCache) HeadVersion(ctx context.Context, key, versionID string) (*Object, error) {
+	return c.headVersion(ctx, key, versionID)
 }
 
 // headVersion is store.HeadVersion, kept: a version never changes.

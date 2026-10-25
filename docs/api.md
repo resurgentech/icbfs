@@ -105,6 +105,40 @@ alone, with no new version: `SetTimes(ctx, item, modified, created)
 none), and how an item copied before its source's times were passed gets
 them.
 
+**Source time.** `drive.WithSourceTime(ctx, t)` says the changes made
+under ctx happened at t at their source: a mirror copying a source's
+history. `Write`, `Mkdir`, `Move`, `Delete`, `SetTimes`, `SetOrigin` and
+`Restore` honour it on icbfs. What they write is dated t, so `Versions`,
+the trash and views of the past show the source's history; a new item is
+created at t, and a file's modified time is t unless `ModTime` says
+otherwise.
+
+- Changes to one file or folder are made in order: one dated before its
+  current state fails with `ErrOutOfOrder` and changes nothing. A time in
+  the future is refused (`ErrInvalid`).
+- The filesystem has to start before the source's history does:
+  `Settings.Created` when creating it.
+- The HTTP API doesn't take a source time: it's for a mirror using the
+  library.
+
+**Folder history.** A change that arrives too late to be made in order is
+put right by the caller, with a drive that's a `drive.FolderHistorian`
+(icbfs's is):
+
+```go
+h, err := fh.FolderHistory(ctx, drive.ByPath("/Project"))  // every state, oldest first
+// ... states: h.States with the late change put in ...
+err = fh.ReplaceFolderHistory(ctx, drive.ByPath("/Project"), states, drive.Condition{IfMatch: h.Version})
+```
+
+- `FolderHistory` is the folder's state at each time it changed (`At`,
+  and its entries' names, ids and types), and `Version`, its state now.
+- `ReplaceFolderHistory` erases the folder's history and writes the states
+  in its place, oldest first. The last must be the folder as it is now;
+  items aren't touched (an entry names an existing item by id). It fails
+  with a `PreconditionError` if the folder has changed since `Version`;
+  the caller makes no other change to the folder while it runs.
+
 ### Mirroring a source: `drive.Mirror`
 
 A sync daemon keeps a drive matching a source of documents (another
@@ -132,6 +166,13 @@ n, err := m.Undo(ctx, passID)                              // a bad pass, undone
 | it, another version | a new version (`updated`) |
 | it, at another path | moves it (`moved`), then writes only if the version differs |
 | it, in the trash | restores it, history and all (`restored`), then as above |
+
+`m.InSourceTime()` makes the mirror write the source's history in the
+source's time (`WithSourceTime`): an item is created at its `Created` time
+(else its `ModTime`), a new version written at its `ModTime`, a move made
+at its `Changed` time, and `Remove` deletes at the context's source time,
+which the daemon sets to when the source deleted it. The daemon applies a
+source's changes oldest first.
 
 `Apply` returns an `Applied`: the item, and the actions it took. Setting
 times alone (`retimed`) needs a drive that's a `TimeSetter`; elsewhere a
@@ -219,15 +260,17 @@ purging it needs write access there.
 
 ## Versions
 
-Each content write is a new version with a store-assigned time. Renames,
+Each content write is a new version. Its `time` is when it was stored,
+or, for one a mirror wrote in source time, when it came to be at the
+source; `stored` is always when it was stored. Renames,
 moves and permission changes don't make versions, so renaming a document
 doesn't make an open editor see a conflict.
 
 ```json
 {"id": "0000-01a2…", "versions": [
-  {"time": "2026-10-12T15:04:05.214Z", "version": "3f5e…", "size": 4211, "current": true,
-   "names": ["q3-signoff"]},
-  {"time": "2026-10-12T14:51:40.002Z", "version": "a19d…", "size": 4102}
+  {"time": "2026-10-12T15:04:05.214Z", "stored": "2026-10-12T15:04:05.214Z", "version": "3f5e…",
+   "size": 4211, "current": true, "names": ["q3-signoff"]},
+  {"time": "2026-10-12T14:51:40.002Z", "stored": "2026-10-12T14:51:40.002Z", "version": "a19d…", "size": 4102}
 ]}
 ```
 
@@ -287,8 +330,9 @@ call's context:
 It reads through the history cache as-of mounts share (by default in the
 user's cache directory, kept 30 days), so a directory listed at some
 moments is listed at them again with no store requests, in later runs
-too. A purge is noticed within 30 seconds (`CheckPurges`); `Purges`
-counts them, for a caller keeping listings of its own. `IsNotFound` tells a
+too. A change to the past (a purge, a mirror writing what happened
+earlier) is noticed within 30 seconds (`CheckPast`); `PastChanges` counts
+them, for a caller keeping listings of its own. `IsNotFound` tells a
 path or item that wasn't there at that moment, and `Close` closes the
 cache.
 

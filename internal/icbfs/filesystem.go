@@ -223,10 +223,11 @@ func (f *Filesystem) Store() objstore.Store { return f.store }
 func (f *Filesystem) RootKey() string { return f.id + "-root-" + f.fsName }
 
 // newKey mints a key for a new object: this filesystem's ID prefix and a
-// new UUIDv7. Every object the filesystem creates gets its key here, so one
-// prefix listing finds all of them.
-func (f *Filesystem) newKey() (string, error) {
-	raw, err := NewUUIDv7()
+// new UUIDv7, at the time of the change ctx makes (see changeTime), which
+// is the item's creation time. Every object the filesystem creates gets
+// its key here, so one prefix listing finds all of them.
+func (f *Filesystem) newKey(ctx context.Context) (string, error) {
+	raw, err := newUUIDv7At(changeTime(ctx))
 	if err != nil {
 		return "", err
 	}
@@ -319,7 +320,16 @@ func dirBlockEntries(entry *pb.FilesystemEntry) int {
 // filesystem doesn't exist in the store — for an AsOf view, if it hadn't
 // been created yet at that time.
 func (f *Filesystem) BootstrapReadOnly(ctx context.Context) error {
-	mb, _, err := readMaster(ctx, f.store)
+	// The master block is the bucket's, shared by its filesystems and
+	// dated by the store, while a filesystem's own history can start
+	// before the master was written (Settings.Created). A view reads the
+	// entry as it is now, whose settings are fixed at creation; whether
+	// the filesystem existed at the view's time is its root's to say.
+	masterStore := f.store
+	if v, ok := f.store.(*objstore.AsOf); ok {
+		masterStore = v.Live()
+	}
+	mb, _, err := readMaster(ctx, masterStore)
 	if err != nil {
 		return fmt.Errorf("filesystem %q: %w", f.fsName, mapNotFound(err))
 	}
@@ -336,6 +346,19 @@ func (f *Filesystem) BootstrapReadOnly(ctx context.Context) error {
 	if !found {
 		return fmt.Errorf("filesystem %q: %w", f.fsName, ErrNotFound)
 	}
+	if _, err := f.store.Head(ctx, f.RootKey()); err != nil {
+		return fmt.Errorf("filesystem %q root: %w", f.fsName, mapNotFound(err))
+	}
+	f.readOnly = true
+	return nil
+}
+
+// BootstrapViewOf is BootstrapReadOnly for a view of live, a filesystem
+// already attached: its settings are live's, with no read of the master.
+func (f *Filesystem) BootstrapViewOf(ctx context.Context, live *Filesystem) error {
+	f.fsName = live.fsName
+	f.id, f.archived, f.primaryWindows = live.id, live.archived, live.primaryWindows
+	f.maxFileSize, f.dirBlockEntries = live.maxFileSize, live.dirBlockEntries
 	if _, err := f.store.Head(ctx, f.RootKey()); err != nil {
 		return fmt.Errorf("filesystem %q root: %w", f.fsName, mapNotFound(err))
 	}
@@ -474,7 +497,7 @@ func combineFileAttr(key string, metaData []byte, metaLastModified time.Time, co
 	}
 	attr.mtimeOverrideETag = ""
 	if attr.Mtime.IsZero() {
-		attr.Mtime = contentObj.LastModified
+		attr.Mtime = contentObj.Time()
 		// S3's Last-Modified has 1-second resolution and is floored, so a
 		// write just after creation can report an mtime before the key's
 		// (millisecond) creation time. Content can't change before it
@@ -526,7 +549,7 @@ func combineDirAttr(key string, metaData []byte, metaLastModified time.Time, blo
 	attr.mtimeOverrideETag = ""
 	attr.Size = blockObj.Size
 	if attr.Mtime.IsZero() {
-		attr.Mtime = blockObj.LastModified
+		attr.Mtime = blockObj.Time()
 	}
 	if attr.Btime.IsZero() {
 		attr.Btime = Btime(key)
@@ -867,6 +890,9 @@ func (f *Filesystem) tryInsert(ctx context.Context, rootKey, name, uuid string, 
 // can't move, so it splits into two new blocks and becomes an internal
 // node over them.
 func (f *Filesystem) writeBack(ctx context.Context, rootKey string, step pathStep, blk *block.Block) error {
+	if err := checkOrder(ctx, step.obj); err != nil {
+		return err
+	}
 	overflowing := (blk.Kind == block.Leaf && len(blk.Entries) > f.dirBlockEntries) ||
 		(blk.Kind == block.Internal && len(blk.Children) > f.dirBlockEntries)
 	if !overflowing {
@@ -884,7 +910,7 @@ func (f *Filesystem) writeBack(ctx context.Context, rootKey string, step pathSte
 	} else {
 		left, right, sep = blk.SplitInternal()
 	}
-	rightKey, err := f.newKey()
+	rightKey, err := f.newKey(ctx)
 	if err != nil {
 		return err
 	}
@@ -894,7 +920,7 @@ func (f *Filesystem) writeBack(ctx context.Context, rootKey string, step pathSte
 	left.Right = rightKey
 
 	if step.key == rootKey {
-		leftKey, err := f.newKey()
+		leftKey, err := f.newKey(ctx)
 		if err != nil {
 			return err
 		}
@@ -1024,6 +1050,9 @@ func (f *Filesystem) tryRemove(ctx context.Context, rootKey, name string, check 
 			return block.Entry{}, err // nothing written: the removal was only in this copy
 		}
 	}
+	if err := checkOrder(ctx, leaf.obj); err != nil {
+		return block.Entry{}, err
+	}
 	data, err := leaf.blk.Encode()
 	if err != nil {
 		return block.Entry{}, err
@@ -1120,7 +1149,7 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 	if err := f.checkName(name); err != nil {
 		return "", Attr{}, err
 	}
-	newUUID, err := f.newKey()
+	newUUID, err := f.newKey(ctx)
 	if err != nil {
 		return "", Attr{}, err
 	}
@@ -1129,7 +1158,7 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 		return "", Attr{}, err
 	}
 	now := time.Now()
-	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1, Mtime: now, Ctime: now}
+	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1, Mtime: changeTime(ctx), Ctime: now}
 	if err := f.inheritACLs(ctx, dirKey, &attr, true); err != nil {
 		return "", Attr{}, err
 	}
@@ -1172,7 +1201,7 @@ func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid,
 	if err := f.checkName(name); err != nil {
 		return "", Attr{}, "", err
 	}
-	newUUID, err := f.newKey()
+	newUUID, err := f.newKey(ctx)
 	if err != nil {
 		return "", Attr{}, "", err
 	}
@@ -1227,7 +1256,7 @@ func (f *Filesystem) Mknod(ctx context.Context, dirKey, name string, mode uint32
 	if err := f.checkName(name); err != nil {
 		return "", Attr{}, err
 	}
-	newUUID, err := f.newKey()
+	newUUID, err := f.newKey(ctx)
 	if err != nil {
 		return "", Attr{}, err
 	}
@@ -1279,7 +1308,7 @@ func (f *Filesystem) Symlink(ctx context.Context, dirKey, name, target string, u
 	if err := f.checkName(name); err != nil {
 		return "", Attr{}, err
 	}
-	newUUID, err := f.newKey()
+	newUUID, err := f.newKey(ctx)
 	if err != nil {
 		return "", Attr{}, err
 	}
@@ -1458,6 +1487,9 @@ func (f *Filesystem) writeMetadataIf(ctx context.Context, key string, statusChan
 		if !mutate(&attr) {
 			return nil
 		}
+		if err := checkOrder(ctx, obj); err != nil {
+			return err
+		}
 		if statusChange {
 			attr.Ctime = time.Now()
 		} else if attr.Ctime.IsZero() {
@@ -1487,8 +1519,12 @@ func (f *Filesystem) touchDir(ctx context.Context, key string) {
 	// so the two fell in different seconds whenever one ticked over in
 	// between (pjdfstest link/00.t on S3, where the round trip is long).
 	now := time.Now()
+	mtime := now
+	if t, ok := objstore.DeclaredTime(ctx); ok {
+		mtime = t
+	}
 	_ = f.writeMetadata(ctx, key, false, func(a *Attr) {
-		a.Mtime = now
+		a.Mtime = mtime
 		a.Ctime = now
 	})
 }

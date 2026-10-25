@@ -8,11 +8,11 @@ import (
 	"github.com/resurgentech/icbfs/internal/objstore"
 )
 
-// TestForgetPurgedClearsHistoryCaches: a history cache keeps a
+// TestForgetChangedPastClearsHistoryCaches: a history cache keeps a
 // directory's attributes and blocks, which name what was in it; after a
-// purge marks the filesystem, ForgetPurged drops them, and a past view
+// purge marks the filesystem, ForgetChangedPast drops them, and a past view
 // finds nothing there, as it would with no cache.
-func TestForgetPurgedClearsHistoryCaches(t *testing.T) {
+func TestForgetChangedPastClearsHistoryCaches(t *testing.T) {
 	f, store := newTestFilesystem(t)
 	ctx := context.Background()
 	root := f.RootKey()
@@ -57,20 +57,20 @@ func TestForgetPurgedClearsHistoryCaches(t *testing.T) {
 	if names, err := listDir(); err != nil || len(names) != 1 {
 		t.Fatalf("before the purge: %v, %v", names, err)
 	}
-	if _, err := ForgetPurged(ctx, f, hist); err != nil {
+	if _, err := ForgetChangedPast(ctx, f, hist); err != nil {
 		t.Fatalf("with no purge yet: %v", err)
 	}
 
 	if err := f.Purge(ctx, root, "d", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ForgetPurged(ctx, f, hist); err != nil {
+	if _, err := ForgetChangedPast(ctx, f, hist); err != nil {
 		t.Fatal(err)
 	}
 	if names, err := listDir(); err == nil {
 		t.Fatalf("after the purge, the directory as it was lists %v", names)
 	}
-	if note, err := hist.Note(ctx, "purged:"+f.id); err != nil || note == "" {
+	if note, err := hist.Note(ctx, "past:"+f.id); err != nil || note == "" {
 		t.Fatalf("the purge mark seen: %q, %v", note, err)
 	}
 }

@@ -85,7 +85,7 @@ func TestCheck(t *testing.T) {
 	}
 
 	// An object nothing leads to is counted, not a problem.
-	stray, err := fsys.newKey()
+	stray, err := fsys.newKey(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

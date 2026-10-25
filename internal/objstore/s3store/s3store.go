@@ -53,7 +53,7 @@ func (s *Store) Put(ctx context.Context, key string, body io.Reader, metadata ma
 		Bucket:   aws.String(s.bucket),
 		Key:      aws.String(s.k(key)),
 		Body:     body,
-		Metadata: metadata,
+		Metadata: objstore.Declare(ctx, metadata),
 	}
 	if ifMatch != "" {
 		in.IfMatch = aws.String(ifMatch)
@@ -117,7 +117,7 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 	up, err := s.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
 		Bucket:   aws.String(s.bucket),
 		Key:      aws.String(s.k(key)),
-		Metadata: metadata,
+		Metadata: objstore.Declare(ctx, metadata),
 	})
 	if err != nil {
 		return nil, s3Error(fmt.Errorf("put parts %s: %w", key, err))
@@ -222,7 +222,7 @@ func (s *Store) PutIfAbsent(ctx context.Context, key string, body io.Reader, met
 		Bucket:      aws.String(s.bucket),
 		Key:         aws.String(s.k(key)),
 		Body:        body,
-		Metadata:    metadata,
+		Metadata:    objstore.Declare(ctx, metadata),
 		IfNoneMatch: aws.String("*"),
 	}, retryConflicts)
 	if err != nil {
@@ -337,6 +337,9 @@ func (s *Store) listVersions(ctx context.Context, prefix string) ([]objstore.Obj
 				ETag:         aws.ToString(v.ETag),
 				Size:         aws.ToInt64(v.Size),
 				LastModified: aws.ToTime(v.LastModified),
+				// A listing has no user metadata; a declared time
+				// needs a HeadVersion.
+				MetadataUnknown: true,
 			}, latest: aws.ToBool(v.IsLatest), seq: seq})
 		}
 		for _, m := range out.DeleteMarkers {

@@ -200,9 +200,11 @@ func (d *Drive) trashedItem(ctx context.Context, itemID string) (drive.TrashEntr
 
 // Restore brings a deleted item back: to where it was, or to opts.To.
 func (d *Drive) Restore(ctx context.Context, id string, opts drive.RestoreOptions) (drive.Item, error) {
-	if err := d.writable(ctx); err != nil {
+	ctx, done, err := d.begin(ctx)
+	if err != nil {
 		return drive.Item{}, err
 	}
+	defer done()
 	_, te, err := d.trashEntry(ctx, id)
 	if err != nil {
 		return drive.Item{}, err
@@ -242,9 +244,12 @@ func (d *Drive) Restore(ctx context.Context, id string, opts drive.RestoreOption
 
 // Purge permanently deletes a live or trashed item.
 func (d *Drive) Purge(ctx context.Context, ref drive.ItemRef, allNames bool) error {
-	if err := d.writable(ctx); err != nil {
+	ctx, done, err := d.begin(ctx)
+	if err != nil {
 		return err
 	}
+	defer done()
+	defer d.views.lookAgain() // a purge changes the past
 	n, err := d.resolve(ctx, d.fs, ref)
 	if err == nil {
 		if n.path == "/" {

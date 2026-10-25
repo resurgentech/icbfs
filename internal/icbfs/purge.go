@@ -1,14 +1,11 @@
 package icbfs
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 
 	"github.com/resurgentech/icbfs/internal/block"
-	"github.com/resurgentech/icbfs/internal/objstore"
 )
 
 // ErrHasLinks: a permanent delete of a file that still has other names.
@@ -126,48 +123,18 @@ func (f *Filesystem) PurgeTrash(ctx context.Context, entryID string) error {
 	return f.eraseAndMark(ctx, items)
 }
 
-// eraseItems erases every version of each item's objects, then its trash
-// entries.
-// eraseAndMark erases items, then marks the filesystem purged, even if
-// the erase failed partway: some of it may be gone.
+// eraseAndMark erases items, then marks the filesystem's past changed,
+// even if the erase failed partway: some of it may be gone.
 func (f *Filesystem) eraseAndMark(ctx context.Context, items []block.Entry) error {
 	err := f.eraseItems(ctx, items)
-	if _, markErr := f.store.Put(ctx, f.purgedKey(), bytes.NewReader(nil), nil, ""); err == nil {
+	if markErr := f.MarkPastChanged(ctx); err == nil {
 		err = markErr
 	}
 	return err
 }
 
-// purgedKey is an empty object every purge writes again once it has
-// erased: a new version of it tells history caches, which can't tell an
-// erased version from one they hold, to drop what they kept of this
-// filesystem (ForgetPurged).
-func (f *Filesystem) purgedKey() string { return f.id + "-purged" }
-
-// ForgetPurged makes cache drop everything it kept of live's filesystem
-// if a purge has marked it since the cache last looked, and reports
-// whether it did. live is the filesystem attached to the live store, not
-// a past view.
-func ForgetPurged(ctx context.Context, live *Filesystem, cache *objstore.HistoryCache) (bool, error) {
-	mark := ""
-	obj, err := live.store.Head(ctx, live.purgedKey())
-	switch {
-	case err == nil:
-		mark = obj.VersionID
-	case !objstore.IsNotFound(err):
-		return false, err
-	}
-	note := "purged:" + live.id
-	seen, err := cache.Note(ctx, note)
-	if err != nil || seen == mark {
-		return false, err
-	}
-	if err := cache.ForgetUnder(ctx, live.prefix()); err != nil {
-		return false, err
-	}
-	return true, cache.SetNote(ctx, note, mark)
-}
-
+// eraseItems erases every version of each item's objects, then its trash
+// entries.
 func (f *Filesystem) eraseItems(ctx context.Context, items []block.Entry) error {
 	erased := map[string]bool{}
 	for _, it := range items {
@@ -212,47 +179,13 @@ func (f *Filesystem) eraseItems(ctx context.Context, items []block.Entry) error 
 // under other keys: every version of its root block names the child
 // blocks it had then, and theirs theirs.
 func (f *Filesystem) eraseDirBlocks(ctx context.Context, rootKey string) error {
-	seen := map[string]bool{rootKey: true}
-	queue := []string{rootKey}
-	for len(queue) > 0 {
-		key := queue[0]
-		queue = queue[1:]
-		versions, err := f.store.History(ctx, key)
-		if err != nil {
+	keys, _, err := f.dirBlockHistory(ctx, rootKey)
+	if err != nil {
+		return err
+	}
+	for _, k := range keys[1:] {
+		if err := f.store.EraseAll(ctx, k); err != nil {
 			return err
-		}
-		for _, v := range versions {
-			if v.Deleted {
-				continue
-			}
-			body, _, err := f.store.GetVersion(ctx, key, v.VersionID)
-			if err != nil {
-				continue
-			}
-			data, err := io.ReadAll(body)
-			body.Close()
-			if err != nil {
-				return err
-			}
-			blk, err := block.Decode(data)
-			if err != nil {
-				continue
-			}
-			next := []string{blk.Right}
-			for _, c := range blk.Children {
-				next = append(next, c.UUID)
-			}
-			for _, k := range next {
-				if k != "" && !seen[k] {
-					seen[k] = true
-					queue = append(queue, k)
-				}
-			}
-		}
-		if key != rootKey {
-			if err := f.store.EraseAll(ctx, key); err != nil {
-				return err
-			}
 		}
 	}
 	return nil
