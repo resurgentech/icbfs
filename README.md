@@ -78,8 +78,8 @@ flowchart LR
 | **Past views** | mount read-only as of any time (`-as-of 2026-10-12T15:04`) or a named version |
 | **Named versions** | a name for a moment: a snapshot that copies nothing |
 | **Trash** | every delete recorded forever; restore with full history; permanent purge |
-| **POSIX** | modes, owners, POSIX ACLs (enforced by the kernel, default ACLs inherited), extended attributes, hard links, symlinks, FIFOs, sockets, device nodes, `utimensat` |
-| **Windows** | security descriptors (SDDL), ACL inheritance, attribute bits, alternate data streams, case-insensitive lookup, share modes |
+| **POSIX** | modes, owners, POSIX ACLs (enforced by the kernel, default ACLs inherited), extended attributes, hard links, symlinks, FIFOs, sockets, device nodes, `utimensat`, creation times (`statx`) |
+| **Windows** | security descriptors (SDDL), ACL inheritance, attribute bits, alternate data streams, creation times, case-insensitive lookup, share modes |
 | **Large files** | multipart uploads that send only the parts an edit changed; per-filesystem max file size (default 1 TiB) |
 | **Locking** | `flock`/`fcntl` byte-range locks shared between Linux mounts, with leases (on by default) |
 | **Drive API** | HTTP API and Go library: browse, read, write, versions, diffs, drafts, trash, copy between drives, permissions checked per item |
@@ -101,22 +101,44 @@ flowchart LR
 ## Status
 
 The core filesystem, both mounts, the drive API, and icbfs-sync are built
-and tested against MinIO. The latest runs, on 2026-10-16 (the last three
-rows on 2026-10-14):
+and tested, against MinIO and, for the store layer and a short
+multi-machine set, AWS S3 and Azure Blob Storage. What has been tested:
 
-| suite | where | result |
-|---|---|---|
-| Go tests (`go test -race ./...`) | Linux, MinIO in Docker, real FUSE mounts | all 19 packages with tests pass |
-| [pjdfstest](https://github.com/pjd/pjdfstest) (POSIX conformance) | FUSE mount, Ubuntu 24.04 VM | 8,798 assertions: all pass but 4 accepted (directory link count, as on Btrfs) |
-| [xfstests](https://git.kernel.org/pub/scm/fs/xfs/xfstests-dev.git) `-g quick` (Linux's own regression suite) | FUSE mount, Ubuntu 24.04 VM | 647 tests: 169 pass, 467 don't apply (reflink, block devices, quotas, ...), 11 fail, each for a listed reason outside icbfs |
-| Several machines on one filesystem (create storms, `O_EXCL`, counters and logs under `flock`, renames, fsstress), then `fs check` | 3 Linux VMs, one MinIO | all pass; `fs check` clean |
-| [winfsp-tests](https://github.com/winfsp/winfsp/wiki/WinFsp-Testing) `--external`, case-insensitive | WinFsp mount, Windows Server 2025 VM | 78 / 78 |
-| winfsp-tests `--external`, case-sensitive | same | 77 / 78 (`getfileinfo_name_test`, which WinFsp's memfs also fails case-sensitive) |
-| Logging chain end to end | Linux VM | 5 / 5 checks |
-| icbfs-sync end to end | Windows Server 2025 VM | 12 / 12 checks |
-| Large files (6 GiB, multipart edits, max size) | Linux VM | 7 / 7 checks |
-| Object store conformance on real stores | AWS S3 (us-east-1), Azure Blob Storage (westus2) | 14 / 14 on each |
-| Two machines on AWS S3 and on Azure (smoke, create storm, `O_EXCL`, counter under `flock`), then `fs check` | Linux VMs | all pass; `fs check` clean |
+- **icbfs's own Go tests**, with the race detector, against a real MinIO
+  and real FUSE mounts.
+- **POSIX conformance:** [pjdfstest](https://github.com/pjd/pjdfstest)'s
+  8,798 assertions on a FUSE mount all pass but 4 accepted (a directory's
+  link count, as on Btrfs).
+- **Linux's own regression suite:**
+  [xfstests](https://git.kernel.org/pub/scm/fs/xfs/xfstests-dev.git)' quick
+  group. Of its tests that apply (most of the rest need reflinks, block
+  devices or quotas), all pass but 11, each for a listed reason outside
+  icbfs.
+- **NFS's Connectathon suite** (cthon04): the basic, general, special and
+  lock tests pass.
+- **Windows conformance:** [winfsp-tests](https://github.com/winfsp/winfsp/wiki/WinFsp-Testing)
+  `--external` all pass case-insensitive, and case-sensitive all but
+  `getfileinfo_name_test`, which WinFsp's own memfs fails too.
+- **Several machines on one filesystem:** create storms, `O_EXCL`,
+  counters and logs under `flock`, renames and fsstress, then a clean
+  `fs check`.
+- **Metadata through ordinary copies** ([test/metadata](test/metadata/README.md)):
+  a tree of the hard cases (times before 1970 and after 2038, creation
+  times, setuid and sticky modes, unnamed owners, extended attributes,
+  POSIX and Windows ACLs, attribute bits, alternate data streams, symlinks,
+  hard links) copied onto a mount and onto a local disk, and the copies
+  compared field by field.
+  - Linux: `cp -a`, `cp -rp`, `rsync -aAXH` and `tar --xattrs --acls`
+    keep exactly what they keep on a local disk.
+  - Windows: robocopy (`/COPY:DAT` and `/COPY:DATSO`), `Copy-Item` and DISM
+    keep exactly what they keep on NTFS. `xcopy /O` loses the inherited
+    entries of the ACLs it copies (WinFsp drops them at create); use
+    `robocopy /SEC`. Hard links can't be made on a Windows mount (WinFsp
+    has no way to).
+- **End to end:** the managed-mount logging chain, icbfs-sync against a
+  drive, and large files (6 GiB, multipart edits, the maximum size).
+- **The store layer** on AWS S3 and Azure Blob Storage: its conformance
+  suite, and two machines sharing a filesystem on each.
 
 **Not yet tested:**
 
@@ -128,7 +150,8 @@ rows on 2026-10-14):
 - **Scale:** millions of files, many concurrent machines, and performance
   generally.
 
-[docs/testing.md](docs/testing.md) has the details and the known issues.
+[docs/testing.md](docs/testing.md) has the latest results, how to run each
+suite, and the known issues.
 
 ## Building
 
@@ -232,8 +255,13 @@ internal/
 pkg/
   drive/        the drive library, icbfs backend, and HTTP handlers
   icbfs/        opening a store; filesystem administration
+  history/      a filesystem's past for programs that browse it: folders at
+                any moment, a file's versions, search including the trash
+  icbfstest/    a throwaway MinIO for other modules' tests
 spec/           Protobuf schemas and the OpenAPI spec
 test/           VM test environments and runners
+  metadata/     the metadata copy tests: a reference tree and the tools that
+                copy it
 third_party/go-winfsp/   vendored WinFsp binding, patched
 ```
 
