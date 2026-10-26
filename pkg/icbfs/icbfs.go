@@ -101,6 +101,14 @@ func CreateFilesystem(ctx context.Context, store Store, s Settings) (Info, error
 	return core.CreateFilesystem(ctx, store, s)
 }
 
+// DefaultSettings is a filesystem called name with the defaults icbfs-cli
+// fs create uses: primary-POSIX, 100 GiB declared, the root mode 0755
+// owned by uid and gid 0 (icbfs-cli makes those the caller's). Change
+// what you need, then CreateFilesystem.
+func DefaultSettings(name string) Settings {
+	return core.DefaultSettings(name)
+}
+
 // ListFilesystems lists a bucket's filesystems.
 func ListFilesystems(ctx context.Context, store Store) ([]Info, error) {
 	return core.ListFilesystems(ctx, store)

@@ -94,16 +94,15 @@ func runStorage(ctx context.Context, store objstore.Store, r Request) (any, erro
 	a := args(r.Args)
 	switch r.Name {
 	case "fs create":
-		var s icbfs.Settings
+		s := icbfs.DefaultSettings(a.str("fs"))
 		var err error
-		s.Name = a.str("fs")
 		s.PrimaryWindows = a.bool("primary-windows")
 		var mode, uid, gid uint64
 		for _, f := range []struct {
 			k   string
 			def uint64
 			to  *uint64
-		}{{"size", 100 << 30, &s.Size}, {"max-file-size", 0, &s.MaxFileSize}, {"root-mode", 0o755, &mode}, {"root-uid", 0, &uid}, {"root-gid", 0, &gid}} {
+		}{{"size", s.Size, &s.Size}, {"max-file-size", 0, &s.MaxFileSize}, {"root-mode", uint64(s.RootMode), &mode}, {"root-uid", 0, &uid}, {"root-gid", 0, &gid}} {
 			if *f.to, err = a.uint(f.k, f.def); err != nil {
 				return nil, err
 			}

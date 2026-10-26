@@ -495,12 +495,19 @@ func (d *Drive) walkBelow(ctx context.Context, n *node, fn func(*node) error) er
 	return nil
 }
 
-// begin starts a change. It fails if the filesystem has been archived
-// (since this drive attached, too: one read of the master block per
-// change), and dates everything the change writes at ctx's source time,
-// if it has one (drive.WithSourceTime). done, to be deferred, then tells
-// history caches that the past has changed.
+// errDriveReadOnly is what a change through a Config.ReadOnly drive gets.
+var errDriveReadOnly = fmt.Errorf("the drive is read-only: %w", drive.ErrReadOnly)
+
+// begin starts a change. It fails if the drive is read-only or the
+// filesystem has been archived (since this drive attached, too: one read
+// of the master block per change), and dates everything the change
+// writes at ctx's source time, if it has one (drive.WithSourceTime).
+// done, to be deferred, then tells history caches that the past has
+// changed.
 func (d *Drive) begin(ctx context.Context) (context.Context, func(), error) {
+	if d.cfg.ReadOnly {
+		return ctx, nil, errDriveReadOnly
+	}
 	if err := d.fs.Refresh(ctx); err != nil {
 		return ctx, nil, mapErr(err)
 	}

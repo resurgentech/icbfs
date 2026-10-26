@@ -305,8 +305,17 @@ drive) unless it's `ByMode`.
 | `bucket.admin` | create, resize and archive filesystems |
 | `bucket.prune` | prune a filesystem |
 
-A drive has no "writable" switch. Whether an actor may write is whether it
-holds `drive.write`.
+Whether an actor may write is whether it holds `drive.write`. The one
+switch is `icbfsdrive.Config.ReadOnly` (`readOnly` on a standalone
+drive): every change through that drive fails with `read_only`, whatever
+the actor's permissions, for a filesystem something else writes (a
+mirror's) and users may only read.
+
+A program that owns a drive, a mirror daemon writing its own filesystem,
+a sync engine, an administrative tool, acts as the system:
+`drive.AsSystem(ctx, actor)` is a context with the `System` profile and
+the actor's name for the records operations leave. Never for a user's
+request, which gets the user's own profile.
 
 A trashed item has no directory left to check against, so the drive's
 root is checked instead: reading its versions needs read access there, and
@@ -418,13 +427,16 @@ defer d.Close()
 - `pkg/icbfs` opens a store (`Open`, or `OpenS3` and `OpenAzure`) and
   administers its filesystems: `CreateFilesystem`, `ListFilesystems`,
   `DescribeFilesystem` (with the bytes used), `Resize`, `Archive` and
-  `Prune` (archived filesystems only). `WatchMinIO` is below, under change
-  events.
+  `Prune` (archived filesystems only). `DefaultSettings(name)` is a
+  filesystem with `icbfs-cli fs create`'s defaults (primary-POSIX, 100 GiB
+  declared, root mode 0755), to change what's needed and create.
+  `WatchMinIO` is below, under change events.
 - `icbfsdrive.Config` names the filesystem, the drive's root directory in
   it, and the drive's registry `ID` (recorded in the origin of copies made
   from it). `History` is a history cache to share with other views; without
   one the drive opens a temporary one in `CacheDir`, which `Close` removes.
-  `Filesystem` returns the drive's icbfs filesystem.
+  `ReadOnly` refuses every change (see Permissions). `Filesystem` returns
+  the drive's icbfs filesystem.
 - `icbfsdrive.OpenSideStore(ctx, store, name)` opens a side store,
   creating its filesystem the first time.
 - `pkg/icbfstest` is for tests of programs built on icbfs: `Store(t)` is
@@ -617,7 +629,7 @@ in `currentVersion`, as well as in the `x-drive-current-version` header.
 | a malformed request | 400 | `invalid` |
 | the content doesn't match `X-Drive-MD5` or `X-Drive-SHA256` | 400 | `checksum_mismatch` |
 | past the max file size | 413 | `too_large` |
-| write to an as-of view or an archived filesystem; prune of one that isn't archived | 409 | `read_only` |
+| write to an as-of view, a read-only drive or an archived filesystem; prune of one that isn't archived | 409 | `read_only` |
 | write contention exhausted the retries | 503 | `busy` |
 | anything else | 500 | `internal` |
 
@@ -656,7 +668,8 @@ The configuration (`driveapi.Standalone`) stands in for a host:
 - Requests carry `Authorization: Bearer <token>` and `X-Drive-Actor: <actor>`.
 - An actor not listed in `permissions` has every permission.
 - `driveProfiles` gives a drive its own profiles, and `bucketSideStores`
-  gives a bucket its own side store.
+  gives a bucket its own side store. A drive with `"readOnly": true`
+  refuses every change.
 - `notify` feeds a bucket's drives' event streams with changes made
   elsewhere (`"minio"`).
 - `cacheDir` holds the drives' temporary files, as-of reads' history

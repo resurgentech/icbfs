@@ -72,6 +72,9 @@ func (d *Drive) CreateName(ctx context.Context, name string, at time.Time, files
 	if _, err := profile(ctx); err != nil {
 		return drive.Name{}, err
 	}
+	if d.cfg.ReadOnly {
+		return drive.Name{}, errDriveReadOnly
+	}
 	scope := d.root
 	if filesystemWide {
 		scope = ""
@@ -93,6 +96,9 @@ func (d *Drive) CreateName(ctx context.Context, name string, at time.Time, files
 func (d *Drive) DeleteName(ctx context.Context, name string) error {
 	if _, err := profile(ctx); err != nil {
 		return err
+	}
+	if d.cfg.ReadOnly {
+		return errDriveReadOnly
 	}
 	if _, err := d.lookupName(ctx, name); err != nil {
 		return err

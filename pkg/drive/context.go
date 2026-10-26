@@ -95,3 +95,12 @@ func ProfileFrom(ctx context.Context) (Profile, bool) {
 	p, ok := ctx.Value(profileKey{}).(Profile)
 	return p, ok
 }
+
+// AsSystem is the context a program that owns a drive acts under: the
+// system profile, which no item's permissions refuse, with actor as who
+// acts (WithActor). For a daemon mirroring into its own filesystem, a
+// sync engine, an administrative tool; never for a user's request, which
+// gets the user's own Profile.
+func AsSystem(ctx context.Context, actor string) context.Context {
+	return WithProfile(WithActor(ctx, actor), Profile{System: true})
+}

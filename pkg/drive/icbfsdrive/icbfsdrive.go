@@ -33,6 +33,11 @@ type Config struct {
 	// CacheDir holds the drive's temporary files ("" for the temp
 	// directory).
 	CacheDir string
+	// ReadOnly makes every change through this drive fail with
+	// drive.ErrReadOnly, whatever the actor's profile and the item's
+	// permissions: a host serving a filesystem something else writes (a
+	// mirror's) to users who may only read it. Reads are as usual.
+	ReadOnly bool
 }
 
 // Drive is an icbfs drive.

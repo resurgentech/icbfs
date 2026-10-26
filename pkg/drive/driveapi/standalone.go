@@ -61,6 +61,9 @@ type StandaloneDrive struct {
 	Bucket     string `json:"bucket"`
 	Filesystem string `json:"filesystem"`
 	Root       string `json:"root"`
+	// ReadOnly refuses every change through the API (read_only), whatever
+	// the actor's permissions: a mirror's filesystem served to its readers.
+	ReadOnly bool `json:"readOnly,omitempty"`
 }
 
 // Config turns the standalone configuration into the handlers' Config.
@@ -100,7 +103,7 @@ func (st *Standalone) Config(ctx context.Context) (Config, func(), error) {
 			if !ok {
 				return nil, DriveEntry{}, fmt.Errorf("drive %s's bucket %s: %w", id, sd.Bucket, drive.ErrNotFound)
 			}
-			d, err := icbfsdrive.New(ctx, icbfsdrive.Config{Store: store, Filesystem: sd.Filesystem, Root: sd.Root, ID: id, CacheDir: st.CacheDir})
+			d, err := icbfsdrive.New(ctx, icbfsdrive.Config{Store: store, Filesystem: sd.Filesystem, Root: sd.Root, ID: id, CacheDir: st.CacheDir, ReadOnly: sd.ReadOnly})
 			if err != nil {
 				return nil, DriveEntry{}, err
 			}

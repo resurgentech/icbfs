@@ -54,6 +54,22 @@ type Info struct {
 	FormatVersion   int       // its objects' format as a whole (see FormatVersion)
 }
 
+// DefaultSettings is a filesystem called name with the defaults icbfs-cli
+// fs create uses: primary-POSIX, DefaultSize declared, the largest file
+// DefaultMaxFileSize, the root mode DefaultRootMode, owned by uid and gid
+// 0 (icbfs-cli makes those the caller's). A host that wants "a
+// filesystem called X" creates this, changing what it needs.
+func DefaultSettings(name string) Settings {
+	return Settings{Name: name, Size: DefaultSize, RootMode: DefaultRootMode}
+}
+
+// DefaultRootMode is DefaultSettings' root folder mode.
+const DefaultRootMode = 0o755
+
+// DefaultSize is DefaultSettings' declared capacity: what df shows,
+// changeable later (Resize).
+const DefaultSize = 100 << 30
+
 // filesystemName is what a filesystem may be called: it's part of the
 // root's object key, so it's kept to characters every store takes.
 var filesystemName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
