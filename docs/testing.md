@@ -68,7 +68,7 @@ What they cover:
 | `internal/acl` | the Windows access check and inheritance |
 | `internal/notify/...` | MinIO notifications for real; SQS and Azure against fakes |
 | `internal/logd`, `logserver`, `fslog`, `sidecmd` | the daemon chain |
-| `pkg/drive/...` | the drive library, the icbfs backend, the HTTP handlers, drafts, copy, diff, mirroring, times |
+| `pkg/drive/...` | the drive library, the icbfs backend, the HTTP handlers, drafts, copy, diff, mirroring, times, and a ceiling on the store requests each mirror operation and a listing take |
 | `pkg/history` | a filesystem's past for programs browsing it, and that revisiting a moment costs no store requests |
 | `internal/namecache` | the mounts' name cache |
 | `internal/storeconfig`, `internal/storeflags` | store configurations and the store flags |
