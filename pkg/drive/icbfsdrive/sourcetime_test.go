@@ -44,8 +44,12 @@ func TestVersionsInSourceTime(t *testing.T) {
 		year int
 		body string
 	}{{2021, "first"}, {2022, "second"}, {2023, "third"}} {
-		if _, err := d.Write(at(system(), v.year), "/doc.txt", strings.NewReader(v.body), drive.Condition{}, drive.WriteOptions{}); err != nil {
+		it, err := d.Write(at(system(), v.year), "/doc.txt", strings.NewReader(v.body), drive.Condition{}, drive.WriteOptions{})
+		if err != nil {
 			t.Fatalf("write %d: %v", v.year, err)
+		}
+		if it.Version == nil || !it.Version.Time.Equal(year(v.year)) {
+			t.Fatalf("write %d returned version %+v, want it dated then", v.year, it.Version)
 		}
 	}
 	versions, err := d.Versions(system(), drive.ByPath("/doc.txt"))

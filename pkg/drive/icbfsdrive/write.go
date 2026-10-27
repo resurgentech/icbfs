@@ -111,7 +111,7 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 				return drive.Item{}, err
 			}
 			d.changed(parent)
-			return d.item(ctx, n, true), nil
+			return d.written(ctx, n), nil
 		}
 		if !errors.Is(mapErr(lerr), drive.ErrNotFound) {
 			return drive.Item{}, mapErr(lerr)
@@ -137,9 +137,24 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 		}
 		d.changed(parent)
 		d.idPaths.put(n.key, n.path)
-		return d.item(ctx, n, true), nil
+		return d.written(ctx, n), nil
 	}
 	return drive.Item{}, drive.ErrBusy
+}
+
+// written is file n's item as a write just left it: in source time its
+// version is dated then, which its .version record will say once the
+// operation is done.
+func (d *Drive) written(ctx context.Context, n *node) drive.Item {
+	t, ok := drive.SourceTime(ctx)
+	if !ok {
+		return d.item(ctx, n, true)
+	}
+	it := d.item(ctx, n, false)
+	if obj, ok := n.attr.ContentVersion(); ok {
+		it.Version = d.currentVersion(ctx, n, objstore.Dates{obj.VersionID: t})
+	}
+	return it
 }
 
 // readBody reads up to the filesystem's max file size: into memory when

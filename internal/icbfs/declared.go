@@ -63,9 +63,11 @@ func undeclared(ctx context.Context) context.Context {
 // this filesystem's store, which records them (objstore.Recording).
 func (f *Filesystem) RecordDates(ctx context.Context, rec *objstore.Recorder) (restored map[string]bool, err error) {
 	ctx = undeclared(ctx)
-	byBase := rec.Dates()
-	for base, dates := range byBase {
-		if err := objstore.AddDates(ctx, f.store, base, dates); err != nil {
+	// Each item's table as written, for restoreCurrent; an item the
+	// operation made has none to read first, and nothing to put right.
+	tables := map[string]objstore.Dates{}
+	for base, dates := range rec.Dates() {
+		if tables[base], err = objstore.MergeDates(ctx, f.store, base, dates, rec.Fresh(base)); err != nil {
 			return nil, err
 		}
 	}
@@ -83,7 +85,10 @@ func (f *Filesystem) RecordDates(ctx context.Context, rec *objstore.Recorder) (r
 		pending[w.Key] = true
 	}
 	for _, w := range written {
-		did, err := f.restoreCurrent(ctx, w, byBase[objstore.BaseKey(w.Key)], rekeys, pending)
+		if rec.IsNew(objstore.BaseKey(w.Key)) {
+			continue // all its versions are this operation's, dated alike: the newest is current
+		}
+		did, err := f.restoreCurrent(ctx, w, tables, rekeys, pending)
 		if err != nil {
 			return restored, err
 		}
@@ -113,10 +118,11 @@ func rekeyETag(a *Attr, old, new string) {
 // that should be current current again: if the key's newest version by
 // effective date isn't its newest stored one, that version is copied on
 // top (server-side for content, read and written back for the small
-// objects), dated as it was, and reported. A directory's blocks are the
-// directory's to put right (the drive rewrites the copies from w.At on);
-// they're left.
-func (f *Filesystem) restoreCurrent(ctx context.Context, w objstore.Written, written objstore.Dates, rekeys map[string][2]string, pending map[string]bool) (bool, error) {
+// objects), dated as it was, and reported. tables holds each item's
+// .version table as RecordDates wrote it, kept up to date here. A
+// directory's blocks are the directory's to put right (the drive
+// rewrites the copies from w.At on); they're left.
+func (f *Filesystem) restoreCurrent(ctx context.Context, w objstore.Written, tables map[string]objstore.Dates, rekeys map[string][2]string, pending map[string]bool) (bool, error) {
 	if w.Dir != "" {
 		return false, nil
 	}
@@ -127,13 +133,7 @@ func (f *Filesystem) restoreCurrent(ctx context.Context, w objstore.Written, wri
 	if len(history) == 0 || history[0].VersionID != w.VersionID {
 		return false, nil // something newer since, or gone: not ours to put right
 	}
-	dates, err := objstore.ReadDates(ctx, f.store, objstore.BaseKey(w.Key))
-	if err != nil {
-		return false, err
-	}
-	for id, t := range written {
-		dates[id] = t
-	}
+	dates := tables[objstore.BaseKey(w.Key)]
 	want, ok := dates.Pick(history, time.Now().Add(time.Hour))
 	if !ok || want.VersionID == w.VersionID {
 		return false, nil // what was written is current, as it should be
@@ -166,7 +166,7 @@ func (f *Filesystem) restoreCurrent(ctx context.Context, w objstore.Written, wri
 	if err != nil {
 		return false, err
 	}
-	if err := objstore.AddDates(ctx, f.store, objstore.BaseKey(w.Key), objstore.Dates{obj.VersionID: dates.Time(&want)}); err != nil {
+	if tables[base], err = objstore.MergeDates(ctx, f.store, base, objstore.Dates{obj.VersionID: dates.Time(&want)}, false); err != nil {
 		return false, err
 	}
 	// The copy is the version now; the one it was copied from is the

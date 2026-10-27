@@ -143,10 +143,19 @@ func readDates(ctx context.Context, store Store, base string) (Dates, *Object, e
 // AddDates merges add into base's override table, under compare-and-swap.
 // Nothing is written for an empty add.
 func AddDates(ctx context.Context, store Store, base string, add Dates) error {
+	_, err := MergeDates(ctx, store, base, add, false)
+	return err
+}
+
+// MergeDates is AddDates returning base's table as it wrote it. fresh
+// says base has no .version yet, being an item the operation made
+// (Recorder.IsNew): the record is written without reading it first,
+// unless it turns out to be there after all.
+func MergeDates(ctx context.Context, store Store, base string, add Dates, fresh bool) (Dates, error) {
 	if len(add) == 0 {
-		return nil
+		return ReadDates(ctx, store, base)
 	}
-	return writeDates(ctx, store, base, func(d Dates) Dates {
+	return writeDates(ctx, store, base, fresh, func(d Dates) Dates {
 		for id, t := range add {
 			d[id] = t
 		}
@@ -164,31 +173,41 @@ func SetDates(ctx context.Context, store Store, base string, dates Dates) error 
 		}
 		return err
 	}
-	return writeDates(ctx, store, base, func(Dates) Dates { return dates })
+	_, err := writeDates(ctx, store, base, false, func(Dates) Dates { return dates })
+	return err
 }
 
-func writeDates(ctx context.Context, store Store, base string, mutate func(Dates) Dates) error {
+// writeDates writes mutate's base's table and returns it; with fresh, it
+// takes there to be none for the first try, reading nothing.
+func writeDates(ctx context.Context, store Store, base string, fresh bool, mutate func(Dates) Dates) (Dates, error) {
 	ctx = WithoutDeclaredTime(ctx) // the record is news now, not part of the history it records
 	key := base + VersionSuffix
 	for attempt := 0; attempt < 8; attempt++ {
-		cur, obj, err := readDates(ctx, store, base)
-		if err != nil {
-			return err
+		cur, obj := Dates{}, (*Object)(nil)
+		if !fresh || attempt > 0 {
+			var err error
+			if cur, obj, err = readDates(ctx, store, base); err != nil {
+				return nil, err
+			}
 		}
-		data, err := encodeDates(mutate(cur))
+		next := mutate(cur)
+		data, err := encodeDates(next)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if obj == nil {
 			_, err = store.PutIfAbsent(ctx, key, bytes.NewReader(data), nil)
 		} else {
 			_, err = store.Put(ctx, key, bytes.NewReader(data), nil, obj.ETag)
 		}
+		if err == nil {
+			return next, nil
+		}
 		if !IsPreconditionFailed(err) {
-			return err
+			return nil, err
 		}
 	}
-	return fmt.Errorf("write %s: lost the race %d times", key, 8)
+	return nil, fmt.Errorf("write %s: lost the race %d times", key, 8)
 }
 
 // --- Recording what a dated operation writes ---
@@ -216,6 +235,40 @@ func AsBlock(ctx context.Context, dir string) context.Context {
 type Recorder struct {
 	mu      sync.Mutex
 	written []Written
+	made    map[string]bool
+	absent  map[string]bool
+}
+
+// NoteNew tells ctx's Recorder, if it has one, that base is an item the
+// operation made: a key just minted, with no history before it.
+func NoteNew(ctx context.Context, base string) {
+	if rec, _ := ctx.Value(recorderKey{}).(*Recorder); rec != nil {
+		rec.mu.Lock()
+		if rec.made == nil {
+			rec.made = map[string]bool{}
+		}
+		rec.made[base] = true
+		rec.mu.Unlock()
+	}
+}
+
+// Fresh reports whether base likely has no .version record: an item
+// the operation made, or a key it wrote where there was none
+// (PutIfAbsent). A hint for MergeDates, which reads the record after all
+// if it's there.
+func (r *Recorder) Fresh(base string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.made[base] || r.absent[base]
+}
+
+// IsNew reports whether base is an item the operation made (NoteNew):
+// it has no .version record yet, and every version it has is one the
+// operation wrote, dated alike.
+func (r *Recorder) IsNew(base string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.made[base]
 }
 
 // Written is what was recorded so far.
@@ -294,6 +347,14 @@ func (r *recording) Put(ctx context.Context, key string, body io.Reader, metadat
 func (r *recording) PutIfAbsent(ctx context.Context, key string, body io.Reader, metadata map[string]string) (*Object, error) {
 	obj, err := r.Store.PutIfAbsent(ctx, key, body, metadata)
 	r.note(ctx, key, obj, err)
+	if rec, _ := ctx.Value(recorderKey{}).(*Recorder); rec != nil && err == nil && key == BaseKey(key) {
+		rec.mu.Lock()
+		if rec.absent == nil {
+			rec.absent = map[string]bool{}
+		}
+		rec.absent[key] = true
+		rec.mu.Unlock()
+	}
 	return obj, err
 }
 

@@ -172,15 +172,15 @@ var requestRuns = []struct {
 var requestCeilings = map[string][4]int{
 	// The first folder in source time also dates the root and marks the
 	// filesystem's past, once.
-	"new top-level folder":  {21, 78, 19, 76},
-	"new folder at depth 2": {27, 45, 19, 37},
-	"new file at depth 3":   {16, 32, 12, 28},
+	"new top-level folder":  {21, 71, 19, 69},
+	"new folder at depth 2": {27, 38, 19, 30},
+	"new file at depth 3":   {16, 23, 12, 19},
 	"the same file again":   {9, 10, 5, 6},
 	// And once more: the file's creation wrote its folder, which the
 	// drive then read again; a pass over unchanged files reads it once.
 	// The origin record and the file's stat, when trusting.
 	"the same file, a third time": {9, 10, 3, 4},
-	"a new version of it":         {23, 36, 11, 24},
+	"a new version of it":         {23, 32, 11, 20},
 	// The root, then a step per folder and the file's own stat: two
 	// requests each (a folder's are none when trusted), and its .version
 	// in source time.

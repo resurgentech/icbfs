@@ -587,7 +587,9 @@ the filesystem's history goes:
   versions of the item's content, `.metadata` and (for a directory) blocks
   that came to be at another time. The filesystem's store records what a
   dated operation writes (`objstore.Recording`, a `Recorder` in the
-  context), and the operation ends by dating it (`RecordDates`). A view
+  context), and the operation ends by dating it (`RecordDates`). An item
+  the operation made (a key it minted) has no record to read first and
+  nothing to put back on top, so dating it is one write. A view
   reads an item's current `.version` once (the record is the authority on
   the item's timeline, whatever the view's time) and picks each version
   by effective date from the cached listing. An ordinary filesystem has

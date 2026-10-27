@@ -384,24 +384,7 @@ func (d *Drive) item(ctx context.Context, n *node, withVersion bool) drive.Item 
 			it.Checksums = toChecksums(c)
 		}
 		if withVersion {
-			// The version the stat read; its .version record only if it
-			// has one.
-			obj, ok := n.attr.ContentVersion()
-			if !ok {
-				head, err := n.fsys.Store().Head(ctx, n.key)
-				obj, ok = objstore.Object{}, err == nil
-				if ok {
-					obj = *head
-				}
-			}
-			if ok {
-				dates := objstore.Dates{}
-				if n.attr.Dated() {
-					dates, _ = objstore.ReadDates(ctx, n.fsys.Store(), n.key)
-				}
-				it.Version = &drive.Version{ID: obj.VersionID, Time: dates.Time(&obj), Stored: obj.LastModified, Size: obj.Size, Current: true,
-					Checksums: toChecksums(n.attr.Checksums[obj.ETag])}
-			}
+			it.Version = d.currentVersion(ctx, n, nil)
 		}
 	case icbfs.TypeSymlink:
 		if t, err := n.fsys.Readlink(ctx, n.key); err == nil {
@@ -417,6 +400,27 @@ func (d *Drive) item(ctx context.Context, n *node, withVersion bool) drive.Item 
 		it.WindowsAttrs = &bits
 	}
 	return it
+}
+
+// currentVersion is file n's current version: the one its stat read,
+// dated by dates if given, else by its .version record if it has one.
+func (d *Drive) currentVersion(ctx context.Context, n *node, dates objstore.Dates) *drive.Version {
+	obj, ok := n.attr.ContentVersion()
+	if !ok {
+		head, err := n.fsys.Store().Head(ctx, n.key)
+		if err != nil {
+			return nil
+		}
+		obj = *head
+	}
+	if dates == nil {
+		dates = objstore.Dates{}
+		if n.attr.Dated() {
+			dates, _ = objstore.ReadDates(ctx, n.fsys.Store(), n.key)
+		}
+	}
+	return &drive.Version{ID: obj.VersionID, Time: dates.Time(&obj), Stored: obj.LastModified, Size: obj.Size, Current: true,
+		Checksums: toChecksums(n.attr.Checksums[obj.ETag])}
 }
 
 // visible: FIFOs, sockets and devices aren't items.

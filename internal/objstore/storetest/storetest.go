@@ -40,6 +40,7 @@ func Run(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	t.Run("AsOfAfterErase", func(t *testing.T) { asOfAfterErase(t, newStore) })
 	t.Run("HistoryCacheKeepsVersions", func(t *testing.T) { historyCacheKeepsVersions(t, newStore) })
 	t.Run("AsOfByVersionDates", func(t *testing.T) { asOfByVersionDates(t, newStore) })
+	t.Run("MergeDatesFresh", func(t *testing.T) { mergeDatesFresh(t, newStore) })
 }
 
 // pause lets the store's clock pass a whole second, so a time taken
@@ -909,5 +910,26 @@ func asOfByVersionDates(t *testing.T, newStore func(*testing.T) objstore.Store) 
 				t.Fatalf("as of %v (round %d): %d versions, %v; want %d", tc.at, round, len(versions), err, wantVersions)
 			}
 		}
+	}
+}
+
+// mergeDatesFresh: a merge told the item has no .version yet writes one
+// without reading, and if there is one after all, merges into it.
+func mergeDatesFresh(t *testing.T, newStore func(*testing.T) objstore.Store) {
+	store := newStore(t)
+	ctx := context.Background()
+	t1, t2 := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)
+	if got, err := objstore.MergeDates(ctx, store, "new", objstore.Dates{"v1": t1}, true); err != nil || len(got) != 1 {
+		t.Fatalf("fresh, none there: %v, %v", got, err)
+	}
+	if err := objstore.AddDates(ctx, store, "old", objstore.Dates{"v1": t1}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := objstore.MergeDates(ctx, store, "old", objstore.Dates{"v2": t2}, true)
+	if err != nil || !got["v1"].Equal(t1) || !got["v2"].Equal(t2) {
+		t.Fatalf("fresh, one there: %v, %v; want both", got, err)
+	}
+	if read, err := objstore.ReadDates(ctx, store, "old"); err != nil || len(read) != 2 {
+		t.Fatalf("read back: %v, %v; want both", read, err)
 	}
 }

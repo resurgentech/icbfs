@@ -232,7 +232,9 @@ func (f *Filesystem) newKey(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return f.id + "-" + raw, nil
+	key := f.id + "-" + raw
+	objstore.NoteNew(ctx, key)
+	return key, nil
 }
 
 // prefix returns the ID-prefix every object this filesystem owns is
