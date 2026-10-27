@@ -144,7 +144,7 @@ func (f *Filesystem) VersionChecksums(ctx context.Context, key, versionID string
 	if err != nil {
 		return Checksums{}, err
 	}
-	if !f.readOnly && !f.archived {
+	if !f.readOnly && !f.archived.Load() {
 		// Best effort: unrecorded, they're only computed again next time.
 		_ = f.SetChecksums(ctx, key, obj.ETag, c)
 	}

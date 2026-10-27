@@ -159,7 +159,7 @@ func (f *Filesystem) Attach(ctx context.Context) error {
 
 // Archived reports whether the filesystem is archived (read-only for
 // good), as of attaching or the last Refresh.
-func (f *Filesystem) Archived() bool { return f.archived }
+func (f *Filesystem) Archived() bool { return f.archived.Load() }
 
 // Refresh re-reads the filesystem's master block entry, so a filesystem
 // archived since it was attached stops taking writes.
@@ -170,7 +170,7 @@ func (f *Filesystem) Refresh(ctx context.Context) error {
 	}
 	for i, e := range mb.Filesystems {
 		if e.Name == f.fsName && fsID(i) == f.id {
-			f.archived = e.Archived
+			f.archived.Store(e.Archived)
 			return nil
 		}
 	}

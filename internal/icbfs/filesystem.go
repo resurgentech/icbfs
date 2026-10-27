@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/resurgentech/icbfs/internal/block"
@@ -81,17 +82,17 @@ func retryPause(ctx context.Context, attempt int) {
 type Filesystem struct {
 	store              objstore.Store
 	fsName             string
-	id                 string // 4-hex-digit prefix, set by Bootstrap
-	archived           bool   // set by Bootstrap; see ErrArchived
-	readOnly           bool   // set by BootstrapReadOnly; see ErrReadOnly
-	primaryWindows     bool   // set by Bootstrap from the stored master-block value; see PrimaryWindows
-	maxFileSize        int64  // set by Bootstrap from the stored master-block value; see MaxFileSize
-	newMaxFileSize     uint64 // the max file size a filesystem gets if Bootstrap creates it; see SetCreationMaxFileSize
-	dirBlockEntries    int    // from the master-block entry; see DefaultDirBlockEntries
-	newDirBlockEntries uint32 // what a filesystem gets if Bootstrap creates it; see SetCreationDirBlockEntries
-	mountID            string // this Filesystem's identity in lock holders; see LockHolder
-	lockingEnabled     bool   // off by default; see EnableLocking
-	posixACLs          bool   // new items inherit default ACLs; see EnablePosixACLs
+	id                 string      // 4-hex-digit prefix, set by Bootstrap
+	archived           atomic.Bool // set by Bootstrap; see ErrArchived
+	readOnly           bool        // set by BootstrapReadOnly; see ErrReadOnly
+	primaryWindows     bool        // set by Bootstrap from the stored master-block value; see PrimaryWindows
+	maxFileSize        int64       // set by Bootstrap from the stored master-block value; see MaxFileSize
+	newMaxFileSize     uint64      // the max file size a filesystem gets if Bootstrap creates it; see SetCreationMaxFileSize
+	dirBlockEntries    int         // from the master-block entry; see DefaultDirBlockEntries
+	newDirBlockEntries uint32      // what a filesystem gets if Bootstrap creates it; see SetCreationDirBlockEntries
+	mountID            string      // this Filesystem's identity in lock holders; see LockHolder
+	lockingEnabled     bool        // off by default; see EnableLocking
+	posixACLs          bool        // new items inherit default ACLs; see EnablePosixACLs
 	atime              AtimeMode
 	atimeMu            sync.Mutex
 	atimeKnown         map[string]time.Time // AtimeHourly: access times this mount knows, by key
@@ -255,7 +256,7 @@ func (f *Filesystem) checkWritable() error {
 	if f.readOnly {
 		return ErrReadOnly
 	}
-	if f.archived {
+	if f.archived.Load() {
 		return ErrArchived
 	}
 	return nil
@@ -298,7 +299,7 @@ func (f *Filesystem) applyEntry(id string, entry *pb.FilesystemEntry) error {
 		return fmt.Errorf("filesystem %q is format %d, this build reads %d: %w", entry.Name, entry.FormatVersion, FormatVersion, err)
 	}
 	f.id = id
-	f.archived = entry.Archived
+	f.archived.Store(entry.Archived)
 	f.primaryWindows = entry.PrimaryWindows
 	f.maxFileSize = DefaultMaxFileSize
 	if entry.MaxFileSize != 0 && entry.MaxFileSize <= DefaultMaxFileSize {
@@ -360,7 +361,8 @@ func (f *Filesystem) BootstrapReadOnly(ctx context.Context) error {
 // already attached: its settings are live's, with no read of the master.
 func (f *Filesystem) BootstrapViewOf(ctx context.Context, live *Filesystem) error {
 	f.fsName = live.fsName
-	f.id, f.archived, f.primaryWindows = live.id, live.archived, live.primaryWindows
+	f.id, f.primaryWindows = live.id, live.primaryWindows
+	f.archived.Store(live.archived.Load())
 	f.maxFileSize, f.dirBlockEntries = live.maxFileSize, live.dirBlockEntries
 	if _, err := f.store.Head(ctx, f.RootKey()); err != nil {
 		return fmt.Errorf("filesystem %q root: %w", f.fsName, mapNotFound(err))
