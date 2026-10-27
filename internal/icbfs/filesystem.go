@@ -1964,29 +1964,47 @@ func (f *Filesystem) Unlink(ctx context.Context, dirKey, name string) error {
 	if err := f.checkNameLength(name); err != nil {
 		return err
 	}
+	// The trash entry first, if this is the last name (trashFirst): in
+	// the walk that removes the name, once it has found the item and
+	// before the block that drops it is written.
+	var pending *pendingTrash
 	entry, err := f.removeEntryIf(ctx, dirKey, name, func(e block.Entry) error {
 		if e.Type == TypeDir {
 			return ErrIsDir
 		}
-		return nil
+		if pending != nil && pending.e.ItemID == e.UUID {
+			return nil // a retry of the block's write, for the same item
+		}
+		pending.cancel(ctx, f) // the name names another item now
+		var err error
+		pending, err = f.trashFirst(ctx, e, dirKey, name, nil)
+		return err
 	})
 	if err != nil {
+		pending.cancel(ctx, f)
 		return err
 	}
-	before, _ := f.store.Head(ctx, entry.UUID) // for the trash entry, if this was the last name
+	var before *objstore.Object
+	if pending == nil {
+		before, _ = f.store.Head(ctx, entry.UUID) // for an entry after all, should this be the last name
+	}
 	f.touchDir(ctx, dirKey)
 
 	deleted, last, err := f.adjustNlinkAttr(ctx, entry.UUID, -1)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return err
 	}
-	if deleted {
+	switch {
+	case deleted && pending == nil:
+		// Its other name went at the same time.
 		var size int64
 		var version string
 		if before != nil {
 			size, version = before.Size, before.VersionID
 		}
-		f.recordTrash(ctx, entry.UUID, entry.Type, dirKey, name, size, version, last.App[AppDriveOrigin])
+		return f.recordTrash(ctx, entry.UUID, entry.Type, dirKey, name, size, version, last.App[AppDriveOrigin])
+	case !deleted:
+		pending.cancel(ctx, f) // a name was added meanwhile: the item stays
 	}
 	return nil
 }
@@ -2022,7 +2040,12 @@ func (f *Filesystem) Rmdir(ctx context.Context, dirKey, name string) error {
 	if err != nil {
 		return err
 	}
+	pending, err := f.trashFirst(ctx, entry, dirKey, name, &dirAttr)
+	if err != nil {
+		return err
+	}
 	if _, err := f.removeEntry(ctx, dirKey, name); err != nil {
+		pending.cancel(ctx, f)
 		return err
 	}
 	f.touchDir(ctx, dirKey)
@@ -2033,7 +2056,6 @@ func (f *Filesystem) Rmdir(ctx context.Context, dirKey, name string) error {
 	if err := f.store.Delete(ctx, metadataObjectKey(entry.UUID)); err != nil && !objstore.IsNotFound(err) {
 		return err
 	}
-	f.recordTrash(ctx, entry.UUID, TypeDir, dirKey, name, 0, "", dirAttr.App[AppDriveOrigin])
 	return nil
 }
 
@@ -2130,8 +2152,16 @@ func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, 
 			if len(children) > 0 {
 				return ErrNotEmpty
 			}
-			replaced, _ := f.statDir(ctx, existing.UUID) // for the trash entry's origin
+			replaced, err := f.statDir(ctx, existing.UUID)
+			if err != nil {
+				return err
+			}
+			pending, err := f.trashFirst(ctx, existing, newDirKey, newName, &replaced)
+			if err != nil {
+				return err
+			}
 			if _, err := f.removeEntry(ctx, newDirKey, newName); err != nil {
+				pending.cancel(ctx, f)
 				return err
 			}
 			if err := f.store.Delete(ctx, existing.UUID); err != nil {
@@ -2140,26 +2170,38 @@ func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, 
 			if err := f.store.Delete(ctx, metadataObjectKey(existing.UUID)); err != nil && !objstore.IsNotFound(err) {
 				return err
 			}
-			f.recordTrash(ctx, existing.UUID, TypeDir, newDirKey, newName, 0, "", replaced.App[AppDriveOrigin])
 		} else {
 			if entry.Type == TypeDir {
 				return ErrNotDir
 			}
-			before, _ := f.store.Head(ctx, existing.UUID)
+			pending, err := f.trashFirst(ctx, existing, newDirKey, newName, nil)
+			if err != nil {
+				return err
+			}
+			var before *objstore.Object
+			if pending == nil {
+				before, _ = f.store.Head(ctx, existing.UUID)
+			}
 			if _, err := f.removeEntry(ctx, newDirKey, newName); err != nil {
+				pending.cancel(ctx, f)
 				return err
 			}
 			deleted, last, err := f.adjustNlinkAttr(ctx, existing.UUID, -1)
 			if err != nil && !errors.Is(err, ErrNotFound) {
 				return err
 			}
-			if deleted {
+			switch {
+			case deleted && pending == nil:
 				var size int64
 				var version string
 				if before != nil {
 					size, version = before.Size, before.VersionID
 				}
-				f.recordTrash(ctx, existing.UUID, existing.Type, newDirKey, newName, size, version, last.App[AppDriveOrigin])
+				if err := f.recordTrash(ctx, existing.UUID, existing.Type, newDirKey, newName, size, version, last.App[AppDriveOrigin]); err != nil {
+					return err
+				}
+			case !deleted:
+				pending.cancel(ctx, f)
 			}
 		}
 	}

@@ -10,6 +10,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/resurgentech/icbfs/internal/block"
+	"github.com/resurgentech/icbfs/internal/objstore"
 )
 
 // TrashEntry records one deleted item: a file whose last name went, or a
@@ -83,7 +86,8 @@ func (f *Filesystem) trashByKey(itemID string) string {
 }
 
 // TrashedItem returns the newest trash entry for the item itemID (the
-// item's key), in two reads, or ErrNotFound if it isn't in the trash.
+// item's key), in three reads, or ErrNotFound if it isn't in the trash
+// (an entry whose item is live again is stale).
 // Entries made before items had a pointer to theirs aren't found this way;
 // ListTrash still lists them.
 func (f *Filesystem) TrashedItem(ctx context.Context, itemID string) (TrashEntry, error) {
@@ -103,6 +107,11 @@ func (f *Filesystem) TrashedItem(ctx context.Context, itemID string) (TrashEntry
 	if e.ItemID != itemID {
 		return TrashEntry{}, fmt.Errorf("trashed item %s: %w", itemID, ErrNotFound)
 	}
+	if live, err := f.itemLive(ctx, itemID, e.Type); err != nil {
+		return TrashEntry{}, err
+	} else if live {
+		return TrashEntry{}, fmt.Errorf("trashed item %s is live: %w", itemID, ErrNotFound)
+	}
 	return e, nil
 }
 
@@ -110,34 +119,109 @@ func (f *Filesystem) trashKey(e TrashEntry) string {
 	return fmt.Sprintf("%s%019d-%s", f.trashPrefix(), math.MaxInt64-e.DeletedAt.UnixNano(), e.EntryID)
 }
 
-// recordTrash writes a trash entry for an item just deleted from dirKey
-// under name. Best effort, like touchDir: the delete itself has happened.
-func (f *Filesystem) recordTrash(ctx context.Context, itemID string, typ EntryType, dirKey, name string, size int64, version string, origin []byte) {
-	info := deleteInfoFrom(ctx)
-	if info.NoTrash {
-		return
+// A delete writes its trash entry first, then removes the item
+// (trashFirst): a delete that can't record itself fails before it has
+// changed anything, and one that stops halfway leaves an entry whose item
+// is live, which everything reading the trash checks for (itemLive) and
+// passes over. The other order would leave a deleted item nothing points
+// to: not restorable, not found by a mirror's undo, never purged.
+
+// pendingTrash is a trash entry written ahead of the delete it records.
+type pendingTrash struct {
+	e   TrashEntry
+	key string
+}
+
+// trashFirst writes the trash entry for deleting item from dirKey under
+// name, before the delete: nil if there's none to write (an access
+// layer's own delete, DeleteInfo.NoTrash, or a file that has other
+// names). attr is the item's, if the caller has it.
+func (f *Filesystem) trashFirst(ctx context.Context, item block.Entry, dirKey, name string, attr *Attr) (*pendingTrash, error) {
+	if deleteInfoFrom(ctx).NoTrash {
+		return nil, nil
 	}
+	if attr == nil {
+		a, err := f.Stat(ctx, item.UUID, item.Type)
+		if err != nil {
+			return nil, err
+		}
+		attr = &a
+	}
+	var size int64
+	var version string
+	if item.Type != TypeDir {
+		if attr.Nlink > 1 {
+			return nil, nil // not its last name: the item stays
+		}
+		size = attr.Size
+		if obj, ok := attr.ContentVersion(); ok {
+			version = obj.VersionID
+		}
+	}
+	e, err := f.newTrashEntry(ctx, item.UUID, item.Type, dirKey, name, size, version, attr.App[AppDriveOrigin])
+	if err != nil {
+		return nil, err
+	}
+	if err := f.writeTrash(ctx, e); err != nil {
+		return nil, err
+	}
+	return &pendingTrash{e: e, key: f.trashKey(e)}, nil
+}
+
+// cancel removes an entry written ahead of a delete that didn't happen.
+// Left behind, it would only be stale.
+func (p *pendingTrash) cancel(ctx context.Context, f *Filesystem) {
+	if p != nil {
+		f.dropStaleEntry(context.WithoutCancel(ctx), p.e, p.key)
+	}
+}
+
+// recordTrash writes a trash entry for an item just deleted from dirKey
+// under name, when trashFirst couldn't know it would be: a file whose
+// other name went at the same time.
+func (f *Filesystem) recordTrash(ctx context.Context, itemID string, typ EntryType, dirKey, name string, size int64, version string, origin []byte) error {
+	if deleteInfoFrom(ctx).NoTrash {
+		return nil
+	}
+	e, err := f.newTrashEntry(ctx, itemID, typ, dirKey, name, size, version, origin)
+	if err != nil {
+		return err
+	}
+	return f.writeTrash(ctx, e)
+}
+
+func (f *Filesystem) newTrashEntry(ctx context.Context, itemID string, typ EntryType, dirKey, name string, size int64, version string, origin []byte) (TrashEntry, error) {
+	info := deleteInfoFrom(ctx)
 	id := info.EntryID
 	if id == "" {
 		var err error
 		if id, err = NewUUIDv7(); err != nil {
-			return
+			return TrashEntry{}, err
 		}
 	}
-	e := TrashEntry{
+	return TrashEntry{
 		EntryID: id, ItemID: itemID, Type: typ, Name: name, ParentID: dirKey,
 		Path: info.Path, DeletedAt: changeTime(ctx).UTC(), DeletedBy: info.By,
 		Size: size, Version: version, Batch: info.Batch, Origin: origin, Pass: info.Pass,
-	}
+	}, nil
+}
+
+// writeTrash writes entry e and the item's pointer to it, both or
+// neither.
+func (f *Filesystem) writeTrash(ctx context.Context, e TrashEntry) error {
 	data, err := encodeTrashEntry(e)
 	if err != nil {
-		return
+		return err
 	}
 	key := f.trashKey(e)
 	if _, err := f.store.PutIfAbsent(ctx, key, bytes.NewReader(data), nil); err != nil {
-		return
+		return fmt.Errorf("trash entry for %s: %w", e.Name, err)
 	}
-	_, _ = f.store.Put(ctx, f.trashByKey(itemID), strings.NewReader(key), nil, "")
+	if _, err := f.store.Put(ctx, f.trashByKey(e.ItemID), strings.NewReader(key), nil, ""); err != nil {
+		_ = f.store.Delete(context.WithoutCancel(ctx), key)
+		return fmt.Errorf("trash entry for %s: %w", e.Name, err)
+	}
+	return nil
 }
 
 // TrashOptions narrows ListTrash.
@@ -149,7 +233,9 @@ type TrashOptions struct {
 	After      string // continue after this entry id (a previous page's last)
 }
 
-// ListTrash lists deleted items, newest first.
+// ListTrash lists deleted items, newest first. An entry whose item is
+// live (a delete that stopped after writing it, a restore that couldn't
+// remove it) isn't listed.
 func (f *Filesystem) ListTrash(ctx context.Context, opts TrashOptions) ([]TrashEntry, error) {
 	objs, err := f.store.List(ctx, f.trashPrefix())
 	if err != nil {
@@ -176,6 +262,11 @@ func (f *Filesystem) ListTrash(ctx context.Context, opts TrashOptions) ([]TrashE
 			continue
 		}
 		if opts.PathPrefix != "" && !underPath(e.Path, opts.PathPrefix) {
+			continue
+		}
+		if live, err := f.itemLive(ctx, e.ItemID, e.Type); err != nil {
+			return nil, err
+		} else if live {
 			continue
 		}
 		out = append(out, e)
@@ -239,6 +330,12 @@ func (f *Filesystem) Restore(ctx context.Context, entryID string, opts RestoreOp
 	if err != nil {
 		return TrashEntry{}, err
 	}
+	if live, err := f.itemLive(ctx, e.ItemID, e.Type); err != nil {
+		return TrashEntry{}, err
+	} else if live {
+		f.dropStaleEntry(ctx, e, key)
+		return TrashEntry{}, fmt.Errorf("trash entry %s: %s isn't deleted: %w", entryID, e.Name, ErrNotFound)
+	}
 	dir, name := e.ParentID, e.Name
 	if opts.ToDir != "" {
 		dir = opts.ToDir
@@ -274,8 +371,14 @@ func (f *Filesystem) Restore(ctx context.Context, entryID string, opts RestoreOp
 		return TrashEntry{}, err
 	}
 	f.touchDir(ctx, dir)
-	_ = f.store.Delete(ctx, key)
-	_ = f.store.Delete(ctx, f.trashByKey(e.ItemID))
+	// The entry goes with the restore. One left behind would be stale,
+	// which nothing acts on, but the restore says so.
+	if err := f.store.Delete(ctx, key); err != nil {
+		return e, fmt.Errorf("restored %s, its trash entry stays: %w", e.Name, err)
+	}
+	if err := f.store.Delete(ctx, f.trashByKey(e.ItemID)); err != nil && !objstore.IsNotFound(err) {
+		return e, fmt.Errorf("restored %s, its trash pointer stays: %w", e.Name, err)
+	}
 
 	// A directory that started a recursive delete brings its batch back,
 	// newest first: the reverse of the order the delete removed them,

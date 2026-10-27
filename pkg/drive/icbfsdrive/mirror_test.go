@@ -243,7 +243,8 @@ func TestMirrorAdoptsItemsCopiedBeforeTheIndex(t *testing.T) {
 
 // TestMirrorLookupsStayCheap: with the index, finding a source item costs
 // the same however much else the drive holds (a record, and the item's
-// path checked), where a search lists everything.
+// path checked), where a search lists everything. A trashed one costs a
+// read more: whether the item is still deleted.
 func TestMirrorLookupsStayCheap(t *testing.T) {
 	counter := &readCounter{Store: miniotest.Store(t)}
 	d := newDrive(t, counter, icbfs.Settings{Name: "cheap", Size: 1 << 30, RootMode: 0o777}, "")
@@ -272,7 +273,7 @@ func TestMirrorLookupsStayCheap(t *testing.T) {
 	if _, err := m.Remove(ctx, "doc"); err != nil {
 		t.Fatal(err)
 	}
-	if reads := known(true); reads > few {
-		t.Fatalf("finding a trashed item took %d reads, more than a live one's %d", reads, few)
+	if reads := known(true); reads > few+1 {
+		t.Fatalf("finding a trashed item took %d reads, more than a live one's %d and one", reads, few)
 	}
 }

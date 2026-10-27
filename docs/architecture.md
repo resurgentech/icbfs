@@ -674,12 +674,24 @@ over an existing item, from any mount or the API.
   undone.
 - The key's inverted time lists entries newest first.
 - Nothing expires: an entry stays until the item is purged.
+- The entry is written first, then the item removed: a delete that can't
+  write its entry fails before it has changed anything, and one that
+  can't remove the item removes the entry again. One that stops in
+  between leaves an entry whose item is live: stale. A deleted item has
+  a deletion as its `.metadata`'s newest version (a file being deleted,
+  link count zero first), and everything that reads the trash checks:
+  the listing leaves stale entries out, a mirror's lookup of a trashed
+  item doesn't find one, and a restore or a purge removes one and leaves
+  the item alone. (The other order left a deleted item no entry points
+  to: not restorable, missed by a pass's undo, never purged.)
 
 **Restoring** removes the delete markers on the item's objects (content,
 `.metadata`, streams), so the history simply continues. It then gives the
 item a name: its old one, or any other. A taken name is refused unless the
 restore is told to replace it. A recursive delete through the API is one
-batch, and restoring its directory restores the batch.
+batch, and restoring its directory restores the batch. Removing the entry
+is part of the restore: if it can't be, the restore says so (the item is
+back; the entry left behind is stale).
 
 **Purge** permanently erases every version of an item's objects, its trash
 entries, and its drafts (the drive API's autosaves, kept in the drive's

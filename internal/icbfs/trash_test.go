@@ -5,7 +5,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
+	"sync/atomic"
 	"testing"
+
+	"github.com/resurgentech/icbfs/internal/objstore"
 )
 
 func writeNew(t *testing.T, ctx context.Context, f *Filesystem, dir, name, data string) string {
@@ -342,5 +346,70 @@ func TestPurgeTrashLeavesLiveItem(t *testing.T) {
 	}
 	if trash, _ := f.ListTrash(ctx, TrashOptions{}); len(trash) != 0 {
 		t.Fatalf("the stale entry is still listed: %+v", trash)
+	}
+}
+
+// noTrash refuses to write trash entries while fail is set.
+type noTrash struct {
+	objstore.Store
+	fail atomic.Bool
+}
+
+var errNoTrash = errors.New("the store is gone")
+
+func (s *noTrash) PutIfAbsent(ctx context.Context, key string, body io.Reader, md map[string]string) (*objstore.Object, error) {
+	if s.fail.Load() && strings.Contains(key, "-trash-") {
+		return nil, errNoTrash
+	}
+	return s.Store.PutIfAbsent(ctx, key, body, md)
+}
+
+// TestTrashEntryFirst: a delete writes its trash entry before it removes
+// the item. One that can't write it fails with the file untouched; one
+// that stopped after writing it leaves an entry whose item is live, which
+// the trash doesn't list, the mirror's lookup doesn't find, and a restore
+// refuses and removes.
+func TestTrashEntryFirst(t *testing.T) {
+	store := &noTrash{Store: newTestStore(t)}
+	f := New(store, "test")
+	ctx := context.Background()
+	if err := f.Bootstrap(ctx, 1<<30, 0o755, 0, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	root := f.RootKey()
+	key := writeNew(t, ctx, f, root, "a.txt", "keep me")
+
+	store.fail.Store(true)
+	if err := f.Unlink(ctx, root, "a.txt"); !errors.Is(err, errNoTrash) {
+		t.Fatalf("a delete that couldn't record itself: %v; want it to fail", err)
+	}
+	store.fail.Store(false)
+	if got := readName(t, ctx, f, root, "a.txt"); got != "keep me" {
+		t.Fatalf("after the failed delete: %q", got)
+	}
+
+	// A delete that stopped once its entry was written.
+	e, _, err := f.Lookup(ctx, root, "a.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := f.trashFirst(ctx, e, root, "a.txt", nil)
+	if err != nil || pending == nil {
+		t.Fatalf("trash entry: %v (%v)", pending, err)
+	}
+	if trash, err := f.ListTrash(ctx, TrashOptions{}); err != nil || len(trash) != 0 {
+		t.Fatalf("the trash lists %d entries (%v); the item is live", len(trash), err)
+	}
+	if _, err := f.TrashedItem(ctx, key); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a live item's entry found: %v", err)
+	}
+	if _, err := f.Restore(ctx, pending.e.EntryID, RestoreOptions{}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("restoring a live item: %v, want ErrNotFound", err)
+	}
+	if _, _, err := f.trashEntry(ctx, pending.e.EntryID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("the stale entry is still there: %v", err)
+	}
+	if got := readName(t, ctx, f, root, "a.txt"); got != "keep me" {
+		t.Fatalf("after all that: %q", got)
 	}
 }
