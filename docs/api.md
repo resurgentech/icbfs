@@ -444,8 +444,10 @@ d, err := icbfsdrive.New(ctx, icbfsdrive.Config{
 defer d.Close()
 ```
 
-- `pkg/icbfs` opens a store (`Open`, or `OpenS3` and `OpenAzure`) and
-  administers its filesystems: `CreateFilesystem`, `ListFilesystems`,
+- `pkg/icbfs` opens a store (`Open`, or `OpenS3` and `OpenAzure`; an
+  Azure container with a token credential the host holds rather than the
+  account's key, `OpenAzureWithCredential`) and administers its
+  filesystems: `CreateFilesystem`, `ListFilesystems`,
   `DescribeFilesystem` (with the bytes used), `Resize`, `Archive` and
   `Prune` (archived filesystems only). `DefaultSettings(name)` is a
   filesystem with `icbfs-cli fs create`'s defaults (primary-POSIX, 100 GiB

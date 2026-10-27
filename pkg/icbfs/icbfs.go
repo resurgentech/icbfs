@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awscreds "github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -79,6 +80,16 @@ func Open(c StoreConfig) (Store, error) {
 // OpenAzure opens an Azure Blob Storage container with the account's key.
 func OpenAzure(c Azure) (Store, error) {
 	return azurestore.New(c.ServiceURL(), c.Account, c.Key, c.Container)
+}
+
+// OpenAzureWithCredential opens an Azure Blob Storage container with an
+// Entra ID token credential of the host application's own instead of
+// the account's key: the SDK's credentials (a signed-in person, a service
+// principal, a managed identity) or any other azcore.TokenCredential.
+// The identity needs Storage Blob Data Reader on the container to read
+// and Contributor to write, and the account's shared keys may be off.
+func OpenAzureWithCredential(c Azure, cred azcore.TokenCredential) (Store, error) {
+	return azurestore.NewWithCredential(c.ServiceURL(), cred, c.Container)
 }
 
 // OpenS3 opens a bucket over the S3 API.
