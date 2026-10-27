@@ -206,7 +206,8 @@ func (f *Filesystem) mergeMetadataOnTop(ctx context.Context, key string, want ob
 		}
 	}
 	rekeyETag(&attr, rekey[0], rekey[1])
-	data, err := encodeFileMetadata(attr)
+	attr.dated = attr.dated || late.dated
+	data, err := encodeFileMetadata(ctx, attr)
 	if err != nil {
 		return nil, err
 	}

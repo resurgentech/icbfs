@@ -152,13 +152,16 @@ func (c *requestCounter) ServerTime(ctx context.Context) (time.Time, error) {
 var requestCeilings = map[string][2]int{
 	// The first folder in source time also dates the root and marks the
 	// filesystem's past, once.
-	"new top-level folder":  {41, 98},
-	"new folder at depth 2": {64, 82},
-	"new file at depth 3":   {74, 91},
-	"the same file again":   {14, 14},
-	"a new version of it":   {75, 86},
+	"new top-level folder":  {35, 92},
+	"new folder at depth 2": {51, 69},
+	"new file at depth 3":   {58, 76},
+	"the same file again":   {9, 10},
+	"a new version of it":   {57, 70},
+	// The root, then a step per folder and the file's own stat: two
+	// requests each, and its .version in source time.
+	"stat at depth 3": {8, 9},
 	// A listing's cost past its first file, per file.
-	"listing, per file": {4, 4},
+	"listing, per file": {2, 3},
 }
 
 // TestRequestsPerOperation counts the store requests a mirror's
@@ -214,6 +217,12 @@ func TestRequestsPerOperation(t *testing.T) {
 			counted("the same file again", func() { apply(t, ctx, m, "same", f, drive.Unchanged) })
 			f2 := src.item("f1", "2.0", "/Clients/Acme/report.txt", "v2", jan.AddDate(0, 1, 0))
 			counted("a new version of it", func() { apply(t, ctx, m, "new version", f2, drive.Updated) })
+
+			counted("stat at depth 3", func() {
+				if _, err := d.Stat(ctx, drive.ByPath("/Clients/Acme/report.txt"), drive.At{}); err != nil {
+					t.Fatal(err)
+				}
+			})
 
 			one := listed()
 			const more = 20

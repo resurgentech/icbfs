@@ -4,6 +4,7 @@
 package icbfs
 
 import (
+	"context"
 	"errors"
 	"strconv"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/resurgentech/icbfs/internal/block"
+	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/internal/pb"
 )
 
@@ -131,8 +133,16 @@ type Attr struct {
 	Streams map[string]uint64
 	Rdev    uint32 // TypeCharDevice/TypeBlockDevice only; 0 for every other type
 
-	// contentETag is a file's current content ETag, as Stat read it.
+	// contentETag is a file's current content ETag, as Stat read it, and
+	// content that version as the store described it (ContentVersion).
 	contentETag string
+	content     objstore.Object
+
+	// dated says the item has a .version record (see Dated).
+	dated bool
+
+	// held is a directory's root block, when StatStep read it.
+	held *heldBlock
 
 	// mtimeOverrideETag is the content ETag an explicit mtime override
 	// (Mtime, as decoded from .metadata) was set against — see
@@ -155,8 +165,13 @@ type Attr struct {
 func metadataObjectKey(uuid string) string { return uuid + ".metadata" }
 
 // encodeFileMetadata serializes mode/uid/gid/nlink/xattrs to the wire
-// format stored at metadataObjectKey.
-func encodeFileMetadata(a Attr) ([]byte, error) {
+// format stored at metadataObjectKey, for a write under ctx: one under a
+// declared time marks the item dated (Attr.Dated), as the write will be in
+// its .version record.
+func encodeFileMetadata(ctx context.Context, a Attr) ([]byte, error) {
+	if _, ok := objstore.DeclaredTime(ctx); ok {
+		a.dated = true
+	}
 	// a.Mtime/a.Btime here are only ever overrides (see combineFileAttr):
 	// a real content write's mtime comes from the content object and is
 	// never passed through this struct. Zero times stay unset.
@@ -188,6 +203,7 @@ func encodeFileMetadata(a Attr) ([]byte, error) {
 		Ctime:             timestampOrNil(a.Ctime),
 		Streams:           a.Streams,
 		NextStreamId:      a.nextStreamID,
+		Dated:             a.dated,
 	})
 }
 
@@ -240,6 +256,7 @@ func decodeFileMetadata(data []byte) (Attr, error) {
 		Btime:             btimeOverride,       // same: override only; see combineFileAttr
 		Ctime:             timeOrZero(m.Ctime), // the stored status-change time only; see combineFileAttr
 		Rdev:              m.Rdev,
+		dated:             m.Dated,
 	}
 	if w := m.Windows; w != nil {
 		a.WindowsSDDL = []byte(w.Sddl)

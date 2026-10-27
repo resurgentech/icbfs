@@ -230,7 +230,7 @@ func (f *Filesystem) createRoot(ctx context.Context, attr Attr) error {
 		return err
 	}
 	attr.Nlink, attr.Mtime, attr.Ctime = 1, changeTime(ctx), time.Now()
-	metaData, err := encodeFileMetadata(attr)
+	metaData, err := encodeFileMetadata(ctx, attr)
 	if err != nil {
 		return err
 	}

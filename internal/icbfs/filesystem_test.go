@@ -294,7 +294,7 @@ func TestXattrsRoundTripArbitraryBinaryValues(t *testing.T) {
 		t.Fatalf("decode .metadata: %v", err)
 	}
 	attr.Xattrs = map[string][]byte{"user.binary-blob": binaryValue}
-	newData, err := encodeFileMetadata(attr)
+	newData, err := encodeFileMetadata(context.Background(), attr)
 	if err != nil {
 		t.Fatalf("encode .metadata: %v", err)
 	}

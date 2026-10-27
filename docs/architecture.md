@@ -257,7 +257,11 @@ content:
 - data icbfs's own tools keep about the item, such as the drive API's
   content type and copy origin, and a mirror's record of its source item.
   Like access times and checksums, it's bookkeeping, not a change to the
-  item: writing it doesn't move ctime.
+  item: writing it doesn't move ctime;
+- whether the item has a `.version` record (Source time, below): set by
+  any write of `.metadata` under a declared time, and kept, so a reader
+  that wants a version's date reads `.version` only for an item that has
+  one.
 
 **Extended attributes and POSIX ACLs.** A Linux mount offers the `user.`,
 `trusted.` and `security.` namespaces, with Linux's limits (names up to 255
@@ -337,7 +341,13 @@ object.
   record nothing.
 
 A full `stat()` is two requests, one for `.metadata` and one `HEAD` on the
-content, issued concurrently.
+content, issued concurrently. The `HEAD` answers the current version's id
+too, which the attributes keep, so the drive API's listing describes a
+file's version in those two requests (a third, its `.version`, only for a
+dated item). A walk down a path stats each directory with a `GET` of its
+block instead of the `HEAD`, still one request, and the lookup in it
+starts from that block (`StatStep`, `Step`): a step down is two requests,
+`.metadata` and the block.
 
 ## Concurrency
 

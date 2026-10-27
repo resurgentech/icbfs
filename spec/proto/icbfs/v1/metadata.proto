@@ -96,6 +96,12 @@ message Metadata {
   // computed as a write's bytes went by, or later, on demand. A version
   // without an entry has none yet.
   map<string, Checksums> checksums = 22;
+
+  // Whether the item has a .version record (internal/objstore's dates):
+  // set by any write made under a declared time, which is what writes
+  // one, and never cleared. A reader that wants a version's date reads
+  // .version only when it's set.
+  bool dated = 23;
 }
 
 // Checksums are a content version's MD5 and SHA-256; either may be empty

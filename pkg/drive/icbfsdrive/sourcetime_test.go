@@ -86,6 +86,47 @@ func TestVersionsInSourceTime(t *testing.T) {
 	}
 }
 
+// TestListingDatesVersions: a listing reads an item's .version record
+// only when its .metadata says it has one (written in source time), and
+// its rows date the current version as Versions does: a file never
+// written in source time, one written in it, and one written now and
+// then given an older version in source time (put back on top of which,
+// the current version keeps the mark).
+func TestListingDatesVersions(t *testing.T) {
+	d, _ := sourceDrive(t, "listing-dates")
+	ctx := system()
+	write(t, ctx, d, "/now.txt", "now", drive.Condition{})
+	write(t, at(ctx, 2021), d, "/then.txt", "then", drive.Condition{})
+	write(t, ctx, d, "/both.txt", "current", drive.Condition{})
+	write(t, at(ctx, 2019), d, "/both.txt", "older", drive.Condition{})
+	for p, dated := range map[string]bool{"/now.txt": false, "/then.txt": true, "/both.txt": true} {
+		n, err := d.resolvePath(ctx, d.fs, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n.attr.Dated() != dated {
+			t.Errorf("%s: dated %v, want %v", p, n.attr.Dated(), dated)
+		}
+	}
+	page, err := d.List(ctx, drive.ByPath("/"), drive.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range page.Items {
+		versions, err := d.Versions(ctx, drive.ByID(it.ID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// To the second: a HEAD's Last-Modified has no finer.
+		if it.Version == nil || it.Version.ID != versions[0].ID || !it.Version.Time.Truncate(time.Second).Equal(versions[0].Time.Truncate(time.Second)) {
+			t.Errorf("%s: listed as version %+v, current is %+v", it.Path, it.Version, versions[0])
+		}
+	}
+	if got := read(t, ctx, d, drive.ByPath("/both.txt"), drive.At{}); got != "current" {
+		t.Fatalf("both.txt is %q now", got)
+	}
+}
+
 // TestDeleteInSourceTime: a file created in 2021 and deleted in 2024 is
 // there in 2023 and gone in mid-2024, in the trash as deleted in 2024,
 // and restorable.

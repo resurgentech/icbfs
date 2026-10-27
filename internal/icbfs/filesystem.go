@@ -435,6 +435,9 @@ func (f *Filesystem) StatFS(ctx context.Context) (total, used uint64, err error)
 // own object metadata (needed so callers can preserve it, and CAS against
 // its ETag, across a read-modify-write).
 func (f *Filesystem) readBlock(ctx context.Context, key string) (*block.Block, *objstore.Object, error) {
+	if held, ok := ctx.Value(heldBlockKey{}).(*heldBlock); ok && held.key == key {
+		return held.blk, held.obj, nil
+	}
 	body, obj, err := f.store.Get(objstore.CacheContent(ctx), key)
 	if err != nil {
 		return nil, nil, mapNotFound(err)
@@ -483,6 +486,8 @@ func combineFileAttr(key string, metaData []byte, metaLastModified time.Time, co
 	}
 	attr.Size = contentObj.Size
 	attr.contentETag = contentObj.ETag
+	attr.content = objstore.Object{Key: contentObj.Key, VersionID: contentObj.VersionID, ETag: contentObj.ETag,
+		Size: contentObj.Size, LastModified: contentObj.LastModified}
 	// attr.Mtime and attr.Btime from decodeFileMetadata are only explicit
 	// overrides (SetAttr); real content writes never set them. Without an
 	// override, mtime is the content's last write and btime the time in the
@@ -577,9 +582,18 @@ func combineDirAttr(key string, metaData []byte, metaLastModified time.Time, blo
 // statDir fetches a directory's root block and .metadata concurrently, as
 // statFile does for a file.
 func (f *Filesystem) statDir(ctx context.Context, key string) (Attr, error) {
+	return f.statDirWith(ctx, key, false)
+}
+
+// statDirWith is statDir; with withBlock it reads the block itself, not
+// only its description, and the attributes hold it for a Step into the
+// directory.
+
+func (f *Filesystem) statDirWith(ctx context.Context, key string, withBlock bool) (Attr, error) {
 	var metaData []byte
 	var metaLastModified time.Time
 	var blockObj *objstore.Object
+	var blk *block.Block
 	var metaErr, blockErr error
 
 	var wg sync.WaitGroup
@@ -597,6 +611,10 @@ func (f *Filesystem) statDir(ctx context.Context, key string) (Attr, error) {
 	}()
 	go func() {
 		defer wg.Done()
+		if withBlock {
+			blk, blockObj, blockErr = f.readBlock(ctx, key)
+			return
+		}
 		blockObj, blockErr = f.store.Head(ctx, key)
 		blockErr = mapNotFound(blockErr)
 	}()
@@ -608,7 +626,11 @@ func (f *Filesystem) statDir(ctx context.Context, key string) (Attr, error) {
 	if metaErr != nil {
 		return Attr{}, metaErr
 	}
-	return combineDirAttr(key, metaData, metaLastModified, blockObj)
+	attr, err := combineDirAttr(key, metaData, metaLastModified, blockObj)
+	if err == nil && blk != nil {
+		attr.held = &heldBlock{key: key, blk: blk, obj: blockObj}
+	}
+	return attr, err
 }
 
 // statFile fetches a file/symlink's two objects concurrently — per
@@ -656,8 +678,19 @@ func (f *Filesystem) statFile(ctx context.Context, key string) (Attr, error) {
 // root key). typ must be the node's type: a directory's attributes are read
 // differently from a file's.
 func (f *Filesystem) Stat(ctx context.Context, key string, typ EntryType) (Attr, error) {
+	return f.stat(ctx, key, typ, false)
+}
+
+// StatStep is Stat for a walk down a path: a directory's block is read
+// whole (a GET where Stat makes a HEAD; one request either way), and the
+// attributes hold it, so a Step into the directory doesn't read it again.
+func (f *Filesystem) StatStep(ctx context.Context, key string, typ EntryType) (Attr, error) {
+	return f.stat(ctx, key, typ, true)
+}
+
+func (f *Filesystem) stat(ctx context.Context, key string, typ EntryType, withBlock bool) (Attr, error) {
 	if typ == TypeDir {
-		return f.statDir(ctx, key)
+		return f.statDirWith(ctx, key, withBlock)
 	}
 	a, err := f.statFile(ctx, key)
 	if err != nil {
@@ -1067,6 +1100,37 @@ func (f *Filesystem) tryRemove(ctx context.Context, rootKey, name string, check 
 
 // Lookup finds name within the directory at dirKey.
 func (f *Filesystem) Lookup(ctx context.Context, dirKey, name string) (block.Entry, Attr, error) {
+	return f.lookup(ctx, dirKey, name, false, false)
+}
+
+// Step is Lookup (LookupFold, with fold) for a walk down a path: dir is
+// dirKey's attributes as StatStep or a Step returned them, and the lookup
+// starts from the block they hold instead of reading it again; a
+// directory found is stat'd as StatStep does, for the next step. A step
+// down to a directory is two requests, its .metadata and its block.
+func (f *Filesystem) Step(ctx context.Context, dirKey string, dir Attr, name string, fold bool) (block.Entry, Attr, error) {
+	if dir.held != nil && dir.held.key == dirKey {
+		ctx = context.WithValue(ctx, heldBlockKey{}, dir.held)
+	}
+	return f.lookup(ctx, dirKey, name, fold, true)
+}
+
+// heldBlock is a directory's root block as a stat read it (StatStep),
+// which a Step into the directory reads instead of the store (readBlock
+// finds it in the context): the block and the attributes are of one
+// moment, as a lookup's own read just after the stat would be.
+type heldBlock struct {
+	key string
+	blk *block.Block
+	obj *objstore.Object
+}
+
+type heldBlockKey struct{}
+
+func (f *Filesystem) lookup(ctx context.Context, dirKey, name string, fold, step bool) (block.Entry, Attr, error) {
+	if fold {
+		return f.lookupFold(ctx, dirKey, name, step)
+	}
 	if err := f.checkNameLength(name); err != nil {
 		return block.Entry{}, Attr{}, err
 	}
@@ -1077,7 +1141,7 @@ func (f *Filesystem) Lookup(ctx context.Context, dirKey, name string) (block.Ent
 	if !ok {
 		return block.Entry{}, Attr{}, ErrNotFound
 	}
-	attr, err := f.Stat(ctx, entry.UUID, entry.Type)
+	attr, err := f.stat(ctx, entry.UUID, entry.Type, step)
 	if err != nil {
 		return block.Entry{}, Attr{}, err
 	}
@@ -1095,6 +1159,10 @@ func (f *Filesystem) Lookup(ctx context.Context, dirKey, name string) (block.Ent
 // a primary-POSIX filesystem a name with no exact match means reading
 // the whole directory.
 func (f *Filesystem) LookupFold(ctx context.Context, dirKey, name string) (block.Entry, Attr, error) {
+	return f.lookup(ctx, dirKey, name, true, false)
+}
+
+func (f *Filesystem) lookupFold(ctx context.Context, dirKey, name string, step bool) (block.Entry, Attr, error) {
 	if err := f.checkNameLength(name); err != nil {
 		return block.Entry{}, Attr{}, err
 	}
@@ -1122,7 +1190,7 @@ func (f *Filesystem) LookupFold(ctx context.Context, dirKey, name string) (block
 	if !ok {
 		return block.Entry{}, Attr{}, ErrNotFound
 	}
-	attr, err := f.Stat(ctx, entry.UUID, entry.Type)
+	attr, err := f.stat(ctx, entry.UUID, entry.Type, step)
 	if err != nil {
 		return block.Entry{}, Attr{}, err
 	}
@@ -1158,7 +1226,7 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 	if err := f.inheritACLs(ctx, dirKey, &attr, true); err != nil {
 		return "", Attr{}, err
 	}
-	metaData, err := encodeFileMetadata(attr)
+	metaData, err := encodeFileMetadata(ctx, attr)
 	if err != nil {
 		return "", Attr{}, err
 	}
@@ -1211,7 +1279,7 @@ func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid,
 		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, "", err
 	}
-	metaData, err := encodeFileMetadata(attr)
+	metaData, err := encodeFileMetadata(ctx, attr)
 	if err != nil {
 		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, "", err
@@ -1269,7 +1337,7 @@ func (f *Filesystem) Mknod(ctx context.Context, dirKey, name string, mode uint32
 		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, err
 	}
-	metaData, err := encodeFileMetadata(attr)
+	metaData, err := encodeFileMetadata(ctx, attr)
 	if err != nil {
 		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, err
@@ -1314,7 +1382,7 @@ func (f *Filesystem) Symlink(ctx context.Context, dirKey, name, target string, u
 	}
 
 	attr := Attr{Mode: 0777, Uid: uid, Gid: gid, Nlink: 1, Ctime: time.Now()}
-	metaData, err := encodeFileMetadata(attr)
+	metaData, err := encodeFileMetadata(ctx, attr)
 	if err != nil {
 		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, err
@@ -1394,7 +1462,7 @@ func (f *Filesystem) adjustNlinkAttr(ctx context.Context, uuid string, delta int
 
 		if newNlink <= 0 {
 			attr.Nlink = nlinkZero
-			tomb, err := encodeFileMetadata(attr)
+			tomb, err := encodeFileMetadata(ctx, attr)
 			if err != nil {
 				return false, Attr{}, err
 			}
@@ -1412,7 +1480,7 @@ func (f *Filesystem) adjustNlinkAttr(ctx context.Context, uuid string, delta int
 		}
 
 		attr.Nlink = uint32(newNlink)
-		updated, err := encodeFileMetadata(attr)
+		updated, err := encodeFileMetadata(ctx, attr)
 		if err != nil {
 			return false, Attr{}, err
 		}
@@ -1488,7 +1556,7 @@ func (f *Filesystem) writeMetadataIf(ctx context.Context, key string, statusChan
 		} else if attr.Ctime.IsZero() {
 			attr.Ctime = obj.LastModified
 		}
-		newData, err := encodeFileMetadata(attr)
+		newData, err := encodeFileMetadata(ctx, attr)
 		if err != nil {
 			return err
 		}

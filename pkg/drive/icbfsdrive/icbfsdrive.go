@@ -146,6 +146,12 @@ func (d *Drive) lookup(ctx context.Context, fsys *icbfs.Filesystem, dirKey, name
 	return fsys.Lookup(ctx, dirKey, name)
 }
 
+// step is lookup for a walk down a path from dir, whose block its stat
+// read (icbfs.Filesystem.Step).
+func (d *Drive) step(ctx context.Context, dir *node, name string) (block.Entry, icbfs.Attr, error) {
+	return dir.fsys.Step(ctx, dir.key, dir.attr, name, d.windows)
+}
+
 // node is a resolved item, with the directories from the filesystem's
 // root down to it — what its inherited ACL and traversal checks need.
 type node struct {
@@ -169,13 +175,13 @@ func (n *node) parentKey() string { return n.chain[len(n.chain)-1].key }
 // rootNode is the drive's root, with the directories above it.
 func (d *Drive) rootNode(ctx context.Context, fsys *icbfs.Filesystem) (*node, error) {
 	key := fsys.RootKey()
-	attr, err := fsys.Stat(ctx, key, icbfs.TypeDir)
+	attr, err := fsys.StatStep(ctx, key, icbfs.TypeDir)
 	if err != nil {
 		return nil, mapErr(err)
 	}
 	n := &node{fsys: fsys, key: key, typ: icbfs.TypeDir, name: "", path: "/", attr: attr}
 	for _, part := range splitPath(d.root) {
-		e, a, err := d.lookup(ctx, fsys, n.key, part)
+		e, a, err := d.step(ctx, n, part)
 		if err != nil {
 			return nil, mapErr(err)
 		}
@@ -201,7 +207,7 @@ func (d *Drive) resolvePath(ctx context.Context, fsys *icbfs.Filesystem, p strin
 		if err := d.checkTraverse(ctx, n); err != nil {
 			return nil, err
 		}
-		e, a, err := d.lookup(ctx, fsys, n.key, part)
+		e, a, err := d.step(ctx, n, part)
 		if err != nil {
 			return nil, mapErr(err)
 		}
@@ -344,9 +350,22 @@ func (d *Drive) item(ctx context.Context, n *node, withVersion bool) drive.Item 
 			it.Checksums = toChecksums(c)
 		}
 		if withVersion {
-			if obj, err := n.fsys.Store().Head(ctx, n.key); err == nil {
-				dates, _ := objstore.ReadDates(ctx, n.fsys.Store(), n.key)
-				it.Version = &drive.Version{ID: obj.VersionID, Time: dates.Time(obj), Stored: obj.LastModified, Size: obj.Size, Current: true,
+			// The version the stat read; its .version record only if it
+			// has one.
+			obj, ok := n.attr.ContentVersion()
+			if !ok {
+				head, err := n.fsys.Store().Head(ctx, n.key)
+				obj, ok = objstore.Object{}, err == nil
+				if ok {
+					obj = *head
+				}
+			}
+			if ok {
+				dates := objstore.Dates{}
+				if n.attr.Dated() {
+					dates, _ = objstore.ReadDates(ctx, n.fsys.Store(), n.key)
+				}
+				it.Version = &drive.Version{ID: obj.VersionID, Time: dates.Time(&obj), Stored: obj.LastModified, Size: obj.Size, Current: true,
 					Checksums: toChecksums(n.attr.Checksums[obj.ETag])}
 			}
 		}

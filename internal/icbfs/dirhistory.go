@@ -188,7 +188,7 @@ func (f *Filesystem) ReplaceDirHistory(ctx context.Context, dirKey string, state
 		if ma.Ctime.IsZero() || ma.Ctime.Before(s.At) {
 			ma.Ctime = s.At
 		}
-		data, err := encodeFileMetadata(ma)
+		data, err := encodeFileMetadata(sctx, ma)
 		if err != nil {
 			return err
 		}
