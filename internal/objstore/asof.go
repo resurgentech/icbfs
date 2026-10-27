@@ -157,6 +157,19 @@ func (a *AsOf) withVersion(ctx context.Context, key string, fn func(versionID st
 	}
 }
 
+// GetIfChanged is Get, compared: a view's reads come from its cache.
+func (a *AsOf) GetIfChanged(ctx context.Context, key, etag string) (io.ReadCloser, *Object, bool, error) {
+	body, obj, err := a.Get(ctx, key)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if obj.ETag == etag {
+		body.Close()
+		return nil, nil, false, nil
+	}
+	return body, obj, true, nil
+}
+
 func (a *AsOf) Get(ctx context.Context, key string) (io.ReadCloser, *Object, error) {
 	var body io.ReadCloser
 	var obj *Object

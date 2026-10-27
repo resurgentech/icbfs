@@ -165,12 +165,27 @@ func (m *Mirror) Apply(ctx context.Context, src SourceItem) (Applied, error) {
 	var done []Action
 	item, trashed, err := m.find(ctx, o.ID)
 	if errors.Is(err, ErrNotFound) {
+		// A file is written if its path is free, which is the write's own
+		// condition: the path is looked at only if it's taken.
+		if src.Type != TypeDir {
+			item, err := m.write(m.at(ctx, born(src)), src, o, Condition{IfNoneMatch: true})
+			var pe *PreconditionError
+			if err == nil {
+				return Applied{Item: item, Actions: []Action{Created}}, nil
+			}
+			if !errors.As(err, &pe) && !errors.Is(err, ErrIsDir) {
+				return Applied{}, err
+			}
+		}
 		// An item copied before the drive kept an index of origins, still
 		// where it was copied to, is adopted: indexed now, then brought up
 		// to date like any other.
 		at, serr := m.d.Stat(ctx, ByPath(src.Path), At{})
+		if serr != nil && !errors.Is(serr, ErrNotFound) {
+			return Applied{}, serr
+		}
 		if serr != nil || at.Origin == nil || at.Origin.Drive != m.source || at.Origin.ID != o.ID {
-			return m.create(ctx, src, o)
+			return m.create(ctx, src, o, at, serr == nil)
 		}
 		if err := m.d.SetOrigin(ctx, ItemRef{ID: at.ID, Path: at.Path}, *at.Origin); err != nil {
 			return Applied{}, err
@@ -253,14 +268,11 @@ func sameOrigin(a *Origin, o Origin) bool {
 	return a != nil && a.Drive == o.Drive && a.ID == o.ID && a.Version == o.Version && a.Path == o.Path
 }
 
-// create makes a source item the drive has never held.
-func (m *Mirror) create(ctx context.Context, src SourceItem, o Origin) (Applied, error) {
+// create makes a source item the drive has never held; existing is
+// what's at its path, if taken.
+func (m *Mirror) create(ctx context.Context, src SourceItem, o Origin, existing Item, taken bool) (Applied, error) {
 	ctx = m.at(ctx, born(src))
-	existing, err := m.d.Stat(ctx, ByPath(src.Path), At{})
-	taken := err == nil
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		return Applied{}, err
-	}
+	var err error
 	if src.Type == TypeDir {
 		item := existing
 		modified := time.Time{} // an adopted directory's is its entries'
@@ -288,19 +300,45 @@ func (m *Mirror) create(ctx context.Context, src SourceItem, o Origin) (Applied,
 }
 
 // write stores src's content at its path, its time and origin with it.
+// The source is opened when the drive first reads the content: not at
+// all if cond refuses the write.
 func (m *Mirror) write(ctx context.Context, src SourceItem, o Origin, cond Condition) (Item, error) {
 	if src.Open == nil {
 		return Item{}, fmt.Errorf("%s: the content is needed and there's no Open: %w", src.Path, ErrInvalid)
 	}
-	body, err := src.Open(ctx)
-	if err != nil {
-		return Item{}, fmt.Errorf("open %s at the source: %w", src.Path, err)
-	}
+	body := &openOnRead{ctx: ctx, src: src}
 	defer body.Close()
 	return m.d.Write(ctx, src.Path, body, cond, WriteOptions{
 		Parents: true, ContentType: src.ContentType, ModTime: src.ModTime, Created: src.Created, Origin: &o,
 		App: src.App, Mode: src.Mode, WindowsAttrs: src.WindowsAttrs,
 	})
+}
+
+// openOnRead is a source item's content, opened at the first Read.
+type openOnRead struct {
+	ctx  context.Context
+	src  SourceItem
+	body io.ReadCloser
+	err  error
+}
+
+func (r *openOnRead) Read(p []byte) (int, error) {
+	if r.body == nil && r.err == nil {
+		if r.body, r.err = r.src.Open(r.ctx); r.err != nil {
+			r.err = fmt.Errorf("open %s at the source: %w", r.src.Path, r.err)
+		}
+	}
+	if r.err != nil {
+		return 0, r.err
+	}
+	return r.body.Read(p)
+}
+
+func (r *openOnRead) Close() error {
+	if r.body == nil {
+		return nil
+	}
+	return r.body.Close()
 }
 
 // reinfo records on item what src says and item's record doesn't yet

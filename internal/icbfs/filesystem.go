@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/resurgentech/icbfs/internal/block"
@@ -81,17 +82,19 @@ func retryPause(ctx context.Context, attempt int) {
 type Filesystem struct {
 	store              objstore.Store
 	fsName             string
-	id                 string // 4-hex-digit prefix, set by Bootstrap
-	archived           bool   // set by Bootstrap; see ErrArchived
-	readOnly           bool   // set by BootstrapReadOnly; see ErrReadOnly
-	primaryWindows     bool   // set by Bootstrap from the stored master-block value; see PrimaryWindows
-	maxFileSize        int64  // set by Bootstrap from the stored master-block value; see MaxFileSize
-	newMaxFileSize     uint64 // the max file size a filesystem gets if Bootstrap creates it; see SetCreationMaxFileSize
-	dirBlockEntries    int    // from the master-block entry; see DefaultDirBlockEntries
-	newDirBlockEntries uint32 // what a filesystem gets if Bootstrap creates it; see SetCreationDirBlockEntries
-	mountID            string // this Filesystem's identity in lock holders; see LockHolder
-	lockingEnabled     bool   // off by default; see EnableLocking
-	posixACLs          bool   // new items inherit default ACLs; see EnablePosixACLs
+	id                 string                // 4-hex-digit prefix, set by Bootstrap
+	archived           atomic.Bool           // set by Bootstrap; see ErrArchived
+	pastChanged        func(context.Context) // SetPastChanged's, if set
+	sourceTime         atomic.Bool           // the master entry's source_time; see dated
+	readOnly           bool                  // set by BootstrapReadOnly; see ErrReadOnly
+	primaryWindows     bool                  // set by Bootstrap from the stored master-block value; see PrimaryWindows
+	maxFileSize        int64                 // set by Bootstrap from the stored master-block value; see MaxFileSize
+	newMaxFileSize     uint64                // the max file size a filesystem gets if Bootstrap creates it; see SetCreationMaxFileSize
+	dirBlockEntries    int                   // from the master-block entry; see DefaultDirBlockEntries
+	newDirBlockEntries uint32                // what a filesystem gets if Bootstrap creates it; see SetCreationDirBlockEntries
+	mountID            string                // this Filesystem's identity in lock holders; see LockHolder
+	lockingEnabled     bool                  // off by default; see EnableLocking
+	posixACLs          bool                  // new items inherit default ACLs; see EnablePosixACLs
 	atime              AtimeMode
 	atimeMu            sync.Mutex
 	atimeKnown         map[string]time.Time // AtimeHourly: access times this mount knows, by key
@@ -135,7 +138,9 @@ func New(store objstore.Store, fsName string) *Filesystem {
 		mountID = fmt.Sprintf("mount-%d-%d", os.Getpid(), time.Now().UnixNano())
 	}
 	// The store records what's written under a declared time (RecordDates).
-	return &Filesystem{store: objstore.Recording(store), fsName: fsName, cache: newDiskCache(cacheDir, defaultCacheMaxBytes), mountID: mountID}
+	f := &Filesystem{store: objstore.Recording(store), fsName: fsName, cache: newDiskCache(cacheDir, defaultCacheMaxBytes), mountID: mountID}
+	objstore.DateAll(f.store, f.dated)
+	return f
 }
 
 // LockHolder names a lock holder of this Filesystem's: local (a FUSE lock
@@ -232,7 +237,9 @@ func (f *Filesystem) newKey(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return f.id + "-" + raw, nil
+	key := f.id + "-" + raw
+	objstore.NoteNew(ctx, key)
+	return key, nil
 }
 
 // prefix returns the ID-prefix every object this filesystem owns is
@@ -253,7 +260,7 @@ func (f *Filesystem) checkWritable() error {
 	if f.readOnly {
 		return ErrReadOnly
 	}
-	if f.archived {
+	if f.archived.Load() {
 		return ErrArchived
 	}
 	return nil
@@ -296,7 +303,8 @@ func (f *Filesystem) applyEntry(id string, entry *pb.FilesystemEntry) error {
 		return fmt.Errorf("filesystem %q is format %d, this build reads %d: %w", entry.Name, entry.FormatVersion, FormatVersion, err)
 	}
 	f.id = id
-	f.archived = entry.Archived
+	f.archived.Store(entry.Archived)
+	f.sourceTime.Store(entry.SourceTime)
 	f.primaryWindows = entry.PrimaryWindows
 	f.maxFileSize = DefaultMaxFileSize
 	if entry.MaxFileSize != 0 && entry.MaxFileSize <= DefaultMaxFileSize {
@@ -358,7 +366,9 @@ func (f *Filesystem) BootstrapReadOnly(ctx context.Context) error {
 // already attached: its settings are live's, with no read of the master.
 func (f *Filesystem) BootstrapViewOf(ctx context.Context, live *Filesystem) error {
 	f.fsName = live.fsName
-	f.id, f.archived, f.primaryWindows = live.id, live.archived, live.primaryWindows
+	f.id, f.primaryWindows = live.id, live.primaryWindows
+	f.archived.Store(live.archived.Load())
+	f.sourceTime.Store(live.sourceTime.Load())
 	f.maxFileSize, f.dirBlockEntries = live.maxFileSize, live.dirBlockEntries
 	if _, err := f.store.Head(ctx, f.RootKey()); err != nil {
 		return fmt.Errorf("filesystem %q root: %w", f.fsName, mapNotFound(err))
@@ -435,6 +445,9 @@ func (f *Filesystem) StatFS(ctx context.Context) (total, used uint64, err error)
 // own object metadata (needed so callers can preserve it, and CAS against
 // its ETag, across a read-modify-write).
 func (f *Filesystem) readBlock(ctx context.Context, key string) (*block.Block, *objstore.Object, error) {
+	if held, ok := ctx.Value(heldBlockKey{}).(*heldBlock); ok && held.key == key {
+		return held.blk, held.obj, nil
+	}
 	body, obj, err := f.store.Get(objstore.CacheContent(ctx), key)
 	if err != nil {
 		return nil, nil, mapNotFound(err)
@@ -483,6 +496,8 @@ func combineFileAttr(key string, metaData []byte, metaLastModified time.Time, co
 	}
 	attr.Size = contentObj.Size
 	attr.contentETag = contentObj.ETag
+	attr.content = objstore.Object{Key: contentObj.Key, VersionID: contentObj.VersionID, ETag: contentObj.ETag,
+		Size: contentObj.Size, LastModified: contentObj.LastModified}
 	// attr.Mtime and attr.Btime from decodeFileMetadata are only explicit
 	// overrides (SetAttr); real content writes never set them. Without an
 	// override, mtime is the content's last write and btime the time in the
@@ -550,6 +565,8 @@ func combineDirAttr(key string, metaData []byte, metaLastModified time.Time, blo
 	}
 	attr.mtimeOverrideETag = ""
 	attr.Size = blockObj.Size
+	attr.content = objstore.Object{Key: blockObj.Key, VersionID: blockObj.VersionID, ETag: blockObj.ETag,
+		Size: blockObj.Size, LastModified: blockObj.LastModified}
 	if attr.Mtime.IsZero() {
 		attr.Mtime = blockObj.LastModified
 	}
@@ -577,9 +594,19 @@ func combineDirAttr(key string, metaData []byte, metaLastModified time.Time, blo
 // statDir fetches a directory's root block and .metadata concurrently, as
 // statFile does for a file.
 func (f *Filesystem) statDir(ctx context.Context, key string) (Attr, error) {
+	return f.statDirWith(ctx, key, false)
+}
+
+// statDirWith is statDir; with withBlock it reads the block itself, not
+// only its description, and the attributes hold it for a Step into the
+// directory.
+
+func (f *Filesystem) statDirWith(ctx context.Context, key string, withBlock bool) (Attr, error) {
 	var metaData []byte
 	var metaLastModified time.Time
 	var blockObj *objstore.Object
+	var blk *block.Block
+	var metaObj *objstore.Object
 	var metaErr, blockErr error
 
 	var wg sync.WaitGroup
@@ -593,10 +620,14 @@ func (f *Filesystem) statDir(ctx context.Context, key string) (Attr, error) {
 		}
 		defer body.Close()
 		metaData, metaErr = io.ReadAll(body)
-		metaLastModified = obj.LastModified
+		metaLastModified, metaObj = obj.LastModified, obj
 	}()
 	go func() {
 		defer wg.Done()
+		if withBlock {
+			blk, blockObj, blockErr = f.readBlock(ctx, key)
+			return
+		}
 		blockObj, blockErr = f.store.Head(ctx, key)
 		blockErr = mapNotFound(blockErr)
 	}()
@@ -608,7 +639,11 @@ func (f *Filesystem) statDir(ctx context.Context, key string) (Attr, error) {
 	if metaErr != nil {
 		return Attr{}, metaErr
 	}
-	return combineDirAttr(key, metaData, metaLastModified, blockObj)
+	attr, err := combineDirAttr(key, metaData, metaLastModified, blockObj)
+	if err == nil && blk != nil {
+		attr.held = &heldBlock{key: key, blk: blk, obj: blockObj, meta: metaData, metaObj: metaObj}
+	}
+	return attr, err
 }
 
 // statFile fetches a file/symlink's two objects concurrently — per
@@ -656,8 +691,20 @@ func (f *Filesystem) statFile(ctx context.Context, key string) (Attr, error) {
 // root key). typ must be the node's type: a directory's attributes are read
 // differently from a file's.
 func (f *Filesystem) Stat(ctx context.Context, key string, typ EntryType) (Attr, error) {
+	return f.stat(ctx, key, typ, false)
+}
+
+// StatStep is Stat for a walk down a path: a directory's block is read
+// whole (a GET where Stat makes a HEAD; one request either way), and the
+// attributes hold it, so a FindStep in the directory doesn't read it
+// again.
+func (f *Filesystem) StatStep(ctx context.Context, key string, typ EntryType) (Attr, error) {
+	return f.stat(ctx, key, typ, true)
+}
+
+func (f *Filesystem) stat(ctx context.Context, key string, typ EntryType, withBlock bool) (Attr, error) {
 	if typ == TypeDir {
-		return f.statDir(ctx, key)
+		return f.statDirWith(ctx, key, withBlock)
 	}
 	a, err := f.statFile(ctx, key)
 	if err != nil {
@@ -1067,15 +1114,117 @@ func (f *Filesystem) tryRemove(ctx context.Context, rootKey, name string, check 
 
 // Lookup finds name within the directory at dirKey.
 func (f *Filesystem) Lookup(ctx context.Context, dirKey, name string) (block.Entry, Attr, error) {
-	if err := f.checkNameLength(name); err != nil {
-		return block.Entry{}, Attr{}, err
+	return f.lookup(ctx, dirKey, name, false)
+}
+
+// FindStep is a lookup for a walk down a path, without the stat: the
+// entry named name in dirKey (case-insensitively, with fold, as
+// LookupFold finds it), starting from the block dir holds (StatStep's,
+// or Revalidate's) instead of reading it again. The walk stats what it
+// finds, a directory with StatStep for the next step: a step down to a
+// directory is two requests, its .metadata and its block, and none for
+// the directory it came from.
+func (f *Filesystem) FindStep(ctx context.Context, dirKey string, dir Attr, name string, fold bool) (block.Entry, error) {
+	return f.find(withHeld(ctx, dirKey, dir), dirKey, name, fold)
+}
+
+// heldBlock is a directory's root block and .metadata as a stat read
+// them (StatStep): a FindStep in the directory reads the block from here
+// instead of the store (readBlock finds it in the context), and
+// Revalidate checks both against the store. The block and the attributes
+// are of one moment, as a lookup's own read just after the stat would be.
+type heldBlock struct {
+	key     string
+	blk     *block.Block
+	obj     *objstore.Object
+	meta    []byte
+	metaObj *objstore.Object
+}
+
+type heldBlockKey struct{}
+
+// withHeld is ctx with dir's block for readBlock, if it holds dirKey's.
+func withHeld(ctx context.Context, dirKey string, dir Attr) context.Context {
+	if dir.held != nil && dir.held.key == dirKey {
+		return context.WithValue(ctx, heldBlockKey{}, dir.held)
 	}
-	entry, ok, err := f.findInTree(ctx, dirKey, name)
+	return ctx
+}
+
+// Revalidate is StatStep for a directory whose attributes prev (from
+// StatStep or Revalidate) the caller holds: its .metadata and its
+// block are each read only if they changed since (Store.GetIfChanged,
+// both at once), so a directory that hasn't changed costs two requests
+// with no bodies. changed reports whether either had.
+func (f *Filesystem) Revalidate(ctx context.Context, key string, prev Attr) (attr Attr, changed bool, err error) {
+	held := prev.held
+	if held == nil || held.key != key || held.metaObj == nil {
+		attr, err := f.StatStep(ctx, key, TypeDir)
+		return attr, true, err
+	}
+	next := *held
+	var metaChanged, blockChanged bool
+	var metaErr, blockErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		var body io.ReadCloser
+		var obj *objstore.Object
+		body, obj, metaChanged, metaErr = f.store.GetIfChanged(ctx, metadataObjectKey(key), held.metaObj.ETag)
+		if metaErr != nil || !metaChanged {
+			metaErr = mapNotFound(metaErr)
+			return
+		}
+		defer body.Close()
+		next.metaObj = obj
+		next.meta, metaErr = io.ReadAll(body)
+	}()
+	go func() {
+		defer wg.Done()
+		var body io.ReadCloser
+		var obj *objstore.Object
+		body, obj, blockChanged, blockErr = f.store.GetIfChanged(ctx, key, held.obj.ETag)
+		if blockErr != nil || !blockChanged {
+			blockErr = mapNotFound(blockErr)
+			return
+		}
+		defer body.Close()
+		data, err := io.ReadAll(body)
+		if err != nil {
+			blockErr = err
+			return
+		}
+		blk, err := block.Decode(data)
+		if err != nil {
+			blockErr = err
+			return
+		}
+		blk.Collation = f.collation()
+		next.blk, next.obj = blk, obj
+	}()
+	wg.Wait()
+	if blockErr != nil {
+		return Attr{}, false, blockErr
+	}
+	if metaErr != nil {
+		return Attr{}, false, metaErr
+	}
+	if !metaChanged && !blockChanged {
+		return prev, false, nil
+	}
+	attr, err = combineDirAttr(key, next.meta, next.metaObj.LastModified, next.obj)
+	if err != nil {
+		return Attr{}, false, err
+	}
+	attr.held = &next
+	return attr, true, nil
+}
+
+func (f *Filesystem) lookup(ctx context.Context, dirKey, name string, fold bool) (block.Entry, Attr, error) {
+	entry, err := f.find(ctx, dirKey, name, fold)
 	if err != nil {
 		return block.Entry{}, Attr{}, err
-	}
-	if !ok {
-		return block.Entry{}, Attr{}, ErrNotFound
 	}
 	attr, err := f.Stat(ctx, entry.UUID, entry.Type)
 	if err != nil {
@@ -1095,15 +1244,24 @@ func (f *Filesystem) Lookup(ctx context.Context, dirKey, name string) (block.Ent
 // a primary-POSIX filesystem a name with no exact match means reading
 // the whole directory.
 func (f *Filesystem) LookupFold(ctx context.Context, dirKey, name string) (block.Entry, Attr, error) {
+	return f.lookup(ctx, dirKey, name, true)
+}
+
+// find is the entry named name in dirKey (with fold, as LookupFold finds
+// it), or ErrNotFound.
+func (f *Filesystem) find(ctx context.Context, dirKey, name string, fold bool) (block.Entry, error) {
 	if err := f.checkNameLength(name); err != nil {
-		return block.Entry{}, Attr{}, err
+		return block.Entry{}, err
 	}
 	var entry block.Entry
 	var ok bool
 	var err error
-	if f.collation() == block.Folded {
+	switch {
+	case !fold:
+		entry, ok, err = f.findInTree(ctx, dirKey, name)
+	case f.collation() == block.Folded:
 		entry, ok, err = f.findFoldInTree(ctx, dirKey, name)
-	} else {
+	default:
 		entry, ok, err = f.findInTree(ctx, dirKey, name)
 		if err == nil && !ok {
 			var entries []block.Entry
@@ -1117,16 +1275,12 @@ func (f *Filesystem) LookupFold(ctx context.Context, dirKey, name string) (block
 		}
 	}
 	if err != nil {
-		return block.Entry{}, Attr{}, err
+		return block.Entry{}, err
 	}
 	if !ok {
-		return block.Entry{}, Attr{}, ErrNotFound
+		return block.Entry{}, ErrNotFound
 	}
-	attr, err := f.Stat(ctx, entry.UUID, entry.Type)
-	if err != nil {
-		return block.Entry{}, Attr{}, err
-	}
-	return entry, attr, nil
+	return entry, nil
 }
 
 // ReadDir lists the entries of the directory at dirKey, across however
@@ -1158,7 +1312,7 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 	if err := f.inheritACLs(ctx, dirKey, &attr, true); err != nil {
 		return "", Attr{}, err
 	}
-	metaData, err := encodeFileMetadata(attr)
+	metaData, err := f.encodeMetadata(ctx, attr)
 	if err != nil {
 		return "", Attr{}, err
 	}
@@ -1177,7 +1331,9 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 		_ = f.store.Delete(ctx, metadataObjectKey(newUUID))
 		return "", Attr{}, err
 	}
-	f.touchDir(ctx, dirKey)
+	if err := f.touchDir(ctx, dirKey); err != nil {
+		return "", Attr{}, err
+	}
 	// Exactly what a Stat of the new directory will say (see Create).
 	created, err := combineDirAttr(newUUID, metaData, metaObj.LastModified, blockObj)
 	if err != nil {
@@ -1211,7 +1367,7 @@ func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid,
 		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, "", err
 	}
-	metaData, err := encodeFileMetadata(attr)
+	metaData, err := f.encodeMetadata(ctx, attr)
 	if err != nil {
 		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, "", err
@@ -1227,7 +1383,9 @@ func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid,
 		_ = f.store.Delete(ctx, metadataObjectKey(newUUID))
 		return "", Attr{}, "", err
 	}
-	f.touchDir(ctx, dirKey)
+	if err := f.touchDir(ctx, dirKey); err != nil {
+		return "", Attr{}, "", err
+	}
 	// Exactly what a Stat of the new item will say: the kernel may cache
 	// this reply, then ask again, and the two must agree.
 	created, err := combineFileAttr(newUUID, metaData, metaObj.LastModified, contentObj)
@@ -1235,6 +1393,62 @@ func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid,
 		return "", Attr{}, "", err
 	}
 	return newUUID, created, contentObj.ETag, nil
+}
+
+// CreateWith is Create with the new file's content and what's recorded
+// about it in the same writes: the content object written once, with
+// data, and .metadata once, with the Windows security descriptor sddl
+// (nil to inherit, as Create does) and info (its ContentETag taken to be
+// the content's). Create and then a write cost four object writes and an
+// empty version left behind; this costs two. The attributes returned are
+// what a Stat would say.
+func (f *Filesystem) CreateWith(ctx context.Context, dirKey, name string, mode, uid, gid uint32, data []byte, sddl []byte, info ItemInfo) (string, Attr, error) {
+	if err := f.checkWritable(); err != nil {
+		return "", Attr{}, err
+	}
+	if err := f.checkName(name); err != nil {
+		return "", Attr{}, err
+	}
+	newUUID, err := f.newKey(ctx)
+	if err != nil {
+		return "", Attr{}, err
+	}
+	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1, Ctime: time.Now()}
+	if err := f.inheritACLs(ctx, dirKey, &attr, false); err != nil {
+		return "", Attr{}, err
+	}
+	if sddl != nil {
+		attr.WindowsSDDL = sddl
+	}
+	contentObj, err := f.store.Put(ctx, newUUID, bytes.NewReader(data), nil, "")
+	if err != nil {
+		return "", Attr{}, err
+	}
+	info.ContentETag = contentObj.ETag
+	info.apply(&attr, TypeFile)
+	metaData, err := f.encodeMetadata(ctx, attr)
+	if err != nil {
+		_ = f.store.Delete(ctx, newUUID)
+		return "", Attr{}, err
+	}
+	metaObj, err := f.store.Put(ctx, metadataObjectKey(newUUID), bytes.NewReader(metaData), nil, "")
+	if err != nil {
+		_ = f.store.Delete(ctx, newUUID)
+		return "", Attr{}, err
+	}
+	if err := f.insertEntry(ctx, dirKey, name, newUUID, TypeFile); err != nil {
+		_ = f.store.Delete(ctx, newUUID)
+		_ = f.store.Delete(ctx, metadataObjectKey(newUUID))
+		return "", Attr{}, err
+	}
+	if err := f.touchDir(ctx, dirKey); err != nil {
+		return "", Attr{}, err
+	}
+	created, err := combineFileAttr(newUUID, metaData, metaObj.LastModified, contentObj)
+	if err != nil {
+		return "", Attr{}, err
+	}
+	return newUUID, created, nil
 }
 
 // Mknod creates a FIFO, a Unix socket, or a character or block device (typ
@@ -1269,7 +1483,7 @@ func (f *Filesystem) Mknod(ctx context.Context, dirKey, name string, mode uint32
 		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, err
 	}
-	metaData, err := encodeFileMetadata(attr)
+	metaData, err := f.encodeMetadata(ctx, attr)
 	if err != nil {
 		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, err
@@ -1285,7 +1499,9 @@ func (f *Filesystem) Mknod(ctx context.Context, dirKey, name string, mode uint32
 		_ = f.store.Delete(ctx, metadataObjectKey(newUUID))
 		return "", Attr{}, err
 	}
-	f.touchDir(ctx, dirKey)
+	if err := f.touchDir(ctx, dirKey); err != nil {
+		return "", Attr{}, err
+	}
 	// Exactly what a Stat of the new item will say (see Create).
 	created, err := combineFileAttr(newUUID, metaData, metaObj.LastModified, contentObj)
 	if err != nil {
@@ -1314,7 +1530,7 @@ func (f *Filesystem) Symlink(ctx context.Context, dirKey, name, target string, u
 	}
 
 	attr := Attr{Mode: 0777, Uid: uid, Gid: gid, Nlink: 1, Ctime: time.Now()}
-	metaData, err := encodeFileMetadata(attr)
+	metaData, err := f.encodeMetadata(ctx, attr)
 	if err != nil {
 		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, err
@@ -1330,7 +1546,9 @@ func (f *Filesystem) Symlink(ctx context.Context, dirKey, name, target string, u
 		_ = f.store.Delete(ctx, metadataObjectKey(newUUID))
 		return "", Attr{}, err
 	}
-	f.touchDir(ctx, dirKey)
+	if err := f.touchDir(ctx, dirKey); err != nil {
+		return "", Attr{}, err
+	}
 	// Exactly what a Stat of the new item will say (see Create).
 	created, err := combineFileAttr(newUUID, metaData, metaObj.LastModified, contentObj)
 	if err != nil {
@@ -1394,7 +1612,7 @@ func (f *Filesystem) adjustNlinkAttr(ctx context.Context, uuid string, delta int
 
 		if newNlink <= 0 {
 			attr.Nlink = nlinkZero
-			tomb, err := encodeFileMetadata(attr)
+			tomb, err := f.encodeMetadata(ctx, attr)
 			if err != nil {
 				return false, Attr{}, err
 			}
@@ -1412,7 +1630,7 @@ func (f *Filesystem) adjustNlinkAttr(ctx context.Context, uuid string, delta int
 		}
 
 		attr.Nlink = uint32(newNlink)
-		updated, err := encodeFileMetadata(attr)
+		updated, err := f.encodeMetadata(ctx, attr)
 		if err != nil {
 			return false, Attr{}, err
 		}
@@ -1464,49 +1682,60 @@ func (f *Filesystem) writeMetadata(ctx context.Context, key string, statusChange
 // record's ctime: one with none stored gets its current one, the
 // record's own LastModified, so the write can't move it.
 func (f *Filesystem) writeMetadataIf(ctx context.Context, key string, statusChange bool, mutate func(*Attr) bool) error {
+	_, _, err := f.writeMetadataRead(ctx, key, statusChange, mutate)
+	return err
+}
+
+// writeMetadataRead is writeMetadataIf returning what it wrote and the
+// store's description of it (nil, nil if mutate declined).
+func (f *Filesystem) writeMetadataRead(ctx context.Context, key string, statusChange bool, mutate func(*Attr) bool) ([]byte, *objstore.Object, error) {
 	mk := metadataObjectKey(key)
 	for attempt := 0; attempt < maxTreeRetries; attempt++ {
 		retryPause(ctx, attempt)
 		body, obj, err := f.store.Get(ctx, mk)
 		if err != nil {
-			return mapNotFound(err)
+			return nil, nil, mapNotFound(err)
 		}
 		data, readErr := io.ReadAll(body)
 		body.Close()
 		if readErr != nil {
-			return readErr
+			return nil, nil, readErr
 		}
 		attr, err := decodeFileMetadata(data)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 		if !mutate(&attr) {
-			return nil
+			return nil, nil, nil
 		}
 		if statusChange {
 			attr.Ctime = time.Now()
 		} else if attr.Ctime.IsZero() {
 			attr.Ctime = obj.LastModified
 		}
-		newData, err := encodeFileMetadata(attr)
+		newData, err := f.encodeMetadata(ctx, attr)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
-		_, err = f.store.Put(ctx, mk, bytes.NewReader(newData), nil, obj.ETag)
+		written, err := f.store.Put(objstore.Replacing(ctx, obj.VersionID), mk, bytes.NewReader(newData), nil, obj.ETag)
 		if objstore.IsPreconditionFailed(err) {
 			continue
 		}
-		return err
+		if err != nil {
+			return nil, nil, err
+		}
+		return newData, written, nil
 	}
-	return fmt.Errorf("update metadata %s: exceeded %d retries", key, maxTreeRetries)
+	return nil, nil, fmt.Errorf("update metadata %s: exceeded %d retries", key, maxTreeRetries)
 }
 
 // touchDir records that an entry was added to or removed from the
-// directory at key: its mtime and ctime become now. Best effort, like
-// TouchAtime — by the time this runs the entry change itself has
-// already happened, and failing that operation over a timestamp would
-// misreport it.
-func (f *Filesystem) touchDir(ctx context.Context, key string) {
+// directory at key: its mtime and ctime become now. For an ordinary
+// change it's best effort, like TouchAtime: the entry change itself has
+// happened, and failing it over a timestamp would misreport it. A change
+// under a declared time (a mirror's) is the folder's history, and fails
+// without it.
+func (f *Filesystem) touchDir(ctx context.Context, key string) error {
 	// One instant for both: a status-change write stamps ctime when it
 	// writes, after reading the .metadata, a round trip later than this,
 	// so the two fell in different seconds whenever one ticked over in
@@ -1516,10 +1745,14 @@ func (f *Filesystem) touchDir(ctx context.Context, key string) {
 	if t, ok := objstore.DeclaredTime(ctx); ok {
 		mtime = t
 	}
-	_ = f.writeMetadata(ctx, key, false, func(a *Attr) {
+	err := f.writeMetadata(ctx, key, false, func(a *Attr) {
 		a.Mtime = mtime
 		a.Ctime = now
 	})
+	if _, dated := objstore.DeclaredTime(ctx); !dated {
+		return nil
+	}
+	return err
 }
 
 // touchCtime records a status change to the file or directory at key
@@ -1584,7 +1817,7 @@ func (f *Filesystem) SetWindowsACL(ctx context.Context, uuid string, typ EntryTy
 // icbfs's own tools keep about an item (Attr.App), never visible through
 // a mount. App data is icbfs's bookkeeping, not a change to the item:
 // like an access time or checksums, writing it doesn't move ctime.
-func (f *Filesystem) SetAppData(ctx context.Context, uuid string, typ EntryType, key string, value []byte) (Attr, error) {
+func (f *Filesystem) SetAppData(ctx context.Context, uuid string, typ EntryType, key string, value []byte) error {
 	return f.SetItemInfo(ctx, uuid, typ, ItemInfo{App: map[string][]byte{key: value}})
 }
 
@@ -1614,54 +1847,81 @@ type ItemInfo struct {
 // SetItemInfo records info about an item in one metadata write, so a sync
 // daemon's write costs one metadata write, not one per field. A time or
 // a mode is a change to the item and moves ctime; app data and checksums
-// are icbfs's bookkeeping and don't.
-func (f *Filesystem) SetItemInfo(ctx context.Context, uuid string, typ EntryType, info ItemInfo) (Attr, error) {
+// are icbfs's bookkeeping and don't. It returns no attributes, so it
+// costs no stat: a caller that wants them asks.
+func (f *Filesystem) SetItemInfo(ctx context.Context, uuid string, typ EntryType, info ItemInfo) error {
+	if err := f.checkWritable(); err != nil {
+		return err
+	}
+	if info.Empty() {
+		return nil
+	}
+	statusChange := info.Mtime != nil || info.Btime != nil || info.Mode != nil || info.WindowsAttrs != nil
+	return f.writeMetadata(ctx, uuid, statusChange, func(a *Attr) { info.apply(a, typ) })
+}
+
+// SetInfoWith is SetItemInfo for an item whose object the caller holds
+// as current: a file's content version (as a write just returned it, or
+// Attr.ContentVersion; info.ContentETag is taken to be its), a
+// directory's root block (Attr.ContentVersion). The attributes it
+// returns are built from what it wrote and that, with no stat.
+func (f *Filesystem) SetInfoWith(ctx context.Context, key string, typ EntryType, current *objstore.Object, info ItemInfo) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
 	}
-	statusChange := info.Mtime != nil || info.Btime != nil || info.Mode != nil || info.WindowsAttrs != nil
-	if info.Mtime == nil && info.Btime == nil && info.Mode == nil && info.WindowsAttrs == nil && len(info.App) == 0 && info.Checksums == nil {
-		return f.Stat(ctx, uuid, typ)
+	if typ != TypeDir {
+		info.ContentETag = current.ETag
 	}
-	key := uuid
-	err := f.writeMetadata(ctx, key, statusChange, func(a *Attr) {
-		if info.Btime != nil {
-			a.Btime = *info.Btime
-		}
-		if info.Mtime != nil {
-			a.Mtime = *info.Mtime
-			if typ != TypeDir {
-				a.mtimeOverrideETag = info.ContentETag
-			}
-		}
-		if info.Mode != nil {
-			a.Mode = *info.Mode
-			chmodACL(a, *info.Mode)
-		}
-		if info.WindowsAttrs != nil {
-			a.WindowsAttrs, a.HasWindowsAttrs = *info.WindowsAttrs&windowsAttrMask, true
-		}
-		for k, v := range info.App {
-			if v == nil {
-				delete(a.App, k)
-				continue
-			}
-			if a.App == nil {
-				a.App = make(map[string][]byte)
-			}
-			a.App[k] = v
-		}
-		if info.Checksums != nil {
-			if a.Checksums == nil {
-				a.Checksums = map[string]Checksums{}
-			}
-			a.Checksums[info.ContentETag] = *info.Checksums
-		}
-	})
+	statusChange := info.Mtime != nil || info.Btime != nil || info.Mode != nil || info.WindowsAttrs != nil
+	data, obj, err := f.writeMetadataRead(ctx, key, statusChange, func(a *Attr) bool { info.apply(a, typ); return true })
 	if err != nil {
 		return Attr{}, err
 	}
-	return f.Stat(ctx, uuid, typ)
+	if typ == TypeDir {
+		return combineDirAttr(key, data, obj.LastModified, current)
+	}
+	return combineFileAttr(key, data, obj.LastModified, current)
+}
+
+// Empty reports whether info records nothing.
+func (info ItemInfo) Empty() bool {
+	return info.Mtime == nil && info.Btime == nil && info.Mode == nil && info.WindowsAttrs == nil && len(info.App) == 0 && info.Checksums == nil
+}
+
+// apply records info in a.
+func (info ItemInfo) apply(a *Attr, typ EntryType) {
+	if info.Btime != nil {
+		a.Btime = *info.Btime
+	}
+	if info.Mtime != nil {
+		a.Mtime = *info.Mtime
+		if typ != TypeDir {
+			a.mtimeOverrideETag = info.ContentETag
+		}
+	}
+	if info.Mode != nil {
+		a.Mode = *info.Mode
+		chmodACL(a, *info.Mode)
+	}
+	if info.WindowsAttrs != nil {
+		a.WindowsAttrs, a.HasWindowsAttrs = *info.WindowsAttrs&windowsAttrMask, true
+	}
+	for k, v := range info.App {
+		if v == nil {
+			delete(a.App, k)
+			continue
+		}
+		if a.App == nil {
+			a.App = make(map[string][]byte)
+		}
+		a.App[k] = v
+	}
+	if info.Checksums != nil {
+		if a.Checksums == nil {
+			a.Checksums = map[string]Checksums{}
+		}
+		a.Checksums[info.ContentETag] = *info.Checksums
+	}
 }
 
 // SetGenericReparseData stores a file's raw, non-symlink reparse point
@@ -1689,7 +1949,10 @@ func (f *Filesystem) DeleteGenericReparseData(ctx context.Context, uuid string) 
 
 // Link creates a hard link named name inside dirKey, pointing at the
 // existing node targetUUID/targetType, incrementing its nlink via the
-// CAS-protected metadataObjectKey object.
+// CAS-protected metadataObjectKey object. The name goes in first: a link
+// that stops before the count leaves it one short, so deleting the last
+// name it counts sends the item to the trash (restorable); the other way,
+// one over, the item would outlive its names, untrashed and unreachable.
 func (f *Filesystem) Link(ctx context.Context, dirKey, name, targetUUID string, targetType EntryType) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
@@ -1697,15 +1960,23 @@ func (f *Filesystem) Link(ctx context.Context, dirKey, name, targetUUID string, 
 	if err := f.checkName(name); err != nil {
 		return Attr{}, err
 	}
-	if _, err := f.adjustNlink(ctx, targetUUID, +1); err != nil {
-		return Attr{}, err
-	}
-
 	if err := f.insertEntry(ctx, dirKey, name, targetUUID, targetType); err != nil {
-		_, _ = f.adjustNlink(ctx, targetUUID, -1) // best-effort rollback
 		return Attr{}, err
 	}
-	f.touchDir(ctx, dirKey)
+	if _, err := f.adjustNlink(ctx, targetUUID, +1); err != nil {
+		if _, uerr := f.removeEntryIf(ctx, dirKey, name, func(e block.Entry) error {
+			if e.UUID != targetUUID {
+				return ErrExists
+			}
+			return nil
+		}); uerr != nil {
+			return Attr{}, fmt.Errorf("link %s: %w; and taking the name back: %v (it isn't counted)", name, err, uerr)
+		}
+		return Attr{}, err
+	}
+	if err := f.touchDir(ctx, dirKey); err != nil {
+		return Attr{}, err
+	}
 	return f.Stat(ctx, targetUUID, targetType)
 }
 
@@ -1719,31 +1990,51 @@ func (f *Filesystem) Unlink(ctx context.Context, dirKey, name string) error {
 	if err := f.checkNameLength(name); err != nil {
 		return err
 	}
+	// The trash entry first, if this is the last name (trashFirst): in
+	// the walk that removes the name, once it has found the item and
+	// before the block that drops it is written.
+	var pending *pendingTrash
 	entry, err := f.removeEntryIf(ctx, dirKey, name, func(e block.Entry) error {
 		if e.Type == TypeDir {
 			return ErrIsDir
 		}
-		return nil
+		if pending != nil && pending.e.ItemID == e.UUID {
+			return nil // a retry of the block's write, for the same item
+		}
+		pending.cancel(ctx, f) // the name names another item now
+		var err error
+		pending, err = f.trashFirst(ctx, e, dirKey, name, nil)
+		return err
 	})
 	if err != nil {
+		pending.cancel(ctx, f)
 		return err
 	}
-	before, _ := f.store.Head(ctx, entry.UUID) // for the trash entry, if this was the last name
-	f.touchDir(ctx, dirKey)
+	var before *objstore.Object
+	if pending == nil {
+		before, _ = f.store.Head(ctx, entry.UUID) // for an entry after all, should this be the last name
+	}
+	touched := f.touchDir(ctx, dirKey) // reported once the item's own steps are done
 
 	deleted, last, err := f.adjustNlinkAttr(ctx, entry.UUID, -1)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return err
 	}
-	if deleted {
+	switch {
+	case deleted && pending == nil:
+		// Its other name went at the same time.
 		var size int64
 		var version string
 		if before != nil {
 			size, version = before.Size, before.VersionID
 		}
-		f.recordTrash(ctx, entry.UUID, entry.Type, dirKey, name, size, version, last.App[AppDriveOrigin])
+		if err := f.recordTrash(ctx, entry.UUID, entry.Type, dirKey, name, size, version, last.App[AppDriveOrigin]); err != nil {
+			return err
+		}
+	case !deleted:
+		pending.cancel(ctx, f) // a name was added meanwhile: the item stays
 	}
-	return nil
+	return touched
 }
 
 // Rmdir removes an empty directory named name from dirKey.
@@ -1777,10 +2068,15 @@ func (f *Filesystem) Rmdir(ctx context.Context, dirKey, name string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := f.removeEntry(ctx, dirKey, name); err != nil {
+	pending, err := f.trashFirst(ctx, entry, dirKey, name, &dirAttr)
+	if err != nil {
 		return err
 	}
-	f.touchDir(ctx, dirKey)
+	if _, err := f.removeEntry(ctx, dirKey, name); err != nil {
+		pending.cancel(ctx, f)
+		return err
+	}
+	touched := f.touchDir(ctx, dirKey) // reported once the directory is deleted
 	if err := f.store.Delete(ctx, entry.UUID); err != nil {
 		return err
 	}
@@ -1788,8 +2084,7 @@ func (f *Filesystem) Rmdir(ctx context.Context, dirKey, name string) error {
 	if err := f.store.Delete(ctx, metadataObjectKey(entry.UUID)); err != nil && !objstore.IsNotFound(err) {
 		return err
 	}
-	f.recordTrash(ctx, entry.UUID, TypeDir, dirKey, name, 0, "", dirAttr.App[AppDriveOrigin])
-	return nil
+	return touched
 }
 
 // dirContains reports whether targetUUID is ancestorUUID or anywhere under
@@ -1885,8 +2180,16 @@ func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, 
 			if len(children) > 0 {
 				return ErrNotEmpty
 			}
-			replaced, _ := f.statDir(ctx, existing.UUID) // for the trash entry's origin
+			replaced, err := f.statDir(ctx, existing.UUID)
+			if err != nil {
+				return err
+			}
+			pending, err := f.trashFirst(ctx, existing, newDirKey, newName, &replaced)
+			if err != nil {
+				return err
+			}
 			if _, err := f.removeEntry(ctx, newDirKey, newName); err != nil {
+				pending.cancel(ctx, f)
 				return err
 			}
 			if err := f.store.Delete(ctx, existing.UUID); err != nil {
@@ -1895,45 +2198,90 @@ func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, 
 			if err := f.store.Delete(ctx, metadataObjectKey(existing.UUID)); err != nil && !objstore.IsNotFound(err) {
 				return err
 			}
-			f.recordTrash(ctx, existing.UUID, TypeDir, newDirKey, newName, 0, "", replaced.App[AppDriveOrigin])
 		} else {
 			if entry.Type == TypeDir {
 				return ErrNotDir
 			}
-			before, _ := f.store.Head(ctx, existing.UUID)
+			pending, err := f.trashFirst(ctx, existing, newDirKey, newName, nil)
+			if err != nil {
+				return err
+			}
+			var before *objstore.Object
+			if pending == nil {
+				before, _ = f.store.Head(ctx, existing.UUID)
+			}
 			if _, err := f.removeEntry(ctx, newDirKey, newName); err != nil {
+				pending.cancel(ctx, f)
 				return err
 			}
 			deleted, last, err := f.adjustNlinkAttr(ctx, existing.UUID, -1)
 			if err != nil && !errors.Is(err, ErrNotFound) {
 				return err
 			}
-			if deleted {
+			switch {
+			case deleted && pending == nil:
 				var size int64
 				var version string
 				if before != nil {
 					size, version = before.Size, before.VersionID
 				}
-				f.recordTrash(ctx, existing.UUID, existing.Type, newDirKey, newName, size, version, last.App[AppDriveOrigin])
+				if err := f.recordTrash(ctx, existing.UUID, existing.Type, newDirKey, newName, size, version, last.App[AppDriveOrigin]); err != nil {
+					return err
+				}
+			case !deleted:
+				pending.cancel(ctx, f)
 			}
 		}
 	}
 
-	if _, err := f.removeEntry(ctx, oldDirKey, oldName); err != nil {
+	if err := f.moveEntry(ctx, entry, oldDirKey, oldName, newDirKey, newName); err != nil {
 		return err
 	}
-	if err := f.insertEntry(ctx, newDirKey, newName, entry.UUID, entry.Type); err != nil {
-		// Best-effort rollback: put the old entry back so a failed
-		// rename doesn't silently lose the source name on top of
-		// whatever already failed.
-		_ = f.insertEntry(ctx, oldDirKey, oldName, entry.UUID, entry.Type)
+	if err := f.touchDir(ctx, oldDirKey); err != nil {
 		return err
 	}
-	f.touchDir(ctx, oldDirKey)
 	if newDirKey != oldDirKey {
-		f.touchDir(ctx, newDirKey)
+		if err := f.touchDir(ctx, newDirKey); err != nil {
+			return err
+		}
 	}
 	f.touchCtime(ctx, entry.UUID) // as Linux filesystems do
+	return nil
+}
+
+// moveEntry gives entry, named oldName in oldDirKey, its new name: the new
+// name first, then the old one goes, so a rename that stops in between
+// leaves the item with both (and a delete of either sends it to the
+// trash), never with neither. A name that differs only in case, in the
+// same directory, would clash with the old one, so it goes the other way.
+// An undo that fails is reported with the error that called for it.
+func (f *Filesystem) moveEntry(ctx context.Context, entry block.Entry, oldDirKey, oldName, newDirKey, newName string) error {
+	if oldDirKey == newDirKey && block.EqualFold(oldName, newName) {
+		if _, err := f.removeEntry(ctx, oldDirKey, oldName); err != nil {
+			return err
+		}
+		if err := f.insertEntry(ctx, newDirKey, newName, entry.UUID, entry.Type); err != nil {
+			if uerr := f.insertEntry(ctx, oldDirKey, oldName, entry.UUID, entry.Type); uerr != nil {
+				return fmt.Errorf("rename %s: %w; and putting its name back: %v (it has none)", oldName, err, uerr)
+			}
+			return err
+		}
+		return nil
+	}
+	if err := f.insertEntry(ctx, newDirKey, newName, entry.UUID, entry.Type); err != nil {
+		return err
+	}
+	if _, err := f.removeEntry(ctx, oldDirKey, oldName); err != nil {
+		if _, uerr := f.removeEntryIf(ctx, newDirKey, newName, func(e block.Entry) error {
+			if e.UUID != entry.UUID {
+				return ErrExists
+			}
+			return nil
+		}); uerr != nil {
+			return fmt.Errorf("rename %s: %w; and taking back its new name %s: %v (it has both)", oldName, err, newName, uerr)
+		}
+		return err
+	}
 	return nil
 }
 
@@ -2003,27 +2351,14 @@ func (f *Filesystem) ReadFile(ctx context.Context, key string) ([]byte, Attr, st
 // file's mtime.
 //
 // ifMatch makes the write conditional on the content's current ETag, as
-// objstore.Store.Put's does; empty means unconditional. It returns the new
-// ETag, so the next write can be conditional on this one without a read.
-func (f *Filesystem) WriteFile(ctx context.Context, key string, data []byte, ifMatch string) (Attr, string, error) {
-	return f.writeFileFrom(ctx, key, bytes.NewReader(data), ifMatch)
-}
-
-// writeFileFrom is WriteFile from a reader: OpenFile.Flush passes its
-// scratch file, so a large file is never held in memory.
-func (f *Filesystem) writeFileFrom(ctx context.Context, key string, body io.Reader, ifMatch string) (Attr, string, error) {
+// objstore.Store.Put's does; empty means unconditional. It returns the
+// version written (its ETag, so the next write can be conditional on this
+// one without a read), and no attributes, so it costs no stat.
+func (f *Filesystem) WriteFile(ctx context.Context, key string, data []byte, ifMatch string) (*objstore.Object, error) {
 	if err := f.checkWritable(); err != nil {
-		return Attr{}, "", err
+		return nil, err
 	}
-	contentObj, err := f.store.Put(ctx, key, body, nil, ifMatch)
-	if err != nil {
-		return Attr{}, "", err
-	}
-	attr, err := f.statFile(ctx, key)
-	if err != nil {
-		return Attr{}, "", err
-	}
-	return attr, contentObj.ETag, nil
+	return f.store.Put(ctx, key, bytes.NewReader(data), nil, ifMatch)
 }
 
 // SetAttr applies the given changes (each may be nil) to the node at key.
@@ -2175,7 +2510,7 @@ func (f *Filesystem) TouchAtime(ctx context.Context, key string, typ EntryType) 
 			return nil
 		}
 	}
-	err := f.writeMetadataIf(ctx, key, false, func(a *Attr) bool {
+	err := f.writeMetadataIf(objstore.KeepDate(ctx), key, false, func(a *Attr) bool {
 		a.Atime = now
 		return true
 	})

@@ -132,12 +132,12 @@ func sameEntries(a, b []block.Entry) bool {
 }
 
 // ReplaceFolderHistory writes states as dir's whole history.
-func (d *Drive) ReplaceFolderHistory(ctx context.Context, ref drive.ItemRef, states []drive.FolderState, cond drive.Condition) error {
+func (d *Drive) ReplaceFolderHistory(ctx context.Context, ref drive.ItemRef, states []drive.FolderState, cond drive.Condition) (err error) {
 	ctx, done, err := d.begin(ctx)
 	if err != nil {
 		return err
 	}
-	defer done()
+	defer done(&err)
 	n, err := d.resolve(ctx, d.fs, ref)
 	if err != nil {
 		return err
@@ -199,7 +199,7 @@ func entryType(t string) (icbfs.EntryType, bool) {
 // the older block. So the directory's history is rewritten: the change
 // goes into a state at its time and into every later one, and the last
 // state is the directory as it is now.
-func (d *Drive) repairLateFolders(ctx context.Context, rec *objstore.Recorder, restored map[string]bool) {
+func (d *Drive) repairLateFolders(ctx context.Context, rec *objstore.Recorder, restored map[string]bool) error {
 	late := map[string]time.Time{}
 	for _, w := range rec.Written() {
 		if w.Dir == "" {
@@ -219,12 +219,15 @@ func (d *Drive) repairLateFolders(ctx context.Context, rec *objstore.Recorder, r
 			continue
 		}
 		if !marked {
-			_ = d.fs.MarkPastChanged(ctx) // views: the past has changed
+			d.past.changed(ctx) // views: the past has changed
 			d.views.lookAgain()
 			marked = true
 		}
-		_ = d.repairLateFolder(ctx, dir, at)
+		if err := d.repairLateFolder(ctx, dir, at); err != nil {
+			return fmt.Errorf("rewrite the history of folder %s with a change at %s: %w", dir, at.Format(time.RFC3339), err)
+		}
 	}
+	return nil
 }
 
 func (d *Drive) repairLateFolder(ctx context.Context, dirKey string, at time.Time) error {
@@ -335,12 +338,12 @@ func (d *Drive) FileHistory(ctx context.Context, ref drive.ItemRef) (drive.FileH
 }
 
 // ReplaceFileHistory writes states as item's whole history.
-func (d *Drive) ReplaceFileHistory(ctx context.Context, ref drive.ItemRef, states []drive.FileState, cond drive.Condition) error {
+func (d *Drive) ReplaceFileHistory(ctx context.Context, ref drive.ItemRef, states []drive.FileState, cond drive.Condition) (err error) {
 	ctx, done, err := d.begin(ctx)
 	if err != nil {
 		return err
 	}
-	defer done()
+	defer done(&err)
 	n, err := d.resolve(ctx, d.fs, ref)
 	if err != nil {
 		return err

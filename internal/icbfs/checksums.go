@@ -34,6 +34,19 @@ func (a Attr) ContentChecksums() (Checksums, bool) {
 // ContentETag is a file's current content ETag, as Stat read it.
 func (a Attr) ContentETag() string { return a.contentETag }
 
+// ContentVersion is a file's current content version as Stat read it
+// (its version id, ETag, size and when the store wrote it), so a caller
+// that wants the version needn't ask the store again; for a directory,
+// its root block's. ok is false for attributes Stat didn't read.
+func (a Attr) ContentVersion() (objstore.Object, bool) {
+	return a.content, a.content.VersionID != ""
+}
+
+// Dated reports whether the item has a .version record, which dates some
+// of its versions otherwise than the store does (objstore.Dates): set by
+// any write of its .metadata made under a declared time, and kept.
+func (a Attr) Dated() bool { return a.dated }
+
 // Checksummer computes Checksums of what's written to it.
 type Checksummer struct {
 	md5, sha256 hash.Hash
@@ -71,7 +84,7 @@ func (f *Filesystem) SetChecksums(ctx context.Context, key, etag string, c Check
 	if err := f.checkWritable(); err != nil {
 		return err
 	}
-	return f.writeMetadataIf(ctx, key, false, func(a *Attr) bool {
+	return f.writeMetadataIf(objstore.KeepDate(ctx), key, false, func(a *Attr) bool {
 		old := a.Checksums[etag]
 		merged := old
 		if len(c.MD5) > 0 {
@@ -131,7 +144,7 @@ func (f *Filesystem) VersionChecksums(ctx context.Context, key, versionID string
 	if err != nil {
 		return Checksums{}, err
 	}
-	if !f.readOnly && !f.archived {
+	if !f.readOnly && !f.archived.Load() {
 		// Best effort: unrecorded, they're only computed again next time.
 		_ = f.SetChecksums(ctx, key, obj.ETag, c)
 	}

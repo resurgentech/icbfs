@@ -118,6 +118,12 @@ type Store interface {
 	Get(ctx context.Context, key string) (io.ReadCloser, *Object, error)
 	Head(ctx context.Context, key string) (*Object, error)
 
+	// GetIfChanged is Get unless key's current version still has ETag
+	// etag: then changed is false and nothing else comes back (the
+	// store's 304), so a caller holding a copy checks it in one request
+	// that carries no body.
+	GetIfChanged(ctx context.Context, key, etag string) (body io.ReadCloser, obj *Object, changed bool, err error)
+
 	// GetVersion and HeadVersion are Get and Head for one version of key,
 	// current or not.
 	GetVersion(ctx context.Context, key, versionID string) (io.ReadCloser, *Object, error)

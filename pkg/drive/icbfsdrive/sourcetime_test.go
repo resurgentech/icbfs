@@ -44,8 +44,12 @@ func TestVersionsInSourceTime(t *testing.T) {
 		year int
 		body string
 	}{{2021, "first"}, {2022, "second"}, {2023, "third"}} {
-		if _, err := d.Write(at(system(), v.year), "/doc.txt", strings.NewReader(v.body), drive.Condition{}, drive.WriteOptions{}); err != nil {
+		it, err := d.Write(at(system(), v.year), "/doc.txt", strings.NewReader(v.body), drive.Condition{}, drive.WriteOptions{})
+		if err != nil {
 			t.Fatalf("write %d: %v", v.year, err)
+		}
+		if it.Version == nil || !it.Version.Time.Equal(year(v.year)) {
+			t.Fatalf("write %d returned version %+v, want it dated then", v.year, it.Version)
 		}
 	}
 	versions, err := d.Versions(system(), drive.ByPath("/doc.txt"))
@@ -83,6 +87,47 @@ func TestVersionsInSourceTime(t *testing.T) {
 	it, err := d.Stat(system(), drive.ByPath("/doc.txt"), drive.At{})
 	if err != nil || !it.Modified.Equal(year(2023)) || !it.Created.Equal(year(2021)) {
 		t.Fatalf("now: modified %v, created %v, %v; want 2023 and 2021", it.Modified, it.Created, err)
+	}
+}
+
+// TestListingDatesVersions: a listing reads an item's .version record
+// only when its .metadata says it has one (written in source time), and
+// its rows date the current version as Versions does: a file never
+// written in source time, one written in it, and one written now and
+// then given an older version in source time (put back on top of which,
+// the current version keeps the mark).
+func TestListingDatesVersions(t *testing.T) {
+	d, _ := sourceDrive(t, "listing-dates")
+	ctx := system()
+	write(t, ctx, d, "/now.txt", "now", drive.Condition{})
+	write(t, at(ctx, 2021), d, "/then.txt", "then", drive.Condition{})
+	write(t, ctx, d, "/both.txt", "current", drive.Condition{})
+	write(t, at(ctx, 2019), d, "/both.txt", "older", drive.Condition{})
+	for p, dated := range map[string]bool{"/now.txt": false, "/then.txt": true, "/both.txt": true} {
+		n, err := d.resolvePath(ctx, d.fs, p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n.attr.Dated() != dated {
+			t.Errorf("%s: dated %v, want %v", p, n.attr.Dated(), dated)
+		}
+	}
+	page, err := d.List(ctx, drive.ByPath("/"), drive.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range page.Items {
+		versions, err := d.Versions(ctx, drive.ByID(it.ID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// To the second: a HEAD's Last-Modified has no finer.
+		if it.Version == nil || it.Version.ID != versions[0].ID || !it.Version.Time.Truncate(time.Second).Equal(versions[0].Time.Truncate(time.Second)) {
+			t.Errorf("%s: listed as version %+v, current is %+v", it.Path, it.Version, versions[0])
+		}
+	}
+	if got := read(t, ctx, d, drive.ByPath("/both.txt"), drive.At{}); got != "current" {
+		t.Fatalf("both.txt is %q now", got)
 	}
 }
 
@@ -251,9 +296,20 @@ func TestSourceTimeReachesOtherCaches(t *testing.T) {
 	if _, err := d.Write(at(ctx, 2022), "/b.txt", strings.NewReader("b"), drive.Condition{}, drive.WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	other.views.lookAgain() // its next look would be within 30 s
-	if !exists(t, other, "/b.txt", year(2023)) {
-		t.Fatal("the other drive's view of 2023 doesn't have b.txt, written since as of 2022")
+	// The second write came within a second of the first, so its mark is
+	// put off to that second's end (pastMarker), not dropped.
+	deadline := time.Now().Add(3 * pastMarkEvery)
+	for {
+		other.views.mu.Lock()
+		other.views.pastSeen = time.Time{} // its next look would be within 30 s
+		other.views.mu.Unlock()
+		if exists(t, other, "/b.txt", year(2023)) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the other drive's view of 2023 doesn't have b.txt, written since as of 2022")
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

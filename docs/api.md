@@ -152,6 +152,11 @@ otherwise.
   `Created` time, so its name is there from the start.
 - The filesystem has to start before the source's history does:
   `Settings.Created` when creating it.
+- Dating a change is part of it: a change whose dates can't be recorded
+  (the store failing after it took the change's writes) is undone and
+  returns the error, so applying it again is safe. From its first change
+  under a source time on, a filesystem dates every version of its items,
+  ordinary writes too.
 - The HTTP API doesn't take a source time: it's for a mirror using the
   library.
 
@@ -225,7 +230,8 @@ source's changes oldest first.
 `Apply` returns an `Applied`: the item, and the actions it took. A
 `SourceItem` carries, besides its content, what the mirror records on the
 item: `ModTime`, `Created`, `Changed`, `App`, `Mode`, `WindowsAttrs`. All
-of it goes in the one metadata write of a create or a new version, and
+of it goes in the one metadata write of a create or a new version (on
+icbfs a new file is its content and its `.metadata`, each written once), and
 on the no-content path (`retimed`) in one `SetInfo`, only what differs;
 an item is `unchanged` only when none of it differs, and then nothing is
 written. That needs a drive that's an `InfoSetter`; on one that's only a
@@ -234,7 +240,10 @@ written. That needs a drive that's an `InfoSetter`; on one that's only a
 and origin in one write.
 
 - `Open` is called only when the bytes are needed: never for a move, a
-  restore of the version held, or an item already up to date.
+  restore of the version held, an item already up to date, or a new
+  file whose path is taken. A new file is written on the condition that
+  its path is free (`IfNoneMatch`), which the drive checks before it
+  reads the content; the mirror looks at the path only if it's taken.
 - The trash is the undo. An item the source deletes and brings back with
   the same id (a recycle bin, a folder shared again, a listing that came
   back short) is restored, not copied again; and `Undo` restores
@@ -248,6 +257,15 @@ and origin in one write.
 - On icbfs, finding a source item is a lookup (`OriginFinder`: an origin
   record per item, and a pointer from each trashed item to its entry);
   any other backend is searched, a listing of the drive and its trash.
+- Applying in parallel: on icbfs, items made or removed under one folder
+  contend on that folder's block, since each is a compare-and-swap of it.
+  Of several at once, one lands and the rest read the block again and
+  retry (with a short random pause, up to 20 times), so siblings cost
+  extra rounds but all land. Items under different folders don't contend
+  at all. A daemon can run applies across folders as wide as it likes;
+  under any one folder, a handful at once is the useful most, and the
+  retries are what bounds it, not correctness.
+  (`TestCreatesInParallel` shows both halves.)
 
 ### Capabilities
 
@@ -410,7 +428,9 @@ It reads through the history cache as-of mounts share (by default in the
 user's cache directory, kept 30 days), so a directory listed at some
 moments is listed at them again with no store requests, in later runs
 too. A change to the past (a purge, a mirror writing what happened
-earlier) is noticed within 30 seconds (`CheckPast`); `PastChanges` counts
+earlier) is noticed within 30 seconds (`CheckPast`), plus up to a second
+for one made through another drive, which signals at most once a second;
+`PastChanges` counts
 them, for a caller keeping listings of its own. `IsNotFound` tells a
 path or item that wasn't there at that moment, and `Close` closes the
 cache.
@@ -435,8 +455,15 @@ defer d.Close()
   it, and the drive's registry `ID` (recorded in the origin of copies made
   from it). `History` is a history cache to share with other views; without
   one the drive opens a temporary one in `CacheDir`, which `Close` removes.
-  `ReadOnly` refuses every change (see Permissions). `Filesystem` returns
-  the drive's icbfs filesystem.
+  `ReadOnly` refuses every change (see Permissions). `TrustFor` is how
+  long the drive uses a folder it has read without asking the store again:
+  for a daemon that is its filesystem's only writer (a mirror's), a walk
+  down a path it walked a moment ago then costs nothing per folder. At 0,
+  the default, each folder on the way is checked, two conditional reads
+  with no bodies when it hasn't changed. The drive's own changes are seen
+  at once either way; changes made elsewhere (a mount, another drive),
+  after at most `TrustFor`. `Filesystem` returns the drive's icbfs
+  filesystem.
 - `icbfsdrive.OpenSideStore(ctx, store, name)` opens a side store,
   creating its filesystem the first time.
 - `pkg/icbfstest` is for tests of programs built on icbfs: `Store(t)` is

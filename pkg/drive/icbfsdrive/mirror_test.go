@@ -30,6 +30,11 @@ func (s *readCounter) Get(ctx context.Context, key string) (io.ReadCloser, *objs
 	return s.Store.Get(ctx, key)
 }
 
+func (s *readCounter) GetIfChanged(ctx context.Context, key, etag string) (io.ReadCloser, *objstore.Object, bool, error) {
+	s.n.Add(1)
+	return s.Store.GetIfChanged(ctx, key, etag)
+}
+
 func (s *readCounter) Head(ctx context.Context, key string) (*objstore.Object, error) {
 	s.n.Add(1)
 	return s.Store.Head(ctx, key)
@@ -189,10 +194,15 @@ func TestMirror(t *testing.T) {
 				}
 			}
 
-			// A file made on the drive is never written over.
+			// A file made on the drive is never written over, nor the
+			// source item downloaded to find that out.
 			write(t, ctx, d, "/Docs/mine.txt", "local", drive.Condition{})
+			before := src.opens.Load()
 			if _, err := m.Apply(ctx, src.item("other", "1.0", "/Docs/mine.txt", "theirs", jan)); !errors.Is(err, drive.ErrNotMirrored) {
 				t.Fatalf("applying over a local file: %v, want ErrNotMirrored", err)
+			}
+			if n := src.opens.Load() - before; n != 0 {
+				t.Fatalf("applying over a local file opened the source %d times", n)
 			}
 			if got := read(t, ctx, d, drive.ByPath("/Docs/mine.txt"), drive.At{}); got != "local" {
 				t.Fatalf("the local file now reads %q", got)
@@ -217,7 +227,7 @@ func TestMirrorAdoptsItemsCopiedBeforeTheIndex(t *testing.T) {
 	ctx := system()
 	it := write(t, ctx, d, "/old.txt", "copied long ago", drive.Condition{})
 	data := []byte(`{"drive":"` + srcDrive + `","id":"old","version":"4.0","path":"/src/old.txt","copied":"2026-01-01T00:00:00Z"}`)
-	if _, err := d.fs.SetAppData(context.Background(), it.ID, icbfs.TypeFile, icbfs.AppDriveOrigin, data); err != nil {
+	if err := d.fs.SetAppData(context.Background(), it.ID, icbfs.TypeFile, icbfs.AppDriveOrigin, data); err != nil {
 		t.Fatal(err)
 	}
 	m := drive.NewMirror(d, srcDrive)
@@ -233,7 +243,8 @@ func TestMirrorAdoptsItemsCopiedBeforeTheIndex(t *testing.T) {
 
 // TestMirrorLookupsStayCheap: with the index, finding a source item costs
 // the same however much else the drive holds (a record, and the item's
-// path checked), where a search lists everything.
+// path checked), where a search lists everything. A trashed one costs a
+// read more: whether the item is still deleted.
 func TestMirrorLookupsStayCheap(t *testing.T) {
 	counter := &readCounter{Store: miniotest.Store(t)}
 	d := newDrive(t, counter, icbfs.Settings{Name: "cheap", Size: 1 << 30, RootMode: 0o777}, "")
@@ -262,7 +273,7 @@ func TestMirrorLookupsStayCheap(t *testing.T) {
 	if _, err := m.Remove(ctx, "doc"); err != nil {
 		t.Fatal(err)
 	}
-	if reads := known(true); reads > few {
-		t.Fatalf("finding a trashed item took %d reads, more than a live one's %d", reads, few)
+	if reads := known(true); reads > few+1 {
+		t.Fatalf("finding a trashed item took %d reads, more than a live one's %d and one", reads, few)
 	}
 }

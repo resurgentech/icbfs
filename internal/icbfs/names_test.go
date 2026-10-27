@@ -39,7 +39,7 @@ func TestNamedVersions(t *testing.T) {
 	pause()
 	afterOne, _ := store.ServerTime(ctx)
 	pause()
-	if _, _, err := live.WriteFile(ctx, key, []byte("two"), ""); err != nil {
+	if _, err := live.WriteFile(ctx, key, []byte("two"), ""); err != nil {
 		t.Fatal(err)
 	}
 	pause()

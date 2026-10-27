@@ -188,7 +188,7 @@ func (f *Filesystem) ReplaceDirHistory(ctx context.Context, dirKey string, state
 		if ma.Ctime.IsZero() || ma.Ctime.Before(s.At) {
 			ma.Ctime = s.At
 		}
-		data, err := encodeFileMetadata(ma)
+		data, err := f.encodeMetadata(sctx, ma)
 		if err != nil {
 			return err
 		}
@@ -230,7 +230,7 @@ func (f *Filesystem) ReplaceDirHistory(ctx context.Context, dirKey string, state
 			return err
 		}
 	}
-	return f.MarkPastChanged(ctx)
+	return f.markPast(ctx)
 }
 
 // sortedEntries is entries in this filesystem's collation, refusing two

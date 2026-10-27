@@ -119,7 +119,7 @@ func TestStatusChangeTimes(t *testing.T) {
 
 	// A content write: S3's Last-Modified is whole seconds, so wait one.
 	time.Sleep(1100 * time.Millisecond)
-	if _, _, err := fsys.WriteFile(ctx, key, []byte("hello"), ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, key, []byte("hello"), ""); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	a6 := stat(key, TypeFile)

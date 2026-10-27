@@ -102,7 +102,7 @@ func TestOpensShareContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := fsys.WriteFile(ctx, key, []byte("0123456789"), ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, key, []byte("0123456789"), ""); err != nil {
 		t.Fatal(err)
 	}
 	a, err := fsys.Open(ctx, key)
@@ -134,7 +134,7 @@ func TestOpensShareContent(t *testing.T) {
 
 	// Another client writes; a new open here, with nothing unflushed,
 	// sees it, and so do the opens already there.
-	if _, _, err := fsys.WriteFile(ctx, key, []byte("elsewhere!"), ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, key, []byte("elsewhere!"), ""); err != nil {
 		t.Fatal(err)
 	}
 	c, err := fsys.Open(ctx, key)
@@ -149,7 +149,7 @@ func TestOpensShareContent(t *testing.T) {
 	if err := c.WriteAt([]byte("C"), 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := fsys.WriteFile(ctx, key, []byte("third ver."), ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, key, []byte("third ver."), ""); err != nil {
 		t.Fatal(err)
 	}
 	d, err := fsys.Open(ctx, key)

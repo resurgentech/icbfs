@@ -16,11 +16,18 @@ import (
 
 func newDrive(t *testing.T, store objstore.Store, s icbfs.Settings, root string) *Drive {
 	t.Helper()
+	return newDriveWith(t, store, s, Config{Root: root})
+}
+
+// newDriveWith is newDrive with more of the drive's Config.
+func newDriveWith(t *testing.T, store objstore.Store, s icbfs.Settings, cfg Config) *Drive {
+	t.Helper()
 	ctx := context.Background()
 	if _, err := icbfs.CreateFilesystem(ctx, store, s); err != nil && !errors.Is(err, icbfs.ErrExists) {
 		t.Fatal(err)
 	}
-	d, err := New(ctx, Config{Store: store, Filesystem: s.Name, Root: root, ID: "drive-" + s.Name + root, CacheDir: t.TempDir()})
+	cfg.Store, cfg.Filesystem, cfg.ID, cfg.CacheDir = store, s.Name, "drive-"+s.Name+cfg.Root, t.TempDir()
+	d, err := New(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

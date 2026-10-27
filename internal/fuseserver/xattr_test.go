@@ -109,7 +109,7 @@ func TestMountXattrs(t *testing.T) {
 	// icbfs's own state is never an xattr.
 	key := lookupKey(t, fsys, "tagged.txt")
 	ctx := context.Background()
-	if _, err := fsys.SetAppData(ctx, key, icbfs.TypeFile, icbfs.AppDriveContentType, []byte("text/plain")); err != nil {
+	if err := fsys.SetAppData(ctx, key, icbfs.TypeFile, icbfs.AppDriveContentType, []byte("text/plain")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fsys.SetWindowsAttributes(ctx, key, icbfs.TypeFile, icbfs.WindowsAttrHidden); err != nil {
@@ -160,7 +160,7 @@ func TestMountPosixACLGrantsAccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := fsys.WriteFile(ctx, key, []byte("secret"), ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, key, []byte("secret"), ""); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(mnt, "locked.txt")

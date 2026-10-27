@@ -21,6 +21,11 @@ import (
 // mirror's, written in its source's time: WithDeclaredTime). Views of the
 // past (AsOf) and version listings go by the effective date.
 //
+// An item that has a .version has every version of its content and its
+// .metadata in it (delete markers aside): the versions written in a
+// source's time at that time, any other at the store's (DateAll). Its
+// first record lists the versions it had before, at the store's times.
+//
 // A .version object is <base>.version, where base is the item's key: the
 // one object serving its content (or a directory's root block) and its
 // companions (.metadata, .ads.N, .lock). A directory's split blocks, under
@@ -143,15 +148,61 @@ func readDates(ctx context.Context, store Store, base string) (Dates, *Object, e
 // AddDates merges add into base's override table, under compare-and-swap.
 // Nothing is written for an empty add.
 func AddDates(ctx context.Context, store Store, base string, add Dates) error {
+	_, err := MergeDates(ctx, store, base, add, false)
+	return err
+}
+
+// MergeDates is AddDates returning base's table as it wrote it. fresh
+// says base has no .version yet, being an item the operation made
+// (Recorder.IsNew): the record is written without reading it first,
+// unless it turns out to be there after all. An item that had versions
+// before its first record has them listed in it, at the store's times.
+func MergeDates(ctx context.Context, store Store, base string, add Dates, fresh bool) (Dates, error) {
 	if len(add) == 0 {
-		return nil
+		return ReadDates(ctx, store, base)
 	}
-	return writeDates(ctx, store, base, func(d Dates) Dates {
+	return writeDates(ctx, store, base, fresh, true, func(d Dates) Dates {
 		for id, t := range add {
 			d[id] = t
 		}
 		return d
 	})
+}
+
+// UpdateDates is MergeDates that also removes drop from the table:
+// versions about to be erased.
+func UpdateDates(ctx context.Context, store Store, base string, add Dates, drop ...string) (Dates, error) {
+	return writeDates(ctx, store, base, false, true, func(d Dates) Dates {
+		for _, id := range drop {
+			delete(d, id)
+		}
+		for id, t := range add {
+			d[id] = t
+		}
+		return d
+	})
+}
+
+// datedKeys are the objects of item base every version of which its
+// .version lists: its content and its .metadata.
+func datedKeys(base string) []string { return []string{base, base + ".metadata"} }
+
+// storeDates is every version base's dated keys have now, at the store's
+// times: the record of an item that had none.
+func storeDates(ctx context.Context, store Store, base string) (Dates, error) {
+	d := Dates{}
+	for _, key := range datedKeys(base) {
+		history, err := store.History(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		for _, o := range history {
+			if !o.Deleted {
+				d[o.VersionID] = o.LastModified
+			}
+		}
+	}
+	return d, nil
 }
 
 // SetDates replaces base's override table with dates, under
@@ -164,31 +215,48 @@ func SetDates(ctx context.Context, store Store, base string, dates Dates) error 
 		}
 		return err
 	}
-	return writeDates(ctx, store, base, func(Dates) Dates { return dates })
+	_, err := writeDates(ctx, store, base, false, false, func(Dates) Dates { return dates })
+	return err
 }
 
-func writeDates(ctx context.Context, store Store, base string, mutate func(Dates) Dates) error {
+// writeDates writes mutate's base's table and returns it; with fresh, it
+// takes there to be none for the first try, reading nothing. With
+// complete, a table written for the first time over versions written
+// before starts with them (storeDates).
+func writeDates(ctx context.Context, store Store, base string, fresh, complete bool, mutate func(Dates) Dates) (Dates, error) {
 	ctx = WithoutDeclaredTime(ctx) // the record is news now, not part of the history it records
 	key := base + VersionSuffix
 	for attempt := 0; attempt < 8; attempt++ {
-		cur, obj, err := readDates(ctx, store, base)
-		if err != nil {
-			return err
+		cur, obj := Dates{}, (*Object)(nil)
+		if !fresh || attempt > 0 {
+			var err error
+			if cur, obj, err = readDates(ctx, store, base); err != nil {
+				return nil, err
+			}
+			if obj == nil && complete {
+				if cur, err = storeDates(ctx, store, base); err != nil {
+					return nil, err
+				}
+			}
 		}
-		data, err := encodeDates(mutate(cur))
+		next := mutate(cur)
+		data, err := encodeDates(next)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if obj == nil {
 			_, err = store.PutIfAbsent(ctx, key, bytes.NewReader(data), nil)
 		} else {
 			_, err = store.Put(ctx, key, bytes.NewReader(data), nil, obj.ETag)
 		}
+		if err == nil {
+			return next, nil
+		}
 		if !IsPreconditionFailed(err) {
-			return err
+			return nil, err
 		}
 	}
-	return fmt.Errorf("write %s: lost the race %d times", key, 8)
+	return nil, fmt.Errorf("write %s: lost the race %d times", key, 8)
 }
 
 // --- Recording what a dated operation writes ---
@@ -204,6 +272,30 @@ type Written struct {
 
 type blockKey struct{}
 
+type keepDateKey struct{}
+
+type replacingKey struct{}
+
+type datesItselfKey struct{}
+
+// DatesItself marks the writes under ctx as dated by the caller, once
+// written (UpdateDates): DateAll leaves them.
+func DatesItself(ctx context.Context) context.Context {
+	return context.WithValue(ctx, datesItselfKey{}, true)
+}
+
+// KeepDate marks the writes under ctx as bookkeeping (checksums, an
+// access time): each version is the state of the one it replaces, and
+// takes its date (when it's undated: DateAll).
+func KeepDate(ctx context.Context) context.Context {
+	return context.WithValue(ctx, keepDateKey{}, true)
+}
+
+// Replacing says the write under ctx replaces version id, for KeepDate.
+func Replacing(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, replacingKey{}, id)
+}
+
 // AsBlock marks the writes under ctx as blocks of directory dir
 // (Written.Dir).
 func AsBlock(ctx context.Context, dir string) context.Context {
@@ -216,6 +308,40 @@ func AsBlock(ctx context.Context, dir string) context.Context {
 type Recorder struct {
 	mu      sync.Mutex
 	written []Written
+	made    map[string]bool
+	absent  map[string]bool
+}
+
+// NoteNew tells ctx's Recorder, if it has one, that base is an item the
+// operation made: a key just minted, with no history before it.
+func NoteNew(ctx context.Context, base string) {
+	if rec, _ := ctx.Value(recorderKey{}).(*Recorder); rec != nil {
+		rec.mu.Lock()
+		if rec.made == nil {
+			rec.made = map[string]bool{}
+		}
+		rec.made[base] = true
+		rec.mu.Unlock()
+	}
+}
+
+// Fresh reports whether base likely has no .version record: an item
+// the operation made, or a key it wrote where there was none
+// (PutIfAbsent). A hint for MergeDates, which reads the record after all
+// if it's there.
+func (r *Recorder) Fresh(base string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.made[base] || r.absent[base]
+}
+
+// IsNew reports whether base is an item the operation made (NoteNew):
+// it has no .version record yet, and every version it has is one the
+// operation wrote, dated alike.
+func (r *Recorder) IsNew(base string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.made[base]
 }
 
 // Written is what was recorded so far.
@@ -259,7 +385,19 @@ func Recording(store Store) Store {
 	if _, ok := store.(*recording); ok {
 		return store
 	}
-	return &recording{store}
+	return &recording{Store: store}
+}
+
+// DateAll has a Recording store date every version of an object dated
+// says is one (a filesystem written in a source's time: its items'
+// content and .metadata) that it writes with no declared time: at the
+// time the store wrote it, or for a KeepDate write the date of the
+// version it replaced. So an item's .version has all its versions. A
+// version it can't date is erased, and the write fails.
+func DateAll(store Store, dated func(key string) bool) {
+	if r, ok := store.(*recording); ok {
+		r.dated = dated
+	}
 }
 
 // Unwrap is the store under a Recording one, else store itself.
@@ -270,35 +408,71 @@ func Unwrap(store Store) Store {
 	return store
 }
 
-type recording struct{ Store }
+type recording struct {
+	Store
+	dated func(key string) bool // DateAll's
+}
 
-func (r *recording) note(ctx context.Context, key string, obj *Object, err error) {
+// note records a version written under a declared time, or dates one
+// written without that DateAll says must be.
+func (r *recording) note(ctx context.Context, key string, obj *Object, err error) error {
 	if err != nil || obj == nil || strings.HasSuffix(key, VersionSuffix) {
-		return
+		return nil
 	}
 	rec, _ := ctx.Value(recorderKey{}).(*Recorder)
-	t, ok := DeclaredTime(ctx)
-	if rec == nil || !ok {
-		return
-	}
 	dir, _ := ctx.Value(blockKey{}).(string)
-	rec.add(Written{Key: key, VersionID: obj.VersionID, At: t, Dir: dir})
+	if t, ok := DeclaredTime(ctx); ok && rec != nil {
+		rec.add(Written{Key: key, VersionID: obj.VersionID, At: t, Dir: dir})
+		return nil
+	}
+	if self, _ := ctx.Value(datesItselfKey{}).(bool); self || dir != "" || r.dated == nil || !r.dated(key) {
+		return nil
+	}
+	keep, _ := ctx.Value(keepDateKey{}).(bool)
+	replaced, _ := ctx.Value(replacingKey{}).(string)
+	_, err = writeDates(WithoutDeclaredTime(ctx), r.Store, BaseKey(key), false, true, func(d Dates) Dates {
+		t := obj.LastModified
+		if prev, ok := d[replaced]; keep && ok {
+			t = prev
+		}
+		d[obj.VersionID] = t
+		return d
+	})
+	if err != nil {
+		_ = r.Store.Erase(context.WithoutCancel(ctx), key, obj.VersionID)
+		return fmt.Errorf("date %s: %w", key, err)
+	}
+	return nil
 }
 
 func (r *recording) Put(ctx context.Context, key string, body io.Reader, metadata map[string]string, ifMatch string) (*Object, error) {
 	obj, err := r.Store.Put(ctx, key, body, metadata, ifMatch)
-	r.note(ctx, key, obj, err)
+	if err := r.note(ctx, key, obj, err); err != nil {
+		return nil, err
+	}
 	return obj, err
 }
 
 func (r *recording) PutIfAbsent(ctx context.Context, key string, body io.Reader, metadata map[string]string) (*Object, error) {
 	obj, err := r.Store.PutIfAbsent(ctx, key, body, metadata)
-	r.note(ctx, key, obj, err)
+	if err := r.note(ctx, key, obj, err); err != nil {
+		return nil, err
+	}
+	if rec, _ := ctx.Value(recorderKey{}).(*Recorder); rec != nil && err == nil && key == BaseKey(key) {
+		rec.mu.Lock()
+		if rec.absent == nil {
+			rec.absent = map[string]bool{}
+		}
+		rec.absent[key] = true
+		rec.mu.Unlock()
+	}
 	return obj, err
 }
 
 func (r *recording) PutParts(ctx context.Context, key string, parts []Part, metadata map[string]string, ifMatch string) (*Object, error) {
 	obj, err := r.Store.PutParts(ctx, key, parts, metadata, ifMatch)
-	r.note(ctx, key, obj, err)
+	if err := r.note(ctx, key, obj, err); err != nil {
+		return nil, err
+	}
 	return obj, err
 }

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/resurgentech/icbfs/internal/block"
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/pkg/drive"
@@ -20,15 +21,15 @@ import (
 // inMemoryWrite is the largest write sent from memory; a bigger body is
 // spooled to a temporary file and written the way a mount writes a
 // large file (in parts, through a scratch file).
-const inMemoryWrite = 64 << 20
+var inMemoryWrite int64 = 64 << 20 // a variable for the tests
 
 // Write makes the body a file's content, creating the file if need be.
-func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.Condition, opts drive.WriteOptions) (drive.Item, error) {
+func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.Condition, opts drive.WriteOptions) (_ drive.Item, err error) {
 	ctx, done, err := d.begin(ctx)
 	if err != nil {
 		return drive.Item{}, err
 	}
-	defer done()
+	defer done(&err)
 	if _, err := appData(opts.App, nil); err != nil { // refused before anything is written
 		return drive.Item{}, err
 	}
@@ -36,36 +37,60 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 	if err != nil {
 		return drive.Item{}, err
 	}
-	data, spool, sums, err := d.readBody(body)
-	if err != nil {
-		return drive.Item{}, err
+	// The body is read once the write is known to go ahead: a write its
+	// condition refuses reads none of it (a mirror opens its source only
+	// when it's read).
+	var data []byte
+	var spool *os.File
+	var sums icbfs.Checksums
+	read := false
+	readBody := func() error {
+		if read {
+			return nil
+		}
+		read = true
+		var err error
+		if data, spool, sums, err = d.readBody(body); err != nil {
+			return err
+		}
+		return checkSums(opts.Checksums, sums)
 	}
-	if spool != nil {
-		defer func() { spool.Close(); os.Remove(spool.Name()) }()
-	}
-	if err := checkSums(opts.Checksums, sums); err != nil {
-		return drive.Item{}, err
-	}
+	defer func() {
+		if spool != nil {
+			spool.Close()
+			os.Remove(spool.Name())
+		}
+	}()
 
 	for attempt := 0; attempt < 3; attempt++ {
-		e, _, lerr := d.lookup(ctx, d.fs, parent.key, name)
+		// The first look starts from the block the parent's resolve
+		// read; one after a race reads it again.
+		lookup := d.step
+		if attempt > 0 {
+			lookup = d.lookupIn
+		}
+		e, a, lerr := lookup(ctx, parent, name)
 		if lerr == nil {
 			if e.Type != icbfs.TypeFile {
 				return drive.Item{}, drive.ErrIsDir
 			}
-			n, err := d.resolvePath(ctx, d.fs, joinPath(parent.path, e.Name))
-			if err != nil {
-				return drive.Item{}, err
-			}
+			n := parent.child(e, a)
 			if err := d.check(ctx, n, needWrite); err != nil {
 				return drive.Item{}, err
 			}
-			cur, err := d.fs.Store().Head(ctx, n.key)
-			if err != nil {
-				return drive.Item{}, mapErr(err)
+			cur, ok := a.ContentVersion()
+			if !ok {
+				head, err := d.fs.Store().Head(ctx, n.key)
+				if err != nil {
+					return drive.Item{}, mapErr(err)
+				}
+				cur = *head
 			}
 			if cond.IfNoneMatch || cond.IfMatch != "" && cond.IfMatch != cur.VersionID {
 				return drive.Item{}, &drive.PreconditionError{Current: cur.VersionID}
+			}
+			if err := readBody(); err != nil {
+				return drive.Item{}, err
 			}
 			written, err := d.writeContent(ctx, n.key, data, spool, cur.ETag)
 			if err != nil {
@@ -82,11 +107,11 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 				}
 				return drive.Item{}, mapErr(err)
 			}
-			if err := d.afterWrite(ctx, n.key, n.path, written, opts, sums); err != nil {
+			if n.attr, err = d.afterWrite(ctx, n.key, n.path, written, opts, sums); err != nil {
 				return drive.Item{}, err
 			}
 			d.changed(parent)
-			return d.statItem(ctx, n.path)
+			return d.written(ctx, n), nil
 		}
 		if !errors.Is(mapErr(lerr), drive.ErrNotFound) {
 			return drive.Item{}, mapErr(lerr)
@@ -97,8 +122,10 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 		if err := d.check(ctx, parent, needAddFile); err != nil {
 			return drive.Item{}, err
 		}
-		sddl, mode, uid, gid := d.newOwnership(ctx, parent, false)
-		key, _, etag, err := d.fs.Create(ctx, parent.key, name, mode, uid, gid)
+		if err := readBody(); err != nil {
+			return drive.Item{}, err
+		}
+		n, err := d.create(ctx, parent, name, data, spool, opts, sums)
 		if errors.Is(err, icbfs.ErrExists) {
 			if cond.IfNoneMatch {
 				return drive.Item{}, &drive.PreconditionError{}
@@ -106,31 +133,28 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 			continue // made meanwhile: write over it
 		}
 		if err != nil {
-			return drive.Item{}, mapErr(err)
-		}
-		if sddl != nil {
-			if _, err := d.fs.SetWindowsACL(ctx, key, icbfs.TypeFile, sddl); err != nil {
-				return drive.Item{}, mapErr(err)
-			}
-		}
-		created, _ := d.fs.Store().Head(ctx, key)
-		written, err := d.writeContent(ctx, key, data, spool, etag)
-		if err != nil {
-			return drive.Item{}, mapErr(err)
-		}
-		if err := d.afterWrite(ctx, key, joinPath(parent.path, name), written, opts, sums); err != nil {
 			return drive.Item{}, err
 		}
-		// Creating made an empty version before the content's; a file the
-		// API makes starts with just its content.
-		if created != nil && created.Size == 0 {
-			_ = d.fs.Store().Erase(ctx, key, created.VersionID)
-		}
 		d.changed(parent)
-		d.idPaths.put(key, joinPath(parent.path, name))
-		return d.statItem(ctx, joinPath(parent.path, name))
+		d.idPaths.put(n.key, n.path)
+		return d.written(ctx, n), nil
 	}
 	return drive.Item{}, drive.ErrBusy
+}
+
+// written is file n's item as a write just left it: in source time its
+// version is dated then, which its .version record will say once the
+// operation is done.
+func (d *Drive) written(ctx context.Context, n *node) drive.Item {
+	t, ok := drive.SourceTime(ctx)
+	if !ok {
+		return d.item(ctx, n, true)
+	}
+	it := d.item(ctx, n, false)
+	if obj, ok := n.attr.ContentVersion(); ok {
+		it.Version = d.currentVersion(ctx, n, objstore.Dates{obj.VersionID: t})
+	}
+	return it
 }
 
 // readBody reads up to the filesystem's max file size: into memory when
@@ -190,31 +214,87 @@ func toChecksums(c icbfs.Checksums) *drive.Checksums {
 	return &drive.Checksums{MD5: hex.EncodeToString(c.MD5), SHA256: hex.EncodeToString(c.SHA256)}
 }
 
-// writeContent replaces key's content, if it's still at etag, and returns
-// the new content's ETag.
-func (d *Drive) writeContent(ctx context.Context, key string, data []byte, spool *os.File, etag string) (string, error) {
+// create makes the file name in parent with its content: in the same two
+// writes when the content is in memory (icbfs CreateWith); a large one,
+// spooled, as a mount writes it, into a file created empty.
+func (d *Drive) create(ctx context.Context, parent *node, name string, data []byte, spool *os.File, opts drive.WriteOptions, sums icbfs.Checksums) (*node, error) {
+	sddl, mode, uid, gid := d.newOwnership(ctx, parent, false)
+	p := joinPath(parent.path, name)
 	if spool == nil {
-		_, written, err := d.fs.WriteFile(ctx, key, data, etag)
-		return written, err
+		info, err := d.writeInfo(ctx, opts, sums)
+		if err != nil {
+			return nil, err
+		}
+		key, attr, err := d.fs.CreateWith(ctx, parent.key, name, mode, uid, gid, data, sddl, info)
+		if err != nil {
+			return nil, mapCreateErr(err)
+		}
+		if opts.Origin != nil {
+			if err := d.recordOrigin(ctx, key, p, *opts.Origin); err != nil {
+				return nil, err
+			}
+		}
+		return parent.child(block.Entry{Name: name, UUID: key, Type: icbfs.TypeFile}, attr), nil
+	}
+	key, _, etag, err := d.fs.Create(ctx, parent.key, name, mode, uid, gid)
+	if err != nil {
+		return nil, mapCreateErr(err)
+	}
+	if sddl != nil {
+		if _, err := d.fs.SetWindowsACL(ctx, key, icbfs.TypeFile, sddl); err != nil {
+			return nil, mapErr(err)
+		}
+	}
+	created, _ := d.fs.Store().Head(ctx, key)
+	written, err := d.writeContent(ctx, key, data, spool, etag)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	attr, err := d.afterWrite(ctx, key, p, written, opts, sums)
+	if err != nil {
+		return nil, err
+	}
+	// Creating made an empty version before the content's; a file the
+	// API makes starts with just its content.
+	if created != nil && created.Size == 0 {
+		_ = d.fs.Store().Erase(ctx, key, created.VersionID)
+	}
+	return parent.child(block.Entry{Name: name, UUID: key, Type: icbfs.TypeFile}, attr), nil
+}
+
+// mapCreateErr is mapErr, leaving icbfs.ErrExists as it is for Write to
+// retry on.
+func mapCreateErr(err error) error {
+	if errors.Is(err, icbfs.ErrExists) {
+		return err
+	}
+	return mapErr(err)
+}
+
+// writeContent replaces key's content, if it's still at etag, and returns
+// the version written.
+func (d *Drive) writeContent(ctx context.Context, key string, data []byte, spool *os.File, etag string) (*objstore.Object, error) {
+	if spool == nil {
+		return d.fs.WriteFile(ctx, key, data, etag)
 	}
 	of, err := d.fs.Open(ctx, key)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer of.Close()
 	if err := of.Truncate(0); err != nil {
-		return "", err
+		return nil, err
 	}
 	buf := make([]byte, 8<<20)
 	var off int64
 	if _, err := spool.Seek(0, io.SeekStart); err != nil {
-		return "", err
+		return nil, err
 	}
 	for {
 		n, rerr := spool.Read(buf)
 		if n > 0 {
 			if err := of.WriteAt(buf[:n], off); err != nil {
-				return "", err
+				return nil, err
 			}
 			off += int64(n)
 		}
@@ -222,27 +302,22 @@ func (d *Drive) writeContent(ctx context.Context, key string, data []byte, spool
 			break
 		}
 		if rerr != nil {
-			return "", rerr
+			return nil, rerr
 		}
 	}
 	if _, err := of.Flush(ctx); err != nil {
-		return "", err
+		return nil, err
 	}
-	head, err := d.fs.Store().Head(ctx, key)
-	if err != nil {
-		return "", err
-	}
-	return head.ETag, nil
+	return d.fs.Store().Head(ctx, key)
 }
 
-// afterWrite records, in one metadata write, what opts say about content
-// just written to the file key at drive path p (its ETag now written):
-// its content type, its times at the source, its origin, and its
-// checksums; and indexes the origin.
-func (d *Drive) afterWrite(ctx context.Context, key, p, written string, opts drive.WriteOptions, sums icbfs.Checksums) error {
+// writeInfo is what opts say to record about content just written, with
+// sums: its content type, its times at the source, its origin, and its
+// checksums.
+func (d *Drive) writeInfo(ctx context.Context, opts drive.WriteOptions, sums icbfs.Checksums) (icbfs.ItemInfo, error) {
 	app, err := appData(opts.App, opts.Origin)
 	if err != nil {
-		return err
+		return icbfs.ItemInfo{}, err
 	}
 	if opts.ContentType != "" {
 		app[icbfs.AppDriveContentType] = []byte(opts.ContentType)
@@ -251,16 +326,28 @@ func (d *Drive) afterWrite(ctx context.Context, key, p, written string, opts dri
 	if t, ok := drive.SourceTime(ctx); ok && mtime == nil {
 		mtime = &t // a version written in source time is modified then
 	}
-	if _, err := d.fs.SetItemInfo(ctx, key, icbfs.TypeFile, icbfs.ItemInfo{
-		Mtime: mtime, Btime: timeOrNil(opts.Created), ContentETag: written,
+	return icbfs.ItemInfo{
+		Mtime: mtime, Btime: timeOrNil(opts.Created),
 		Mode: opts.Mode, WindowsAttrs: opts.WindowsAttrs, App: app, Checksums: &sums,
-	}); err != nil {
-		return mapErr(err)
+	}, nil
+}
+
+// afterWrite records, in one metadata write, what opts say about content
+// just written to the file key at drive path p (writeInfo), and indexes
+// the origin. It returns the file's attributes, as a stat would.
+func (d *Drive) afterWrite(ctx context.Context, key, p string, written *objstore.Object, opts drive.WriteOptions, sums icbfs.Checksums) (icbfs.Attr, error) {
+	info, err := d.writeInfo(ctx, opts, sums)
+	if err != nil {
+		return icbfs.Attr{}, err
+	}
+	attr, err := d.fs.SetInfoWith(ctx, key, icbfs.TypeFile, written, info)
+	if err != nil {
+		return icbfs.Attr{}, mapErr(err)
 	}
 	if opts.Origin != nil {
-		return d.recordOrigin(ctx, key, p, *opts.Origin)
+		return attr, d.recordOrigin(ctx, key, p, *opts.Origin)
 	}
-	return nil
+	return attr, nil
 }
 
 func (d *Drive) statItem(ctx context.Context, p string) (drive.Item, error) {
@@ -273,12 +360,12 @@ func (d *Drive) statItem(ctx context.Context, p string) (drive.Item, error) {
 
 // Mkdir makes a directory (and its parents, with parents; an existing
 // directory is then fine).
-func (d *Drive) Mkdir(ctx context.Context, p string, parents bool) (drive.Item, error) {
+func (d *Drive) Mkdir(ctx context.Context, p string, parents bool) (_ drive.Item, err error) {
 	ctx, done, err := d.begin(ctx)
 	if err != nil {
 		return drive.Item{}, err
 	}
-	defer done()
+	defer done(&err)
 	if parents {
 		n, err := d.mkdirAll(ctx, p)
 		if err != nil {
@@ -302,21 +389,19 @@ func (d *Drive) mkdirIn(ctx context.Context, parent *node, name string) (*node, 
 		return nil, err
 	}
 	sddl, mode, uid, gid := d.newOwnership(ctx, parent, true)
-	key, _, err := d.fs.Mkdir(ctx, parent.key, name, mode, uid, gid)
+	key, attr, err := d.fs.Mkdir(ctx, parent.key, name, mode, uid, gid)
 	if err != nil {
 		return nil, mapErr(err)
 	}
 	if sddl != nil {
-		if _, err := d.fs.SetWindowsACL(ctx, key, icbfs.TypeDir, sddl); err != nil {
+		if attr, err = d.fs.SetWindowsACL(ctx, key, icbfs.TypeDir, sddl); err != nil {
 			return nil, mapErr(err)
 		}
 	}
 	d.changed(parent)
-	n, err := d.resolvePath(ctx, d.fs, joinPath(parent.path, name))
-	if err == nil {
-		d.idPaths.put(n.key, n.path)
-	}
-	return n, err
+	n := parent.child(block.Entry{Name: name, UUID: key, Type: icbfs.TypeDir}, attr)
+	d.idPaths.put(n.key, n.path)
+	return n, nil
 }
 
 // mkdirAll makes p and every missing directory above it.
@@ -329,11 +414,19 @@ func (d *Drive) mkdirAll(ctx context.Context, p string) (*node, error) {
 		if err := d.checkTraverse(ctx, n); err != nil {
 			return nil, err
 		}
-		next, err := d.resolvePath(ctx, d.fs, joinPath(n.path, part))
-		if errors.Is(err, drive.ErrNotFound) {
+		// A step down from n, which holds its block; made if it isn't
+		// there, and looked up afresh if someone made it meanwhile.
+		var next *node
+		e, a, err := d.step(ctx, n, part)
+		if err = mapErr(err); err == nil {
+			next = n.child(e, a)
+		} else if errors.Is(err, drive.ErrNotFound) {
 			next, err = d.mkdirIn(ctx, n, part)
 			if errors.Is(err, drive.ErrExists) {
-				next, err = d.resolvePath(ctx, d.fs, joinPath(n.path, part))
+				e, a, err = d.lookupIn(ctx, n, part)
+				if err = mapErr(err); err == nil {
+					next = n.child(e, a)
+				}
 			}
 		}
 		if err != nil {
@@ -348,12 +441,12 @@ func (d *Drive) mkdirAll(ctx context.Context, p string) (*node, error) {
 }
 
 // Move renames or moves an item; its id doesn't change.
-func (d *Drive) Move(ctx context.Context, from drive.ItemRef, to string, replace bool) (drive.Item, error) {
+func (d *Drive) Move(ctx context.Context, from drive.ItemRef, to string, replace bool) (_ drive.Item, err error) {
 	ctx, done, err := d.begin(ctx)
 	if err != nil {
 		return drive.Item{}, err
 	}
-	defer done()
+	defer done(&err)
 	src, err := d.resolve(ctx, d.fs, from)
 	if err != nil {
 		return drive.Item{}, err
@@ -393,12 +486,12 @@ func (d *Drive) Move(ctx context.Context, from drive.ItemRef, to string, replace
 
 // Delete moves an item to the trash; recursive for a non-empty
 // directory, as one batch.
-func (d *Drive) Delete(ctx context.Context, ref drive.ItemRef, recursive bool, cond drive.Condition) error {
+func (d *Drive) Delete(ctx context.Context, ref drive.ItemRef, recursive bool, cond drive.Condition) (err error) {
 	ctx, done, err := d.begin(ctx)
 	if err != nil {
 		return err
 	}
-	defer done()
+	defer done(&err)
 	n, err := d.resolve(ctx, d.fs, ref)
 	if err != nil {
 		return err
@@ -502,9 +595,10 @@ var errDriveReadOnly = fmt.Errorf("the drive is read-only: %w", drive.ErrReadOnl
 // filesystem has been archived (since this drive attached, too: one read
 // of the master block per change), and dates everything the change
 // writes at ctx's source time, if it has one (drive.WithSourceTime).
-// done, to be deferred, then tells history caches that the past has
-// changed.
-func (d *Drive) begin(ctx context.Context) (context.Context, func(), error) {
+// done, to be deferred with the change's error, then dates what it
+// wrote and tells history caches that the past has changed; a change
+// whose writes can't all be dated fails (finishDated).
+func (d *Drive) begin(ctx context.Context) (context.Context, func(*error), error) {
 	if d.cfg.ReadOnly {
 		return ctx, nil, errDriveReadOnly
 	}
@@ -516,24 +610,63 @@ func (d *Drive) begin(ctx context.Context) (context.Context, func(), error) {
 	}
 	t, ok := drive.SourceTime(ctx)
 	if !ok {
-		return ctx, func() {}, nil
+		return ctx, func(*error) {}, nil
 	}
 	if t.After(time.Now().Add(maxSourceTimeAhead)) {
 		return ctx, nil, fmt.Errorf("source time %s is in the future: %w", t.Format(time.RFC3339), drive.ErrInvalid)
 	}
+	// From the first change in a source's time on, every version of the
+	// filesystem's items is dated, whatever writes it.
+	if err := d.fs.MarkSourceTime(ctx); err != nil {
+		return ctx, nil, mapErr(err)
+	}
 	rec := &objstore.Recorder{}
 	ctx = objstore.WithRecorder(objstore.WithDeclaredTime(ctx, t), rec)
-	return ctx, func() {
-		// What was written is dated, and anything written behind its
-		// item's current state is put right: the item's current version
-		// back on top, and a directory's copies from t on rewritten with
-		// the change. Best effort, like a trash entry: the write itself
-		// has happened, and the mirror's next pass finds what's undated.
-		restored, _ := d.fs.RecordDates(ctx, rec)
-		d.repairLateFolders(ctx, rec, restored)
-		_ = d.fs.MarkPastChanged(ctx)
+	return ctx, func(errp *error) {
+		if err := d.finishDated(ctx, rec); err != nil && *errp == nil {
+			*errp = err
+		}
+		d.past.changed(ctx)
 		d.views.lookAgain()
 	}, nil
+}
+
+// datingTries is how many times a change tries to date what it wrote.
+const datingTries = 3
+
+// finishDated dates what a change in a source's time wrote, and puts
+// right anything written behind its item's current state: the item's
+// current version back on top, and a directory's copies from then on
+// rewritten with the change. Both are part of the change: one whose
+// writes can't be dated is undone, each version it wrote that is still
+// its key's newest erased, and fails. Undated, a version would be taken
+// for a write that never finished.
+func (d *Drive) finishDated(ctx context.Context, rec *objstore.Recorder) error {
+	var restored map[string]bool
+	var err error
+	for try := 0; try < datingTries; try++ {
+		if restored, err = d.fs.RecordDates(ctx, rec); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		d.undo(ctx, rec)
+		return fmt.Errorf("the change is undone: dating what it wrote: %w", err)
+	}
+	return d.repairLateFolders(ctx, rec, restored)
+}
+
+// undo erases what rec recorded written, newest first, where it's still
+// its key's newest version: one something has written over since stays.
+func (d *Drive) undo(ctx context.Context, rec *objstore.Recorder) {
+	ctx = context.WithoutCancel(objstore.WithoutDeclaredTime(ctx))
+	written := rec.Written()
+	for i := len(written) - 1; i >= 0; i-- {
+		w := written[i]
+		if head, err := d.fs.Store().Head(ctx, w.Key); err == nil && head.VersionID == w.VersionID {
+			_ = d.fs.Store().Erase(ctx, w.Key, w.VersionID)
+		}
+	}
 }
 
 // maxSourceTimeAhead is how far past this machine's clock a source time
@@ -541,12 +674,12 @@ func (d *Drive) begin(ctx context.Context) (context.Context, func(), error) {
 const maxSourceTimeAhead = time.Second
 
 // SetOrigin records where an item was copied from.
-func (d *Drive) SetOrigin(ctx context.Context, ref drive.ItemRef, o drive.Origin) error {
+func (d *Drive) SetOrigin(ctx context.Context, ref drive.ItemRef, o drive.Origin) (err error) {
 	ctx, done, err := d.begin(ctx)
 	if err != nil {
 		return err
 	}
-	defer done()
+	defer done(&err)
 	n, err := d.resolve(ctx, d.fs, ref)
 	if err != nil {
 		return err
@@ -555,7 +688,7 @@ func (d *Drive) SetOrigin(ctx context.Context, ref drive.ItemRef, o drive.Origin
 	if err != nil {
 		return err
 	}
-	if _, err := d.fs.SetAppData(ctx, n.key, n.typ, icbfs.AppDriveOrigin, data); err != nil {
+	if err := d.fs.SetAppData(ctx, n.key, n.typ, icbfs.AppDriveOrigin, data); err != nil {
 		return mapErr(err)
 	}
 	return d.recordOrigin(ctx, n.key, n.path, o)
@@ -569,12 +702,12 @@ func (d *Drive) SetTimes(ctx context.Context, ref drive.ItemRef, modified, creat
 
 // SetInfo records info about an item (drive.InfoSetter) in one metadata
 // write: no new version of its content.
-func (d *Drive) SetInfo(ctx context.Context, ref drive.ItemRef, info drive.ItemInfo) (drive.Item, error) {
+func (d *Drive) SetInfo(ctx context.Context, ref drive.ItemRef, info drive.ItemInfo) (_ drive.Item, err error) {
 	ctx, done, err := d.begin(ctx)
 	if err != nil {
 		return drive.Item{}, err
 	}
-	defer done()
+	defer done(&err)
 	n, err := d.resolve(ctx, d.fs, ref)
 	if err != nil {
 		return drive.Item{}, err
@@ -586,27 +719,28 @@ func (d *Drive) SetInfo(ctx context.Context, ref drive.ItemRef, info drive.ItemI
 	if err != nil {
 		return drive.Item{}, err
 	}
-	fi := icbfs.ItemInfo{Btime: timeOrNil(info.Created), Mode: info.Mode, WindowsAttrs: info.WindowsAttrs, App: app}
-	if mtime := timeOrNil(info.Modified); mtime != nil {
-		fi.Mtime = mtime
-		if n.typ != icbfs.TypeDir {
-			// Tied to the content version it's set on, as SetAttr's is.
-			head, err := d.fs.Store().Head(ctx, n.key)
-			if err != nil {
-				return drive.Item{}, mapErr(err)
-			}
-			fi.ContentETag = head.ETag
+	// A file's mtime is tied to the content version it's set on, as
+	// SetAttr's is: the one the resolve read.
+	fi := icbfs.ItemInfo{Btime: timeOrNil(info.Created), Mtime: timeOrNil(info.Modified), Mode: info.Mode, WindowsAttrs: info.WindowsAttrs, App: app}
+	cur, ok := n.attr.ContentVersion()
+	if !ok {
+		head, err := d.fs.Store().Head(ctx, n.key)
+		if err != nil {
+			return drive.Item{}, mapErr(err)
 		}
+		cur = *head
 	}
-	if _, err := d.fs.SetItemInfo(ctx, n.key, n.typ, fi); err != nil {
-		return drive.Item{}, mapErr(err)
+	if !fi.Empty() {
+		if n.attr, err = d.fs.SetInfoWith(ctx, n.key, n.typ, &cur, fi); err != nil {
+			return drive.Item{}, mapErr(err)
+		}
 	}
 	if info.Origin != nil {
 		if err := d.recordOrigin(ctx, n.key, n.path, *info.Origin); err != nil {
 			return drive.Item{}, err
 		}
 	}
-	return d.statItem(ctx, n.path)
+	return d.item(ctx, n, true), nil
 }
 
 // appData is the app map a caller's app keys and origin make: each key

@@ -6,10 +6,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"mime"
 	"path"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/resurgentech/icbfs/internal/block"
 	"github.com/resurgentech/icbfs/internal/icbfs"
@@ -38,6 +40,14 @@ type Config struct {
 	// permissions: a host serving a filesystem something else writes (a
 	// mirror's) to users who may only read it. Reads are as usual.
 	ReadOnly bool
+	// TrustFor is how long a directory the drive has read is used
+	// without asking the store again: right for a daemon that is its
+	// filesystem's only writer, which then walks a path it walked a
+	// moment ago with no requests. At 0, the default, each step of a walk
+	// checks the directory it holds (two conditional reads, no bodies
+	// when nothing changed). Changes made through this drive are seen at
+	// once either way; changes made elsewhere, after at most TrustFor.
+	TrustFor time.Duration
 }
 
 // Drive is an icbfs drive.
@@ -51,19 +61,24 @@ type Drive struct {
 	views   viewCache
 	events  broadcaster
 	idPaths idPathCache
+	dirs    *dirCache
+	past    pastMarker
 }
 
 var _ drive.Drive = (*Drive)(nil)
 
 // New attaches to the filesystem and finds the drive's root directory.
 func New(ctx context.Context, cfg Config) (*Drive, error) {
-	fsys := icbfs.New(cfg.Store, cfg.Filesystem)
+	dirs := newDirCache(cfg.TrustFor)
+	fsys := icbfs.New(&dropOnWrite{Store: cfg.Store, dirs: dirs}, cfg.Filesystem)
 	if err := fsys.Attach(ctx); err != nil {
 		return nil, mapErr(err)
 	}
-	d := &Drive{cfg: cfg, fs: fsys, windows: fsys.PrimaryWindows()}
+	d := &Drive{cfg: cfg, fs: fsys, windows: fsys.PrimaryWindows(), dirs: dirs}
 	d.root = cleanPath(cfg.Root)
 	d.views.d = d
+	d.past.mark = fsys.MarkPastChanged
+	fsys.SetPastChanged(d.past.changed)
 	key := fsys.RootKey()
 	for _, part := range splitPath(d.root) {
 		e, _, err := d.lookup(ctx, fsys, key, part)
@@ -82,9 +97,12 @@ func New(ctx context.Context, cfg Config) (*Drive, error) {
 // Filesystem is the drive's icbfs filesystem.
 func (d *Drive) Filesystem() *icbfs.Filesystem { return d.fs }
 
-// Close releases the drive's as-of views, and its temporary history
-// cache.
-func (d *Drive) Close() { d.views.closeAll() }
+// Close sends a past-changed mark still put off (pastMarker), and
+// releases the drive's as-of views and its temporary history cache.
+func (d *Drive) Close() {
+	d.past.flush()
+	d.views.closeAll()
+}
 
 // Capabilities: everything.
 func (d *Drive) Capabilities() drive.Capabilities {
@@ -146,6 +164,28 @@ func (d *Drive) lookup(ctx context.Context, fsys *icbfs.Filesystem, dirKey, name
 	return fsys.Lookup(ctx, dirKey, name)
 }
 
+// step is lookup for a walk down a path from dir, whose block its stat
+// read (icbfs.Filesystem.FindStep); a directory found comes from the
+// directory cache (dirAttr).
+func (d *Drive) step(ctx context.Context, dir *node, name string) (block.Entry, icbfs.Attr, error) {
+	e, err := dir.fsys.FindStep(ctx, dir.key, dir.attr, name, d.windows)
+	if err != nil {
+		return block.Entry{}, icbfs.Attr{}, err
+	}
+	var a icbfs.Attr
+	if e.Type == icbfs.TypeDir {
+		a, err = d.dirAttr(ctx, dir.fsys, e.UUID)
+	} else {
+		a, err = dir.fsys.Stat(ctx, e.UUID, e.Type)
+	}
+	return e, a, err
+}
+
+// lookupIn is lookup in dir, reading its block afresh.
+func (d *Drive) lookupIn(ctx context.Context, dir *node, name string) (block.Entry, icbfs.Attr, error) {
+	return d.lookup(ctx, dir.fsys, dir.key, name)
+}
+
 // node is a resolved item, with the directories from the filesystem's
 // root down to it — what its inherited ACL and traversal checks need.
 type node struct {
@@ -166,16 +206,22 @@ type ancestor struct {
 
 func (n *node) parentKey() string { return n.chain[len(n.chain)-1].key }
 
+// child is the node of entry e in directory n, with attributes a.
+func (n *node) child(e block.Entry, a icbfs.Attr) *node {
+	return &node{fsys: n.fsys, key: e.UUID, typ: e.Type, name: e.Name, path: joinPath(n.path, e.Name), attr: a,
+		chain: append(append([]ancestor(nil), n.chain...), ancestor{key: n.key, path: n.path, attr: n.attr})}
+}
+
 // rootNode is the drive's root, with the directories above it.
 func (d *Drive) rootNode(ctx context.Context, fsys *icbfs.Filesystem) (*node, error) {
 	key := fsys.RootKey()
-	attr, err := fsys.Stat(ctx, key, icbfs.TypeDir)
+	attr, err := d.dirAttr(ctx, fsys, key)
 	if err != nil {
 		return nil, mapErr(err)
 	}
 	n := &node{fsys: fsys, key: key, typ: icbfs.TypeDir, name: "", path: "/", attr: attr}
 	for _, part := range splitPath(d.root) {
-		e, a, err := d.lookup(ctx, fsys, n.key, part)
+		e, a, err := d.step(ctx, n, part)
 		if err != nil {
 			return nil, mapErr(err)
 		}
@@ -201,12 +247,11 @@ func (d *Drive) resolvePath(ctx context.Context, fsys *icbfs.Filesystem, p strin
 		if err := d.checkTraverse(ctx, n); err != nil {
 			return nil, err
 		}
-		e, a, err := d.lookup(ctx, fsys, n.key, part)
+		e, a, err := d.step(ctx, n, part)
 		if err != nil {
 			return nil, mapErr(err)
 		}
-		n = &node{fsys: fsys, key: e.UUID, typ: e.Type, name: e.Name, path: joinPath(n.path, e.Name), attr: a,
-			chain: append(append([]ancestor(nil), n.chain...), ancestor{key: n.key, path: n.path, attr: n.attr})}
+		n = n.child(e, a)
 	}
 	return n, nil
 }
@@ -288,12 +333,13 @@ func (d *Drive) resolveParent(ctx context.Context, p string, parents bool) (*nod
 		return nil, "", fmt.Errorf("the drive's root: %w", drive.ErrInvalidName)
 	}
 	dir, base := path.Split(p)
+	var parent *node
+	var err error
 	if parents {
-		if _, err := d.mkdirAll(ctx, dir); err != nil {
-			return nil, "", err
-		}
+		parent, err = d.mkdirAll(ctx, dir)
+	} else {
+		parent, err = d.resolvePath(ctx, d.fs, dir)
 	}
-	parent, err := d.resolvePath(ctx, d.fs, dir)
 	if err != nil {
 		return nil, "", err
 	}
@@ -344,11 +390,7 @@ func (d *Drive) item(ctx context.Context, n *node, withVersion bool) drive.Item 
 			it.Checksums = toChecksums(c)
 		}
 		if withVersion {
-			if obj, err := n.fsys.Store().Head(ctx, n.key); err == nil {
-				dates, _ := objstore.ReadDates(ctx, n.fsys.Store(), n.key)
-				it.Version = &drive.Version{ID: obj.VersionID, Time: dates.Time(obj), Stored: obj.LastModified, Size: obj.Size, Current: true,
-					Checksums: toChecksums(n.attr.Checksums[obj.ETag])}
-			}
+			it.Version = d.currentVersion(ctx, n, nil)
 		}
 	case icbfs.TypeSymlink:
 		if t, err := n.fsys.Readlink(ctx, n.key); err == nil {
@@ -358,12 +400,33 @@ func (d *Drive) item(ctx context.Context, n *node, withVersion bool) drive.Item 
 	if o, ok := n.attr.App[icbfs.AppDriveOrigin]; ok {
 		it.Origin = decodeOrigin(o)
 	}
-	it.App = n.attr.App
+	it.App = maps.Clone(n.attr.App) // a directory's attributes are shared (dirCache)
 	it.Mode = n.attr.Mode
 	if bits, ok := n.attr.WindowsAttributes(); ok {
 		it.WindowsAttrs = &bits
 	}
 	return it
+}
+
+// currentVersion is file n's current version: the one its stat read,
+// dated by dates if given, else by its .version record if it has one.
+func (d *Drive) currentVersion(ctx context.Context, n *node, dates objstore.Dates) *drive.Version {
+	obj, ok := n.attr.ContentVersion()
+	if !ok {
+		head, err := n.fsys.Store().Head(ctx, n.key)
+		if err != nil {
+			return nil
+		}
+		obj = *head
+	}
+	if dates == nil {
+		dates = objstore.Dates{}
+		if n.attr.Dated() {
+			dates, _ = objstore.ReadDates(ctx, n.fsys.Store(), n.key)
+		}
+	}
+	return &drive.Version{ID: obj.VersionID, Time: dates.Time(&obj), Stored: obj.LastModified, Size: obj.Size, Current: true,
+		Checksums: toChecksums(n.attr.Checksums[obj.ETag])}
 }
 
 // visible: FIFOs, sockets and devices aren't items.

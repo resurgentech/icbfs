@@ -95,7 +95,12 @@ type Metadata struct {
 	// The checksums of the content's versions, by each version's ETag:
 	// computed as a write's bytes went by, or later, on demand. A version
 	// without an entry has none yet.
-	Checksums     map[string]*Checksums `protobuf:"bytes,22,rep,name=checksums,proto3" json:"checksums,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Checksums map[string]*Checksums `protobuf:"bytes,22,rep,name=checksums,proto3" json:"checksums,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Whether the item has a .version record (internal/objstore's dates):
+	// set by any write made under a declared time, which is what writes
+	// one, and never cleared. A reader that wants a version's date reads
+	// .version only when it's set.
+	Dated         bool `protobuf:"varint,23,opt,name=dated,proto3" json:"dated,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -263,6 +268,13 @@ func (x *Metadata) GetChecksums() map[string]*Checksums {
 	return nil
 }
 
+func (x *Metadata) GetDated() bool {
+	if x != nil {
+		return x.Dated
+	}
+	return false
+}
+
 // Checksums are a content version's MD5 and SHA-256; either may be empty
 // (not computed).
 type Checksums struct {
@@ -395,7 +407,7 @@ var File_spec_proto_icbfs_v1_metadata_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\n" +
-	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xbe\b\n" +
+	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd4\b\n" +
 	"\bMetadata\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\rR\x04mode\x12\x10\n" +
 	"\x03uid\x18\x02 \x01(\rR\x03uid\x12\x10\n" +
@@ -416,7 +428,8 @@ const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\x11posix_acl_default\x18\x13 \x01(\fR\x0fposixAclDefault\x12-\n" +
 	"\x03app\x18\x14 \x03(\v2\x1b.icbfs.v1.Metadata.AppEntryR\x03app\x12\x16\n" +
 	"\x06layout\x18\x15 \x01(\rR\x06layout\x12?\n" +
-	"\tchecksums\x18\x16 \x03(\v2!.icbfs.v1.Metadata.ChecksumsEntryR\tchecksums\x1a9\n" +
+	"\tchecksums\x18\x16 \x03(\v2!.icbfs.v1.Metadata.ChecksumsEntryR\tchecksums\x12\x14\n" +
+	"\x05dated\x18\x17 \x01(\bR\x05dated\x1a9\n" +
 	"\vXattrsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\x1a:\n" +

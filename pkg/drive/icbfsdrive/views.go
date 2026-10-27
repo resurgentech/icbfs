@@ -22,6 +22,10 @@ type viewCache struct {
 	history  *objstore.HistoryCache
 	ownHist  bool      // history is the temporary one, for closeAll to close
 	pastSeen time.Time // when the filesystem's past-changed mark was last looked at
+	// forget: this drive changed the past, so views forget what they kept
+	// on next use, without waiting for the mark (sent at most once a
+	// second: pastMarker).
+	forget bool
 }
 
 // pastCheck is how often views look for a change to the past (a purge, a
@@ -60,6 +64,13 @@ func (c *viewCache) get(ctx context.Context, t time.Time) (*icbfs.Filesystem, er
 	history, err := c.cacheLocked(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if c.forget {
+		if err := icbfs.ForgetPast(ctx, c.d.fs, history); err != nil {
+			return nil, err
+		}
+		clear(c.views)
+		c.forget = false
 	}
 	if time.Since(c.pastSeen) >= pastCheck {
 		if _, err := c.checkPastLocked(ctx, history); err != nil {
@@ -147,11 +158,11 @@ func (c *viewCache) checkPastLocked(ctx context.Context, history *objstore.Histo
 	return forgot, nil
 }
 
-// lookAgain makes the next view look for a change to the past at once:
-// this drive has just made one.
+// lookAgain makes the next view forget what views kept of the past:
+// this drive has just changed it.
 func (c *viewCache) lookAgain() {
 	c.mu.Lock()
-	c.pastSeen = time.Time{}
+	c.forget = true
 	c.mu.Unlock()
 }
 

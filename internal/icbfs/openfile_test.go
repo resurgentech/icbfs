@@ -40,7 +40,7 @@ func TestConcurrentNonOverlappingWritesBothSurvive(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	base := make([]byte, size)
-	if _, _, err := fsys.WriteFile(ctx, key, base, etag); err != nil {
+	if _, err := fsys.WriteFile(ctx, key, base, etag); err != nil {
 		t.Fatalf("seed content: %v", err)
 	}
 
@@ -119,7 +119,7 @@ func TestFlushEscalatesWhenPlainRetryBudgetIsExhausted(t *testing.T) {
 	// Another writer changes the object first, so the session's ETag is
 	// stale and its only attempt fails.
 	concurrent := []byte("someone-else-wrote-this")
-	if _, _, err := fsys.WriteFile(ctx, key, concurrent, ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, key, concurrent, ""); err != nil {
 		t.Fatalf("simulate a concurrent writer: %v", err)
 	}
 
@@ -155,7 +155,7 @@ func TestFlushRefusedWhenTouchedRangeOverlapsExternalLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, _, err := fsys.WriteFile(ctx, key, make([]byte, 20), ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, key, make([]byte, 20), ""); err != nil {
 		t.Fatalf("seed content: %v", err)
 	}
 
@@ -433,7 +433,7 @@ func TestInterleavedWritesAllSurvive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := fsys.WriteFile(ctx, key, bytes.Repeat([]byte("."), 1100), etag); err != nil {
+	if _, err := fsys.WriteFile(ctx, key, bytes.Repeat([]byte("."), 1100), etag); err != nil {
 		t.Fatal(err)
 	}
 	ours, err := fsys.Open(ctx, key)
@@ -483,7 +483,7 @@ func TestFlushNotRefusedByLockBetweenEdits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := fsys.WriteFile(ctx, key, make([]byte, 1100), ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, key, make([]byte, 1100), ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := fsys.TryAcquireLockRange(ctx, key, 500, 510, "client-1", 30*time.Second); err != nil {
@@ -502,5 +502,34 @@ func TestFlushNotRefusedByLockBetweenEdits(t *testing.T) {
 	open.WriteAt([]byte("B"), 505)
 	if _, err := open.Flush(ctx); !errors.Is(err, ErrLocked) {
 		t.Fatalf("flush of an edit inside the lock: %v, want ErrLocked", err)
+	}
+}
+
+// TestCloseReportsUnsaved: the last Close of an open with writes no Flush
+// saved drops them, and says so; one after a Flush has nothing to say.
+func TestCloseReportsUnsaved(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	key := writeNew(t, ctx, fsys, fsys.RootKey(), "a.txt", "saved")
+	for _, flush := range []bool{true, false} {
+		open, err := fsys.Open(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := open.WriteAt([]byte("more"), 5); err != nil {
+			t.Fatal(err)
+		}
+		if flush {
+			if _, err := open.Flush(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+		err = open.Close()
+		if flush && err != nil {
+			t.Fatalf("closing after a flush: %v", err)
+		}
+		if !flush && !errors.Is(err, ErrUnsaved) {
+			t.Fatalf("closing with writes unsaved: %v, want ErrUnsaved", err)
+		}
 	}
 }

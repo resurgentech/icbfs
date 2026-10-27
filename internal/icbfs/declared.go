@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/resurgentech/icbfs/internal/objstore"
+	"github.com/resurgentech/icbfs/internal/pb"
 )
 
 // A change made under objstore.WithDeclaredTime happened at that time, as
@@ -61,11 +62,16 @@ func undeclared(ctx context.Context) context.Context {
 // record, and puts back on top whatever a version written behind its
 // item's current state displaced. The operation's writes went through
 // this filesystem's store, which records them (objstore.Recording).
+//
+// restored names the keys whose current version was put back on top, and
+// the .metadata of every directory changed behind its latest state.
 func (f *Filesystem) RecordDates(ctx context.Context, rec *objstore.Recorder) (restored map[string]bool, err error) {
 	ctx = undeclared(ctx)
-	byBase := rec.Dates()
-	for base, dates := range byBase {
-		if err := objstore.AddDates(ctx, f.store, base, dates); err != nil {
+	// Each item's table as written, for restoreCurrent; an item the
+	// operation made has none to read first, and nothing to put right.
+	tables := map[string]objstore.Dates{}
+	for base, dates := range rec.Dates() {
+		if tables[base], err = objstore.MergeDates(ctx, f.store, base, dates, rec.Fresh(base)); err != nil {
 			return nil, err
 		}
 	}
@@ -83,7 +89,10 @@ func (f *Filesystem) RecordDates(ctx context.Context, rec *objstore.Recorder) (r
 		pending[w.Key] = true
 	}
 	for _, w := range written {
-		did, err := f.restoreCurrent(ctx, w, byBase[objstore.BaseKey(w.Key)], rekeys, pending)
+		if rec.IsNew(objstore.BaseKey(w.Key)) {
+			continue // all its versions are this operation's, dated alike: the newest is current
+		}
+		did, err := f.restoreCurrent(ctx, w, tables, rekeys, pending)
 		if err != nil {
 			return restored, err
 		}
@@ -91,7 +100,83 @@ func (f *Filesystem) RecordDates(ctx context.Context, rec *objstore.Recorder) (r
 			restored[w.Key] = true
 		}
 	}
+	// A directory changed behind its latest state is late however its
+	// .metadata write went: in a filesystem whose items list every
+	// version, the directory's table says so.
+	if f.sourceTime.Load() {
+		ours := map[string]bool{}
+		for _, w := range written {
+			ours[w.VersionID] = true
+		}
+		for _, w := range written {
+			meta := metadataObjectKey(w.Dir)
+			if w.Dir == "" || restored[meta] {
+				continue
+			}
+			dates, ok := tables[w.Dir]
+			if !ok {
+				if dates, err = objstore.ReadDates(ctx, f.store, w.Dir); err != nil {
+					return restored, err
+				}
+				tables[w.Dir] = dates
+			}
+			for id, t := range dates {
+				if !ours[id] && t.After(w.At) {
+					restored[meta] = true // the drive rewrites its history (repairLateFolders)
+					break
+				}
+			}
+		}
+	}
 	return restored, nil
+}
+
+// latestDated reports whether w is dated no earlier than every version in
+// its item's table (any of its objects': one of them later is reason
+// enough to look).
+func latestDated(dates objstore.Dates, w objstore.Written) bool {
+	if _, ok := dates[w.VersionID]; !ok {
+		return false
+	}
+	for id, t := range dates {
+		if id != w.VersionID && t.After(w.At) {
+			return false
+		}
+	}
+	return true
+}
+
+// unfinishedAfter is how old a version an item's complete table doesn't
+// list must be to count as a write that never finished: any write is
+// dated well within it.
+var unfinishedAfter = 5 * time.Minute // a variable for the tests
+
+// eraseUnfinished erases from key's history, newest first, the versions
+// its item's complete table doesn't list that are older than
+// unfinishedAfter: written, never dated, the change that wrote them
+// failed. A key's only version stays: erasing it would leave the name of
+// an item with nothing behind it. It returns history without them.
+func (f *Filesystem) eraseUnfinished(ctx context.Context, key string, history []objstore.Object, dates objstore.Dates) ([]objstore.Object, error) {
+	cutoff := time.Now().Add(-unfinishedAfter)
+	kept := history[:0:0]
+	live := 0
+	for _, o := range history {
+		if !o.Deleted {
+			live++
+		}
+	}
+	for _, o := range history {
+		_, dated := dates[o.VersionID]
+		if o.Deleted || dated || !o.LastModified.Before(cutoff) || live <= 1 {
+			kept = append(kept, o)
+			continue
+		}
+		if err := f.store.Erase(ctx, key, o.VersionID); err != nil && !objstore.IsNotFound(err) {
+			return nil, err
+		}
+		live--
+	}
+	return kept, nil
 }
 
 // rekeyETag moves what a references by content ETag old (the mtime
@@ -113,12 +198,24 @@ func rekeyETag(a *Attr, old, new string) {
 // that should be current current again: if the key's newest version by
 // effective date isn't its newest stored one, that version is copied on
 // top (server-side for content, read and written back for the small
-// objects), dated as it was, and reported. A directory's blocks are the
-// directory's to put right (the drive rewrites the copies from w.At on);
-// they're left.
-func (f *Filesystem) restoreCurrent(ctx context.Context, w objstore.Written, written objstore.Dates, rekeys map[string][2]string, pending map[string]bool) (bool, error) {
+// objects), dated as it was, and reported. tables holds each item's
+// .version table as RecordDates wrote it, kept up to date here. A
+// directory's blocks are the directory's to put right (the drive
+// rewrites the copies from w.At on); they're left.
+//
+// In a filesystem written in a source's time the table lists every
+// version (Filesystem.dated), so a write dated no earlier than all of
+// them is current with nothing more to read. Only one behind lists the
+// key's versions, and then erases any the table doesn't list that are
+// older than unfinishedAfter: writes that never finished.
+func (f *Filesystem) restoreCurrent(ctx context.Context, w objstore.Written, tables map[string]objstore.Dates, rekeys map[string][2]string, pending map[string]bool) (bool, error) {
 	if w.Dir != "" {
 		return false, nil
+	}
+	dates := tables[objstore.BaseKey(w.Key)]
+	complete := f.dated(w.Key)
+	if complete && latestDated(dates, w) {
+		return false, nil // what was written is current, as it should be
 	}
 	history, err := f.store.History(ctx, w.Key)
 	if err != nil {
@@ -127,12 +224,10 @@ func (f *Filesystem) restoreCurrent(ctx context.Context, w objstore.Written, wri
 	if len(history) == 0 || history[0].VersionID != w.VersionID {
 		return false, nil // something newer since, or gone: not ours to put right
 	}
-	dates, err := objstore.ReadDates(ctx, f.store, objstore.BaseKey(w.Key))
-	if err != nil {
-		return false, err
-	}
-	for id, t := range written {
-		dates[id] = t
+	if complete {
+		if history, err = f.eraseUnfinished(ctx, w.Key, history, dates); err != nil {
+			return false, err
+		}
 	}
 	want, ok := dates.Pick(history, time.Now().Add(time.Hour))
 	if !ok || want.VersionID == w.VersionID {
@@ -140,12 +235,13 @@ func (f *Filesystem) restoreCurrent(ctx context.Context, w objstore.Written, wri
 	}
 	var obj *objstore.Object
 	base := objstore.BaseKey(w.Key)
+	cctx := objstore.DatesItself(ctx) // the copy is dated below, as want was
 	if strings.HasSuffix(w.Key, ".metadata") {
 		// The attributes as they were, plus the bookkeeping the late
 		// write added about its own version (its checksums).
-		obj, err = f.mergeMetadataOnTop(ctx, w.Key, want, w.VersionID, rekeys[base])
+		obj, err = f.mergeMetadataOnTop(cctx, w.Key, want, w.VersionID, rekeys[base])
 	} else {
-		obj, err = f.copyVersionOnTop(ctx, w.Key, want)
+		obj, err = f.copyVersionOnTop(cctx, w.Key, want)
 		if err == nil && obj.ETag != want.ETag {
 			rekeys[base] = [2]string{want.ETag, obj.ETag}
 			// Content: its .metadata follows the new ETag, now, unless a
@@ -153,7 +249,7 @@ func (f *Filesystem) restoreCurrent(ctx context.Context, w objstore.Written, wri
 			// which does it (a write here would be the newer version, and
 			// leave that one as it is).
 			if base == w.Key && !pending[metadataObjectKey(base)] {
-				err = f.writeMetadataIf(ctx, base, false, func(a *Attr) bool {
+				err = f.writeMetadataIf(objstore.KeepDate(ctx), base, false, func(a *Attr) bool {
 					rekeyETag(a, want.ETag, obj.ETag)
 					return true
 				})
@@ -166,11 +262,14 @@ func (f *Filesystem) restoreCurrent(ctx context.Context, w objstore.Written, wri
 	if err != nil {
 		return false, err
 	}
-	if err := objstore.AddDates(ctx, f.store, objstore.BaseKey(w.Key), objstore.Dates{obj.VersionID: dates.Time(&want)}); err != nil {
+	// The copy is the version now; the one it was copied from is the
+	// same bytes at the same date, so it goes, and its line with it.
+	if tables[base], err = objstore.UpdateDates(ctx, f.store, base, objstore.Dates{obj.VersionID: dates.Time(&want)}, want.VersionID); err != nil {
+		// Undated, the copy would be taken for an unfinished write; it
+		// goes, and the late write is on top until a try that works.
+		_ = f.store.Erase(context.WithoutCancel(ctx), w.Key, obj.VersionID)
 		return false, err
 	}
-	// The copy is the version now; the one it was copied from is the
-	// same bytes at the same date, so it goes.
 	return true, f.store.Erase(ctx, w.Key, want.VersionID)
 }
 
@@ -206,7 +305,8 @@ func (f *Filesystem) mergeMetadataOnTop(ctx context.Context, key string, want ob
 		}
 	}
 	rekeyETag(&attr, rekey[0], rekey[1])
-	data, err := encodeFileMetadata(attr)
+	attr.dated = attr.dated || late.dated
+	data, err := f.encodeMetadata(ctx, attr)
 	if err != nil {
 		return nil, err
 	}
@@ -242,6 +342,71 @@ func (f *Filesystem) MarkPastChanged(ctx context.Context) error {
 	// Not under the declared time: the mark is news now.
 	_, err := f.store.Put(context.WithoutCancel(undeclared(ctx)), f.pastKey(), bytes.NewReader(nil), nil, "")
 	return err
+}
+
+// SourceTime reports whether the filesystem is written in a source's
+// time (its master entry's source_time), as of attaching or the last
+// Refresh.
+func (f *Filesystem) SourceTime() bool { return f.sourceTime.Load() }
+
+// MarkSourceTime records that the filesystem is written in a source's
+// time, before its first change made under one: from then on every
+// version of its items is dated (dated).
+func (f *Filesystem) MarkSourceTime(ctx context.Context) error {
+	if f.sourceTime.Load() {
+		return nil
+	}
+	err := updateFilesystemEntry(undeclared(ctx), f.store, f.fsName, func(e *pb.FilesystemEntry) {
+		e.SourceTime = true
+	})
+	if err == nil {
+		f.sourceTime.Store(true)
+	}
+	return err
+}
+
+// dated reports whether key is an object every version of which is to
+// be dated (objstore.DateAll): in a filesystem written in a source's
+// time, an item's content or .metadata, a directory's .metadata, or an
+// origin record. Not a lock, a stream, or anything outside the tree.
+func (f *Filesystem) dated(key string) bool {
+	if !f.sourceTime.Load() {
+		return false
+	}
+	base := objstore.BaseKey(key)
+	if key != base && key != metadataObjectKey(base) {
+		return false
+	}
+	rest, ok := strings.CutPrefix(base, f.id+"-")
+	if !ok {
+		return false
+	}
+	if _, err := uuid.Parse(rest); err == nil {
+		return true
+	}
+	return rest == "root-"+f.fsName || strings.HasPrefix(rest, "origin-")
+}
+
+// SetPastChanged has fn told whenever this filesystem's own operations
+// (a history replaced, a purge) change its past, instead of their
+// sending the mark themselves: for a caller that sends marks of its own
+// and spaces them out (the drive's, at most one a second).
+func (f *Filesystem) SetPastChanged(fn func(context.Context)) { f.pastChanged = fn }
+
+// markPast marks the past changed, or tells SetPastChanged's fn to.
+func (f *Filesystem) markPast(ctx context.Context) error {
+	if f.pastChanged != nil {
+		f.pastChanged(ctx)
+		return nil
+	}
+	return f.MarkPastChanged(ctx)
+}
+
+// ForgetPast makes cache drop everything it kept of live's filesystem,
+// mark or no mark: for the filesystem's own writer, which knows it has
+// just changed the past before its mark is sent.
+func ForgetPast(ctx context.Context, live *Filesystem, cache *objstore.HistoryCache) error {
+	return cache.ForgetUnder(ctx, live.prefix())
 }
 
 // ForgetChangedPast makes cache drop everything it kept of live's

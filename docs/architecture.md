@@ -80,7 +80,7 @@ with its four-hex-digit ID, so one prefix listing finds all of it.
 | `<id>-trashby-<uuid>` | the key of the item's newest trash entry, so a trashed item's entry is one read |
 | `<id>-name-<name>` | a named version |
 | `<id>-origin-<hash>` | the item copied from one source item (an item in another document store, say): its id, the source version, where it was last seen |
-| `<id>-<uuid>.version` | the dates of the item's versions the store's timestamp is wrong for (a mirror's, written in its source's time); only items with one (see Past views) |
+| `<id>-<uuid>.version` | the dates of the item's versions (a mirror's, written in its source's time): in a filesystem written in a source's time, every version of its content and `.metadata`; elsewhere, only items a change under a source time touched (see Source time) |
 | `<id>-app-<tool>.<name>` | an object a tool keeps beside the filesystem, not about any item: a mirror's table of the ids its app keys use |
 | `<id>-past` | empty; written again whenever the filesystem's past changes (a purge, a change made under a source time), telling history caches to drop what they kept (see Past views) |
 
@@ -147,6 +147,15 @@ uploads only what changed, but the result is still one object.
   1 TiB. A write or truncate past it fails with `EFBIG` on Linux, or
   `STATUS_FILE_TOO_LARGE` on Windows.
 
+**A file made whole is two writes.** A mount creates a file empty and
+writes it at close. The drive API has the content in hand (up to 64 MiB;
+past that it writes as a mount does): `CreateWith` writes the content
+object once, with it, and `.metadata` once, with what the write records
+(times, app data, mode, checksums), then the directory entry. A new version
+is the content, then one `.metadata` write (`SetInfoWith`, which a
+directory's record takes too), whose result gives the item its attributes
+without a stat.
+
 **Open files are edited in a local scratch file, not in memory.** Opening a
 file copies it from a shared on-disk read cache into a private scratch
 file, fetching it from the store if the cache doesn't have it. Reads and
@@ -159,7 +168,9 @@ file, for a mapping's pages written back after the close.
 - Every open of a file in one mount shares that one scratch file, so a
   write through one descriptor is read through every other at once, as on
   a local disk. Any close or `fsync` stores all of them; the last close
-  removes the scratch file. Opening a file already open picks up another
+  removes the scratch file. Writes still unsaved then (their flush
+  failed) are dropped, and the core's `Close` says so (`ErrUnsaved`);
+  a Windows close has nowhere to report it. Opening a file already open picks up another
   machine's newer version if nothing here is unflushed (close-to-open);
   otherwise the next flush merges onto it.
 - A file removed while it's open here lives until its last close, as on a
@@ -257,7 +268,12 @@ content:
 - data icbfs's own tools keep about the item, such as the drive API's
   content type and copy origin, and a mirror's record of its source item.
   Like access times and checksums, it's bookkeeping, not a change to the
-  item: writing it doesn't move ctime.
+  item: writing it doesn't move ctime;
+- whether the item has a `.version` record (Source time, below): set by
+  any write of `.metadata` under a declared time or in a filesystem
+  written in a source's time, and kept, so a reader
+  that wants a version's date reads `.version` only for an item that has
+  one.
 
 **Extended attributes and POSIX ACLs.** A Linux mount offers the `user.`,
 `trusted.` and `security.` namespaces, with Linux's limits (names up to 255
@@ -337,7 +353,21 @@ object.
   record nothing.
 
 A full `stat()` is two requests, one for `.metadata` and one `HEAD` on the
-content, issued concurrently.
+content, issued concurrently. The `HEAD` answers the current version's id
+too, which the attributes keep, so the drive API's listing describes a
+file's version in those two requests (a third, its `.version`, only for a
+dated item). A walk down a path stats each directory with a `GET` of its
+block instead of the `HEAD`, still one request, and the lookup in it
+starts from that block (`StatStep`, `FindStep`): a step down is two
+requests, `.metadata` and the block.
+
+The drive API remembers the directories its walks read, with their
+blocks. It checks one it holds with a conditional read of each of its two
+objects (`Revalidate`, `If-None-Match`: no body when unchanged), since a
+change to a directory's permissions or record moves only its `.metadata`
+and an entry added or removed only its block. Within the drive's
+`TrustFor` it doesn't check at all. Every write through the drive drops
+what it wrote from its memory, so its own changes are seen at once.
 
 ## Concurrency
 
@@ -385,10 +415,16 @@ its content, as on a local disk):
   directory block, so it is atomic, and concurrent creates, unlinks and
   links from any number of machines all land; none is lost to another,
   splits included.
-- **Rename is not atomic.** It removes the old name, then adds the new one
-  (after removing what it replaces). Between the two, the item has no
-  name; a client that dies there leaves it unreachable (`icbfs-cli fs
-  check` counts it).
+- **Rename is not atomic.** It adds the new name, then removes the old one
+  (after removing what it replaces). Between the two, the item has both;
+  a client that dies there leaves it so, and deleting either name sends
+  it to the trash, so it is never unreachable. A rename that fails takes
+  the new name back, and says so if it can't. A name differing only in
+  case in the same directory would clash, so it goes the other way.
+- **A hard link** adds its name, then counts it. One that dies between
+  leaves the count one short: deleting the last counted name sends the
+  item to the trash. Counting first would leave it one over, and the
+  item would outlive its names, untrashed.
 - **File content is close-to-open.** A close (or `fsync`) stores the file
   as one conditional whole-object write, so another machine sees the old
   content or the new, never a mix, and sees the new at its next open.
@@ -529,7 +565,11 @@ it was written under a source time (see below).
   later session as well.
 - The past changes only by a purge or by a change made under a source
   time (below), which the cache can't see for itself. So each writes a new
-  version of an empty object, `<id>-past`, after it's done.
+  version of an empty object, `<id>-past`, after it's done. A drive
+  writes it at most once a second: a change within a second of the last
+  write is put off to the second's end (so the last change is always
+  marked), and sent at the latest when the drive closes. The drive's own
+  views forget at once, without waiting for it.
   `pkg/history` and the drive API's views check it at most every 30
   seconds, and an as-of mount when it starts (`icbfs.ForgetChangedPast`);
   a new version since the cache last looked drops everything it kept of
@@ -560,11 +600,26 @@ the filesystem's history goes:
   versions of the item's content, `.metadata` and (for a directory) blocks
   that came to be at another time. The filesystem's store records what a
   dated operation writes (`objstore.Recording`, a `Recorder` in the
-  context), and the operation ends by dating it (`RecordDates`). A view
+  context), and the operation ends by dating it (`RecordDates`). An item
+  the operation made (a key it minted) has no record to read first and
+  nothing to put back on top, so dating it is one write. A view
   reads an item's current `.version` once (the record is the authority on
   the item's timeline, whatever the view's time) and picks each version
   by effective date from the cached listing. An ordinary filesystem has
   no `.version` and reads exactly as before;
+- a filesystem written in a source's time says so in its master entry
+  (`source_time`: set at creation by `Settings.Created`, or by its first
+  change made under a source time). From then on, an item's `.version`
+  lists every version of its content and `.metadata` (delete markers
+  aside), whatever writes it: the store wrapper dates a version written
+  with no declared time as it's written (`objstore.DateAll`), at the
+  store's time, or, for bookkeeping that amends a version without
+  changing what the file is (checksums, an access time, `restoreCurrent`
+  following a copy's ETag: `objstore.KeepDate`), at the date of the
+  version it replaced. A version it can't date is erased and the write
+  fails. An item's first `.version` lists the versions it had before, at
+  the store's times. Locks, streams and directory blocks aren't listed;
+  the directory's history is its blocks' (above);
 - a new item's key is minted at the time, so that's its creation time; a
   directory's mtime becomes it; a trash entry is deleted at it. ctime
   stays icbfs's own clock;
@@ -575,8 +630,25 @@ the filesystem's history goes:
   mtime override and the checksums, follow the copy's ETag); a directory
   by rewriting its history from that date on with the change in every
   later copy (the drive's `repairLateFolders`, through
-  `ReplaceDirHistory`). A time in the future is refused. A filesystem
-  whose history starts before the store wrote it gives `Settings.Created`.
+  `ReplaceDirHistory`). In a filesystem written in a source's time,
+  whose items list every version, a change dated no earlier than every
+  version its item lists is current with nothing more to read; only one
+  behind lists the key's versions from the store. A time in the future is
+  refused. A filesystem whose history starts before the store wrote it
+  gives `Settings.Created`;
+- a directory changed behind its latest state is found late from its
+  `.version` (a version dated after the change), not from the change's
+  write of the directory's modified time; that write is part of a dated
+  change too, which fails without it (an ordinary change's is best
+  effort);
+- dating what a change wrote, and putting right what it wrote behind, are
+  part of the change. The drive tries three times; a change it can't
+  date is undone (each version it wrote that is still its key's newest
+  is erased) and fails, and a mirror applies it again on its next pass.
+  A version an item's complete `.version` doesn't list is a write that
+  never finished (the process stopped between writing it and dating it):
+  once it's five minutes old, the next change that lists the key's
+  versions erases it, unless it's the key's only version.
 
 Corrections, for a date the source got wrong, are the caller's:
 `DirHistory` / `ReplaceDirHistory` and `FileHistory` /
@@ -615,12 +687,24 @@ over an existing item, from any mount or the API.
   undone.
 - The key's inverted time lists entries newest first.
 - Nothing expires: an entry stays until the item is purged.
+- The entry is written first, then the item removed: a delete that can't
+  write its entry fails before it has changed anything, and one that
+  can't remove the item removes the entry again. One that stops in
+  between leaves an entry whose item is live: stale. A deleted item has
+  a deletion as its `.metadata`'s newest version (a file being deleted,
+  link count zero first), and everything that reads the trash checks:
+  the listing leaves stale entries out, a mirror's lookup of a trashed
+  item doesn't find one, and a restore or a purge removes one and leaves
+  the item alone. (The other order left a deleted item no entry points
+  to: not restorable, missed by a pass's undo, never purged.)
 
 **Restoring** removes the delete markers on the item's objects (content,
 `.metadata`, streams), so the history simply continues. It then gives the
 item a name: its old one, or any other. A taken name is refused unless the
 restore is told to replace it. A recursive delete through the API is one
-batch, and restoring its directory restores the batch.
+batch, and restoring its directory restores the batch. Removing the entry
+is part of the restore: if it can't be, the restore says so (the item is
+back; the entry left behind is stale).
 
 **Purge** permanently erases every version of an item's objects, its trash
 entries, and its drafts (the drive API's autosaves, kept in the drive's
@@ -630,6 +714,9 @@ has had and everything under it.
 - The item's name stays in its parent directory's history: a past listing
   still shows it, and opening it finds nothing.
 - A file with other names is refused unless all of its names go too.
+- Purging from the trash (`PurgeTrash`) erases only what is still deleted.
+  An entry whose item is live again (a restore that couldn't remove the
+  entry) is stale: it goes, and the item is left alone.
 
 ## Windows compatibility: primary mode
 

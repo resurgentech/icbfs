@@ -46,10 +46,11 @@ func TestUnlinkWalksTheDirectoryOnce(t *testing.T) {
 	if err := fsys.Unlink(ctx, root, "f050"); err != nil {
 		t.Fatal(err)
 	}
-	// Each block on the way down once, the file's .metadata (nlink) and
-	// the directory's (mtime). Looking the name up first, as Unlink did,
-	// read the blocks twice: 8 here.
-	if got := cs.gets.Load(); got > int64(depth)+2 {
-		t.Fatalf("Unlink made %d reads, want at most %d (a %d-level tree once, and two records)", got, depth+2, depth)
+	// Each block on the way down once, the file's .metadata twice (for
+	// the trash entry written before the name goes, then nlink) and the
+	// directory's (mtime). Looking the name up first, as Unlink did, read
+	// the blocks twice: 9 here.
+	if got := cs.gets.Load(); got > int64(depth)+3 {
+		t.Fatalf("Unlink made %d reads, want at most %d (a %d-level tree once, and three records)", got, depth+3, depth)
 	}
 }

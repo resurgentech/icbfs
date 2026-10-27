@@ -227,8 +227,31 @@ func (s *Store) GetVersion(ctx context.Context, key, versionID string) (io.ReadC
 	return s.get(ctx, key, c)
 }
 
+func (s *Store) GetIfChanged(ctx context.Context, key, etag string) (io.ReadCloser, *objstore.Object, bool, error) {
+	body, obj, err := s.getWith(ctx, key, s.blob(key), &blob.DownloadStreamOptions{AccessConditions: &blob.AccessConditions{
+		ModifiedAccessConditions: &blob.ModifiedAccessConditions{IfNoneMatch: to.Ptr(azcore.ETag(etag))}}})
+	if errors.Is(err, errNotModified) {
+		return nil, nil, false, nil
+	}
+	if err != nil {
+		return nil, nil, false, err
+	}
+	return body, obj, true, nil
+}
+
+// errNotModified is a conditional read's 304, which Azure sends with the
+// code ConditionNotMet, as it does a failed write's 412.
+var errNotModified = errors.New("not modified")
+
 func (s *Store) get(ctx context.Context, key string, c *blockblob.Client) (io.ReadCloser, *objstore.Object, error) {
-	resp, err := c.DownloadStream(ctx, nil)
+	return s.getWith(ctx, key, c, nil)
+}
+
+func (s *Store) getWith(ctx context.Context, key string, c *blockblob.Client, opts *blob.DownloadStreamOptions) (io.ReadCloser, *objstore.Object, error) {
+	resp, err := c.DownloadStream(ctx, opts)
+	if re := (*azcore.ResponseError)(nil); errors.As(err, &re) && re.StatusCode == 304 {
+		return nil, nil, errNotModified
+	}
 	if err != nil {
 		return nil, nil, azureErr("get", key, err)
 	}

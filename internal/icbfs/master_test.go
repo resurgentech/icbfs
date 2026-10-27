@@ -268,7 +268,7 @@ func TestArchivedFilesystemRejectsWritesButAllowsReads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create before archive: %v", err)
 	}
-	if _, _, err := fsys.WriteFile(ctx, fileUUID, []byte("hello"), ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, fileUUID, []byte("hello"), ""); err != nil {
 		t.Fatalf("write before archive: %v", err)
 	}
 
@@ -293,7 +293,7 @@ func TestArchivedFilesystemRejectsWritesButAllowsReads(t *testing.T) {
 	if _, _, _, err := reopened.Create(ctx, reopened.RootKey(), "after-archive", 0644, 0, 0); err != ErrArchived {
 		t.Fatalf("create against archived filesystem = %v, want ErrArchived", err)
 	}
-	if _, _, err := reopened.WriteFile(ctx, fileUUID, []byte("nope"), ""); err != ErrArchived {
+	if _, err := reopened.WriteFile(ctx, fileUUID, []byte("nope"), ""); err != ErrArchived {
 		t.Fatalf("write against archived filesystem = %v, want ErrArchived", err)
 	}
 	if _, _, err := reopened.Mkdir(ctx, reopened.RootKey(), "nope-dir", 0755, 0, 0); err != ErrArchived {
@@ -528,7 +528,7 @@ func TestStatFSIsScopedPerFilesystem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create in tenant-a: %v", err)
 	}
-	if _, _, err := fsA.WriteFile(ctx, fileA, smallContent, ""); err != nil {
+	if _, err := fsA.WriteFile(ctx, fileA, smallContent, ""); err != nil {
 		t.Fatalf("write in tenant-a: %v", err)
 	}
 
@@ -536,7 +536,7 @@ func TestStatFSIsScopedPerFilesystem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create in tenant-b: %v", err)
 	}
-	if _, _, err := fsB.WriteFile(ctx, fileB, bigContent, ""); err != nil {
+	if _, err := fsB.WriteFile(ctx, fileB, bigContent, ""); err != nil {
 		t.Fatalf("write in tenant-b: %v", err)
 	}
 

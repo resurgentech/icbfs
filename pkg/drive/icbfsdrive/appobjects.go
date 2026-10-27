@@ -40,12 +40,12 @@ func (d *Drive) AppObject(ctx context.Context, name string) ([]byte, error) {
 }
 
 // SetAppObject writes app object name.
-func (d *Drive) SetAppObject(ctx context.Context, name string, data []byte) error {
+func (d *Drive) SetAppObject(ctx context.Context, name string, data []byte) (err error) {
 	ctx, done, err := d.begin(ctx)
 	if err != nil {
 		return err
 	}
-	defer done()
+	defer done(&err)
 	if err := d.appObjectAccess(ctx, name, true); err != nil {
 		return err
 	}
@@ -59,12 +59,12 @@ func (d *Drive) SetAppObject(ctx context.Context, name string, data []byte) erro
 }
 
 // DeleteAppObject deletes app object name.
-func (d *Drive) DeleteAppObject(ctx context.Context, name string) error {
+func (d *Drive) DeleteAppObject(ctx context.Context, name string) (err error) {
 	ctx, done, err := d.begin(ctx)
 	if err != nil {
 		return err
 	}
-	defer done()
+	defer done(&err)
 	if err := d.appObjectAccess(ctx, name, true); err != nil {
 		return err
 	}

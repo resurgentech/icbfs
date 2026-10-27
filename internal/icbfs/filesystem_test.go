@@ -294,7 +294,7 @@ func TestXattrsRoundTripArbitraryBinaryValues(t *testing.T) {
 		t.Fatalf("decode .metadata: %v", err)
 	}
 	attr.Xattrs = map[string][]byte{"user.binary-blob": binaryValue}
-	newData, err := encodeFileMetadata(attr)
+	newData, err := encodeFileMetadata(context.Background(), attr)
 	if err != nil {
 		t.Fatalf("encode .metadata: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestInternalStateIsNotXattrs(t *testing.T) {
 	if _, err := fsys.SetWindowsCreateMetadata(ctx, uuid, TypeFile, WindowsAttrHidden, []byte("O:BAG:BAD:(A;;FA;;;WD)")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fsys.SetAppData(ctx, uuid, TypeFile, AppDriveContentType, []byte("text/plain")); err != nil {
+	if err := fsys.SetAppData(ctx, uuid, TypeFile, AppDriveContentType, []byte("text/plain")); err != nil {
 		t.Fatal(err)
 	}
 	got, err := fsys.Stat(ctx, uuid, TypeFile)
@@ -369,7 +369,7 @@ func TestSetAttrRejectsNegativeSizeInsteadOfCrashing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, _, err := fsys.WriteFile(ctx, uuid, []byte("hello"), ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, uuid, []byte("hello"), ""); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -400,7 +400,7 @@ func TestSetAttrRejectsHugeSizeInsteadOfCrashing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, _, err := fsys.WriteFile(ctx, uuid, []byte("hello"), ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, uuid, []byte("hello"), ""); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -636,7 +636,7 @@ func TestSetAttrExplicitMtimeBtimeOverrides(t *testing.T) {
 
 	// A real write afterwards: mtime follows content again (the override
 	// was tied to the old content version); the btime override stays.
-	if _, _, err := fsys.WriteFile(ctx, uuid, []byte("new content"), ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, uuid, []byte("new content"), ""); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	written, err := fsys.Stat(ctx, uuid, TypeFile)
