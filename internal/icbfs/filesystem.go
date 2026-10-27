@@ -596,6 +596,7 @@ func (f *Filesystem) statDirWith(ctx context.Context, key string, withBlock bool
 	var metaLastModified time.Time
 	var blockObj *objstore.Object
 	var blk *block.Block
+	var metaObj *objstore.Object
 	var metaErr, blockErr error
 
 	var wg sync.WaitGroup
@@ -609,7 +610,7 @@ func (f *Filesystem) statDirWith(ctx context.Context, key string, withBlock bool
 		}
 		defer body.Close()
 		metaData, metaErr = io.ReadAll(body)
-		metaLastModified = obj.LastModified
+		metaLastModified, metaObj = obj.LastModified, obj
 	}()
 	go func() {
 		defer wg.Done()
@@ -630,7 +631,7 @@ func (f *Filesystem) statDirWith(ctx context.Context, key string, withBlock bool
 	}
 	attr, err := combineDirAttr(key, metaData, metaLastModified, blockObj)
 	if err == nil && blk != nil {
-		attr.held = &heldBlock{key: key, blk: blk, obj: blockObj}
+		attr.held = &heldBlock{key: key, blk: blk, obj: blockObj, meta: metaData, metaObj: metaObj}
 	}
 	return attr, err
 }
@@ -685,7 +686,8 @@ func (f *Filesystem) Stat(ctx context.Context, key string, typ EntryType) (Attr,
 
 // StatStep is Stat for a walk down a path: a directory's block is read
 // whole (a GET where Stat makes a HEAD; one request either way), and the
-// attributes hold it, so a Step into the directory doesn't read it again.
+// attributes hold it, so a FindStep in the directory doesn't read it
+// again.
 func (f *Filesystem) StatStep(ctx context.Context, key string, typ EntryType) (Attr, error) {
 	return f.stat(ctx, key, typ, true)
 }
@@ -1102,48 +1104,119 @@ func (f *Filesystem) tryRemove(ctx context.Context, rootKey, name string, check 
 
 // Lookup finds name within the directory at dirKey.
 func (f *Filesystem) Lookup(ctx context.Context, dirKey, name string) (block.Entry, Attr, error) {
-	return f.lookup(ctx, dirKey, name, false, false)
+	return f.lookup(ctx, dirKey, name, false)
 }
 
-// Step is Lookup (LookupFold, with fold) for a walk down a path: dir is
-// dirKey's attributes as StatStep or a Step returned them, and the lookup
-// starts from the block they hold instead of reading it again; a
-// directory found is stat'd as StatStep does, for the next step. A step
-// down to a directory is two requests, its .metadata and its block.
-func (f *Filesystem) Step(ctx context.Context, dirKey string, dir Attr, name string, fold bool) (block.Entry, Attr, error) {
-	if dir.held != nil && dir.held.key == dirKey {
-		ctx = context.WithValue(ctx, heldBlockKey{}, dir.held)
-	}
-	return f.lookup(ctx, dirKey, name, fold, true)
+// FindStep is a lookup for a walk down a path, without the stat: the
+// entry named name in dirKey (case-insensitively, with fold, as
+// LookupFold finds it), starting from the block dir holds (StatStep's,
+// or Revalidate's) instead of reading it again. The walk stats what it
+// finds, a directory with StatStep for the next step: a step down to a
+// directory is two requests, its .metadata and its block, and none for
+// the directory it came from.
+func (f *Filesystem) FindStep(ctx context.Context, dirKey string, dir Attr, name string, fold bool) (block.Entry, error) {
+	return f.find(withHeld(ctx, dirKey, dir), dirKey, name, fold)
 }
 
-// heldBlock is a directory's root block as a stat read it (StatStep),
-// which a Step into the directory reads instead of the store (readBlock
-// finds it in the context): the block and the attributes are of one
-// moment, as a lookup's own read just after the stat would be.
+// heldBlock is a directory's root block and .metadata as a stat read
+// them (StatStep): a FindStep in the directory reads the block from here
+// instead of the store (readBlock finds it in the context), and
+// Revalidate checks both against the store. The block and the attributes
+// are of one moment, as a lookup's own read just after the stat would be.
 type heldBlock struct {
-	key string
-	blk *block.Block
-	obj *objstore.Object
+	key     string
+	blk     *block.Block
+	obj     *objstore.Object
+	meta    []byte
+	metaObj *objstore.Object
 }
 
 type heldBlockKey struct{}
 
-func (f *Filesystem) lookup(ctx context.Context, dirKey, name string, fold, step bool) (block.Entry, Attr, error) {
-	if fold {
-		return f.lookupFold(ctx, dirKey, name, step)
+// withHeld is ctx with dir's block for readBlock, if it holds dirKey's.
+func withHeld(ctx context.Context, dirKey string, dir Attr) context.Context {
+	if dir.held != nil && dir.held.key == dirKey {
+		return context.WithValue(ctx, heldBlockKey{}, dir.held)
 	}
-	if err := f.checkNameLength(name); err != nil {
-		return block.Entry{}, Attr{}, err
+	return ctx
+}
+
+// Revalidate is StatStep for a directory whose attributes prev (from
+// StatStep or Revalidate) the caller holds: its .metadata and its
+// block are each read only if they changed since (Store.GetIfChanged,
+// both at once), so a directory that hasn't changed costs two requests
+// with no bodies. changed reports whether either had.
+func (f *Filesystem) Revalidate(ctx context.Context, key string, prev Attr) (attr Attr, changed bool, err error) {
+	held := prev.held
+	if held == nil || held.key != key || held.metaObj == nil {
+		attr, err := f.StatStep(ctx, key, TypeDir)
+		return attr, true, err
 	}
-	entry, ok, err := f.findInTree(ctx, dirKey, name)
+	next := *held
+	var metaChanged, blockChanged bool
+	var metaErr, blockErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		var body io.ReadCloser
+		var obj *objstore.Object
+		body, obj, metaChanged, metaErr = f.store.GetIfChanged(ctx, metadataObjectKey(key), held.metaObj.ETag)
+		if metaErr != nil || !metaChanged {
+			metaErr = mapNotFound(metaErr)
+			return
+		}
+		defer body.Close()
+		next.metaObj = obj
+		next.meta, metaErr = io.ReadAll(body)
+	}()
+	go func() {
+		defer wg.Done()
+		var body io.ReadCloser
+		var obj *objstore.Object
+		body, obj, blockChanged, blockErr = f.store.GetIfChanged(ctx, key, held.obj.ETag)
+		if blockErr != nil || !blockChanged {
+			blockErr = mapNotFound(blockErr)
+			return
+		}
+		defer body.Close()
+		data, err := io.ReadAll(body)
+		if err != nil {
+			blockErr = err
+			return
+		}
+		blk, err := block.Decode(data)
+		if err != nil {
+			blockErr = err
+			return
+		}
+		blk.Collation = f.collation()
+		next.blk, next.obj = blk, obj
+	}()
+	wg.Wait()
+	if blockErr != nil {
+		return Attr{}, false, blockErr
+	}
+	if metaErr != nil {
+		return Attr{}, false, metaErr
+	}
+	if !metaChanged && !blockChanged {
+		return prev, false, nil
+	}
+	attr, err = combineDirAttr(key, next.meta, next.metaObj.LastModified, next.obj)
+	if err != nil {
+		return Attr{}, false, err
+	}
+	attr.held = &next
+	return attr, true, nil
+}
+
+func (f *Filesystem) lookup(ctx context.Context, dirKey, name string, fold bool) (block.Entry, Attr, error) {
+	entry, err := f.find(ctx, dirKey, name, fold)
 	if err != nil {
 		return block.Entry{}, Attr{}, err
 	}
-	if !ok {
-		return block.Entry{}, Attr{}, ErrNotFound
-	}
-	attr, err := f.stat(ctx, entry.UUID, entry.Type, step)
+	attr, err := f.Stat(ctx, entry.UUID, entry.Type)
 	if err != nil {
 		return block.Entry{}, Attr{}, err
 	}
@@ -1161,19 +1234,24 @@ func (f *Filesystem) lookup(ctx context.Context, dirKey, name string, fold, step
 // a primary-POSIX filesystem a name with no exact match means reading
 // the whole directory.
 func (f *Filesystem) LookupFold(ctx context.Context, dirKey, name string) (block.Entry, Attr, error) {
-	return f.lookup(ctx, dirKey, name, true, false)
+	return f.lookup(ctx, dirKey, name, true)
 }
 
-func (f *Filesystem) lookupFold(ctx context.Context, dirKey, name string, step bool) (block.Entry, Attr, error) {
+// find is the entry named name in dirKey (with fold, as LookupFold finds
+// it), or ErrNotFound.
+func (f *Filesystem) find(ctx context.Context, dirKey, name string, fold bool) (block.Entry, error) {
 	if err := f.checkNameLength(name); err != nil {
-		return block.Entry{}, Attr{}, err
+		return block.Entry{}, err
 	}
 	var entry block.Entry
 	var ok bool
 	var err error
-	if f.collation() == block.Folded {
+	switch {
+	case !fold:
+		entry, ok, err = f.findInTree(ctx, dirKey, name)
+	case f.collation() == block.Folded:
 		entry, ok, err = f.findFoldInTree(ctx, dirKey, name)
-	} else {
+	default:
 		entry, ok, err = f.findInTree(ctx, dirKey, name)
 		if err == nil && !ok {
 			var entries []block.Entry
@@ -1187,16 +1265,12 @@ func (f *Filesystem) lookupFold(ctx context.Context, dirKey, name string, step b
 		}
 	}
 	if err != nil {
-		return block.Entry{}, Attr{}, err
+		return block.Entry{}, err
 	}
 	if !ok {
-		return block.Entry{}, Attr{}, ErrNotFound
+		return block.Entry{}, ErrNotFound
 	}
-	attr, err := f.stat(ctx, entry.UUID, entry.Type, step)
-	if err != nil {
-		return block.Entry{}, Attr{}, err
-	}
-	return entry, attr, nil
+	return entry, nil
 }
 
 // ReadDir lists the entries of the directory at dirKey, across however

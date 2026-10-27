@@ -30,6 +30,11 @@ func (s *readCounter) Get(ctx context.Context, key string) (io.ReadCloser, *objs
 	return s.Store.Get(ctx, key)
 }
 
+func (s *readCounter) GetIfChanged(ctx context.Context, key, etag string) (io.ReadCloser, *objstore.Object, bool, error) {
+	s.n.Add(1)
+	return s.Store.GetIfChanged(ctx, key, etag)
+}
+
 func (s *readCounter) Head(ctx context.Context, key string) (*objstore.Object, error) {
 	s.n.Add(1)
 	return s.Store.Head(ctx, key)

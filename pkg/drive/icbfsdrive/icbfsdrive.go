@@ -6,10 +6,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"mime"
 	"path"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/resurgentech/icbfs/internal/block"
 	"github.com/resurgentech/icbfs/internal/icbfs"
@@ -38,6 +40,14 @@ type Config struct {
 	// permissions: a host serving a filesystem something else writes (a
 	// mirror's) to users who may only read it. Reads are as usual.
 	ReadOnly bool
+	// TrustFor is how long a directory the drive has read is used
+	// without asking the store again: right for a daemon that is its
+	// filesystem's only writer, which then walks a path it walked a
+	// moment ago with no requests. At 0, the default, each step of a walk
+	// checks the directory it holds (two conditional reads, no bodies
+	// when nothing changed). Changes made through this drive are seen at
+	// once either way; changes made elsewhere, after at most TrustFor.
+	TrustFor time.Duration
 }
 
 // Drive is an icbfs drive.
@@ -51,17 +61,19 @@ type Drive struct {
 	views   viewCache
 	events  broadcaster
 	idPaths idPathCache
+	dirs    *dirCache
 }
 
 var _ drive.Drive = (*Drive)(nil)
 
 // New attaches to the filesystem and finds the drive's root directory.
 func New(ctx context.Context, cfg Config) (*Drive, error) {
-	fsys := icbfs.New(cfg.Store, cfg.Filesystem)
+	dirs := newDirCache(cfg.TrustFor)
+	fsys := icbfs.New(&dropOnWrite{Store: cfg.Store, dirs: dirs}, cfg.Filesystem)
 	if err := fsys.Attach(ctx); err != nil {
 		return nil, mapErr(err)
 	}
-	d := &Drive{cfg: cfg, fs: fsys, windows: fsys.PrimaryWindows()}
+	d := &Drive{cfg: cfg, fs: fsys, windows: fsys.PrimaryWindows(), dirs: dirs}
 	d.root = cleanPath(cfg.Root)
 	d.views.d = d
 	key := fsys.RootKey()
@@ -147,9 +159,20 @@ func (d *Drive) lookup(ctx context.Context, fsys *icbfs.Filesystem, dirKey, name
 }
 
 // step is lookup for a walk down a path from dir, whose block its stat
-// read (icbfs.Filesystem.Step).
+// read (icbfs.Filesystem.FindStep); a directory found comes from the
+// directory cache (dirAttr).
 func (d *Drive) step(ctx context.Context, dir *node, name string) (block.Entry, icbfs.Attr, error) {
-	return dir.fsys.Step(ctx, dir.key, dir.attr, name, d.windows)
+	e, err := dir.fsys.FindStep(ctx, dir.key, dir.attr, name, d.windows)
+	if err != nil {
+		return block.Entry{}, icbfs.Attr{}, err
+	}
+	var a icbfs.Attr
+	if e.Type == icbfs.TypeDir {
+		a, err = d.dirAttr(ctx, dir.fsys, e.UUID)
+	} else {
+		a, err = dir.fsys.Stat(ctx, e.UUID, e.Type)
+	}
+	return e, a, err
 }
 
 // lookupIn is lookup in dir, reading its block afresh.
@@ -186,7 +209,7 @@ func (n *node) child(e block.Entry, a icbfs.Attr) *node {
 // rootNode is the drive's root, with the directories above it.
 func (d *Drive) rootNode(ctx context.Context, fsys *icbfs.Filesystem) (*node, error) {
 	key := fsys.RootKey()
-	attr, err := fsys.StatStep(ctx, key, icbfs.TypeDir)
+	attr, err := d.dirAttr(ctx, fsys, key)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -388,7 +411,7 @@ func (d *Drive) item(ctx context.Context, n *node, withVersion bool) drive.Item 
 	if o, ok := n.attr.App[icbfs.AppDriveOrigin]; ok {
 		it.Origin = decodeOrigin(o)
 	}
-	it.App = n.attr.App
+	it.App = maps.Clone(n.attr.App) // a directory's attributes are shared (dirCache)
 	it.Mode = n.attr.Mode
 	if bits, ok := n.attr.WindowsAttributes(); ok {
 		it.WindowsAttrs = &bits

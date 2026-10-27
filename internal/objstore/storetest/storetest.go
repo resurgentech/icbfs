@@ -23,6 +23,7 @@ import (
 func Run(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	t.Run("PutGetRoundTrip", func(t *testing.T) { putGetRoundTrip(t, newStore) })
 	t.Run("HeadReturnsMetadataAndSize", func(t *testing.T) { headReturnsMetadataAndSize(t, newStore) })
+	t.Run("GetIfChanged", func(t *testing.T) { getIfChanged(t, newStore) })
 	t.Run("PutIfAbsent", func(t *testing.T) { putIfAbsent(t, newStore) })
 	t.Run("ConditionalPutRejectsStaleETag", func(t *testing.T) { conditionalPutRejectsStaleETag(t, newStore) })
 	t.Run("PutCutOffIsLostRaceOnlyIfChanged", func(t *testing.T) { putCutOffIsLostRaceOnlyIfChanged(t, newStore) })
@@ -257,6 +258,40 @@ func putGetRoundTrip(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	}
 	if got.Metadata["mode"] != "0644" {
 		t.Fatalf("got mode metadata %q, want %q", got.Metadata["mode"], "0644")
+	}
+}
+
+// getIfChanged: a read conditional on the current ETag answers unchanged
+// with nothing; on an older one, the current content; on a deleted key,
+// not found.
+func getIfChanged(t *testing.T, newStore func(*testing.T) objstore.Store) {
+	store := newStore(t)
+	ctx := context.Background()
+	one, err := store.Put(ctx, "doc", strings.NewReader("one"), nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body, obj, changed, err := store.GetIfChanged(ctx, "doc", one.ETag); err != nil || changed || body != nil || obj != nil {
+		t.Fatalf("at its own ETag: changed %v, %v", changed, err)
+	}
+	two, err := store.Put(ctx, "doc", strings.NewReader("two"), nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, obj, changed, err := store.GetIfChanged(ctx, "doc", one.ETag)
+	if err != nil || !changed {
+		t.Fatalf("after a write: changed %v, %v", changed, err)
+	}
+	data, _ := io.ReadAll(body)
+	body.Close()
+	if string(data) != "two" || obj.ETag != two.ETag || obj.VersionID != two.VersionID {
+		t.Fatalf("after a write: %q, %+v; want two, %+v", data, obj, two)
+	}
+	if err := store.Delete(ctx, "doc"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := store.GetIfChanged(ctx, "doc", two.ETag); !objstore.IsNotFound(err) {
+		t.Fatalf("deleted: %v, want not found", err)
 	}
 }
 

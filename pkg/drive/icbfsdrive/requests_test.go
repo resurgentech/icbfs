@@ -90,6 +90,11 @@ func (c *requestCounter) Get(ctx context.Context, key string) (io.ReadCloser, *o
 	return c.Store.Get(ctx, key)
 }
 
+func (c *requestCounter) GetIfChanged(ctx context.Context, key, etag string) (io.ReadCloser, *objstore.Object, bool, error) {
+	c.add("GET-if-changed", key)
+	return c.Store.GetIfChanged(ctx, key, etag)
+}
+
 func (c *requestCounter) Head(ctx context.Context, key string) (*objstore.Object, error) {
 	c.add("HEAD", key)
 	return c.Store.Head(ctx, key)
@@ -145,35 +150,51 @@ func (c *requestCounter) ServerTime(ctx context.Context) (time.Time, error) {
 	return c.Store.ServerTime(ctx)
 }
 
-// requestCeilings are the most store requests an operation may take,
-// now and in source time. Each is today's count: a change that makes an
+// requestRuns are the drives TestRequestsPerOperation counts on: the
+// mirror writing now and in source time, each on a drive that checks
+// every folder it walks (TrustFor 0) and on one that trusts what it read
+// (TrustFor set, as a daemon that is its filesystem's only writer runs).
+var requestRuns = []struct {
+	name       string
+	sourceTime bool
+	trustFor   time.Duration
+}{
+	{"now", false, 0},
+	{"source time", true, 0},
+	{"now, trusting", false, time.Hour},
+	{"source time, trusting", true, time.Hour},
+}
+
+// requestCeilings are the most store requests an operation may take, in
+// each of requestRuns. Each is today's count: a change that makes an
 // operation cheaper lowers its ceiling here, so the count can't creep
 // back.
-var requestCeilings = map[string][2]int{
+var requestCeilings = map[string][4]int{
 	// The first folder in source time also dates the root and marks the
 	// filesystem's past, once.
-	"new top-level folder":  {21, 78},
-	"new folder at depth 2": {27, 45},
-	"new file at depth 3":   {22, 38},
-	"the same file again":   {9, 10},
-	"a new version of it":   {23, 36},
+	"new top-level folder":  {21, 78, 19, 76},
+	"new folder at depth 2": {27, 45, 19, 37},
+	"new file at depth 3":   {22, 38, 12, 28},
+	"the same file again":   {9, 10, 5, 6},
+	"a new version of it":   {23, 36, 11, 24},
 	// The root, then a step per folder and the file's own stat: two
-	// requests each, and its .version in source time.
-	"stat at depth 3": {8, 9},
+	// requests each (a folder's are none when trusted), and its .version
+	// in source time.
+	"stat at depth 3": {8, 9, 2, 3},
 	// A listing's cost past its first file, per file.
-	"listing, per file": {2, 3},
+	"listing, per file": {2, 3, 2, 3},
 }
 
 // TestRequestsPerOperation counts the store requests a mirror's
 // operations take through Mirror.Apply, and a listing's, and holds each
 // to its ceiling in requestCeilings.
 func TestRequestsPerOperation(t *testing.T) {
-	for i, name := range []string{"now", "source time"} {
-		t.Run(name, func(t *testing.T) {
+	for i, run := range requestRuns {
+		t.Run(run.name, func(t *testing.T) {
 			store := &requestCounter{Store: miniotest.Store(t), n: map[string]int{}}
-			d := newDrive(t, store, icbfs.Settings{Name: fmt.Sprintf("requests-%d", i), Size: 1 << 30, RootMode: 0o777}, "")
+			d := newDriveWith(t, store, icbfs.Settings{Name: fmt.Sprintf("requests-%d", i), Size: 1 << 30, RootMode: 0o777}, Config{TrustFor: run.trustFor})
 			m := drive.NewMirror(d, srcDrive)
-			if i == 1 {
+			if run.sourceTime {
 				m = m.InSourceTime()
 			}
 			ctx := system()
@@ -197,8 +218,14 @@ func TestRequestsPerOperation(t *testing.T) {
 				n, by := store.take()
 				check(op, n, by)
 			}
+			// A listing after a stat of the folder, so both listings
+			// start from the same: the folder just read (and cached).
 			listed := func() int {
 				t.Helper()
+				if _, err := d.Stat(ctx, drive.ByPath("/Clients/Acme"), drive.At{}); err != nil {
+					t.Fatal(err)
+				}
+				store.take()
 				if _, err := d.List(ctx, drive.ByPath("/Clients/Acme"), drive.ListOptions{}); err != nil {
 					t.Fatal(err)
 				}

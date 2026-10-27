@@ -436,8 +436,15 @@ defer d.Close()
   it, and the drive's registry `ID` (recorded in the origin of copies made
   from it). `History` is a history cache to share with other views; without
   one the drive opens a temporary one in `CacheDir`, which `Close` removes.
-  `ReadOnly` refuses every change (see Permissions). `Filesystem` returns
-  the drive's icbfs filesystem.
+  `ReadOnly` refuses every change (see Permissions). `TrustFor` is how
+  long the drive uses a folder it has read without asking the store again:
+  for a daemon that is its filesystem's only writer (a mirror's), a walk
+  down a path it walked a moment ago then costs nothing per folder. At 0,
+  the default, each folder on the way is checked, two conditional reads
+  with no bodies when it hasn't changed. The drive's own changes are seen
+  at once either way; changes made elsewhere (a mount, another drive),
+  after at most `TrustFor`. `Filesystem` returns the drive's icbfs
+  filesystem.
 - `icbfsdrive.OpenSideStore(ctx, store, name)` opens a side store,
   creating its filesystem the first time.
 - `pkg/icbfstest` is for tests of programs built on icbfs: `Store(t)` is

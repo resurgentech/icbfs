@@ -355,8 +355,16 @@ too, which the attributes keep, so the drive API's listing describes a
 file's version in those two requests (a third, its `.version`, only for a
 dated item). A walk down a path stats each directory with a `GET` of its
 block instead of the `HEAD`, still one request, and the lookup in it
-starts from that block (`StatStep`, `Step`): a step down is two requests,
-`.metadata` and the block.
+starts from that block (`StatStep`, `FindStep`): a step down is two
+requests, `.metadata` and the block.
+
+The drive API remembers the directories its walks read, with their
+blocks. It checks one it holds with a conditional read of each of its two
+objects (`Revalidate`, `If-None-Match`: no body when unchanged), since a
+change to a directory's permissions or record moves only its `.metadata`
+and an entry added or removed only its block. Within the drive's
+`TrustFor` it doesn't check at all. Every write through the drive drops
+what it wrote from its memory, so its own changes are seen at once.
 
 ## Concurrency
 

@@ -250,6 +250,29 @@ func (s *Store) Get(ctx context.Context, key string) (io.ReadCloser, *objstore.O
 	return out.Body, obj, nil
 }
 
+func (s *Store) GetIfChanged(ctx context.Context, key, etag string) (io.ReadCloser, *objstore.Object, bool, error) {
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket:      aws.String(s.bucket),
+		Key:         aws.String(s.k(key)),
+		IfNoneMatch: aws.String(etag),
+	})
+	var respErr *smithyhttp.ResponseError
+	if errors.As(err, &respErr) && respErr.HTTPStatusCode() == 304 {
+		return nil, nil, false, nil
+	}
+	if err != nil {
+		return nil, nil, false, s3Error(fmt.Errorf("get %s: %w", key, err))
+	}
+	return out.Body, &objstore.Object{
+		Key:          key,
+		VersionID:    aws.ToString(out.VersionId),
+		ETag:         aws.ToString(out.ETag),
+		Size:         aws.ToInt64(out.ContentLength),
+		LastModified: aws.ToTime(out.LastModified),
+		Metadata:     out.Metadata,
+	}, true, nil
+}
+
 func (s *Store) Head(ctx context.Context, key string) (*objstore.Object, error) {
 	return s.headVersion(ctx, key, nil)
 }
