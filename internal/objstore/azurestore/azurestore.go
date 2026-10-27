@@ -8,11 +8,14 @@ import (
 	"fmt"
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"io"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
@@ -35,15 +38,24 @@ import (
 //     version ID, as S3 can: the newest version is copied to a new current
 //     version, and the marker stays in the history between them.
 //   - PutParts stages blocks, uploaded or copied on the server from a range
-//     of a pinned version (authorized by a short-lived SAS for that version,
-//     as Put Block From URL takes no shared key), and commits them under
-//     If-Match.
+//     of a pinned version, and commits them under If-Match. Undelete's copy
+//     of a whole version is the same staging, so both server-side copies
+//     authorize their source one way: Put Block From URL takes no shared
+//     key, so under the key the source URL carries a short-lived SAS for
+//     that version, and under a token the request carries the token for
+//     the source too.
+//
+// The store opens with the account's shared key (New) or with an Entra ID
+// token credential (NewWithCredential): a person's sign-in, a service
+// principal, a managed identity. Under a token the account's shared keys
+// can be off; what the caller may do is then their role on the container.
 //
 // Azure returns metadata names in its own case: they're lowercased on
 // reading, as icbfs's names are.
 type Store struct {
 	client    *container.Client
-	cred      *azblob.SharedKeyCredential
+	cred      *azblob.SharedKeyCredential // under the key; nil under a token
+	token     azcore.TokenCredential      // under a token; nil under the key
 	container string
 	keyPrefix string // see WithKeyPrefix
 }
@@ -69,6 +81,58 @@ func New(serviceURL, account, key, containerName string) (*Store, error) {
 		return nil, err
 	}
 	return &Store{client: svc.ServiceClient().NewContainerClient(containerName), cred: cred, container: containerName}, nil
+}
+
+// NewWithCredential is a store on container in the storage account at
+// serviceURL, authorizing every request with a token from cred: the
+// azidentity credentials (a signed-in person, a service principal, a
+// managed identity) or any other azcore.TokenCredential. The identity
+// needs Storage Blob Data Reader on the container to read and Contributor
+// to write; the account's shared keys may be off.
+func NewWithCredential(serviceURL string, cred azcore.TokenCredential, containerName string) (*Store, error) {
+	if cred == nil {
+		return nil, errors.New("azurestore: no token credential")
+	}
+	svc, err := azblob.NewClient(serviceURL, cred, nil)
+	if err != nil {
+		return nil, err
+	}
+	return &Store{client: svc.ServiceClient().NewContainerClient(containerName), token: cred, container: containerName}, nil
+}
+
+// storageScope is the scope a token for Azure Storage is requested with,
+// the same for every account.
+const storageScope = "https://storage.azure.com/.default"
+
+// source is how a server-side copy names and authorizes its source, one
+// version of key: under the key a URL carrying a SAS good for an hour, as
+// Put Block From URL takes no shared key; under a token the plain
+// versioned URL and the token, for the request's copy-source
+// authorization header.
+func (s *Store) source(ctx context.Context, key, versionID string) (url string, auth *string, err error) {
+	c, err := s.version(key, versionID)
+	if err != nil {
+		return "", nil, err
+	}
+	if s.token != nil {
+		tok, err := s.token.GetToken(ctx, policy.TokenRequestOptions{Scopes: []string{storageScope}})
+		if err != nil {
+			return "", nil, fmt.Errorf("token for copy source %s: %w", key, err)
+		}
+		return c.URL(), to.Ptr("Bearer " + tok.Token), nil
+	}
+	q, err := sas.BlobSignatureValues{
+		Protocol:      sas.ProtocolHTTPSandHTTP,
+		ExpiryTime:    time.Now().UTC().Add(time.Hour),
+		Permissions:   (&sas.BlobPermissions{Read: true}).String(),
+		ContainerName: s.container,
+		BlobName:      s.k(key),
+		BlobVersion:   versionID,
+	}.SignWithSharedKey(s.cred)
+	if err != nil {
+		return "", nil, err
+	}
+	return c.URL() + "&" + q.Encode(), nil, nil
 }
 
 // WithKeyPrefix is S3Store.WithKeyPrefix: every key kept under prefix,
@@ -248,8 +312,17 @@ func (s *Store) get(ctx context.Context, key string, c *blockblob.Client) (io.Re
 }
 
 func (s *Store) getWith(ctx context.Context, key string, c *blockblob.Client, opts *blob.DownloadStreamOptions) (io.ReadCloser, *objstore.Object, error) {
-	resp, err := c.DownloadStream(ctx, opts)
-	if re := (*azcore.ResponseError)(nil); errors.As(err, &re) && re.StatusCode == 304 {
+	// The SDK counts a 304 as a successful download with an empty body, so
+	// the status has to be read off the raw response.
+	var raw *http.Response
+	resp, err := c.DownloadStream(runtime.WithCaptureResponse(ctx, &raw), opts)
+	if err == nil && raw != nil && raw.StatusCode == http.StatusNotModified {
+		if resp.Body != nil {
+			resp.Body.Close()
+		}
+		return nil, nil, errNotModified
+	}
+	if re := (*azcore.ResponseError)(nil); errors.As(err, &re) && re.StatusCode == http.StatusNotModified {
 		return nil, nil, errNotModified
 	}
 	if err != nil {
@@ -466,27 +539,39 @@ func (s *Store) PartLimits() objstore.PartLimits {
 }
 
 // promote makes version versionID of key current again, as a new version
-// with its content and metadata.
+// with its content and metadata: the version's bytes staged on the server
+// as blocks, as PutParts stages a copied part, and committed with its
+// metadata. (The asynchronous Copy Blob did this before; it has no way to
+// authorize its source with a token, and the synchronous one stops at
+// 256 MiB. Blocks have neither limit.)
 func (s *Store) promote(ctx context.Context, key, versionID string) error {
 	src, err := s.version(key, versionID)
 	if err != nil {
 		return err
 	}
-	resp, err := s.blob(key).StartCopyFromURL(ctx, src.URL(), nil)
+	props, err := src.GetProperties(ctx, nil)
 	if err != nil {
 		return azureErr("undelete", key, err)
 	}
-	for status := resp.CopyStatus; status != nil && *status == blob.CopyStatusTypePending; {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(100 * time.Millisecond):
-		}
-		p, err := s.blob(key).GetProperties(ctx, nil)
-		if err != nil {
+	url, auth, err := s.source(ctx, key, versionID)
+	if err != nil {
+		return err
+	}
+	bb := s.blob(key)
+	const block = 4000 << 20
+	var ids []string
+	for off, size := int64(0), deref(props.ContentLength); off < size; off += block {
+		id := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("icbfs-promote-%06d", len(ids))))
+		if _, err := bb.StageBlockFromURL(ctx, id, url, &blockblob.StageBlockFromURLOptions{
+			Range:                   blob.HTTPRange{Offset: off, Count: min(block, size-off)},
+			CopySourceAuthorization: auth,
+		}); err != nil {
 			return azureErr("undelete", key, err)
 		}
-		status = p.CopyStatus
+		ids = append(ids, id)
+	}
+	if _, err := bb.CommitBlockList(ctx, ids, &blockblob.CommitBlockListOptions{Metadata: props.Metadata}); err != nil {
+		return azureErr("undelete", key, err)
 	}
 	return nil
 }
@@ -502,12 +587,13 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 			}
 			continue
 		}
-		src, err := s.versionURL(key, p.CopyVersion)
+		src, auth, err := s.source(ctx, key, p.CopyVersion)
 		if err != nil {
 			return nil, err
 		}
 		if _, err := bb.StageBlockFromURL(ctx, ids[i], src, &blockblob.StageBlockFromURLOptions{
-			Range: blob.HTTPRange{Offset: p.CopyOffset, Count: p.Size},
+			Range:                   blob.HTTPRange{Offset: p.CopyOffset, Count: p.Size},
+			CopySourceAuthorization: auth,
 		}); err != nil {
 			return nil, azureErr("put parts", key, err)
 		}
@@ -520,27 +606,6 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 		return nil, azureErr("put parts", key, err)
 	}
 	return s.HeadVersion(ctx, key, deref(resp.VersionID))
-}
-
-// versionURL is a URL for reading one version of key, with a SAS good for
-// an hour: Put Block From URL authorizes its source by the URL alone.
-func (s *Store) versionURL(key, versionID string) (string, error) {
-	q, err := sas.BlobSignatureValues{
-		Protocol:      sas.ProtocolHTTPSandHTTP,
-		ExpiryTime:    time.Now().UTC().Add(time.Hour),
-		Permissions:   (&sas.BlobPermissions{Read: true}).String(),
-		ContainerName: s.container,
-		BlobName:      s.k(key),
-		BlobVersion:   versionID,
-	}.SignWithSharedKey(s.cred)
-	if err != nil {
-		return "", err
-	}
-	c, err := s.version(key, versionID)
-	if err != nil {
-		return "", err
-	}
-	return c.URL() + "&" + q.Encode(), nil
 }
 
 func (s *Store) List(ctx context.Context, prefix string) ([]objstore.Object, error) {

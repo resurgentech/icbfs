@@ -181,15 +181,25 @@ a real bucket or container as well as MinIO:
 ```
 test/aws/run-conformance.sh     # .env.aws names the bucket; keys from the aws CLI
 test/azure/run-conformance.sh   # .env.azure names the account; key from the az CLI
+ICBFS_TEST_AZURE_AUTH=login test/azure/run-conformance.sh   # the az CLI's sign-in, no key
 ```
+
+The Azure suite runs two ways: with the account key, and with the az
+CLI's sign-in as an Entra ID token (the SDK's default credential chain),
+which is the run that proves the store needs no key and the account's
+shared keys can be off. The identity needs Storage Blob Data Owner on the
+container, not Contributor: erasing a blob version is an action of its
+own that only Owner has.
 
 The Azure account itself is declared in `test/azure/tofu/` and made by
 `test/azure/tofu.sh plan` then `apply`, from the names in `.env.azure`:
 blob versioning on, a two-day expiry rule, and the roles the Entra ID
-sign-in modes need (whoever applies gets Storage Blob Data Contributor;
-the tenant's `icbfs-test-readers` and `icbfs-test-writers` groups get
-Reader and Contributor). `tofu.sh env` prints the `.env.azure` lines for
-the account it made. State is local and gitignored.
+sign-in modes need (whoever applies gets Storage Blob Data Owner; the
+tenant's `icbfs-test-readers` and `icbfs-test-writers` groups get Reader
+and Contributor). `TF_VAR_shared_keys=false` turns the account's shared
+keys off; the key run then fails and the sign-in run must not.
+`tofu.sh env` prints the `.env.azure` lines for the account it made.
+State is local and gitignored.
 
 `.env.aws` and `.env.azure` are gitignored and hold names only. Each test
 writes under a prefix of its own, and the bucket's and account's lifecycle

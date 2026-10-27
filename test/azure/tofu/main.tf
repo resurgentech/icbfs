@@ -122,9 +122,16 @@ resource "azurerm_storage_management_policy" "expire" {
 # Roles on the account. Entra roles and these are separate hierarchies: an
 # Owner of the subscription still cannot read a blob without one of these
 # once shared keys are off.
+#
+# Deleting a blob *version* (icbfs's Erase: purging the trash, dropping a
+# version for good) is its own action, deleteBlobVersion, which Storage
+# Blob Data Contributor lacks and Owner has; Azure refuses it with the
+# code OperationNotAllowedOnAutomaticSnapshot, not a 403. The conformance
+# suite erases, so whoever runs it is Owner here. Writers in production
+# can write and delete but not erase unless given the same.
 resource "azurerm_role_assignment" "deployer" {
   scope                = azurerm_storage_account.test.id
-  role_definition_name = "Storage Blob Data Contributor"
+  role_definition_name = "Storage Blob Data Owner"
   principal_id         = data.azurerm_client_config.current.object_id
 }
 
