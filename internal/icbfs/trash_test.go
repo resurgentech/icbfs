@@ -1,8 +1,10 @@
 package icbfs
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"testing"
 )
 
@@ -299,5 +301,46 @@ func TestTrashRecordsOrigin(t *testing.T) {
 		if g, ok := got[name]; !ok || g != o {
 			t.Errorf("%s: trash entry origin %q (present %v), want %q", name, g, ok, o)
 		}
+	}
+}
+
+// TestPurgeTrashLeavesLiveItem: a trash entry left behind by a restore
+// (its removal failed) is stale. Purging it erases nothing of the item,
+// now live again, and removes the entry.
+func TestPurgeTrashLeavesLiveItem(t *testing.T) {
+	f, store := newTestFilesystem(t)
+	ctx := context.Background()
+	root := f.RootKey()
+	writeNew(t, ctx, f, root, "a.txt", "keep me")
+	if err := f.Unlink(ctx, root, "a.txt"); err != nil {
+		t.Fatal(err)
+	}
+	trash, err := f.ListTrash(ctx, TrashOptions{})
+	if err != nil || len(trash) != 1 {
+		t.Fatalf("trash: %v (%d)", err, len(trash))
+	}
+	te := trash[0]
+	entry, _, err := store.Get(ctx, f.trashKey(te))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := io.ReadAll(entry)
+	entry.Close()
+	if _, err := f.Restore(ctx, te.EntryID, RestoreOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	// The restore's removal of the entry failed: it's still there.
+	if _, err := store.Put(ctx, f.trashKey(te), bytes.NewReader(data), nil, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.PurgeTrash(ctx, te.EntryID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("purging a stale entry: %v, want ErrNotFound", err)
+	}
+	if got := readName(t, ctx, f, root, "a.txt"); got != "keep me" {
+		t.Fatalf("after purging a stale entry: %q", got)
+	}
+	if trash, _ := f.ListTrash(ctx, TrashOptions{}); len(trash) != 0 {
+		t.Fatalf("the stale entry is still listed: %+v", trash)
 	}
 }

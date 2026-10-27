@@ -689,6 +689,9 @@ has had and everything under it.
 - The item's name stays in its parent directory's history: a past listing
   still shows it, and opening it finds nothing.
 - A file with other names is refused unless all of its names go too.
+- Purging from the trash (`PurgeTrash`) erases only what is still deleted.
+  An entry whose item is live again (a restore that couldn't remove the
+  entry) is stale: it goes, and the item is left alone.
 
 ## Windows compatibility: primary mode
 

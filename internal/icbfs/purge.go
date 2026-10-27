@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/resurgentech/icbfs/internal/block"
+	"github.com/resurgentech/icbfs/internal/objstore"
 )
 
 // ErrHasLinks: a permanent delete of a file that still has other names.
@@ -100,13 +102,23 @@ func (f *Filesystem) removeNamesOf(ctx context.Context, dirKey string, ids map[s
 // PurgeTrash permanently deletes a deleted item from the trash: its
 // history is erased as Purge's is, and its trash entry goes. A directory
 // that started a recursive delete takes its whole batch with it.
+//
+// Only what is still deleted: an entry whose item is live again (restored
+// with its entry left behind) is stale, and goes on its own, the item
+// untouched; for the entry asked for, that's ErrNotFound.
 func (f *Filesystem) PurgeTrash(ctx context.Context, entryID string) error {
 	if err := f.checkWritable(); err != nil {
 		return err
 	}
-	e, _, err := f.trashEntry(ctx, entryID)
+	e, key, err := f.trashEntry(ctx, entryID)
 	if err != nil {
 		return err
+	}
+	if live, err := f.itemLive(ctx, e.ItemID, e.Type); err != nil {
+		return err
+	} else if live {
+		f.dropStaleEntry(ctx, e, key)
+		return fmt.Errorf("trash entry %s: %s isn't deleted: %w", entryID, e.Name, ErrNotFound)
 	}
 	items := []block.Entry{{Name: e.Name, UUID: e.ItemID, Type: e.Type}}
 	if e.Type == TypeDir && e.Batch == e.EntryID {
@@ -115,12 +127,60 @@ func (f *Filesystem) PurgeTrash(ctx context.Context, entryID string) error {
 			return err
 		}
 		for _, r := range rest {
-			if r.EntryID != e.EntryID {
-				items = append(items, block.Entry{Name: r.Name, UUID: r.ItemID, Type: r.Type})
+			if r.EntryID == e.EntryID {
+				continue
 			}
+			live, err := f.itemLive(ctx, r.ItemID, r.Type)
+			if err != nil {
+				return err
+			}
+			if live {
+				f.dropStaleEntry(ctx, r, f.trashKey(r))
+				continue
+			}
+			items = append(items, block.Entry{Name: r.Name, UUID: r.ItemID, Type: r.Type})
 		}
 	}
 	return f.eraseAndMark(ctx, items)
+}
+
+// itemLive reports whether item id is live: its .metadata is there and,
+// for a file, isn't the zero link count a delete writes first. A
+// deleted item's objects end in a deletion.
+func (f *Filesystem) itemLive(ctx context.Context, id string, typ EntryType) (bool, error) {
+	body, _, err := f.store.Get(ctx, metadataObjectKey(id))
+	if objstore.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	data, err := io.ReadAll(body)
+	body.Close()
+	if err != nil {
+		return false, err
+	}
+	if typ == TypeDir {
+		return true, nil
+	}
+	attr, err := decodeFileMetadata(data)
+	if err != nil {
+		return false, err
+	}
+	return attr.Nlink != nlinkZero, nil
+}
+
+// dropStaleEntry removes trash entry e, at key, whose item is live again,
+// and the item's pointer to it. Nothing about the item depends on it.
+func (f *Filesystem) dropStaleEntry(ctx context.Context, e TrashEntry, key string) {
+	_ = f.store.Delete(ctx, key)
+	if body, _, err := f.store.Get(ctx, f.trashByKey(e.ItemID)); err == nil {
+		pointed, _ := io.ReadAll(body)
+		body.Close()
+		if string(pointed) == key {
+			_ = f.store.Delete(ctx, f.trashByKey(e.ItemID))
+		}
+	}
 }
 
 // eraseAndMark erases items, then marks the filesystem's past changed,
