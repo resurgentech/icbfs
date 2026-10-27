@@ -230,7 +230,7 @@ func (f *Filesystem) ReplaceDirHistory(ctx context.Context, dirKey string, state
 			return err
 		}
 	}
-	return f.MarkPastChanged(ctx)
+	return f.markPast(ctx)
 }
 
 // sortedEntries is entries in this filesystem's collation, refusing two

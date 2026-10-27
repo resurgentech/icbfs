@@ -219,7 +219,7 @@ func (d *Drive) repairLateFolders(ctx context.Context, rec *objstore.Recorder, r
 			continue
 		}
 		if !marked {
-			_ = d.fs.MarkPastChanged(ctx) // views: the past has changed
+			d.past.changed(ctx) // views: the past has changed
 			d.views.lookAgain()
 			marked = true
 		}

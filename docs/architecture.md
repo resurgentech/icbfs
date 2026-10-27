@@ -556,7 +556,11 @@ it was written under a source time (see below).
   later session as well.
 - The past changes only by a purge or by a change made under a source
   time (below), which the cache can't see for itself. So each writes a new
-  version of an empty object, `<id>-past`, after it's done.
+  version of an empty object, `<id>-past`, after it's done. A drive
+  writes it at most once a second: a change within a second of the last
+  write is put off to the second's end (so the last change is always
+  marked), and sent at the latest when the drive closes. The drive's own
+  views forget at once, without waiting for it.
   `pkg/history` and the drive API's views check it at most every 30
   seconds, and an as-of mount when it starts (`icbfs.ForgetChangedPast`);
   a new version since the cache last looked drops everything it kept of

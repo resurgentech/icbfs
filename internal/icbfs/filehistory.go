@@ -181,5 +181,5 @@ func (f *Filesystem) ReplaceFileHistory(ctx context.Context, key string, states 
 			return err
 		}
 	}
-	return f.MarkPastChanged(ctx)
+	return f.markPast(ctx)
 }

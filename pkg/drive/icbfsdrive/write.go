@@ -624,7 +624,7 @@ func (d *Drive) begin(ctx context.Context) (context.Context, func(), error) {
 		// has happened, and the mirror's next pass finds what's undated.
 		restored, _ := d.fs.RecordDates(ctx, rec)
 		d.repairLateFolders(ctx, rec, restored)
-		_ = d.fs.MarkPastChanged(ctx)
+		d.past.changed(ctx)
 		d.views.lookAgain()
 	}, nil
 }

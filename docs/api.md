@@ -423,7 +423,9 @@ It reads through the history cache as-of mounts share (by default in the
 user's cache directory, kept 30 days), so a directory listed at some
 moments is listed at them again with no store requests, in later runs
 too. A change to the past (a purge, a mirror writing what happened
-earlier) is noticed within 30 seconds (`CheckPast`); `PastChanges` counts
+earlier) is noticed within 30 seconds (`CheckPast`), plus up to a second
+for one made through another drive, which signals at most once a second;
+`PastChanges` counts
 them, for a caller keeping listings of its own. `IsNotFound` tells a
 path or item that wasn't there at that moment, and `Close` closes the
 cache.

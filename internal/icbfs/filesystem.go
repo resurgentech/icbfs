@@ -82,17 +82,18 @@ func retryPause(ctx context.Context, attempt int) {
 type Filesystem struct {
 	store              objstore.Store
 	fsName             string
-	id                 string      // 4-hex-digit prefix, set by Bootstrap
-	archived           atomic.Bool // set by Bootstrap; see ErrArchived
-	readOnly           bool        // set by BootstrapReadOnly; see ErrReadOnly
-	primaryWindows     bool        // set by Bootstrap from the stored master-block value; see PrimaryWindows
-	maxFileSize        int64       // set by Bootstrap from the stored master-block value; see MaxFileSize
-	newMaxFileSize     uint64      // the max file size a filesystem gets if Bootstrap creates it; see SetCreationMaxFileSize
-	dirBlockEntries    int         // from the master-block entry; see DefaultDirBlockEntries
-	newDirBlockEntries uint32      // what a filesystem gets if Bootstrap creates it; see SetCreationDirBlockEntries
-	mountID            string      // this Filesystem's identity in lock holders; see LockHolder
-	lockingEnabled     bool        // off by default; see EnableLocking
-	posixACLs          bool        // new items inherit default ACLs; see EnablePosixACLs
+	id                 string                // 4-hex-digit prefix, set by Bootstrap
+	archived           atomic.Bool           // set by Bootstrap; see ErrArchived
+	pastChanged        func(context.Context) // SetPastChanged's, if set
+	readOnly           bool                  // set by BootstrapReadOnly; see ErrReadOnly
+	primaryWindows     bool                  // set by Bootstrap from the stored master-block value; see PrimaryWindows
+	maxFileSize        int64                 // set by Bootstrap from the stored master-block value; see MaxFileSize
+	newMaxFileSize     uint64                // the max file size a filesystem gets if Bootstrap creates it; see SetCreationMaxFileSize
+	dirBlockEntries    int                   // from the master-block entry; see DefaultDirBlockEntries
+	newDirBlockEntries uint32                // what a filesystem gets if Bootstrap creates it; see SetCreationDirBlockEntries
+	mountID            string                // this Filesystem's identity in lock holders; see LockHolder
+	lockingEnabled     bool                  // off by default; see EnableLocking
+	posixACLs          bool                  // new items inherit default ACLs; see EnablePosixACLs
 	atime              AtimeMode
 	atimeMu            sync.Mutex
 	atimeKnown         map[string]time.Time // AtimeHourly: access times this mount knows, by key

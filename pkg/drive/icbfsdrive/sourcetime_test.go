@@ -296,9 +296,20 @@ func TestSourceTimeReachesOtherCaches(t *testing.T) {
 	if _, err := d.Write(at(ctx, 2022), "/b.txt", strings.NewReader("b"), drive.Condition{}, drive.WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	other.views.lookAgain() // its next look would be within 30 s
-	if !exists(t, other, "/b.txt", year(2023)) {
-		t.Fatal("the other drive's view of 2023 doesn't have b.txt, written since as of 2022")
+	// The second write came within a second of the first, so its mark is
+	// put off to that second's end (pastMarker), not dropped.
+	deadline := time.Now().Add(3 * pastMarkEvery)
+	for {
+		other.views.mu.Lock()
+		other.views.pastSeen = time.Time{} // its next look would be within 30 s
+		other.views.mu.Unlock()
+		if exists(t, other, "/b.txt", year(2023)) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the other drive's view of 2023 doesn't have b.txt, written since as of 2022")
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

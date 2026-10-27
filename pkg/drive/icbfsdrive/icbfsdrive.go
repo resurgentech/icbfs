@@ -62,6 +62,7 @@ type Drive struct {
 	events  broadcaster
 	idPaths idPathCache
 	dirs    *dirCache
+	past    pastMarker
 }
 
 var _ drive.Drive = (*Drive)(nil)
@@ -76,6 +77,8 @@ func New(ctx context.Context, cfg Config) (*Drive, error) {
 	d := &Drive{cfg: cfg, fs: fsys, windows: fsys.PrimaryWindows(), dirs: dirs}
 	d.root = cleanPath(cfg.Root)
 	d.views.d = d
+	d.past.mark = fsys.MarkPastChanged
+	fsys.SetPastChanged(d.past.changed)
 	key := fsys.RootKey()
 	for _, part := range splitPath(d.root) {
 		e, _, err := d.lookup(ctx, fsys, key, part)
@@ -94,9 +97,12 @@ func New(ctx context.Context, cfg Config) (*Drive, error) {
 // Filesystem is the drive's icbfs filesystem.
 func (d *Drive) Filesystem() *icbfs.Filesystem { return d.fs }
 
-// Close releases the drive's as-of views, and its temporary history
-// cache.
-func (d *Drive) Close() { d.views.closeAll() }
+// Close sends a past-changed mark still put off (pastMarker), and
+// releases the drive's as-of views and its temporary history cache.
+func (d *Drive) Close() {
+	d.past.flush()
+	d.views.closeAll()
+}
 
 // Capabilities: everything.
 func (d *Drive) Capabilities() drive.Capabilities {

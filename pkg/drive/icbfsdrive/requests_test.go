@@ -35,7 +35,7 @@ func (c *requestCounter) add(op, key string) {
 		class = "origin"
 	case strings.HasSuffix(key, "-root"):
 		class = "root"
-	case strings.Contains(key, "-past"):
+	case strings.HasSuffix(key, "-past"):
 		class = "past"
 	case strings.Contains(key, "-trash"):
 		class = "trash"
@@ -49,7 +49,8 @@ func (c *requestCounter) add(op, key string) {
 // them by operation and class for a failure message. A read of the
 // store's clock isn't counted: how many a view of a moment just past
 // takes depends on where in the store's second it lands (asof.go waits
-// that second out).
+// that second out). Nor is a past-changed mark: the drive sends at most
+// one a second, whatever the operations (TestPastMarkedOncePerSecond).
 func (c *requestCounter) take() (int, string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -57,7 +58,7 @@ func (c *requestCounter) take() (int, string) {
 	total := 0
 	for k, v := range c.n {
 		keys = append(keys, k)
-		if !strings.HasPrefix(k, "TIME ") {
+		if !strings.HasPrefix(k, "TIME ") && !strings.HasSuffix(k, " past") {
 			total += v
 		}
 	}
@@ -170,17 +171,16 @@ var requestRuns = []struct {
 // operation cheaper lowers its ceiling here, so the count can't creep
 // back.
 var requestCeilings = map[string][4]int{
-	// The first folder in source time also dates the root and marks the
-	// filesystem's past, once.
-	"new top-level folder":  {21, 71, 19, 69},
-	"new folder at depth 2": {27, 38, 19, 30},
-	"new file at depth 3":   {16, 23, 12, 19},
+	// The first folder in source time also dates the root, once.
+	"new top-level folder":  {21, 66, 19, 64},
+	"new folder at depth 2": {27, 36, 19, 28},
+	"new file at depth 3":   {16, 22, 12, 18},
 	"the same file again":   {9, 10, 5, 6},
 	// And once more: the file's creation wrote its folder, which the
 	// drive then read again; a pass over unchanged files reads it once.
 	// The origin record and the file's stat, when trusting.
 	"the same file, a third time": {9, 10, 3, 4},
-	"a new version of it":         {23, 32, 11, 20},
+	"a new version of it":         {23, 31, 11, 19},
 	// The root, then a step per folder and the file's own stat: two
 	// requests each (a folder's are none when trusted), and its .version
 	// in source time.

@@ -245,6 +245,28 @@ func (f *Filesystem) MarkPastChanged(ctx context.Context) error {
 	return err
 }
 
+// SetPastChanged has fn told whenever this filesystem's own operations
+// (a history replaced, a purge) change its past, instead of their
+// sending the mark themselves: for a caller that sends marks of its own
+// and spaces them out (the drive's, at most one a second).
+func (f *Filesystem) SetPastChanged(fn func(context.Context)) { f.pastChanged = fn }
+
+// markPast marks the past changed, or tells SetPastChanged's fn to.
+func (f *Filesystem) markPast(ctx context.Context) error {
+	if f.pastChanged != nil {
+		f.pastChanged(ctx)
+		return nil
+	}
+	return f.MarkPastChanged(ctx)
+}
+
+// ForgetPast makes cache drop everything it kept of live's filesystem,
+// mark or no mark: for the filesystem's own writer, which knows it has
+// just changed the past before its mark is sent.
+func ForgetPast(ctx context.Context, live *Filesystem, cache *objstore.HistoryCache) error {
+	return cache.ForgetUnder(ctx, live.prefix())
+}
+
 // ForgetChangedPast makes cache drop everything it kept of live's
 // filesystem if its past has changed (MarkPastChanged) since the cache
 // last looked, and reports whether it did. live is the filesystem

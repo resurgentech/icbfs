@@ -127,7 +127,7 @@ func (f *Filesystem) PurgeTrash(ctx context.Context, entryID string) error {
 // even if the erase failed partway: some of it may be gone.
 func (f *Filesystem) eraseAndMark(ctx context.Context, items []block.Entry) error {
 	err := f.eraseItems(ctx, items)
-	if markErr := f.MarkPastChanged(ctx); err == nil {
+	if markErr := f.markPast(ctx); err == nil {
 		err = markErr
 	}
 	return err
