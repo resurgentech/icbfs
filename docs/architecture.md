@@ -415,10 +415,16 @@ its content, as on a local disk):
   directory block, so it is atomic, and concurrent creates, unlinks and
   links from any number of machines all land; none is lost to another,
   splits included.
-- **Rename is not atomic.** It removes the old name, then adds the new one
-  (after removing what it replaces). Between the two, the item has no
-  name; a client that dies there leaves it unreachable (`icbfs-cli fs
-  check` counts it).
+- **Rename is not atomic.** It adds the new name, then removes the old one
+  (after removing what it replaces). Between the two, the item has both;
+  a client that dies there leaves it so, and deleting either name sends
+  it to the trash, so it is never unreachable. A rename that fails takes
+  the new name back, and says so if it can't. A name differing only in
+  case in the same directory would clash, so it goes the other way.
+- **A hard link** adds its name, then counts it. One that dies between
+  leaves the count one short: deleting the last counted name sends the
+  item to the trash. Counting first would leave it one over, and the
+  item would outlive its names, untrashed.
 - **File content is close-to-open.** A close (or `fsync`) stores the file
   as one conditional whole-object write, so another machine sees the old
   content or the new, never a mix, and sees the new at its next open.

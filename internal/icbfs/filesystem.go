@@ -1949,7 +1949,10 @@ func (f *Filesystem) DeleteGenericReparseData(ctx context.Context, uuid string) 
 
 // Link creates a hard link named name inside dirKey, pointing at the
 // existing node targetUUID/targetType, incrementing its nlink via the
-// CAS-protected metadataObjectKey object.
+// CAS-protected metadataObjectKey object. The name goes in first: a link
+// that stops before the count leaves it one short, so deleting the last
+// name it counts sends the item to the trash (restorable); the other way,
+// one over, the item would outlive its names, untrashed and unreachable.
 func (f *Filesystem) Link(ctx context.Context, dirKey, name, targetUUID string, targetType EntryType) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
@@ -1957,12 +1960,18 @@ func (f *Filesystem) Link(ctx context.Context, dirKey, name, targetUUID string, 
 	if err := f.checkName(name); err != nil {
 		return Attr{}, err
 	}
-	if _, err := f.adjustNlink(ctx, targetUUID, +1); err != nil {
+	if err := f.insertEntry(ctx, dirKey, name, targetUUID, targetType); err != nil {
 		return Attr{}, err
 	}
-
-	if err := f.insertEntry(ctx, dirKey, name, targetUUID, targetType); err != nil {
-		_, _ = f.adjustNlink(ctx, targetUUID, -1) // best-effort rollback
+	if _, err := f.adjustNlink(ctx, targetUUID, +1); err != nil {
+		if _, uerr := f.removeEntryIf(ctx, dirKey, name, func(e block.Entry) error {
+			if e.UUID != targetUUID {
+				return ErrExists
+			}
+			return nil
+		}); uerr != nil {
+			return Attr{}, fmt.Errorf("link %s: %w; and taking the name back: %v (it isn't counted)", name, err, uerr)
+		}
 		return Attr{}, err
 	}
 	if err := f.touchDir(ctx, dirKey); err != nil {
@@ -2225,14 +2234,7 @@ func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, 
 		}
 	}
 
-	if _, err := f.removeEntry(ctx, oldDirKey, oldName); err != nil {
-		return err
-	}
-	if err := f.insertEntry(ctx, newDirKey, newName, entry.UUID, entry.Type); err != nil {
-		// Best-effort rollback: put the old entry back so a failed
-		// rename doesn't silently lose the source name on top of
-		// whatever already failed.
-		_ = f.insertEntry(ctx, oldDirKey, oldName, entry.UUID, entry.Type)
+	if err := f.moveEntry(ctx, entry, oldDirKey, oldName, newDirKey, newName); err != nil {
 		return err
 	}
 	if err := f.touchDir(ctx, oldDirKey); err != nil {
@@ -2244,6 +2246,42 @@ func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, 
 		}
 	}
 	f.touchCtime(ctx, entry.UUID) // as Linux filesystems do
+	return nil
+}
+
+// moveEntry gives entry, named oldName in oldDirKey, its new name: the new
+// name first, then the old one goes, so a rename that stops in between
+// leaves the item with both (and a delete of either sends it to the
+// trash), never with neither. A name that differs only in case, in the
+// same directory, would clash with the old one, so it goes the other way.
+// An undo that fails is reported with the error that called for it.
+func (f *Filesystem) moveEntry(ctx context.Context, entry block.Entry, oldDirKey, oldName, newDirKey, newName string) error {
+	if oldDirKey == newDirKey && block.EqualFold(oldName, newName) {
+		if _, err := f.removeEntry(ctx, oldDirKey, oldName); err != nil {
+			return err
+		}
+		if err := f.insertEntry(ctx, newDirKey, newName, entry.UUID, entry.Type); err != nil {
+			if uerr := f.insertEntry(ctx, oldDirKey, oldName, entry.UUID, entry.Type); uerr != nil {
+				return fmt.Errorf("rename %s: %w; and putting its name back: %v (it has none)", oldName, err, uerr)
+			}
+			return err
+		}
+		return nil
+	}
+	if err := f.insertEntry(ctx, newDirKey, newName, entry.UUID, entry.Type); err != nil {
+		return err
+	}
+	if _, err := f.removeEntry(ctx, oldDirKey, oldName); err != nil {
+		if _, uerr := f.removeEntryIf(ctx, newDirKey, newName, func(e block.Entry) error {
+			if e.UUID != entry.UUID {
+				return ErrExists
+			}
+			return nil
+		}); uerr != nil {
+			return fmt.Errorf("rename %s: %w; and taking back its new name %s: %v (it has both)", oldName, err, newName, uerr)
+		}
+		return err
+	}
 	return nil
 }
 
