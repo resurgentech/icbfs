@@ -622,8 +622,20 @@ the filesystem's history goes:
   mtime override and the checksums, follow the copy's ETag); a directory
   by rewriting its history from that date on with the change in every
   later copy (the drive's `repairLateFolders`, through
-  `ReplaceDirHistory`). A time in the future is refused. A filesystem
-  whose history starts before the store wrote it gives `Settings.Created`.
+  `ReplaceDirHistory`). In a filesystem written in a source's time,
+  whose items list every version, a change dated no earlier than every
+  version its item lists is current with nothing more to read; only one
+  behind lists the key's versions from the store. A time in the future is
+  refused. A filesystem whose history starts before the store wrote it
+  gives `Settings.Created`;
+- dating what a change wrote, and putting right what it wrote behind, are
+  part of the change. The drive tries three times; a change it can't
+  date is undone (each version it wrote that is still its key's newest
+  is erased) and fails, and a mirror applies it again on its next pass.
+  A version an item's complete `.version` doesn't list is a write that
+  never finished (the process stopped between writing it and dating it):
+  once it's five minutes old, the next change that lists the key's
+  versions erases it, unless it's the key's only version.
 
 Corrections, for a date the source got wrong, are the caller's:
 `DirHistory` / `ReplaceDirHistory` and `FileHistory` /

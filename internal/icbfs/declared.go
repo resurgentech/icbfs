@@ -100,6 +100,54 @@ func (f *Filesystem) RecordDates(ctx context.Context, rec *objstore.Recorder) (r
 	return restored, nil
 }
 
+// latestDated reports whether w is dated no earlier than every version in
+// its item's table (any of its objects': one of them later is reason
+// enough to look).
+func latestDated(dates objstore.Dates, w objstore.Written) bool {
+	if _, ok := dates[w.VersionID]; !ok {
+		return false
+	}
+	for id, t := range dates {
+		if id != w.VersionID && t.After(w.At) {
+			return false
+		}
+	}
+	return true
+}
+
+// unfinishedAfter is how old a version an item's complete table doesn't
+// list must be to count as a write that never finished: any write is
+// dated well within it.
+var unfinishedAfter = 5 * time.Minute // a variable for the tests
+
+// eraseUnfinished erases from key's history, newest first, the versions
+// its item's complete table doesn't list that are older than
+// unfinishedAfter: written, never dated, the change that wrote them
+// failed. A key's only version stays: erasing it would leave the name of
+// an item with nothing behind it. It returns history without them.
+func (f *Filesystem) eraseUnfinished(ctx context.Context, key string, history []objstore.Object, dates objstore.Dates) ([]objstore.Object, error) {
+	cutoff := time.Now().Add(-unfinishedAfter)
+	kept := history[:0:0]
+	live := 0
+	for _, o := range history {
+		if !o.Deleted {
+			live++
+		}
+	}
+	for _, o := range history {
+		_, dated := dates[o.VersionID]
+		if o.Deleted || dated || !o.LastModified.Before(cutoff) || live <= 1 {
+			kept = append(kept, o)
+			continue
+		}
+		if err := f.store.Erase(ctx, key, o.VersionID); err != nil && !objstore.IsNotFound(err) {
+			return nil, err
+		}
+		live--
+	}
+	return kept, nil
+}
+
 // rekeyETag moves what a references by content ETag old (the mtime
 // override, the checksums) to new: for a content version copied, whose
 // copy has an ETag of its own.
@@ -123,9 +171,20 @@ func rekeyETag(a *Attr, old, new string) {
 // .version table as RecordDates wrote it, kept up to date here. A
 // directory's blocks are the directory's to put right (the drive
 // rewrites the copies from w.At on); they're left.
+//
+// In a filesystem written in a source's time the table lists every
+// version (Filesystem.dated), so a write dated no earlier than all of
+// them is current with nothing more to read. Only one behind lists the
+// key's versions, and then erases any the table doesn't list that are
+// older than unfinishedAfter: writes that never finished.
 func (f *Filesystem) restoreCurrent(ctx context.Context, w objstore.Written, tables map[string]objstore.Dates, rekeys map[string][2]string, pending map[string]bool) (bool, error) {
 	if w.Dir != "" {
 		return false, nil
+	}
+	dates := tables[objstore.BaseKey(w.Key)]
+	complete := f.dated(w.Key)
+	if complete && latestDated(dates, w) {
+		return false, nil // what was written is current, as it should be
 	}
 	history, err := f.store.History(ctx, w.Key)
 	if err != nil {
@@ -134,7 +193,11 @@ func (f *Filesystem) restoreCurrent(ctx context.Context, w objstore.Written, tab
 	if len(history) == 0 || history[0].VersionID != w.VersionID {
 		return false, nil // something newer since, or gone: not ours to put right
 	}
-	dates := tables[objstore.BaseKey(w.Key)]
+	if complete {
+		if history, err = f.eraseUnfinished(ctx, w.Key, history, dates); err != nil {
+			return false, err
+		}
+	}
 	want, ok := dates.Pick(history, time.Now().Add(time.Hour))
 	if !ok || want.VersionID == w.VersionID {
 		return false, nil // what was written is current, as it should be
@@ -171,6 +234,9 @@ func (f *Filesystem) restoreCurrent(ctx context.Context, w objstore.Written, tab
 	// The copy is the version now; the one it was copied from is the
 	// same bytes at the same date, so it goes, and its line with it.
 	if tables[base], err = objstore.UpdateDates(ctx, f.store, base, objstore.Dates{obj.VersionID: dates.Time(&want)}, want.VersionID); err != nil {
+		// Undated, the copy would be taken for an unfinished write; it
+		// goes, and the late write is on top until a try that works.
+		_ = f.store.Erase(context.WithoutCancel(ctx), w.Key, obj.VersionID)
 		return false, err
 	}
 	return true, f.store.Erase(ctx, w.Key, want.VersionID)

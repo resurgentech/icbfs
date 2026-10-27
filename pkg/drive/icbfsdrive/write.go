@@ -24,12 +24,12 @@ import (
 var inMemoryWrite int64 = 64 << 20 // a variable for the tests
 
 // Write makes the body a file's content, creating the file if need be.
-func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.Condition, opts drive.WriteOptions) (drive.Item, error) {
+func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.Condition, opts drive.WriteOptions) (_ drive.Item, err error) {
 	ctx, done, err := d.begin(ctx)
 	if err != nil {
 		return drive.Item{}, err
 	}
-	defer done()
+	defer done(&err)
 	if _, err := appData(opts.App, nil); err != nil { // refused before anything is written
 		return drive.Item{}, err
 	}
@@ -360,12 +360,12 @@ func (d *Drive) statItem(ctx context.Context, p string) (drive.Item, error) {
 
 // Mkdir makes a directory (and its parents, with parents; an existing
 // directory is then fine).
-func (d *Drive) Mkdir(ctx context.Context, p string, parents bool) (drive.Item, error) {
+func (d *Drive) Mkdir(ctx context.Context, p string, parents bool) (_ drive.Item, err error) {
 	ctx, done, err := d.begin(ctx)
 	if err != nil {
 		return drive.Item{}, err
 	}
-	defer done()
+	defer done(&err)
 	if parents {
 		n, err := d.mkdirAll(ctx, p)
 		if err != nil {
@@ -441,12 +441,12 @@ func (d *Drive) mkdirAll(ctx context.Context, p string) (*node, error) {
 }
 
 // Move renames or moves an item; its id doesn't change.
-func (d *Drive) Move(ctx context.Context, from drive.ItemRef, to string, replace bool) (drive.Item, error) {
+func (d *Drive) Move(ctx context.Context, from drive.ItemRef, to string, replace bool) (_ drive.Item, err error) {
 	ctx, done, err := d.begin(ctx)
 	if err != nil {
 		return drive.Item{}, err
 	}
-	defer done()
+	defer done(&err)
 	src, err := d.resolve(ctx, d.fs, from)
 	if err != nil {
 		return drive.Item{}, err
@@ -486,12 +486,12 @@ func (d *Drive) Move(ctx context.Context, from drive.ItemRef, to string, replace
 
 // Delete moves an item to the trash; recursive for a non-empty
 // directory, as one batch.
-func (d *Drive) Delete(ctx context.Context, ref drive.ItemRef, recursive bool, cond drive.Condition) error {
+func (d *Drive) Delete(ctx context.Context, ref drive.ItemRef, recursive bool, cond drive.Condition) (err error) {
 	ctx, done, err := d.begin(ctx)
 	if err != nil {
 		return err
 	}
-	defer done()
+	defer done(&err)
 	n, err := d.resolve(ctx, d.fs, ref)
 	if err != nil {
 		return err
@@ -595,9 +595,10 @@ var errDriveReadOnly = fmt.Errorf("the drive is read-only: %w", drive.ErrReadOnl
 // filesystem has been archived (since this drive attached, too: one read
 // of the master block per change), and dates everything the change
 // writes at ctx's source time, if it has one (drive.WithSourceTime).
-// done, to be deferred, then tells history caches that the past has
-// changed.
-func (d *Drive) begin(ctx context.Context) (context.Context, func(), error) {
+// done, to be deferred with the change's error, then dates what it
+// wrote and tells history caches that the past has changed; a change
+// whose writes can't all be dated fails (finishDated).
+func (d *Drive) begin(ctx context.Context) (context.Context, func(*error), error) {
 	if d.cfg.ReadOnly {
 		return ctx, nil, errDriveReadOnly
 	}
@@ -609,7 +610,7 @@ func (d *Drive) begin(ctx context.Context) (context.Context, func(), error) {
 	}
 	t, ok := drive.SourceTime(ctx)
 	if !ok {
-		return ctx, func() {}, nil
+		return ctx, func(*error) {}, nil
 	}
 	if t.After(time.Now().Add(maxSourceTimeAhead)) {
 		return ctx, nil, fmt.Errorf("source time %s is in the future: %w", t.Format(time.RFC3339), drive.ErrInvalid)
@@ -621,17 +622,51 @@ func (d *Drive) begin(ctx context.Context) (context.Context, func(), error) {
 	}
 	rec := &objstore.Recorder{}
 	ctx = objstore.WithRecorder(objstore.WithDeclaredTime(ctx, t), rec)
-	return ctx, func() {
-		// What was written is dated, and anything written behind its
-		// item's current state is put right: the item's current version
-		// back on top, and a directory's copies from t on rewritten with
-		// the change. Best effort, like a trash entry: the write itself
-		// has happened, and the mirror's next pass finds what's undated.
-		restored, _ := d.fs.RecordDates(ctx, rec)
-		d.repairLateFolders(ctx, rec, restored)
+	return ctx, func(errp *error) {
+		if err := d.finishDated(ctx, rec); err != nil && *errp == nil {
+			*errp = err
+		}
 		d.past.changed(ctx)
 		d.views.lookAgain()
 	}, nil
+}
+
+// datingTries is how many times a change tries to date what it wrote.
+const datingTries = 3
+
+// finishDated dates what a change in a source's time wrote, and puts
+// right anything written behind its item's current state: the item's
+// current version back on top, and a directory's copies from then on
+// rewritten with the change. Both are part of the change: one whose
+// writes can't be dated is undone, each version it wrote that is still
+// its key's newest erased, and fails. Undated, a version would be taken
+// for a write that never finished.
+func (d *Drive) finishDated(ctx context.Context, rec *objstore.Recorder) error {
+	var restored map[string]bool
+	var err error
+	for try := 0; try < datingTries; try++ {
+		if restored, err = d.fs.RecordDates(ctx, rec); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		d.undo(ctx, rec)
+		return fmt.Errorf("the change is undone: dating what it wrote: %w", err)
+	}
+	return d.repairLateFolders(ctx, rec, restored)
+}
+
+// undo erases what rec recorded written, newest first, where it's still
+// its key's newest version: one something has written over since stays.
+func (d *Drive) undo(ctx context.Context, rec *objstore.Recorder) {
+	ctx = context.WithoutCancel(objstore.WithoutDeclaredTime(ctx))
+	written := rec.Written()
+	for i := len(written) - 1; i >= 0; i-- {
+		w := written[i]
+		if head, err := d.fs.Store().Head(ctx, w.Key); err == nil && head.VersionID == w.VersionID {
+			_ = d.fs.Store().Erase(ctx, w.Key, w.VersionID)
+		}
+	}
 }
 
 // maxSourceTimeAhead is how far past this machine's clock a source time
@@ -639,12 +674,12 @@ func (d *Drive) begin(ctx context.Context) (context.Context, func(), error) {
 const maxSourceTimeAhead = time.Second
 
 // SetOrigin records where an item was copied from.
-func (d *Drive) SetOrigin(ctx context.Context, ref drive.ItemRef, o drive.Origin) error {
+func (d *Drive) SetOrigin(ctx context.Context, ref drive.ItemRef, o drive.Origin) (err error) {
 	ctx, done, err := d.begin(ctx)
 	if err != nil {
 		return err
 	}
-	defer done()
+	defer done(&err)
 	n, err := d.resolve(ctx, d.fs, ref)
 	if err != nil {
 		return err
@@ -667,12 +702,12 @@ func (d *Drive) SetTimes(ctx context.Context, ref drive.ItemRef, modified, creat
 
 // SetInfo records info about an item (drive.InfoSetter) in one metadata
 // write: no new version of its content.
-func (d *Drive) SetInfo(ctx context.Context, ref drive.ItemRef, info drive.ItemInfo) (drive.Item, error) {
+func (d *Drive) SetInfo(ctx context.Context, ref drive.ItemRef, info drive.ItemInfo) (_ drive.Item, err error) {
 	ctx, done, err := d.begin(ctx)
 	if err != nil {
 		return drive.Item{}, err
 	}
-	defer done()
+	defer done(&err)
 	n, err := d.resolve(ctx, d.fs, ref)
 	if err != nil {
 		return drive.Item{}, err

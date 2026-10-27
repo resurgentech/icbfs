@@ -152,6 +152,11 @@ otherwise.
   `Created` time, so its name is there from the start.
 - The filesystem has to start before the source's history does:
   `Settings.Created` when creating it.
+- Dating a change is part of it: a change whose dates can't be recorded
+  (the store failing after it took the change's writes) is undone and
+  returns the error, so applying it again is safe. From its first change
+  under a source time on, a filesystem dates every version of its items,
+  ordinary writes too.
 - The HTTP API doesn't take a source time: it's for a mirror using the
   library.
 
