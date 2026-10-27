@@ -93,7 +93,10 @@ a command line.
 starts a program on that desktop (with a scheduled task that runs only
 while Administrator is logged on), waits, and saves a screenshot of the
 console (`virsh screenshot`), by default to `work/desktop.png`. A fourth
-argument is the program's arguments. A script that drives a window (by UI
+argument is the program's arguments. `ICBFS_WIN_DESKTOP_USER` names
+another logged-on user to run it as; that user can't read
+C:\Windows\Temp's files or write there, so a script run this way keeps
+its files under `C:\icbfs-test`. A script that drives a window (by UI
 Automation, say) runs this way too, through PowerShell with
 `-WindowStyle Hidden`, or its console window takes the clicks.
 
