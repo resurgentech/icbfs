@@ -19,10 +19,10 @@ import (
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore"
-	"github.com/resurgentech/icbfs/internal/storeflags"
 	"github.com/resurgentech/icbfs/pkg/drive"
 	"github.com/resurgentech/icbfs/pkg/drive/icbfsdrive"
 	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
+	"github.com/resurgentech/icbfs/pkg/storeflags"
 )
 
 // Config says which filesystem, and which directory of it ("" or "/"
@@ -75,7 +75,7 @@ func Open(ctx context.Context, cfg Config) (*History, error) {
 	if err != nil {
 		return nil, err
 	}
-	hist, err := (&storeflags.History{Dir: cfg.CacheDir, TTL: cfg.TTL}).Open(ctx, store, &cfg.Store)
+	hist, err := (&storeflags.History{Dir: cfg.CacheDir, TTL: cfg.TTL}).Open(ctx, store, &storeflags.Flags{Config: &cfg.Store})
 	if err != nil {
 		return nil, err
 	}

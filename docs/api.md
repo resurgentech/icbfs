@@ -471,6 +471,12 @@ defer d.Close()
   filesystem with `icbfs-cli fs create`'s defaults (primary-POSIX, 100 GiB
   declared, root mode 0755), to change what's needed and create.
   `WatchMinIO` is below, under change events.
+- `pkg/clicmd` and `pkg/winfspcmd` are the `icbfs-cli` and
+  `icbfs-winfsp` commands as packages, each a `Main(args, newStore)`,
+  and `pkg/storeflags` the store flags they take: `storeflags.Default`
+  is this module's, and a host with a store of its own, a credential it
+  holds, say, implements `storeflags.Store` and builds the same commands
+  around it.
 - `icbfsdrive.Config` names the filesystem, the drive's root directory in
   it, and the drive's registry `ID` (recorded in the origin of copies made
   from it). `History` is a history cache to share with other views; without

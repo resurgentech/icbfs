@@ -71,7 +71,7 @@ What they cover:
 | `pkg/drive/...` | the drive library, the icbfs backend, the HTTP handlers, drafts, copy, diff, mirroring, times, and a ceiling on the store requests each mirror operation and a listing take |
 | `pkg/history` | a filesystem's past for programs browsing it, and that revisiting a moment costs no store requests |
 | `internal/namecache` | the mounts' name cache |
-| `internal/storeconfig`, `internal/storeflags` | store configurations and the store flags |
+| `internal/storeconfig`, `pkg/storeflags` | store configurations and the store flags |
 | `cmd/icbfs` | the mount(8) helper's options |
 | `internal/syncer/...`, `cmd/icbfs-sync` | the sync planner and engine, the folder and drive sides, the command's pass |
 

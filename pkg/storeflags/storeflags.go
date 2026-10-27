@@ -33,10 +33,54 @@ import (
 	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
 )
 
+// Store is a command's way to its store: flags of its own on the
+// command's set, and once that is parsed, whether they name a store
+// (Check), the store (Open), the connection for a log line (String, no
+// secrets) and whose it is (Identity: the history cache is one per
+// store and identity, so a person's past isn't a machine's). The
+// command packages (pkg/clicmd, pkg/winfspcmd) take one, so a host with
+// a way of its own to reach a store, a credential it holds, say, builds
+// the same commands around it. Default is this module's: the flags
+// above.
+type Store interface {
+	AddFlags(fset *flag.FlagSet)
+	Check() error
+	Open(ctx context.Context) (pkgicbfs.Store, error)
+	String() string
+	Identity() string
+}
+
+// Flags is the Store the flags above describe, opened by pkg/icbfs.Open.
+type Flags struct {
+	Config *pkgicbfs.StoreConfig
+}
+
+// Default is a new Flags, empty until its flags are parsed.
+func Default() Store { return &Flags{Config: &pkgicbfs.StoreConfig{}} }
+
+func (f *Flags) AddFlags(fset *flag.FlagSet)                  { add(fset, f.Config) }
+func (f *Flags) Check() error                                 { return Check(f.Config) }
+func (f *Flags) Open(context.Context) (pkgicbfs.Store, error) { return pkgicbfs.Open(*f.Config) }
+func (f *Flags) String() string                               { return f.Config.String() }
+
+// Identity is the S3 access key, or the Azure account, which the key
+// stands for.
+func (f *Flags) Identity() string {
+	if f.Config.Kind == pkgicbfs.KindAzure {
+		return f.Config.Azure.Account
+	}
+	return f.Config.S3.AccessKey
+}
+
 // Add registers the connection flags on fset. The returned value is
 // filled in when fset is parsed.
 func Add(fset *flag.FlagSet) *pkgicbfs.StoreConfig {
 	c := &pkgicbfs.StoreConfig{}
+	add(fset, c)
+	return c
+}
+
+func add(fset *flag.FlagSet, c *pkgicbfs.StoreConfig) {
 	fset.StringVar(&c.Kind, "store", env("ICBFS_STORE", pkgicbfs.KindS3), "store: s3 (AWS S3, MinIO) or azure (Azure Blob Storage) ($ICBFS_STORE)")
 	fset.StringVar(&c.S3.Endpoint, "endpoint", env("ICBFS_ENDPOINT", "http://127.0.0.1:9000"), "S3: endpoint ($ICBFS_ENDPOINT)")
 	fset.StringVar(&c.S3.Bucket, "bucket", env("ICBFS_BUCKET", "icbfs"), "S3: bucket, with versioning on ($ICBFS_BUCKET)")
@@ -47,7 +91,6 @@ func Add(fset *flag.FlagSet) *pkgicbfs.StoreConfig {
 	fset.StringVar(&c.Azure.Container, "azure-container", env("ICBFS_AZURE_CONTAINER", "icbfs"), "Azure: container ($ICBFS_AZURE_CONTAINER)")
 	fset.StringVar(&c.Azure.Key, "azure-key", env("ICBFS_AZURE_KEY", ""), "Azure: the account's key ($ICBFS_AZURE_KEY)")
 	fset.StringVar(&c.Azure.Endpoint, "azure-endpoint", env("ICBFS_AZURE_ENDPOINT", ""), "Azure: blob service URL, if not https://ACCOUNT.blob.core.windows.net/ ($ICBFS_AZURE_ENDPOINT)")
-	return c
 }
 
 // ErrNoKeys is Check's answer when the store's credentials are missing.
@@ -81,16 +124,12 @@ func AddHistory(fset *flag.FlagSet) *History {
 	return h
 }
 
-// Open opens the history cache of the store c says how to reach. If it
-// can't (another user's directory, say), it logs why and opens a
-// temporary one instead, which Close removes: the past is readable
-// either way, only not shared.
-func (h *History) Open(ctx context.Context, store objstore.Store, c *pkgicbfs.StoreConfig) (*objstore.HistoryCache, error) {
-	who := c.S3.AccessKey
-	if c.Kind == pkgicbfs.KindAzure {
-		who = c.Azure.Account
-	}
-	hist, err := objstore.OpenHistoryCache(ctx, store, objstore.HistoryCachePath(h.Dir, c.String()+" as "+who), h.TTL)
+// Open opens the history cache of store, one per store and identity
+// (s.String and s.Identity name it). If it can't (another user's
+// directory, say), it logs why and opens a temporary one instead, which
+// Close removes: the past is readable either way, only not shared.
+func (h *History) Open(ctx context.Context, store objstore.Store, s Store) (*objstore.HistoryCache, error) {
+	hist, err := objstore.OpenHistoryCache(ctx, store, objstore.HistoryCachePath(h.Dir, s.String()+" as "+s.Identity()), h.TTL)
 	if err == nil {
 		return hist, nil
 	}

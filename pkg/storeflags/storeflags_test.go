@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
-
-	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
 )
 
 func TestEnvironmentThenFlags(t *testing.T) {
@@ -74,7 +72,7 @@ func TestHistoryFallsBackToATemporaryCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := &History{Dir: blocked, TTL: time.Hour}
-	hist, err := h.Open(context.Background(), nil, &pkgicbfs.StoreConfig{})
+	hist, err := h.Open(context.Background(), nil, Default())
 	if err != nil {
 		t.Fatalf("no fallback: %v", err)
 	}

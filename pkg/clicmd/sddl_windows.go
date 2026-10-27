@@ -1,6 +1,6 @@
 //go:build windows
 
-package main
+package clicmd
 
 import "github.com/winfsp/go-winfsp/procsd"
 

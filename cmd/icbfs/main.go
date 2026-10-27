@@ -23,8 +23,8 @@ import (
 	"github.com/resurgentech/icbfs/internal/notify"
 	"github.com/resurgentech/icbfs/internal/notify/miniosrc"
 	"github.com/resurgentech/icbfs/internal/objstore"
-	"github.com/resurgentech/icbfs/internal/storeflags"
 	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
+	"github.com/resurgentech/icbfs/pkg/storeflags"
 )
 
 func main() {
@@ -113,7 +113,7 @@ func main() {
 			log.Fatal("-as-of mounts the past read-only; -notify doesn't apply")
 		}
 		*locking = false // nothing can be written, so there's nothing to lock
-		hist, err := history.Open(ctx, store, conn)
+		hist, err := history.Open(ctx, store, &storeflags.Flags{Config: conn})
 		if err != nil {
 			log.Fatal(err)
 		}

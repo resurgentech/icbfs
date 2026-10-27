@@ -1,4 +1,4 @@
-package main
+package clicmd
 
 import (
 	"context"

@@ -15,7 +15,7 @@ import (
 
 	"github.com/resurgentech/icbfs/internal/fslog"
 	"github.com/resurgentech/icbfs/internal/logserver"
-	"github.com/resurgentech/icbfs/internal/storeflags"
+	"github.com/resurgentech/icbfs/pkg/storeflags"
 )
 
 func main() {
