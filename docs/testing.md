@@ -183,6 +183,14 @@ test/aws/run-conformance.sh     # .env.aws names the bucket; keys from the aws C
 test/azure/run-conformance.sh   # .env.azure names the account; key from the az CLI
 ```
 
+The Azure account itself is declared in `test/azure/tofu/` and made by
+`test/azure/tofu.sh plan` then `apply`, from the names in `.env.azure`:
+blob versioning on, a two-day expiry rule, and the roles the Entra ID
+sign-in modes need (whoever applies gets Storage Blob Data Contributor;
+the tenant's `icbfs-test-readers` and `icbfs-test-writers` groups get
+Reader and Contributor). `tofu.sh env` prints the `.env.azure` lines for
+the account it made. State is local and gitignored.
+
 `.env.aws` and `.env.azure` are gitignored and hold names only. Each test
 writes under a prefix of its own, and the bucket's and account's lifecycle
 rules expire what's left after two days. The multi-machine tests run on
