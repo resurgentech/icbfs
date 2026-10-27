@@ -137,7 +137,13 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 	defer cancel()
 	completed := make([]types.CompletedPart, len(parts))
 	errs := make([]error, len(parts))
-	sem := make(chan struct{}, partConcurrency)
+	// Parts from a stream share one buffer and are filled in order, so
+	// they go up one at a time; the loop starts them in order.
+	conc := partConcurrency
+	if objstore.IsStream(parts) {
+		conc = 1
+	}
+	sem := make(chan struct{}, conc)
 	var wg sync.WaitGroup
 	for i, p := range parts {
 		wg.Add(1)

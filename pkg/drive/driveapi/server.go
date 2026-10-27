@@ -457,6 +457,11 @@ func (s *server) putContent(r *req) error {
 		ct = "" // the default: the name's type decides
 	}
 	opts := drive.WriteOptions{Parents: r.flag("parents"), ContentType: ct}
+	// A Content-Length lets the write go to the store as the body
+	// arrives; a chunked body (-1) is read first.
+	if n := r.c.Request().Header.ContentLength(); n > 0 {
+		opts.Size = int64(n)
+	}
 	if md5, sha := r.c.Get("X-Drive-MD5"), r.c.Get("X-Drive-SHA256"); md5 != "" || sha != "" {
 		opts.Checksums = &drive.Checksums{MD5: md5, SHA256: sha}
 	}

@@ -109,6 +109,24 @@ every mount shows it read-only; a mount's own chmod still works. An item
 reports them back as `Item.App`, `Item.Mode` and `Item.WindowsAttrs`, to
 callers of the library only (not over HTTP).
 
+**Writing without spooling.** `WriteOptions.Size` is the body's length
+when the caller knows it: a download's reported length, a listing's size,
+a local file's, an HTTP upload's `Content-Length` (the HTTP handler and
+`drive.Copy` fill it in). Known, the body goes to the store as it
+arrives: one put when it fits one part, else parts straight from the
+body with one part in memory at a time, and nothing on disk. A body that
+turns out shorter or longer than its size fails the write, which then
+writes nothing; another write landing first fails a streamed write
+rather than retrying it, as the body can't be sent twice. Checksums the
+caller gives are checked once the body has gone by, and a mismatch
+erases the version written. Without a size (0), the body is read first:
+into memory up to 64 MiB, past that into a temporary file. A drive that
+is a `FileWriter` also takes content the caller holds open:
+`WriteFrom(ctx, path, content io.ReaderAt, size, cond, opts)` reads parts
+from it at offsets as they go up, reads one again if it is retried, and
+copies nothing; the caller's checksums are checked before anything is
+written. The item that results is the same whichever way the bytes came.
+
 A drive that's a `drive.InfoSetter` (icbfs's is) records all of that on
 an existing item in one metadata write and no new version:
 `SetInfo(ctx, item, ItemInfo{Modified, Created, App, Mode, WindowsAttrs,

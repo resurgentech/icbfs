@@ -28,6 +28,7 @@ func Run(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	t.Run("ConditionalPutRejectsStaleETag", func(t *testing.T) { conditionalPutRejectsStaleETag(t, newStore) })
 	t.Run("PutCutOffIsLostRaceOnlyIfChanged", func(t *testing.T) { putCutOffIsLostRaceOnlyIfChanged(t, newStore) })
 	t.Run("PutPartsCopiesAndUploadsUnderIfMatch", func(t *testing.T) { putPartsCopiesAndUploadsUnderIfMatch(t, newStore) })
+	t.Run("PutPartsFromStream", func(t *testing.T) { putPartsFromStream(t, newStore) })
 	t.Run("HistoryIsNewestFirstWithTimestamps", func(t *testing.T) { historyIsNewestFirstWithTimestamps(t, newStore) })
 	t.Run("HistoryPaginatesAndIncludesDeletions", func(t *testing.T) { historyPaginatesAndIncludesDeletions(t, newStore) })
 	t.Run("DeleteAndUndelete", func(t *testing.T) { deleteAndUndelete(t, newStore) })
@@ -479,6 +480,49 @@ func putPartsCopiesAndUploadsUnderIfMatch(t *testing.T, newStore func(*testing.T
 	}
 	if head, err := store.Head(ctx, "big"); err != nil || head.ETag != v2.ETag {
 		t.Fatalf("object after a failed PutParts: %v, %v; want unchanged %s", head, err, v2.ETag)
+	}
+}
+
+// putPartsFromStream: parts from one reader of a known length
+// (objstore.StreamParts) go up in order, one in memory at a time, and
+// assemble the stream's bytes; under If-Match like any parts; and a body
+// shorter than its size fails the write with nothing written.
+func putPartsFromStream(t *testing.T, newStore func(*testing.T) objstore.Store) {
+	store := newStore(t)
+	ctx := context.Background()
+	const mib = 1 << 20
+	part := max(store.PartLimits().Min, 5*mib)
+	size := 2*part + 1234
+	data := make([]byte, size)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+
+	v1, err := store.PutParts(ctx, "stream", objstore.StreamParts(bytes.NewReader(data), size, part), map[string]string{"k": "v"}, "")
+	if err != nil {
+		t.Fatalf("PutParts from a stream: %v", err)
+	}
+	body, obj, err := store.Get(ctx, "stream")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	got, _ := io.ReadAll(body)
+	body.Close()
+	if !bytes.Equal(got, data) || obj.Size != size || obj.ETag != v1.ETag || obj.Metadata["k"] != "v" {
+		t.Fatalf("assembled object: size %d etag %s (want %s) metadata %v, content equal %v",
+			obj.Size, obj.ETag, v1.ETag, obj.Metadata, bytes.Equal(got, data))
+	}
+
+	if _, err := store.PutParts(ctx, "stream", objstore.StreamParts(bytes.NewReader(data), size, part), nil, `"stale-etag"`); !objstore.IsPreconditionFailed(err) {
+		t.Fatalf("stream with a stale If-Match: %v, want precondition failed", err)
+	}
+
+	short := data[:size-1000]
+	if _, err := store.PutParts(ctx, "stream", objstore.StreamParts(bytes.NewReader(short), size, part), nil, v1.ETag); err == nil {
+		t.Fatal("a short stream assembled, want an error")
+	}
+	if head, err := store.Head(ctx, "stream"); err != nil || head.ETag != v1.ETag {
+		t.Fatalf("object after a short stream: %v, %v; want unchanged %s", head, err, v1.ETag)
 	}
 }
 

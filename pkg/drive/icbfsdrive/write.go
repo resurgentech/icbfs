@@ -24,7 +24,41 @@ import (
 var inMemoryWrite int64 = 64 << 20 // a variable for the tests
 
 // Write makes the body a file's content, creating the file if need be.
-func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.Condition, opts drive.WriteOptions) (_ drive.Item, err error) {
+// With opts.Size the body goes to the store as it arrives (source);
+// without, it is read first.
+func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.Condition, opts drive.WriteOptions) (drive.Item, error) {
+	return d.write(ctx, p, writeSource{r: body, size: opts.Size}, cond, opts)
+}
+
+// WriteFrom is Write from content the caller holds (drive.FileWriter):
+// parts are read from it at offsets as they go up, and nothing is copied.
+func (d *Drive) WriteFrom(ctx context.Context, p string, content io.ReaderAt, size int64, cond drive.Condition, opts drive.WriteOptions) (drive.Item, error) {
+	if content == nil || size < 0 {
+		return drive.Item{}, fmt.Errorf("write from: no content: %w", drive.ErrInvalid)
+	}
+	return d.write(ctx, p, writeSource{at: content, size: size}, cond, opts)
+}
+
+var _ drive.FileWriter = (*Drive)(nil)
+
+// writeSource is a write's content, one of three: a body of unknown length
+// (r, size 0), read first, into memory or a temporary file; a body of
+// known length (r, size), sent as it arrives, one part in memory at a
+// time; or content the caller holds (at, size), read at offsets.
+type writeSource struct {
+	r    io.Reader
+	at   io.ReaderAt
+	size int64
+}
+
+// streamed is whether the content goes to the store as it arrives, so
+// that it can't be sent twice.
+func (s writeSource) streamed() bool { return s.at == nil && s.size > 0 }
+
+// putFunc writes content as key's new version if key is still at etag.
+type putFunc func(ctx context.Context, key, etag string) (*objstore.Object, error)
+
+func (d *Drive) write(ctx context.Context, p string, src writeSource, cond drive.Condition, opts drive.WriteOptions) (_ drive.Item, err error) {
 	ctx, done, err := d.begin(ctx)
 	if err != nil {
 		return drive.Item{}, err
@@ -37,21 +71,55 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 	if err != nil {
 		return drive.Item{}, err
 	}
-	// The body is read once the write is known to go ahead: a write its
-	// condition refuses reads none of it (a mirror opens its source only
-	// when it's read).
+	// The content is taken once the write is known to go ahead: a write
+	// its condition refuses reads none of it (a mirror opens its source
+	// only when it's read). A body of unknown length is read here; a
+	// known one is sent by put as it arrives, and its checksums are known
+	// only then (late); the caller's own content is summed here, a pass
+	// over their file, and sent by put.
 	var data []byte
 	var spool *os.File
 	var sums icbfs.Checksums
+	var put putFunc
+	late := false
 	read := false
 	readBody := func() error {
 		if read {
 			return nil
 		}
 		read = true
-		var err error
-		if data, spool, sums, err = d.readBody(body); err != nil {
-			return err
+		switch {
+		case src.at != nil:
+			if src.size > d.fs.MaxFileSize() {
+				return drive.ErrTooLarge
+			}
+			var err error
+			if sums, err = icbfs.ChecksumsOf(io.NewSectionReader(src.at, 0, src.size)); err != nil {
+				return err
+			}
+			put = func(ctx context.Context, key, etag string) (*objstore.Object, error) {
+				return d.fs.WriteFrom(ctx, key, src.at, src.size, etag)
+			}
+		case src.size > 0:
+			if src.size > d.fs.MaxFileSize() {
+				return drive.ErrTooLarge
+			}
+			sum := icbfs.NewChecksummer()
+			r := io.TeeReader(src.r, sum)
+			late = true
+			put = func(ctx context.Context, key, etag string) (*objstore.Object, error) {
+				obj, err := d.fs.WriteStream(ctx, key, r, src.size, etag)
+				if err == nil {
+					sums = sum.Sum()
+				}
+				return obj, err
+			}
+			return nil
+		default:
+			var err error
+			if data, spool, sums, err = d.readBody(src.r); err != nil {
+				return err
+			}
 		}
 		return checkSums(opts.Checksums, sums)
 	}
@@ -92,7 +160,7 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 			if err := readBody(); err != nil {
 				return drive.Item{}, err
 			}
-			written, err := d.writeContent(ctx, n.key, data, spool, cur.ETag)
+			written, err := d.writeContent(ctx, n.key, data, spool, put, cur.ETag)
 			if err != nil {
 				if objstore.IsPreconditionFailed(err) {
 					if cond.IfMatch != "" {
@@ -103,9 +171,20 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 						}
 						return drive.Item{}, &drive.PreconditionError{Current: current}
 					}
+					if src.streamed() {
+						// The body went once and can't go again.
+						return drive.Item{}, fmt.Errorf("another write landed first and a streamed body can't be sent again: %w", drive.ErrBusy)
+					}
 					continue // someone else wrote; an unconditional write just goes again
 				}
 				return drive.Item{}, mapErr(err)
+			}
+			if late {
+				if err := checkSums(opts.Checksums, sums); err != nil {
+					// Known only now, with the version written: it goes.
+					_ = d.fs.Store().Erase(ctx, n.key, written.VersionID)
+					return drive.Item{}, err
+				}
 			}
 			if n.attr, err = d.afterWrite(ctx, n.key, n.path, written, opts, sums); err != nil {
 				return drive.Item{}, err
@@ -125,7 +204,7 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 		if err := readBody(); err != nil {
 			return drive.Item{}, err
 		}
-		n, err := d.create(ctx, parent, name, data, spool, opts, sums)
+		n, err := d.create(ctx, parent, name, data, spool, put, late, opts, &sums)
 		if errors.Is(err, icbfs.ErrExists) {
 			if cond.IfNoneMatch {
 				return drive.Item{}, &drive.PreconditionError{}
@@ -216,12 +295,13 @@ func toChecksums(c icbfs.Checksums) *drive.Checksums {
 
 // create makes the file name in parent with its content: in the same two
 // writes when the content is in memory (icbfs CreateWith); a large one,
-// spooled, as a mount writes it, into a file created empty.
-func (d *Drive) create(ctx context.Context, parent *node, name string, data []byte, spool *os.File, opts drive.WriteOptions, sums icbfs.Checksums) (*node, error) {
+// spooled or sent as it arrives (put), into a file created empty. sums
+// are the content's, or, when late, become known as put sends it.
+func (d *Drive) create(ctx context.Context, parent *node, name string, data []byte, spool *os.File, put putFunc, late bool, opts drive.WriteOptions, sums *icbfs.Checksums) (*node, error) {
 	sddl, mode, uid, gid := d.newOwnership(ctx, parent, false)
 	p := joinPath(parent.path, name)
-	if spool == nil {
-		info, err := d.writeInfo(ctx, opts, sums)
+	if spool == nil && put == nil {
+		info, err := d.writeInfo(ctx, opts, *sums)
 		if err != nil {
 			return nil, err
 		}
@@ -246,11 +326,21 @@ func (d *Drive) create(ctx context.Context, parent *node, name string, data []by
 		}
 	}
 	created, _ := d.fs.Store().Head(ctx, key)
-	written, err := d.writeContent(ctx, key, data, spool, etag)
+	written, err := d.writeContent(ctx, key, data, spool, put, etag)
 	if err != nil {
+		// The file was made before its content could be: a streamed body
+		// that fell short, or a store that refused. Not a file to leave.
+		d.dropCreated(ctx, parent, name, p)
 		return nil, mapErr(err)
 	}
-	attr, err := d.afterWrite(ctx, key, p, written, opts, sums)
+	if late {
+		if err := checkSums(opts.Checksums, *sums); err != nil {
+			_ = d.fs.Store().Erase(ctx, key, written.VersionID)
+			d.dropCreated(ctx, parent, name, p)
+			return nil, err
+		}
+	}
+	attr, err := d.afterWrite(ctx, key, p, written, opts, *sums)
 	if err != nil {
 		return nil, err
 	}
@@ -260,6 +350,15 @@ func (d *Drive) create(ctx context.Context, parent *node, name string, data []by
 		_ = d.fs.Store().Erase(ctx, key, created.VersionID)
 	}
 	return parent.child(block.Entry{Name: name, UUID: key, Type: icbfs.TypeFile}, attr), nil
+}
+
+// dropCreated unlinks the empty file name a failed write made in parent
+// (to the trash, as any delete; it holds nothing). Best effort: the write
+// has its own error to report.
+func (d *Drive) dropCreated(ctx context.Context, parent *node, name, p string) {
+	dctx := icbfs.WithDeleteInfo(ctx, icbfs.DeleteInfo{By: drive.Actor(ctx), Path: d.fsPath(p)})
+	_ = d.fs.Unlink(dctx, parent.key, name)
+	d.changed(parent)
 }
 
 // mapCreateErr is mapErr, leaving icbfs.ErrExists as it is for Write to
@@ -272,8 +371,13 @@ func mapCreateErr(err error) error {
 }
 
 // writeContent replaces key's content, if it's still at etag, and returns
-// the version written.
-func (d *Drive) writeContent(ctx context.Context, key string, data []byte, spool *os.File, etag string) (*objstore.Object, error) {
+// the version written: from memory, by put (a stream or the caller's
+// file), or from the spool through the engine's scratch file, as a mount
+// writes.
+func (d *Drive) writeContent(ctx context.Context, key string, data []byte, spool *os.File, put putFunc, etag string) (*objstore.Object, error) {
+	if put != nil {
+		return put(ctx, key, etag)
+	}
 	if spool == nil {
 		return d.fs.WriteFile(ctx, key, data, etag)
 	}

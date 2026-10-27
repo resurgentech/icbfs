@@ -202,6 +202,15 @@ type Condition struct {
 type WriteOptions struct {
 	Parents     bool   // make missing parent directories
 	ContentType string // recorded with the content, where the backend keeps it
+	// Size is the body's length when the caller knows it: a download's
+	// reported length, a listing's size, a local file's, an HTTP
+	// upload's Content-Length. Known, the write goes to the store as the
+	// body arrives, one part in memory at a time and nothing on disk,
+	// and a body that turns out shorter or longer fails the write.
+	// Unknown (0, the zero value; a known-empty body may say 0 too, it
+	// reads the same) the body is read first, into memory when small and
+	// else into a temporary file.
+	Size int64
 	// ModTime, if set, is the file's time at its source (a document's
 	// modification date), shown as its modified time instead of the moment
 	// of the write; a later write without one puts it back to the write's.
@@ -214,8 +223,10 @@ type WriteOptions struct {
 	// same write (as SetOrigin would after it).
 	Origin *Origin
 	// Checksums, if set, are what the caller knows the content's to be
-	// (from its source): the write fails with ErrChecksum, writing
-	// nothing, if what arrived doesn't match. Either may be empty.
+	// (from its source): the write fails with ErrChecksum if what arrived
+	// doesn't match, before anything is written when the body is read
+	// first, and erasing the version written when it was sent as it
+	// arrived (Size). Either may be empty.
 	Checksums *Checksums
 	// App, Mode and WindowsAttrs are recorded in the same metadata write
 	// as the times and the origin (see ItemInfo).
@@ -250,6 +261,15 @@ type ItemInfo struct {
 // with the rest of what a mirror knows.
 type InfoSetter interface {
 	SetInfo(ctx context.Context, item ItemRef, info ItemInfo) (Item, error)
+}
+
+// A FileWriter is a drive that writes from content the caller holds,
+// read at offsets: a local file in a sync, a connector's own spool. The
+// caller's file is the scratch file, parts are read from it as they go
+// up and read again if one is retried, and nothing is copied. Otherwise
+// Write: the same conditions, options, versions and checksums.
+type FileWriter interface {
+	WriteFrom(ctx context.Context, path string, content io.ReaderAt, size int64, cond Condition, opts WriteOptions) (Item, error)
 }
 
 // CheckAppKey is nil if key is a valid app key for a caller to set:

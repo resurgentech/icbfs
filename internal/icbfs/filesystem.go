@@ -2361,6 +2361,62 @@ func (f *Filesystem) WriteFile(ctx context.Context, key string, data []byte, ifM
 	return f.store.Put(ctx, key, bytes.NewReader(data), nil, ifMatch)
 }
 
+// WriteStream is WriteFile from a body of a known length, as it arrives:
+// nothing spooled. A body that fits one part is read into memory and put;
+// a larger one goes up in parts straight from the body, one part in memory
+// at a time (objstore.StreamParts). A body shorter or longer than size
+// fails the write, which then writes nothing. size past the max file size
+// is ErrFileTooLarge before a byte is read.
+func (f *Filesystem) WriteStream(ctx context.Context, key string, body io.Reader, size int64, ifMatch string) (*objstore.Object, error) {
+	if err := f.checkWritable(); err != nil {
+		return nil, err
+	}
+	if size < 0 {
+		return nil, ErrInvalidArgument
+	}
+	if size > f.maxFileSize {
+		return nil, ErrFileTooLarge
+	}
+	partSize := f.partSize()
+	if size <= partSize {
+		data := make([]byte, size)
+		if _, err := io.ReadFull(body, data); err != nil {
+			return nil, fmt.Errorf("the body ended before its %d bytes: %w", size, io.ErrUnexpectedEOF)
+		}
+		var one [1]byte
+		if n, _ := body.Read(one[:]); n > 0 {
+			return nil, fmt.Errorf("the body is longer than its %d bytes", size)
+		}
+		return f.store.Put(ctx, key, bytes.NewReader(data), nil, ifMatch)
+	}
+	return f.store.PutParts(ctx, key, objstore.StreamParts(body, size, partSize), nil, ifMatch)
+}
+
+// WriteFrom is WriteFile from content the caller holds, read at offsets:
+// a file of theirs is the scratch file, parts are read from it as they
+// go up and read again if one is retried, and nothing is copied.
+func (f *Filesystem) WriteFrom(ctx context.Context, key string, content io.ReaderAt, size int64, ifMatch string) (*objstore.Object, error) {
+	if err := f.checkWritable(); err != nil {
+		return nil, err
+	}
+	if size < 0 {
+		return nil, ErrInvalidArgument
+	}
+	if size > f.maxFileSize {
+		return nil, ErrFileTooLarge
+	}
+	partSize := f.partSize()
+	if size <= partSize {
+		return f.store.Put(ctx, key, io.NewSectionReader(content, 0, size), nil, ifMatch)
+	}
+	var parts []objstore.Part
+	for off := int64(0); off < size; off += partSize {
+		n := min(partSize, size-off)
+		parts = append(parts, objstore.Part{Size: n, Body: io.NewSectionReader(content, off, n)})
+	}
+	return f.store.PutParts(ctx, key, parts, nil, ifMatch)
+}
+
 // SetAttr applies the given changes (each may be nil) to the node at key.
 // typ must be the node's type (see Stat).
 //

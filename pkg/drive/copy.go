@@ -58,7 +58,8 @@ func copyFile(ctx context.Context, src Drive, srcID string, from ItemRef, at At,
 		return Item{}, err
 	}
 	defer body.Close()
-	out, err := dst.Write(ctx, to, body, cond, WriteOptions{ContentType: it.ContentType})
+	// The source's size lets the target write as the bytes arrive.
+	out, err := dst.Write(ctx, to, body, cond, WriteOptions{ContentType: it.ContentType, Size: it.Size})
 	if err != nil {
 		return Item{}, err
 	}
