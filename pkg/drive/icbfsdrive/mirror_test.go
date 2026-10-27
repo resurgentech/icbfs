@@ -194,10 +194,15 @@ func TestMirror(t *testing.T) {
 				}
 			}
 
-			// A file made on the drive is never written over.
+			// A file made on the drive is never written over, nor the
+			// source item downloaded to find that out.
 			write(t, ctx, d, "/Docs/mine.txt", "local", drive.Condition{})
+			before := src.opens.Load()
 			if _, err := m.Apply(ctx, src.item("other", "1.0", "/Docs/mine.txt", "theirs", jan)); !errors.Is(err, drive.ErrNotMirrored) {
 				t.Fatalf("applying over a local file: %v, want ErrNotMirrored", err)
+			}
+			if n := src.opens.Load() - before; n != 0 {
+				t.Fatalf("applying over a local file opened the source %d times", n)
 			}
 			if got := read(t, ctx, d, drive.ByPath("/Docs/mine.txt"), drive.At{}); got != "local" {
 				t.Fatalf("the local file now reads %q", got)

@@ -174,9 +174,13 @@ var requestCeilings = map[string][4]int{
 	// filesystem's past, once.
 	"new top-level folder":  {21, 78, 19, 76},
 	"new folder at depth 2": {27, 45, 19, 37},
-	"new file at depth 3":   {22, 38, 12, 28},
+	"new file at depth 3":   {16, 32, 12, 28},
 	"the same file again":   {9, 10, 5, 6},
-	"a new version of it":   {23, 36, 11, 24},
+	// And once more: the file's creation wrote its folder, which the
+	// drive then read again; a pass over unchanged files reads it once.
+	// The origin record and the file's stat, when trusting.
+	"the same file, a third time": {9, 10, 3, 4},
+	"a new version of it":         {23, 36, 11, 24},
 	// The root, then a step per folder and the file's own stat: two
 	// requests each (a folder's are none when trusted), and its .version
 	// in source time.
@@ -242,6 +246,7 @@ func TestRequestsPerOperation(t *testing.T) {
 			f.Created = jan
 			counted("new file at depth 3", func() { apply(t, ctx, m, "file", f, drive.Created) })
 			counted("the same file again", func() { apply(t, ctx, m, "same", f, drive.Unchanged) })
+			counted("the same file, a third time", func() { apply(t, ctx, m, "same", f, drive.Unchanged) })
 			f2 := src.item("f1", "2.0", "/Clients/Acme/report.txt", "v2", jan.AddDate(0, 1, 0))
 			counted("a new version of it", func() { apply(t, ctx, m, "new version", f2, drive.Updated) })
 

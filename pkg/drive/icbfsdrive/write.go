@@ -37,16 +37,30 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 	if err != nil {
 		return drive.Item{}, err
 	}
-	data, spool, sums, err := d.readBody(body)
-	if err != nil {
-		return drive.Item{}, err
+	// The body is read once the write is known to go ahead: a write its
+	// condition refuses reads none of it (a mirror opens its source only
+	// when it's read).
+	var data []byte
+	var spool *os.File
+	var sums icbfs.Checksums
+	read := false
+	readBody := func() error {
+		if read {
+			return nil
+		}
+		read = true
+		var err error
+		if data, spool, sums, err = d.readBody(body); err != nil {
+			return err
+		}
+		return checkSums(opts.Checksums, sums)
 	}
-	if spool != nil {
-		defer func() { spool.Close(); os.Remove(spool.Name()) }()
-	}
-	if err := checkSums(opts.Checksums, sums); err != nil {
-		return drive.Item{}, err
-	}
+	defer func() {
+		if spool != nil {
+			spool.Close()
+			os.Remove(spool.Name())
+		}
+	}()
 
 	for attempt := 0; attempt < 3; attempt++ {
 		// The first look starts from the block the parent's resolve
@@ -74,6 +88,9 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 			}
 			if cond.IfNoneMatch || cond.IfMatch != "" && cond.IfMatch != cur.VersionID {
 				return drive.Item{}, &drive.PreconditionError{Current: cur.VersionID}
+			}
+			if err := readBody(); err != nil {
+				return drive.Item{}, err
 			}
 			written, err := d.writeContent(ctx, n.key, data, spool, cur.ETag)
 			if err != nil {
@@ -103,6 +120,9 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 			return drive.Item{}, &drive.PreconditionError{}
 		}
 		if err := d.check(ctx, parent, needAddFile); err != nil {
+			return drive.Item{}, err
+		}
+		if err := readBody(); err != nil {
 			return drive.Item{}, err
 		}
 		n, err := d.create(ctx, parent, name, data, spool, opts, sums)

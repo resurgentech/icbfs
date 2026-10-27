@@ -235,7 +235,10 @@ written. That needs a drive that's an `InfoSetter`; on one that's only a
 and origin in one write.
 
 - `Open` is called only when the bytes are needed: never for a move, a
-  restore of the version held, or an item already up to date.
+  restore of the version held, an item already up to date, or a new
+  file whose path is taken. A new file is written on the condition that
+  its path is free (`IfNoneMatch`), which the drive checks before it
+  reads the content; the mirror looks at the path only if it's taken.
 - The trash is the undo. An item the source deletes and brings back with
   the same id (a recycle bin, a folder shared again, a listing that came
   back short) is restored, not copied again; and `Undo` restores
