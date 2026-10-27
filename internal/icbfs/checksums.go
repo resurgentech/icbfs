@@ -36,8 +36,8 @@ func (a Attr) ContentETag() string { return a.contentETag }
 
 // ContentVersion is a file's current content version as Stat read it
 // (its version id, ETag, size and when the store wrote it), so a caller
-// that wants the version needn't ask the store again. ok is false for
-// attributes Stat didn't read.
+// that wants the version needn't ask the store again; for a directory,
+// its root block's. ok is false for attributes Stat didn't read.
 func (a Attr) ContentVersion() (objstore.Object, bool) {
 	return a.content, a.content.VersionID != ""
 }

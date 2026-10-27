@@ -152,8 +152,9 @@ writes it at close. The drive API has the content in hand (up to 64 MiB;
 past that it writes as a mount does): `CreateWith` writes the content
 object once, with it, and `.metadata` once, with what the write records
 (times, app data, mode, checksums), then the directory entry. A new version
-is the content, then one `.metadata` write (`SetFileInfo`), whose result
-gives the item its attributes without a stat.
+is the content, then one `.metadata` write (`SetInfoWith`, which a
+directory's record takes too), whose result gives the item its attributes
+without a stat.
 
 **Open files are edited in a local scratch file, not in memory.** Opening a
 file copies it from a shared on-disk read cache into a private scratch

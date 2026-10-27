@@ -305,7 +305,7 @@ func (d *Drive) afterWrite(ctx context.Context, key, p string, written *objstore
 	if err != nil {
 		return icbfs.Attr{}, err
 	}
-	attr, err := d.fs.SetFileInfo(ctx, key, written, info)
+	attr, err := d.fs.SetInfoWith(ctx, key, icbfs.TypeFile, written, info)
 	if err != nil {
 		return icbfs.Attr{}, mapErr(err)
 	}
@@ -354,21 +354,19 @@ func (d *Drive) mkdirIn(ctx context.Context, parent *node, name string) (*node, 
 		return nil, err
 	}
 	sddl, mode, uid, gid := d.newOwnership(ctx, parent, true)
-	key, _, err := d.fs.Mkdir(ctx, parent.key, name, mode, uid, gid)
+	key, attr, err := d.fs.Mkdir(ctx, parent.key, name, mode, uid, gid)
 	if err != nil {
 		return nil, mapErr(err)
 	}
 	if sddl != nil {
-		if _, err := d.fs.SetWindowsACL(ctx, key, icbfs.TypeDir, sddl); err != nil {
+		if attr, err = d.fs.SetWindowsACL(ctx, key, icbfs.TypeDir, sddl); err != nil {
 			return nil, mapErr(err)
 		}
 	}
 	d.changed(parent)
-	n, err := d.resolvePath(ctx, d.fs, joinPath(parent.path, name))
-	if err == nil {
-		d.idPaths.put(n.key, n.path)
-	}
-	return n, err
+	n := parent.child(block.Entry{Name: name, UUID: key, Type: icbfs.TypeDir}, attr)
+	d.idPaths.put(n.key, n.path)
+	return n, nil
 }
 
 // mkdirAll makes p and every missing directory above it.
@@ -646,27 +644,28 @@ func (d *Drive) SetInfo(ctx context.Context, ref drive.ItemRef, info drive.ItemI
 	if err != nil {
 		return drive.Item{}, err
 	}
-	fi := icbfs.ItemInfo{Btime: timeOrNil(info.Created), Mode: info.Mode, WindowsAttrs: info.WindowsAttrs, App: app}
-	if mtime := timeOrNil(info.Modified); mtime != nil {
-		fi.Mtime = mtime
-		if n.typ != icbfs.TypeDir {
-			// Tied to the content version it's set on, as SetAttr's is.
-			head, err := d.fs.Store().Head(ctx, n.key)
-			if err != nil {
-				return drive.Item{}, mapErr(err)
-			}
-			fi.ContentETag = head.ETag
+	// A file's mtime is tied to the content version it's set on, as
+	// SetAttr's is: the one the resolve read.
+	fi := icbfs.ItemInfo{Btime: timeOrNil(info.Created), Mtime: timeOrNil(info.Modified), Mode: info.Mode, WindowsAttrs: info.WindowsAttrs, App: app}
+	cur, ok := n.attr.ContentVersion()
+	if !ok {
+		head, err := d.fs.Store().Head(ctx, n.key)
+		if err != nil {
+			return drive.Item{}, mapErr(err)
 		}
+		cur = *head
 	}
-	if err := d.fs.SetItemInfo(ctx, n.key, n.typ, fi); err != nil {
-		return drive.Item{}, mapErr(err)
+	if !fi.Empty() {
+		if n.attr, err = d.fs.SetInfoWith(ctx, n.key, n.typ, &cur, fi); err != nil {
+			return drive.Item{}, mapErr(err)
+		}
 	}
 	if info.Origin != nil {
 		if err := d.recordOrigin(ctx, n.key, n.path, *info.Origin); err != nil {
 			return drive.Item{}, err
 		}
 	}
-	return d.statItem(ctx, n.path)
+	return d.item(ctx, n, true), nil
 }
 
 // appData is the app map a caller's app keys and origin make: each key

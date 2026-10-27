@@ -555,6 +555,8 @@ func combineDirAttr(key string, metaData []byte, metaLastModified time.Time, blo
 	}
 	attr.mtimeOverrideETag = ""
 	attr.Size = blockObj.Size
+	attr.content = objstore.Object{Key: blockObj.Key, VersionID: blockObj.VersionID, ETag: blockObj.ETag,
+		Size: blockObj.Size, LastModified: blockObj.LastModified}
 	if attr.Mtime.IsZero() {
 		attr.Mtime = blockObj.LastModified
 	}
@@ -1752,28 +1754,39 @@ func (f *Filesystem) SetItemInfo(ctx context.Context, uuid string, typ EntryType
 	if err := f.checkWritable(); err != nil {
 		return err
 	}
-	statusChange := info.Mtime != nil || info.Btime != nil || info.Mode != nil || info.WindowsAttrs != nil
-	if info.Mtime == nil && info.Btime == nil && info.Mode == nil && info.WindowsAttrs == nil && len(info.App) == 0 && info.Checksums == nil {
+	if info.Empty() {
 		return nil
 	}
+	statusChange := info.Mtime != nil || info.Btime != nil || info.Mode != nil || info.WindowsAttrs != nil
 	return f.writeMetadata(ctx, uuid, statusChange, func(a *Attr) { info.apply(a, typ) })
 }
 
-// SetFileInfo is SetItemInfo for a file whose current content version the
-// caller holds, as a write just returned it (info.ContentETag is taken to
-// be its): the attributes it returns are built from what it wrote and
-// content, with no stat.
-func (f *Filesystem) SetFileInfo(ctx context.Context, key string, content *objstore.Object, info ItemInfo) (Attr, error) {
+// SetInfoWith is SetItemInfo for an item whose object the caller holds
+// as current: a file's content version (as a write just returned it, or
+// Attr.ContentVersion; info.ContentETag is taken to be its), a
+// directory's root block (Attr.ContentVersion). The attributes it
+// returns are built from what it wrote and that, with no stat.
+func (f *Filesystem) SetInfoWith(ctx context.Context, key string, typ EntryType, current *objstore.Object, info ItemInfo) (Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return Attr{}, err
 	}
-	info.ContentETag = content.ETag
+	if typ != TypeDir {
+		info.ContentETag = current.ETag
+	}
 	statusChange := info.Mtime != nil || info.Btime != nil || info.Mode != nil || info.WindowsAttrs != nil
-	data, obj, err := f.writeMetadataRead(ctx, key, statusChange, func(a *Attr) bool { info.apply(a, TypeFile); return true })
+	data, obj, err := f.writeMetadataRead(ctx, key, statusChange, func(a *Attr) bool { info.apply(a, typ); return true })
 	if err != nil {
 		return Attr{}, err
 	}
-	return combineFileAttr(key, data, obj.LastModified, content)
+	if typ == TypeDir {
+		return combineDirAttr(key, data, obj.LastModified, current)
+	}
+	return combineFileAttr(key, data, obj.LastModified, current)
+}
+
+// Empty reports whether info records nothing.
+func (info ItemInfo) Empty() bool {
+	return info.Mtime == nil && info.Btime == nil && info.Mode == nil && info.WindowsAttrs == nil && len(info.App) == 0 && info.Checksums == nil
 }
 
 // apply records info in a.
