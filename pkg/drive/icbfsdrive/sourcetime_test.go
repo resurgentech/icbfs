@@ -465,8 +465,8 @@ func TestReplaceFileHistory(t *testing.T) {
 	// "four" was saved in 2024 (so the present changes).
 	states := []drive.FileState{
 		{At: year(2020), Version: h.Versions[2].ID},
-		{At: year(2023), Version: h.Versions[0].ID, Info: drive.ItemInfo{App: map[string][]byte{"clio.version": []byte("3")}}},
-		{At: year(2024), Content: strings.NewReader("four"), Info: drive.ItemInfo{App: map[string][]byte{"clio.version": []byte("4")}}},
+		{At: year(2023), Version: h.Versions[0].ID, Info: drive.ItemInfo{App: map[string][]byte{"mirror.version": []byte("3")}}},
+		{At: year(2024), Content: strings.NewReader("four"), Info: drive.ItemInfo{App: map[string][]byte{"mirror.version": []byte("4")}}},
 	}
 	if err := d.ReplaceFileHistory(ctx, drive.ByPath("/f.txt"), states, drive.Condition{IfMatch: "stale"}); !errors.Is(err, drive.ErrPrecondition) {
 		t.Fatalf("a stale version: %v; want a precondition error", err)
@@ -511,11 +511,11 @@ func TestReplaceFileHistory(t *testing.T) {
 		}
 	}
 	now, err := d.Stat(ctx, drive.ByPath("/f.txt"), drive.At{})
-	if err != nil || string(now.App["clio.version"]) != "4" || !now.Modified.Equal(year(2024)) {
+	if err != nil || string(now.App["mirror.version"]) != "4" || !now.Modified.Equal(year(2024)) {
 		t.Fatalf("now: app %q, modified %v, %v", now.App, now.Modified, err)
 	}
 	then, err := d.Stat(ctx, drive.ByPath("/f.txt"), drive.At{Time: year(2023).AddDate(0, 6, 0)})
-	if err != nil || string(then.App["clio.version"]) != "3" || !then.Modified.Equal(year(2023)) {
+	if err != nil || string(then.App["mirror.version"]) != "3" || !then.Modified.Equal(year(2023)) {
 		t.Fatalf("mid-2023: app %q, modified %v, %v", then.App, then.Modified, err)
 	}
 	report, err := d.Filesystem().Check(context.Background())
