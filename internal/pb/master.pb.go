@@ -53,6 +53,11 @@ type FilesystemEntry struct {
 	// misread or overwrite objects in a format it doesn't understand. Raising it is how
 	// a format change is committed, once every machine can read it.
 	FormatVersion uint32 `protobuf:"varint,8,opt,name=format_version,json=formatVersion,proto3" json:"format_version,omitempty"`
+	// source_time: the filesystem is written in a source's time (a
+	// mirror's), set when it's created with a history that starts earlier
+	// or at its first change made under a source time. Every item's
+	// .version then lists all versions of its content and .metadata.
+	SourceTime    bool `protobuf:"varint,9,opt,name=source_time,json=sourceTime,proto3" json:"source_time,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -143,6 +148,13 @@ func (x *FilesystemEntry) GetFormatVersion() uint32 {
 	return 0
 }
 
+func (x *FilesystemEntry) GetSourceTime() bool {
+	if x != nil {
+		return x.SourceTime
+	}
+	return false
+}
+
 // MasterBlock is the body of the one, fixed, well-known master-block
 // object per bucket. The list can only ever grow in length, never
 // shrink or reorder — a deleted filesystem's entry is blanked in place
@@ -206,7 +218,7 @@ var File_spec_proto_icbfs_v1_master_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_master_proto_rawDesc = "" +
 	"\n" +
-	" spec/proto/icbfs/v1/master.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xab\x02\n" +
+	" spec/proto/icbfs/v1/master.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xcc\x02\n" +
 	"\x0fFilesystemEntry\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x1a\n" +
@@ -215,7 +227,9 @@ const file_spec_proto_icbfs_v1_master_proto_rawDesc = "" +
 	"\rmax_file_size\x18\x05 \x01(\x04R\vmaxFileSize\x124\n" +
 	"\acreated\x18\x06 \x01(\v2\x1a.google.protobuf.TimestampR\acreated\x12*\n" +
 	"\x11dir_block_entries\x18\a \x01(\rR\x0fdirBlockEntries\x12%\n" +
-	"\x0eformat_version\x18\b \x01(\rR\rformatVersion\"b\n" +
+	"\x0eformat_version\x18\b \x01(\rR\rformatVersion\x12\x1f\n" +
+	"\vsource_time\x18\t \x01(\bR\n" +
+	"sourceTime\"b\n" +
 	"\vMasterBlock\x12;\n" +
 	"\vfilesystems\x18\x01 \x03(\v2\x19.icbfs.v1.FilesystemEntryR\vfilesystems\x12\x16\n" +
 	"\x06layout\x18\x02 \x01(\rR\x06layoutB+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"

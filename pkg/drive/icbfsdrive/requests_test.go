@@ -171,8 +171,10 @@ var requestRuns = []struct {
 // operation cheaper lowers its ceiling here, so the count can't creep
 // back.
 var requestCeilings = map[string][4]int{
-	// The first folder in source time also dates the root, once.
-	"new top-level folder":  {21, 66, 19, 64},
+	// The first folder in source time also dates the root, listing its
+	// versions so far, and marks the filesystem as written in source time,
+	// once.
+	"new top-level folder":  {21, 70, 19, 68},
 	"new folder at depth 2": {27, 36, 19, 28},
 	"new file at depth 3":   {16, 22, 12, 18},
 	"the same file again":   {9, 10, 5, 6},

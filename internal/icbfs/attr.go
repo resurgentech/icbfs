@@ -164,6 +164,15 @@ type Attr struct {
 // concurrent chmod, chown and link serialize through compare-and-swap.
 func metadataObjectKey(uuid string) string { return uuid + ".metadata" }
 
+// encodeMetadata is encodeFileMetadata for this filesystem: in one
+// written in a source's time, every item is dated (Filesystem.dated).
+func (f *Filesystem) encodeMetadata(ctx context.Context, a Attr) ([]byte, error) {
+	if f.sourceTime.Load() {
+		a.dated = true
+	}
+	return encodeFileMetadata(ctx, a)
+}
+
 // encodeFileMetadata serializes mode/uid/gid/nlink/xattrs to the wire
 // format stored at metadataObjectKey, for a write under ctx: one under a
 // declared time marks the item dated (Attr.Dated), as the write will be in

@@ -100,6 +100,7 @@ func CreateFilesystem(ctx context.Context, store objstore.Store, s Settings) (In
 		Name: s.Name, Size: s.Size, PrimaryWindows: s.PrimaryWindows, MaxFileSize: s.MaxFileSize,
 		DirBlockEntries: s.DirBlockEntries,
 		Created:         timestamppb.New(created),
+		SourceTime:      !s.Created.IsZero(),
 	})
 	if err != nil {
 		return Info{}, err
@@ -171,6 +172,7 @@ func (f *Filesystem) Refresh(ctx context.Context) error {
 	for i, e := range mb.Filesystems {
 		if e.Name == f.fsName && fsID(i) == f.id {
 			f.archived.Store(e.Archived)
+			f.sourceTime.Store(e.SourceTime)
 			return nil
 		}
 	}
@@ -230,7 +232,7 @@ func (f *Filesystem) createRoot(ctx context.Context, attr Attr) error {
 		return err
 	}
 	attr.Nlink, attr.Mtime, attr.Ctime = 1, changeTime(ctx), time.Now()
-	metaData, err := encodeFileMetadata(ctx, attr)
+	metaData, err := f.encodeMetadata(ctx, attr)
 	if err != nil {
 		return err
 	}

@@ -160,7 +160,7 @@ func (f *Filesystem) ReplaceFileHistory(ctx context.Context, key string, states 
 		if attr.Ctime.IsZero() || attr.Ctime.Before(s.At) {
 			attr.Ctime = s.At
 		}
-		data, err := encodeFileMetadata(sctx, attr)
+		data, err := f.encodeMetadata(sctx, attr)
 		if err != nil {
 			return err
 		}

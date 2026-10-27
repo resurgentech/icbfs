@@ -80,7 +80,7 @@ with its four-hex-digit ID, so one prefix listing finds all of it.
 | `<id>-trashby-<uuid>` | the key of the item's newest trash entry, so a trashed item's entry is one read |
 | `<id>-name-<name>` | a named version |
 | `<id>-origin-<hash>` | the item copied from one source item (an item in another document store, say): its id, the source version, where it was last seen |
-| `<id>-<uuid>.version` | the dates of the item's versions the store's timestamp is wrong for (a mirror's, written in its source's time); only items with one (see Past views) |
+| `<id>-<uuid>.version` | the dates of the item's versions (a mirror's, written in its source's time): in a filesystem written in a source's time, every version of its content and `.metadata`; elsewhere, only items a change under a source time touched (see Source time) |
 | `<id>-app-<tool>.<name>` | an object a tool keeps beside the filesystem, not about any item: a mirror's table of the ids its app keys use |
 | `<id>-past` | empty; written again whenever the filesystem's past changes (a purge, a change made under a source time), telling history caches to drop what they kept (see Past views) |
 
@@ -268,7 +268,8 @@ content:
   Like access times and checksums, it's bookkeeping, not a change to the
   item: writing it doesn't move ctime;
 - whether the item has a `.version` record (Source time, below): set by
-  any write of `.metadata` under a declared time, and kept, so a reader
+  any write of `.metadata` under a declared time or in a filesystem
+  written in a source's time, and kept, so a reader
   that wants a version's date reads `.version` only for an item that has
   one.
 
@@ -598,6 +599,19 @@ the filesystem's history goes:
   the item's timeline, whatever the view's time) and picks each version
   by effective date from the cached listing. An ordinary filesystem has
   no `.version` and reads exactly as before;
+- a filesystem written in a source's time says so in its master entry
+  (`source_time`: set at creation by `Settings.Created`, or by its first
+  change made under a source time). From then on, an item's `.version`
+  lists every version of its content and `.metadata` (delete markers
+  aside), whatever writes it: the store wrapper dates a version written
+  with no declared time as it's written (`objstore.DateAll`), at the
+  store's time, or, for bookkeeping that amends a version without
+  changing what the file is (checksums, an access time, `restoreCurrent`
+  following a copy's ETag: `objstore.KeepDate`), at the date of the
+  version it replaced. A version it can't date is erased and the write
+  fails. An item's first `.version` lists the versions it had before, at
+  the store's times. Locks, streams and directory blocks aren't listed;
+  the directory's history is its blocks' (above);
 - a new item's key is minted at the time, so that's its creation time; a
   directory's mtime becomes it; a trash entry is deleted at it. ctime
   stays icbfs's own clock;

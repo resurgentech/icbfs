@@ -85,6 +85,7 @@ type Filesystem struct {
 	id                 string                // 4-hex-digit prefix, set by Bootstrap
 	archived           atomic.Bool           // set by Bootstrap; see ErrArchived
 	pastChanged        func(context.Context) // SetPastChanged's, if set
+	sourceTime         atomic.Bool           // the master entry's source_time; see dated
 	readOnly           bool                  // set by BootstrapReadOnly; see ErrReadOnly
 	primaryWindows     bool                  // set by Bootstrap from the stored master-block value; see PrimaryWindows
 	maxFileSize        int64                 // set by Bootstrap from the stored master-block value; see MaxFileSize
@@ -137,7 +138,9 @@ func New(store objstore.Store, fsName string) *Filesystem {
 		mountID = fmt.Sprintf("mount-%d-%d", os.Getpid(), time.Now().UnixNano())
 	}
 	// The store records what's written under a declared time (RecordDates).
-	return &Filesystem{store: objstore.Recording(store), fsName: fsName, cache: newDiskCache(cacheDir, defaultCacheMaxBytes), mountID: mountID}
+	f := &Filesystem{store: objstore.Recording(store), fsName: fsName, cache: newDiskCache(cacheDir, defaultCacheMaxBytes), mountID: mountID}
+	objstore.DateAll(f.store, f.dated)
+	return f
 }
 
 // LockHolder names a lock holder of this Filesystem's: local (a FUSE lock
@@ -301,6 +304,7 @@ func (f *Filesystem) applyEntry(id string, entry *pb.FilesystemEntry) error {
 	}
 	f.id = id
 	f.archived.Store(entry.Archived)
+	f.sourceTime.Store(entry.SourceTime)
 	f.primaryWindows = entry.PrimaryWindows
 	f.maxFileSize = DefaultMaxFileSize
 	if entry.MaxFileSize != 0 && entry.MaxFileSize <= DefaultMaxFileSize {
@@ -364,6 +368,7 @@ func (f *Filesystem) BootstrapViewOf(ctx context.Context, live *Filesystem) erro
 	f.fsName = live.fsName
 	f.id, f.primaryWindows = live.id, live.primaryWindows
 	f.archived.Store(live.archived.Load())
+	f.sourceTime.Store(live.sourceTime.Load())
 	f.maxFileSize, f.dirBlockEntries = live.maxFileSize, live.dirBlockEntries
 	if _, err := f.store.Head(ctx, f.RootKey()); err != nil {
 		return fmt.Errorf("filesystem %q root: %w", f.fsName, mapNotFound(err))
@@ -1307,7 +1312,7 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 	if err := f.inheritACLs(ctx, dirKey, &attr, true); err != nil {
 		return "", Attr{}, err
 	}
-	metaData, err := encodeFileMetadata(ctx, attr)
+	metaData, err := f.encodeMetadata(ctx, attr)
 	if err != nil {
 		return "", Attr{}, err
 	}
@@ -1360,7 +1365,7 @@ func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid,
 		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, "", err
 	}
-	metaData, err := encodeFileMetadata(ctx, attr)
+	metaData, err := f.encodeMetadata(ctx, attr)
 	if err != nil {
 		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, "", err
@@ -1417,7 +1422,7 @@ func (f *Filesystem) CreateWith(ctx context.Context, dirKey, name string, mode, 
 	}
 	info.ContentETag = contentObj.ETag
 	info.apply(&attr, TypeFile)
-	metaData, err := encodeFileMetadata(ctx, attr)
+	metaData, err := f.encodeMetadata(ctx, attr)
 	if err != nil {
 		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, err
@@ -1472,7 +1477,7 @@ func (f *Filesystem) Mknod(ctx context.Context, dirKey, name string, mode uint32
 		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, err
 	}
-	metaData, err := encodeFileMetadata(ctx, attr)
+	metaData, err := f.encodeMetadata(ctx, attr)
 	if err != nil {
 		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, err
@@ -1517,7 +1522,7 @@ func (f *Filesystem) Symlink(ctx context.Context, dirKey, name, target string, u
 	}
 
 	attr := Attr{Mode: 0777, Uid: uid, Gid: gid, Nlink: 1, Ctime: time.Now()}
-	metaData, err := encodeFileMetadata(ctx, attr)
+	metaData, err := f.encodeMetadata(ctx, attr)
 	if err != nil {
 		_ = f.store.Delete(ctx, newUUID)
 		return "", Attr{}, err
@@ -1597,7 +1602,7 @@ func (f *Filesystem) adjustNlinkAttr(ctx context.Context, uuid string, delta int
 
 		if newNlink <= 0 {
 			attr.Nlink = nlinkZero
-			tomb, err := encodeFileMetadata(ctx, attr)
+			tomb, err := f.encodeMetadata(ctx, attr)
 			if err != nil {
 				return false, Attr{}, err
 			}
@@ -1615,7 +1620,7 @@ func (f *Filesystem) adjustNlinkAttr(ctx context.Context, uuid string, delta int
 		}
 
 		attr.Nlink = uint32(newNlink)
-		updated, err := encodeFileMetadata(ctx, attr)
+		updated, err := f.encodeMetadata(ctx, attr)
 		if err != nil {
 			return false, Attr{}, err
 		}
@@ -1698,11 +1703,11 @@ func (f *Filesystem) writeMetadataRead(ctx context.Context, key string, statusCh
 		} else if attr.Ctime.IsZero() {
 			attr.Ctime = obj.LastModified
 		}
-		newData, err := encodeFileMetadata(ctx, attr)
+		newData, err := f.encodeMetadata(ctx, attr)
 		if err != nil {
 			return nil, nil, err
 		}
-		written, err := f.store.Put(ctx, mk, bytes.NewReader(newData), nil, obj.ETag)
+		written, err := f.store.Put(objstore.Replacing(ctx, obj.VersionID), mk, bytes.NewReader(newData), nil, obj.ETag)
 		if objstore.IsPreconditionFailed(err) {
 			continue
 		}
@@ -2402,7 +2407,7 @@ func (f *Filesystem) TouchAtime(ctx context.Context, key string, typ EntryType) 
 			return nil
 		}
 	}
-	err := f.writeMetadataIf(ctx, key, false, func(a *Attr) bool {
+	err := f.writeMetadataIf(objstore.KeepDate(ctx), key, false, func(a *Attr) bool {
 		a.Atime = now
 		return true
 	})

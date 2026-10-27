@@ -84,7 +84,7 @@ func (f *Filesystem) SetChecksums(ctx context.Context, key, etag string, c Check
 	if err := f.checkWritable(); err != nil {
 		return err
 	}
-	return f.writeMetadataIf(ctx, key, false, func(a *Attr) bool {
+	return f.writeMetadataIf(objstore.KeepDate(ctx), key, false, func(a *Attr) bool {
 		old := a.Checksums[etag]
 		merged := old
 		if len(c.MD5) > 0 {

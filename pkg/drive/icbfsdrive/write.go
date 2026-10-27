@@ -614,6 +614,11 @@ func (d *Drive) begin(ctx context.Context) (context.Context, func(), error) {
 	if t.After(time.Now().Add(maxSourceTimeAhead)) {
 		return ctx, nil, fmt.Errorf("source time %s is in the future: %w", t.Format(time.RFC3339), drive.ErrInvalid)
 	}
+	// From the first change in a source's time on, every version of the
+	// filesystem's items is dated, whatever writes it.
+	if err := d.fs.MarkSourceTime(ctx); err != nil {
+		return ctx, nil, mapErr(err)
+	}
 	rec := &objstore.Recorder{}
 	ctx = objstore.WithRecorder(objstore.WithDeclaredTime(ctx, t), rec)
 	return ctx, func() {

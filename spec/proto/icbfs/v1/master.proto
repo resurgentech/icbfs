@@ -36,6 +36,11 @@ message FilesystemEntry {
   // misread or overwrite objects in a format it doesn't understand. Raising it is how
   // a format change is committed, once every machine can read it.
   uint32 format_version = 8;
+  // source_time: the filesystem is written in a source's time (a
+  // mirror's), set when it's created with a history that starts earlier
+  // or at its first change made under a source time. Every item's
+  // .version then lists all versions of its content and .metadata.
+  bool source_time = 9;
 }
 
 // MasterBlock is the body of the one, fixed, well-known master-block

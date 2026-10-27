@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/resurgentech/icbfs/internal/objstore"
+	"github.com/resurgentech/icbfs/internal/pb"
 )
 
 // A change made under objstore.WithDeclaredTime happened at that time, as
@@ -140,12 +141,13 @@ func (f *Filesystem) restoreCurrent(ctx context.Context, w objstore.Written, tab
 	}
 	var obj *objstore.Object
 	base := objstore.BaseKey(w.Key)
+	cctx := objstore.DatesItself(ctx) // the copy is dated below, as want was
 	if strings.HasSuffix(w.Key, ".metadata") {
 		// The attributes as they were, plus the bookkeeping the late
 		// write added about its own version (its checksums).
-		obj, err = f.mergeMetadataOnTop(ctx, w.Key, want, w.VersionID, rekeys[base])
+		obj, err = f.mergeMetadataOnTop(cctx, w.Key, want, w.VersionID, rekeys[base])
 	} else {
-		obj, err = f.copyVersionOnTop(ctx, w.Key, want)
+		obj, err = f.copyVersionOnTop(cctx, w.Key, want)
 		if err == nil && obj.ETag != want.ETag {
 			rekeys[base] = [2]string{want.ETag, obj.ETag}
 			// Content: its .metadata follows the new ETag, now, unless a
@@ -153,7 +155,7 @@ func (f *Filesystem) restoreCurrent(ctx context.Context, w objstore.Written, tab
 			// which does it (a write here would be the newer version, and
 			// leave that one as it is).
 			if base == w.Key && !pending[metadataObjectKey(base)] {
-				err = f.writeMetadataIf(ctx, base, false, func(a *Attr) bool {
+				err = f.writeMetadataIf(objstore.KeepDate(ctx), base, false, func(a *Attr) bool {
 					rekeyETag(a, want.ETag, obj.ETag)
 					return true
 				})
@@ -166,11 +168,11 @@ func (f *Filesystem) restoreCurrent(ctx context.Context, w objstore.Written, tab
 	if err != nil {
 		return false, err
 	}
-	if tables[base], err = objstore.MergeDates(ctx, f.store, base, objstore.Dates{obj.VersionID: dates.Time(&want)}, false); err != nil {
+	// The copy is the version now; the one it was copied from is the
+	// same bytes at the same date, so it goes, and its line with it.
+	if tables[base], err = objstore.UpdateDates(ctx, f.store, base, objstore.Dates{obj.VersionID: dates.Time(&want)}, want.VersionID); err != nil {
 		return false, err
 	}
-	// The copy is the version now; the one it was copied from is the
-	// same bytes at the same date, so it goes.
 	return true, f.store.Erase(ctx, w.Key, want.VersionID)
 }
 
@@ -207,7 +209,7 @@ func (f *Filesystem) mergeMetadataOnTop(ctx context.Context, key string, want ob
 	}
 	rekeyETag(&attr, rekey[0], rekey[1])
 	attr.dated = attr.dated || late.dated
-	data, err := encodeFileMetadata(ctx, attr)
+	data, err := f.encodeMetadata(ctx, attr)
 	if err != nil {
 		return nil, err
 	}
@@ -243,6 +245,49 @@ func (f *Filesystem) MarkPastChanged(ctx context.Context) error {
 	// Not under the declared time: the mark is news now.
 	_, err := f.store.Put(context.WithoutCancel(undeclared(ctx)), f.pastKey(), bytes.NewReader(nil), nil, "")
 	return err
+}
+
+// SourceTime reports whether the filesystem is written in a source's
+// time (its master entry's source_time), as of attaching or the last
+// Refresh.
+func (f *Filesystem) SourceTime() bool { return f.sourceTime.Load() }
+
+// MarkSourceTime records that the filesystem is written in a source's
+// time, before its first change made under one: from then on every
+// version of its items is dated (dated).
+func (f *Filesystem) MarkSourceTime(ctx context.Context) error {
+	if f.sourceTime.Load() {
+		return nil
+	}
+	err := updateFilesystemEntry(undeclared(ctx), f.store, f.fsName, func(e *pb.FilesystemEntry) {
+		e.SourceTime = true
+	})
+	if err == nil {
+		f.sourceTime.Store(true)
+	}
+	return err
+}
+
+// dated reports whether key is an object every version of which is to
+// be dated (objstore.DateAll): in a filesystem written in a source's
+// time, an item's content or .metadata, a directory's .metadata, or an
+// origin record. Not a lock, a stream, or anything outside the tree.
+func (f *Filesystem) dated(key string) bool {
+	if !f.sourceTime.Load() {
+		return false
+	}
+	base := objstore.BaseKey(key)
+	if key != base && key != metadataObjectKey(base) {
+		return false
+	}
+	rest, ok := strings.CutPrefix(base, f.id+"-")
+	if !ok {
+		return false
+	}
+	if _, err := uuid.Parse(rest); err == nil {
+		return true
+	}
+	return rest == "root-"+f.fsName || strings.HasPrefix(rest, "origin-")
 }
 
 // SetPastChanged has fn told whenever this filesystem's own operations
