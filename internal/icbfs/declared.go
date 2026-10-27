@@ -62,6 +62,9 @@ func undeclared(ctx context.Context) context.Context {
 // record, and puts back on top whatever a version written behind its
 // item's current state displaced. The operation's writes went through
 // this filesystem's store, which records them (objstore.Recording).
+//
+// restored names the keys whose current version was put back on top, and
+// the .metadata of every directory changed behind its latest state.
 func (f *Filesystem) RecordDates(ctx context.Context, rec *objstore.Recorder) (restored map[string]bool, err error) {
 	ctx = undeclared(ctx)
 	// Each item's table as written, for restoreCurrent; an item the
@@ -95,6 +98,34 @@ func (f *Filesystem) RecordDates(ctx context.Context, rec *objstore.Recorder) (r
 		}
 		if did {
 			restored[w.Key] = true
+		}
+	}
+	// A directory changed behind its latest state is late however its
+	// .metadata write went: in a filesystem whose items list every
+	// version, the directory's table says so.
+	if f.sourceTime.Load() {
+		ours := map[string]bool{}
+		for _, w := range written {
+			ours[w.VersionID] = true
+		}
+		for _, w := range written {
+			meta := metadataObjectKey(w.Dir)
+			if w.Dir == "" || restored[meta] {
+				continue
+			}
+			dates, ok := tables[w.Dir]
+			if !ok {
+				if dates, err = objstore.ReadDates(ctx, f.store, w.Dir); err != nil {
+					return restored, err
+				}
+				tables[w.Dir] = dates
+			}
+			for id, t := range dates {
+				if !ours[id] && t.After(w.At) {
+					restored[meta] = true // the drive rewrites its history (repairLateFolders)
+					break
+				}
+			}
 		}
 	}
 	return restored, nil

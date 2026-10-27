@@ -1331,7 +1331,9 @@ func (f *Filesystem) Mkdir(ctx context.Context, dirKey, name string, mode, uid, 
 		_ = f.store.Delete(ctx, metadataObjectKey(newUUID))
 		return "", Attr{}, err
 	}
-	f.touchDir(ctx, dirKey)
+	if err := f.touchDir(ctx, dirKey); err != nil {
+		return "", Attr{}, err
+	}
 	// Exactly what a Stat of the new directory will say (see Create).
 	created, err := combineDirAttr(newUUID, metaData, metaObj.LastModified, blockObj)
 	if err != nil {
@@ -1381,7 +1383,9 @@ func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid,
 		_ = f.store.Delete(ctx, metadataObjectKey(newUUID))
 		return "", Attr{}, "", err
 	}
-	f.touchDir(ctx, dirKey)
+	if err := f.touchDir(ctx, dirKey); err != nil {
+		return "", Attr{}, "", err
+	}
 	// Exactly what a Stat of the new item will say: the kernel may cache
 	// this reply, then ask again, and the two must agree.
 	created, err := combineFileAttr(newUUID, metaData, metaObj.LastModified, contentObj)
@@ -1437,7 +1441,9 @@ func (f *Filesystem) CreateWith(ctx context.Context, dirKey, name string, mode, 
 		_ = f.store.Delete(ctx, metadataObjectKey(newUUID))
 		return "", Attr{}, err
 	}
-	f.touchDir(ctx, dirKey)
+	if err := f.touchDir(ctx, dirKey); err != nil {
+		return "", Attr{}, err
+	}
 	created, err := combineFileAttr(newUUID, metaData, metaObj.LastModified, contentObj)
 	if err != nil {
 		return "", Attr{}, err
@@ -1493,7 +1499,9 @@ func (f *Filesystem) Mknod(ctx context.Context, dirKey, name string, mode uint32
 		_ = f.store.Delete(ctx, metadataObjectKey(newUUID))
 		return "", Attr{}, err
 	}
-	f.touchDir(ctx, dirKey)
+	if err := f.touchDir(ctx, dirKey); err != nil {
+		return "", Attr{}, err
+	}
 	// Exactly what a Stat of the new item will say (see Create).
 	created, err := combineFileAttr(newUUID, metaData, metaObj.LastModified, contentObj)
 	if err != nil {
@@ -1538,7 +1546,9 @@ func (f *Filesystem) Symlink(ctx context.Context, dirKey, name, target string, u
 		_ = f.store.Delete(ctx, metadataObjectKey(newUUID))
 		return "", Attr{}, err
 	}
-	f.touchDir(ctx, dirKey)
+	if err := f.touchDir(ctx, dirKey); err != nil {
+		return "", Attr{}, err
+	}
 	// Exactly what a Stat of the new item will say (see Create).
 	created, err := combineFileAttr(newUUID, metaData, metaObj.LastModified, contentObj)
 	if err != nil {
@@ -1720,11 +1730,12 @@ func (f *Filesystem) writeMetadataRead(ctx context.Context, key string, statusCh
 }
 
 // touchDir records that an entry was added to or removed from the
-// directory at key: its mtime and ctime become now. Best effort, like
-// TouchAtime — by the time this runs the entry change itself has
-// already happened, and failing that operation over a timestamp would
-// misreport it.
-func (f *Filesystem) touchDir(ctx context.Context, key string) {
+// directory at key: its mtime and ctime become now. For an ordinary
+// change it's best effort, like TouchAtime: the entry change itself has
+// happened, and failing it over a timestamp would misreport it. A change
+// under a declared time (a mirror's) is the folder's history, and fails
+// without it.
+func (f *Filesystem) touchDir(ctx context.Context, key string) error {
 	// One instant for both: a status-change write stamps ctime when it
 	// writes, after reading the .metadata, a round trip later than this,
 	// so the two fell in different seconds whenever one ticked over in
@@ -1734,10 +1745,14 @@ func (f *Filesystem) touchDir(ctx context.Context, key string) {
 	if t, ok := objstore.DeclaredTime(ctx); ok {
 		mtime = t
 	}
-	_ = f.writeMetadata(ctx, key, false, func(a *Attr) {
+	err := f.writeMetadata(ctx, key, false, func(a *Attr) {
 		a.Mtime = mtime
 		a.Ctime = now
 	})
+	if _, dated := objstore.DeclaredTime(ctx); !dated {
+		return nil
+	}
+	return err
 }
 
 // touchCtime records a status change to the file or directory at key
@@ -1950,7 +1965,9 @@ func (f *Filesystem) Link(ctx context.Context, dirKey, name, targetUUID string, 
 		_, _ = f.adjustNlink(ctx, targetUUID, -1) // best-effort rollback
 		return Attr{}, err
 	}
-	f.touchDir(ctx, dirKey)
+	if err := f.touchDir(ctx, dirKey); err != nil {
+		return Attr{}, err
+	}
 	return f.Stat(ctx, targetUUID, targetType)
 }
 
@@ -1988,7 +2005,7 @@ func (f *Filesystem) Unlink(ctx context.Context, dirKey, name string) error {
 	if pending == nil {
 		before, _ = f.store.Head(ctx, entry.UUID) // for an entry after all, should this be the last name
 	}
-	f.touchDir(ctx, dirKey)
+	touched := f.touchDir(ctx, dirKey) // reported once the item's own steps are done
 
 	deleted, last, err := f.adjustNlinkAttr(ctx, entry.UUID, -1)
 	if err != nil && !errors.Is(err, ErrNotFound) {
@@ -2002,11 +2019,13 @@ func (f *Filesystem) Unlink(ctx context.Context, dirKey, name string) error {
 		if before != nil {
 			size, version = before.Size, before.VersionID
 		}
-		return f.recordTrash(ctx, entry.UUID, entry.Type, dirKey, name, size, version, last.App[AppDriveOrigin])
+		if err := f.recordTrash(ctx, entry.UUID, entry.Type, dirKey, name, size, version, last.App[AppDriveOrigin]); err != nil {
+			return err
+		}
 	case !deleted:
 		pending.cancel(ctx, f) // a name was added meanwhile: the item stays
 	}
-	return nil
+	return touched
 }
 
 // Rmdir removes an empty directory named name from dirKey.
@@ -2048,7 +2067,7 @@ func (f *Filesystem) Rmdir(ctx context.Context, dirKey, name string) error {
 		pending.cancel(ctx, f)
 		return err
 	}
-	f.touchDir(ctx, dirKey)
+	touched := f.touchDir(ctx, dirKey) // reported once the directory is deleted
 	if err := f.store.Delete(ctx, entry.UUID); err != nil {
 		return err
 	}
@@ -2056,7 +2075,7 @@ func (f *Filesystem) Rmdir(ctx context.Context, dirKey, name string) error {
 	if err := f.store.Delete(ctx, metadataObjectKey(entry.UUID)); err != nil && !objstore.IsNotFound(err) {
 		return err
 	}
-	return nil
+	return touched
 }
 
 // dirContains reports whether targetUUID is ancestorUUID or anywhere under
@@ -2216,9 +2235,13 @@ func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, 
 		_ = f.insertEntry(ctx, oldDirKey, oldName, entry.UUID, entry.Type)
 		return err
 	}
-	f.touchDir(ctx, oldDirKey)
+	if err := f.touchDir(ctx, oldDirKey); err != nil {
+		return err
+	}
 	if newDirKey != oldDirKey {
-		f.touchDir(ctx, newDirKey)
+		if err := f.touchDir(ctx, newDirKey); err != nil {
+			return err
+		}
 	}
 	f.touchCtime(ctx, entry.UUID) // as Linux filesystems do
 	return nil

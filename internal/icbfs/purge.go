@@ -40,7 +40,7 @@ func (f *Filesystem) Purge(ctx context.Context, dirKey, name string, allNames bo
 	if _, err := f.removeEntry(ctx, dirKey, name); err != nil {
 		return err
 	}
-	f.touchDir(ctx, dirKey)
+	touched := f.touchDir(ctx, dirKey) // reported once the purge is done
 	if len(linked) > 0 {
 		// The purged subtree is out of the tree now, so whatever names
 		// the walk finds are the other ones.
@@ -48,7 +48,10 @@ func (f *Filesystem) Purge(ctx context.Context, dirKey, name string, allNames bo
 			return err
 		}
 	}
-	return f.eraseAndMark(ctx, items)
+	if err := f.eraseAndMark(ctx, items); err != nil {
+		return err
+	}
+	return touched
 }
 
 // collectForPurge lists e and, for a directory, everything under it
@@ -89,7 +92,9 @@ func (f *Filesystem) removeNamesOf(ctx context.Context, dirKey string, ids map[s
 			if _, err := f.removeEntry(ctx, dirKey, e.Name); err != nil && !errors.Is(err, ErrNotFound) {
 				return err
 			}
-			f.touchDir(ctx, dirKey)
+			if err := f.touchDir(ctx, dirKey); err != nil {
+				return err
+			}
 		case e.Type == TypeDir:
 			if err := f.removeNamesOf(ctx, e.UUID, ids); err != nil {
 				return err

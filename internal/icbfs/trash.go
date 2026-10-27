@@ -370,7 +370,9 @@ func (f *Filesystem) Restore(ctx context.Context, entryID string, opts RestoreOp
 	if err := f.insertEntry(ctx, dir, name, e.ItemID, e.Type); err != nil {
 		return TrashEntry{}, err
 	}
-	f.touchDir(ctx, dir)
+	if err := f.touchDir(ctx, dir); err != nil {
+		return e, err
+	}
 	// The entry goes with the restore. One left behind would be stale,
 	// which nothing acts on, but the restore says so.
 	if err := f.store.Delete(ctx, key); err != nil {

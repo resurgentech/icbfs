@@ -630,6 +630,11 @@ the filesystem's history goes:
   behind lists the key's versions from the store. A time in the future is
   refused. A filesystem whose history starts before the store wrote it
   gives `Settings.Created`;
+- a directory changed behind its latest state is found late from its
+  `.version` (a version dated after the change), not from the change's
+  write of the directory's modified time; that write is part of a dated
+  change too, which fails without it (an ordinary change's is best
+  effort);
 - dating what a change wrote, and putting right what it wrote behind, are
   part of the change. The drive tries three times; a change it can't
   date is undone (each version it wrote that is still its key's newest
