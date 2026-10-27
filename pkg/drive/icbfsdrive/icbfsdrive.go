@@ -152,6 +152,11 @@ func (d *Drive) step(ctx context.Context, dir *node, name string) (block.Entry, 
 	return dir.fsys.Step(ctx, dir.key, dir.attr, name, d.windows)
 }
 
+// lookupIn is lookup in dir, reading its block afresh.
+func (d *Drive) lookupIn(ctx context.Context, dir *node, name string) (block.Entry, icbfs.Attr, error) {
+	return d.lookup(ctx, dir.fsys, dir.key, name)
+}
+
 // node is a resolved item, with the directories from the filesystem's
 // root down to it — what its inherited ACL and traversal checks need.
 type node struct {
@@ -171,6 +176,12 @@ type ancestor struct {
 }
 
 func (n *node) parentKey() string { return n.chain[len(n.chain)-1].key }
+
+// child is the node of entry e in directory n, with attributes a.
+func (n *node) child(e block.Entry, a icbfs.Attr) *node {
+	return &node{fsys: n.fsys, key: e.UUID, typ: e.Type, name: e.Name, path: joinPath(n.path, e.Name), attr: a,
+		chain: append(append([]ancestor(nil), n.chain...), ancestor{key: n.key, path: n.path, attr: n.attr})}
+}
 
 // rootNode is the drive's root, with the directories above it.
 func (d *Drive) rootNode(ctx context.Context, fsys *icbfs.Filesystem) (*node, error) {
@@ -211,8 +222,7 @@ func (d *Drive) resolvePath(ctx context.Context, fsys *icbfs.Filesystem, p strin
 		if err != nil {
 			return nil, mapErr(err)
 		}
-		n = &node{fsys: fsys, key: e.UUID, typ: e.Type, name: e.Name, path: joinPath(n.path, e.Name), attr: a,
-			chain: append(append([]ancestor(nil), n.chain...), ancestor{key: n.key, path: n.path, attr: n.attr})}
+		n = n.child(e, a)
 	}
 	return n, nil
 }
@@ -294,12 +304,13 @@ func (d *Drive) resolveParent(ctx context.Context, p string, parents bool) (*nod
 		return nil, "", fmt.Errorf("the drive's root: %w", drive.ErrInvalidName)
 	}
 	dir, base := path.Split(p)
+	var parent *node
+	var err error
 	if parents {
-		if _, err := d.mkdirAll(ctx, dir); err != nil {
-			return nil, "", err
-		}
+		parent, err = d.mkdirAll(ctx, dir)
+	} else {
+		parent, err = d.resolvePath(ctx, d.fs, dir)
 	}
-	parent, err := d.resolvePath(ctx, d.fs, dir)
 	if err != nil {
 		return nil, "", err
 	}

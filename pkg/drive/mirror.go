@@ -169,8 +169,11 @@ func (m *Mirror) Apply(ctx context.Context, src SourceItem) (Applied, error) {
 		// where it was copied to, is adopted: indexed now, then brought up
 		// to date like any other.
 		at, serr := m.d.Stat(ctx, ByPath(src.Path), At{})
+		if serr != nil && !errors.Is(serr, ErrNotFound) {
+			return Applied{}, serr
+		}
 		if serr != nil || at.Origin == nil || at.Origin.Drive != m.source || at.Origin.ID != o.ID {
-			return m.create(ctx, src, o)
+			return m.create(ctx, src, o, at, serr == nil)
 		}
 		if err := m.d.SetOrigin(ctx, ItemRef{ID: at.ID, Path: at.Path}, *at.Origin); err != nil {
 			return Applied{}, err
@@ -253,14 +256,11 @@ func sameOrigin(a *Origin, o Origin) bool {
 	return a != nil && a.Drive == o.Drive && a.ID == o.ID && a.Version == o.Version && a.Path == o.Path
 }
 
-// create makes a source item the drive has never held.
-func (m *Mirror) create(ctx context.Context, src SourceItem, o Origin) (Applied, error) {
+// create makes a source item the drive has never held; existing is
+// what's at its path, if taken.
+func (m *Mirror) create(ctx context.Context, src SourceItem, o Origin, existing Item, taken bool) (Applied, error) {
 	ctx = m.at(ctx, born(src))
-	existing, err := m.d.Stat(ctx, ByPath(src.Path), At{})
-	taken := err == nil
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		return Applied{}, err
-	}
+	var err error
 	if src.Type == TypeDir {
 		item := existing
 		modified := time.Time{} // an adopted directory's is its entries'

@@ -152,11 +152,11 @@ func (c *requestCounter) ServerTime(ctx context.Context) (time.Time, error) {
 var requestCeilings = map[string][2]int{
 	// The first folder in source time also dates the root and marks the
 	// filesystem's past, once.
-	"new top-level folder":  {35, 92},
-	"new folder at depth 2": {51, 69},
-	"new file at depth 3":   {58, 76},
+	"new top-level folder":  {29, 86},
+	"new folder at depth 2": {39, 57},
+	"new file at depth 3":   {22, 38},
 	"the same file again":   {9, 10},
-	"a new version of it":   {57, 70},
+	"a new version of it":   {23, 36},
 	// The root, then a step per folder and the file's own stat: two
 	// requests each, and its .version in source time.
 	"stat at depth 3": {8, 9},

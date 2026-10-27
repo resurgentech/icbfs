@@ -147,6 +147,14 @@ uploads only what changed, but the result is still one object.
   1 TiB. A write or truncate past it fails with `EFBIG` on Linux, or
   `STATUS_FILE_TOO_LARGE` on Windows.
 
+**A file made whole is two writes.** A mount creates a file empty and
+writes it at close. The drive API has the content in hand (up to 64 MiB;
+past that it writes as a mount does): `CreateWith` writes the content
+object once, with it, and `.metadata` once, with what the write records
+(times, app data, mode, checksums), then the directory entry. A new version
+is the content, then one `.metadata` write (`SetFileInfo`), whose result
+gives the item its attributes without a stat.
+
 **Open files are edited in a local scratch file, not in memory.** Opening a
 file copies it from a shared on-disk read cache into a private scratch
 file, fetching it from the store if the cache doesn't have it. Reads and

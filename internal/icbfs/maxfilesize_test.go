@@ -64,7 +64,7 @@ func TestMaxFileSize(t *testing.T) {
 	}
 
 	// Truncate shrinks and grows (zero-filled) through the scratch file.
-	if _, _, err := fsys.WriteFile(ctx, key, []byte("0123456789"), ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, key, []byte("0123456789"), ""); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	for _, tc := range []struct {
@@ -97,7 +97,7 @@ func TestTruncateSurvivesARebase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, _, err := fsys.WriteFile(ctx, key, []byte("0123456789"), ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, key, []byte("0123456789"), ""); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	a, err := fsys.Open(ctx, key)

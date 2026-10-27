@@ -212,3 +212,27 @@ func TestChecksumsKeepSourceTimeOrder(t *testing.T) {
 		t.Fatalf("the next dated version after checksums were recorded: %v", err)
 	}
 }
+
+// TestSpooledWrite: a body past the in-memory limit is written as a mount
+// writes a large file, into a file created empty, and comes out the same
+// as one written from memory: its content, one version (the empty one
+// erased), its checksums, and the item's version the one written.
+func TestSpooledWrite(t *testing.T) {
+	defer func(n int64) { inMemoryWrite = n }(inMemoryWrite)
+	inMemoryWrite = 16
+	d := newDrive(t, miniotest.Store(t), icbfs.Settings{Name: "spooled", Size: 1 << 30, RootMode: 0o777}, "")
+	ctx := system()
+	for i, body := range []string{"a body longer than sixteen bytes\n", "a second version, longer again\n"} {
+		it := write(t, ctx, d, "/big.txt", body, drive.Condition{})
+		if got := read(t, ctx, d, drive.ByID(it.ID), drive.At{}); got != body {
+			t.Fatalf("write %d: read %q", i, got)
+		}
+		versions, err := d.Versions(ctx, drive.ByID(it.ID))
+		if err != nil || len(versions) != i+1 {
+			t.Fatalf("write %d: versions %+v, %v", i, versions, err)
+		}
+		if it.Version == nil || it.Version.ID != versions[0].ID || it.Checksums == nil || *it.Checksums != sumsOf([]byte(body)) {
+			t.Fatalf("write %d: item %+v, current version %+v", i, it, versions[0])
+		}
+	}
+}

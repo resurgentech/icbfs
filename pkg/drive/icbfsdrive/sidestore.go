@@ -85,7 +85,7 @@ func (s *SideStore) Put(ctx context.Context, key string, body []byte, meta map[s
 	default:
 		return mapErr(err)
 	}
-	if _, _, err := s.fs.WriteFile(ctx, fileKey, body, etag); err != nil {
+	if _, err := s.fs.WriteFile(ctx, fileKey, body, etag); err != nil {
 		return mapErr(err)
 	}
 	attr, err := s.fs.Stat(ctx, fileKey, icbfs.TypeFile)
@@ -95,14 +95,14 @@ func (s *SideStore) Put(ctx context.Context, key string, body []byte, meta map[s
 	for k := range attr.App {
 		if strings.HasPrefix(k, sideMetaPrefix) {
 			if _, ok := meta[strings.TrimPrefix(k, sideMetaPrefix)]; !ok {
-				if _, err := s.fs.SetAppData(ctx, fileKey, icbfs.TypeFile, k, nil); err != nil {
+				if err := s.fs.SetAppData(ctx, fileKey, icbfs.TypeFile, k, nil); err != nil {
 					return mapErr(err)
 				}
 			}
 		}
 	}
 	for k, v := range meta {
-		if _, err := s.fs.SetAppData(ctx, fileKey, icbfs.TypeFile, sideMetaPrefix+k, []byte(v)); err != nil {
+		if err := s.fs.SetAppData(ctx, fileKey, icbfs.TypeFile, sideMetaPrefix+k, []byte(v)); err != nil {
 			return mapErr(err)
 		}
 	}

@@ -32,7 +32,7 @@ func metadataVersions(t *testing.T, d *Drive, id string) int {
 
 // TestWriteWithInfo: a write with app keys, a mode, Windows attributes,
 // times and an origin makes exactly one .metadata version holding all of
-// them; a bad app key is refused before anything is written.
+// them, written with the file; a bad app key is refused before anything is written.
 func TestWriteWithInfo(t *testing.T) {
 	d := newDrive(t, miniotest.Store(t), icbfs.Settings{Name: "info", Size: 1 << 30, RootMode: 0o777}, "")
 	ctx := system()
@@ -46,8 +46,8 @@ func TestWriteWithInfo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := metadataVersions(t, d, it.ID); n != 2 { // Create's, then the one write
-		t.Fatalf("%d .metadata versions, want 2 (create, then one write)", n)
+	if n := metadataVersions(t, d, it.ID); n != 1 {
+		t.Fatalf("%d .metadata versions, want 1 (written with the file)", n)
 	}
 	if string(it.App["mirror.contactId"]) != "c1" || it.Mode != 0o444 || it.WindowsAttrs == nil || *it.WindowsAttrs != icbfs.WindowsAttrReadOnly ||
 		!it.Modified.Equal(edited) || !it.Created.Equal(born) || it.Origin == nil || it.Origin.ID != "doc1" {
@@ -172,8 +172,8 @@ func TestMirrorRecordsInfo(t *testing.T) {
 	if string(a.Item.App["mirror.contactId"]) != "c1" || a.Item.Mode != 0o644 {
 		t.Fatalf("created: %+v", a.Item)
 	}
-	if n := metadataVersions(t, d, a.Item.ID); n != 2 {
-		t.Fatalf("create: %d .metadata versions, want 2", n)
+	if n := metadataVersions(t, d, a.Item.ID); n != 1 {
+		t.Fatalf("create: %d .metadata versions, want 1", n)
 	}
 	apply(t, ctx, m, "same again", doc, drive.Unchanged)
 
@@ -183,8 +183,8 @@ func TestMirrorRecordsInfo(t *testing.T) {
 	if a.Item.Mode != 0o444 || a.Item.WindowsAttrs == nil || *a.Item.WindowsAttrs != icbfs.WindowsAttrReadOnly || string(a.Item.App["mirror.locked"]) != "1" {
 		t.Fatalf("locked: %+v", a.Item)
 	}
-	if n := metadataVersions(t, d, a.Item.ID); n != 3 {
-		t.Fatalf("locked: %d .metadata versions, want 3", n)
+	if n := metadataVersions(t, d, a.Item.ID); n != 2 {
+		t.Fatalf("locked: %d .metadata versions, want 2", n)
 	}
 	if v, _ := d.Versions(ctx, drive.ByID(a.Item.ID)); len(v) != 1 {
 		t.Fatalf("locked: %d content versions, want 1", len(v))
@@ -200,8 +200,8 @@ func TestMirrorRecordsInfo(t *testing.T) {
 	if string(a.Item.App["mirror.contactId"]) != "c2" || a.Item.Mode != 0o644 || *a.Item.WindowsAttrs != 0 {
 		t.Fatalf("updated: %+v", a.Item)
 	}
-	if n := metadataVersions(t, d, a.Item.ID); n != 4 {
-		t.Fatalf("update: %d .metadata versions, want 4", n)
+	if n := metadataVersions(t, d, a.Item.ID); n != 3 {
+		t.Fatalf("update: %d .metadata versions, want 3", n)
 	}
 
 	// A directory: made, then one write for its record and origin.

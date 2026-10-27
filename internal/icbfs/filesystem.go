@@ -1305,6 +1305,60 @@ func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid,
 	return newUUID, created, contentObj.ETag, nil
 }
 
+// CreateWith is Create with the new file's content and what's recorded
+// about it in the same writes: the content object written once, with
+// data, and .metadata once, with the Windows security descriptor sddl
+// (nil to inherit, as Create does) and info (its ContentETag taken to be
+// the content's). Create and then a write cost four object writes and an
+// empty version left behind; this costs two. The attributes returned are
+// what a Stat would say.
+func (f *Filesystem) CreateWith(ctx context.Context, dirKey, name string, mode, uid, gid uint32, data []byte, sddl []byte, info ItemInfo) (string, Attr, error) {
+	if err := f.checkWritable(); err != nil {
+		return "", Attr{}, err
+	}
+	if err := f.checkName(name); err != nil {
+		return "", Attr{}, err
+	}
+	newUUID, err := f.newKey(ctx)
+	if err != nil {
+		return "", Attr{}, err
+	}
+	attr := Attr{Mode: mode, Uid: uid, Gid: gid, Nlink: 1, Ctime: time.Now()}
+	if err := f.inheritACLs(ctx, dirKey, &attr, false); err != nil {
+		return "", Attr{}, err
+	}
+	if sddl != nil {
+		attr.WindowsSDDL = sddl
+	}
+	contentObj, err := f.store.Put(ctx, newUUID, bytes.NewReader(data), nil, "")
+	if err != nil {
+		return "", Attr{}, err
+	}
+	info.ContentETag = contentObj.ETag
+	info.apply(&attr, TypeFile)
+	metaData, err := encodeFileMetadata(ctx, attr)
+	if err != nil {
+		_ = f.store.Delete(ctx, newUUID)
+		return "", Attr{}, err
+	}
+	metaObj, err := f.store.Put(ctx, metadataObjectKey(newUUID), bytes.NewReader(metaData), nil, "")
+	if err != nil {
+		_ = f.store.Delete(ctx, newUUID)
+		return "", Attr{}, err
+	}
+	if err := f.insertEntry(ctx, dirKey, name, newUUID, TypeFile); err != nil {
+		_ = f.store.Delete(ctx, newUUID)
+		_ = f.store.Delete(ctx, metadataObjectKey(newUUID))
+		return "", Attr{}, err
+	}
+	f.touchDir(ctx, dirKey)
+	created, err := combineFileAttr(newUUID, metaData, metaObj.LastModified, contentObj)
+	if err != nil {
+		return "", Attr{}, err
+	}
+	return newUUID, created, nil
+}
+
 // Mknod creates a FIFO, a Unix socket, or a character or block device (typ
 // TypeFifo, TypeSocket, TypeCharDevice or TypeBlockDevice); rdev is stored
 // only for devices.
@@ -1532,24 +1586,31 @@ func (f *Filesystem) writeMetadata(ctx context.Context, key string, statusChange
 // record's ctime: one with none stored gets its current one, the
 // record's own LastModified, so the write can't move it.
 func (f *Filesystem) writeMetadataIf(ctx context.Context, key string, statusChange bool, mutate func(*Attr) bool) error {
+	_, _, err := f.writeMetadataRead(ctx, key, statusChange, mutate)
+	return err
+}
+
+// writeMetadataRead is writeMetadataIf returning what it wrote and the
+// store's description of it (nil, nil if mutate declined).
+func (f *Filesystem) writeMetadataRead(ctx context.Context, key string, statusChange bool, mutate func(*Attr) bool) ([]byte, *objstore.Object, error) {
 	mk := metadataObjectKey(key)
 	for attempt := 0; attempt < maxTreeRetries; attempt++ {
 		retryPause(ctx, attempt)
 		body, obj, err := f.store.Get(ctx, mk)
 		if err != nil {
-			return mapNotFound(err)
+			return nil, nil, mapNotFound(err)
 		}
 		data, readErr := io.ReadAll(body)
 		body.Close()
 		if readErr != nil {
-			return readErr
+			return nil, nil, readErr
 		}
 		attr, err := decodeFileMetadata(data)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
 		if !mutate(&attr) {
-			return nil
+			return nil, nil, nil
 		}
 		if statusChange {
 			attr.Ctime = time.Now()
@@ -1558,15 +1619,18 @@ func (f *Filesystem) writeMetadataIf(ctx context.Context, key string, statusChan
 		}
 		newData, err := encodeFileMetadata(ctx, attr)
 		if err != nil {
-			return err
+			return nil, nil, err
 		}
-		_, err = f.store.Put(ctx, mk, bytes.NewReader(newData), nil, obj.ETag)
+		written, err := f.store.Put(ctx, mk, bytes.NewReader(newData), nil, obj.ETag)
 		if objstore.IsPreconditionFailed(err) {
 			continue
 		}
-		return err
+		if err != nil {
+			return nil, nil, err
+		}
+		return newData, written, nil
 	}
-	return fmt.Errorf("update metadata %s: exceeded %d retries", key, maxTreeRetries)
+	return nil, nil, fmt.Errorf("update metadata %s: exceeded %d retries", key, maxTreeRetries)
 }
 
 // touchDir records that an entry was added to or removed from the
@@ -1652,7 +1716,7 @@ func (f *Filesystem) SetWindowsACL(ctx context.Context, uuid string, typ EntryTy
 // icbfs's own tools keep about an item (Attr.App), never visible through
 // a mount. App data is icbfs's bookkeeping, not a change to the item:
 // like an access time or checksums, writing it doesn't move ctime.
-func (f *Filesystem) SetAppData(ctx context.Context, uuid string, typ EntryType, key string, value []byte) (Attr, error) {
+func (f *Filesystem) SetAppData(ctx context.Context, uuid string, typ EntryType, key string, value []byte) error {
 	return f.SetItemInfo(ctx, uuid, typ, ItemInfo{App: map[string][]byte{key: value}})
 }
 
@@ -1682,54 +1746,70 @@ type ItemInfo struct {
 // SetItemInfo records info about an item in one metadata write, so a sync
 // daemon's write costs one metadata write, not one per field. A time or
 // a mode is a change to the item and moves ctime; app data and checksums
-// are icbfs's bookkeeping and don't.
-func (f *Filesystem) SetItemInfo(ctx context.Context, uuid string, typ EntryType, info ItemInfo) (Attr, error) {
+// are icbfs's bookkeeping and don't. It returns no attributes, so it
+// costs no stat: a caller that wants them asks.
+func (f *Filesystem) SetItemInfo(ctx context.Context, uuid string, typ EntryType, info ItemInfo) error {
 	if err := f.checkWritable(); err != nil {
-		return Attr{}, err
+		return err
 	}
 	statusChange := info.Mtime != nil || info.Btime != nil || info.Mode != nil || info.WindowsAttrs != nil
 	if info.Mtime == nil && info.Btime == nil && info.Mode == nil && info.WindowsAttrs == nil && len(info.App) == 0 && info.Checksums == nil {
-		return f.Stat(ctx, uuid, typ)
+		return nil
 	}
-	key := uuid
-	err := f.writeMetadata(ctx, key, statusChange, func(a *Attr) {
-		if info.Btime != nil {
-			a.Btime = *info.Btime
-		}
-		if info.Mtime != nil {
-			a.Mtime = *info.Mtime
-			if typ != TypeDir {
-				a.mtimeOverrideETag = info.ContentETag
-			}
-		}
-		if info.Mode != nil {
-			a.Mode = *info.Mode
-			chmodACL(a, *info.Mode)
-		}
-		if info.WindowsAttrs != nil {
-			a.WindowsAttrs, a.HasWindowsAttrs = *info.WindowsAttrs&windowsAttrMask, true
-		}
-		for k, v := range info.App {
-			if v == nil {
-				delete(a.App, k)
-				continue
-			}
-			if a.App == nil {
-				a.App = make(map[string][]byte)
-			}
-			a.App[k] = v
-		}
-		if info.Checksums != nil {
-			if a.Checksums == nil {
-				a.Checksums = map[string]Checksums{}
-			}
-			a.Checksums[info.ContentETag] = *info.Checksums
-		}
-	})
+	return f.writeMetadata(ctx, uuid, statusChange, func(a *Attr) { info.apply(a, typ) })
+}
+
+// SetFileInfo is SetItemInfo for a file whose current content version the
+// caller holds, as a write just returned it (info.ContentETag is taken to
+// be its): the attributes it returns are built from what it wrote and
+// content, with no stat.
+func (f *Filesystem) SetFileInfo(ctx context.Context, key string, content *objstore.Object, info ItemInfo) (Attr, error) {
+	if err := f.checkWritable(); err != nil {
+		return Attr{}, err
+	}
+	info.ContentETag = content.ETag
+	statusChange := info.Mtime != nil || info.Btime != nil || info.Mode != nil || info.WindowsAttrs != nil
+	data, obj, err := f.writeMetadataRead(ctx, key, statusChange, func(a *Attr) bool { info.apply(a, TypeFile); return true })
 	if err != nil {
 		return Attr{}, err
 	}
-	return f.Stat(ctx, uuid, typ)
+	return combineFileAttr(key, data, obj.LastModified, content)
+}
+
+// apply records info in a.
+func (info ItemInfo) apply(a *Attr, typ EntryType) {
+	if info.Btime != nil {
+		a.Btime = *info.Btime
+	}
+	if info.Mtime != nil {
+		a.Mtime = *info.Mtime
+		if typ != TypeDir {
+			a.mtimeOverrideETag = info.ContentETag
+		}
+	}
+	if info.Mode != nil {
+		a.Mode = *info.Mode
+		chmodACL(a, *info.Mode)
+	}
+	if info.WindowsAttrs != nil {
+		a.WindowsAttrs, a.HasWindowsAttrs = *info.WindowsAttrs&windowsAttrMask, true
+	}
+	for k, v := range info.App {
+		if v == nil {
+			delete(a.App, k)
+			continue
+		}
+		if a.App == nil {
+			a.App = make(map[string][]byte)
+		}
+		a.App[k] = v
+	}
+	if info.Checksums != nil {
+		if a.Checksums == nil {
+			a.Checksums = map[string]Checksums{}
+		}
+		a.Checksums[info.ContentETag] = *info.Checksums
+	}
 }
 
 // SetGenericReparseData stores a file's raw, non-symlink reparse point
@@ -2071,27 +2151,14 @@ func (f *Filesystem) ReadFile(ctx context.Context, key string) ([]byte, Attr, st
 // file's mtime.
 //
 // ifMatch makes the write conditional on the content's current ETag, as
-// objstore.Store.Put's does; empty means unconditional. It returns the new
-// ETag, so the next write can be conditional on this one without a read.
-func (f *Filesystem) WriteFile(ctx context.Context, key string, data []byte, ifMatch string) (Attr, string, error) {
-	return f.writeFileFrom(ctx, key, bytes.NewReader(data), ifMatch)
-}
-
-// writeFileFrom is WriteFile from a reader: OpenFile.Flush passes its
-// scratch file, so a large file is never held in memory.
-func (f *Filesystem) writeFileFrom(ctx context.Context, key string, body io.Reader, ifMatch string) (Attr, string, error) {
+// objstore.Store.Put's does; empty means unconditional. It returns the
+// version written (its ETag, so the next write can be conditional on this
+// one without a read), and no attributes, so it costs no stat.
+func (f *Filesystem) WriteFile(ctx context.Context, key string, data []byte, ifMatch string) (*objstore.Object, error) {
 	if err := f.checkWritable(); err != nil {
-		return Attr{}, "", err
+		return nil, err
 	}
-	contentObj, err := f.store.Put(ctx, key, body, nil, ifMatch)
-	if err != nil {
-		return Attr{}, "", err
-	}
-	attr, err := f.statFile(ctx, key)
-	if err != nil {
-		return Attr{}, "", err
-	}
-	return attr, contentObj.ETag, nil
+	return f.store.Put(ctx, key, bytes.NewReader(data), nil, ifMatch)
 }
 
 // SetAttr applies the given changes (each may be nil) to the node at key.

@@ -217,7 +217,7 @@ func TestMirrorAdoptsItemsCopiedBeforeTheIndex(t *testing.T) {
 	ctx := system()
 	it := write(t, ctx, d, "/old.txt", "copied long ago", drive.Condition{})
 	data := []byte(`{"drive":"` + srcDrive + `","id":"old","version":"4.0","path":"/src/old.txt","copied":"2026-01-01T00:00:00Z"}`)
-	if _, err := d.fs.SetAppData(context.Background(), it.ID, icbfs.TypeFile, icbfs.AppDriveOrigin, data); err != nil {
+	if err := d.fs.SetAppData(context.Background(), it.ID, icbfs.TypeFile, icbfs.AppDriveOrigin, data); err != nil {
 		t.Fatal(err)
 	}
 	m := drive.NewMirror(d, srcDrive)

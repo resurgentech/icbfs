@@ -12,7 +12,7 @@ func writeNew(t *testing.T, ctx context.Context, f *Filesystem, dir, name, data 
 	if err != nil {
 		t.Fatalf("create %s: %v", name, err)
 	}
-	if _, _, err := f.WriteFile(ctx, key, []byte(data), etag); err != nil {
+	if _, err := f.WriteFile(ctx, key, []byte(data), etag); err != nil {
 		t.Fatalf("write %s: %v", name, err)
 	}
 	return key
@@ -41,7 +41,7 @@ func TestTrashRestoreKeepsHistory(t *testing.T) {
 
 	key := writeNew(t, ctx, f, root, "a.txt", "one")
 	e, _, _ := f.Lookup(ctx, root, "a.txt")
-	if _, _, err := f.WriteFile(ctx, key, []byte("two"), ""); err != nil {
+	if _, err := f.WriteFile(ctx, key, []byte("two"), ""); err != nil {
 		t.Fatal(err)
 	}
 	before, _ := store.History(ctx, key)
@@ -76,7 +76,7 @@ func TestTrashRestoreKeepsHistory(t *testing.T) {
 	if trash, _ := f.ListTrash(ctx, TrashOptions{}); len(trash) != 0 {
 		t.Fatalf("trash after restore = %v", trash)
 	}
-	if _, _, err := f.WriteFile(ctx, key, []byte("three"), ""); err != nil {
+	if _, err := f.WriteFile(ctx, key, []byte("three"), ""); err != nil {
 		t.Fatalf("write after restore: %v", err)
 	}
 }
@@ -237,7 +237,7 @@ func TestTrashRecordsOrigin(t *testing.T) {
 	root := fsys.RootKey()
 	withOrigin := func(key string, typ EntryType, o string) {
 		t.Helper()
-		if _, err := fsys.SetAppData(ctx, key, typ, AppDriveOrigin, []byte(o)); err != nil {
+		if err := fsys.SetAppData(ctx, key, typ, AppDriveOrigin, []byte(o)); err != nil {
 			t.Fatal(err)
 		}
 	}

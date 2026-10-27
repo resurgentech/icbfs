@@ -20,7 +20,7 @@ func TestNamedStreams(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, _, err := fsys.WriteFile(ctx, file, []byte("main"), ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, file, []byte("main"), ""); err != nil {
 		t.Fatalf("write main: %v", err)
 	}
 	fooKey, _, err := fsys.CreateStream(ctx, file, TypeFile, "foo")

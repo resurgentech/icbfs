@@ -48,7 +48,7 @@ func TestAsOfFilesystem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := live.WriteFile(ctx, a, []byte("one"), ""); err != nil {
+	if _, err := live.WriteFile(ctx, a, []byte("one"), ""); err != nil {
 		t.Fatal(err)
 	}
 	big, _, err := live.Mkdir(ctx, root, "big", 0755, 0, 0)
@@ -106,7 +106,7 @@ func TestAsOfFilesystem(t *testing.T) {
 	first := take("a")
 
 	// Change everything.
-	if _, _, err := live.WriteFile(ctx, a, []byte("two, longer"), ""); err != nil {
+	if _, err := live.WriteFile(ctx, a, []byte("two, longer"), ""); err != nil {
 		t.Fatal(err)
 	}
 	mode := uint32(0600)

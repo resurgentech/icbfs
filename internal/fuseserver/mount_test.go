@@ -327,7 +327,7 @@ func TestMountDefaultPermissionsEnforcesOtherBits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create via Filesystem API: %v", err)
 	}
-	if _, _, err := fsys.WriteFile(ctx, key, []byte("secret"), ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, key, []byte("secret"), ""); err != nil {
 		t.Fatalf("seed content: %v", err)
 	}
 
@@ -1157,7 +1157,7 @@ func TestMountNotifyDispatchesSignalToCorrectInode(t *testing.T) {
 	// The second, independent client: writes directly to the backend
 	// object this mount's "watched.txt" resolves to, never going
 	// through this mount's FUSE layer at all.
-	if _, _, err := fsys.WriteFile(ctx, entry.UUID, []byte("v2 from another client"), ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, entry.UUID, []byte("v2 from another client"), ""); err != nil {
 		t.Fatalf("second client write: %v", err)
 	}
 

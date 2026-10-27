@@ -40,7 +40,7 @@ func TestConcurrentNonOverlappingWritesBothSurvive(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	base := make([]byte, size)
-	if _, _, err := fsys.WriteFile(ctx, key, base, etag); err != nil {
+	if _, err := fsys.WriteFile(ctx, key, base, etag); err != nil {
 		t.Fatalf("seed content: %v", err)
 	}
 
@@ -119,7 +119,7 @@ func TestFlushEscalatesWhenPlainRetryBudgetIsExhausted(t *testing.T) {
 	// Another writer changes the object first, so the session's ETag is
 	// stale and its only attempt fails.
 	concurrent := []byte("someone-else-wrote-this")
-	if _, _, err := fsys.WriteFile(ctx, key, concurrent, ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, key, concurrent, ""); err != nil {
 		t.Fatalf("simulate a concurrent writer: %v", err)
 	}
 
@@ -155,7 +155,7 @@ func TestFlushRefusedWhenTouchedRangeOverlapsExternalLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, _, err := fsys.WriteFile(ctx, key, make([]byte, 20), ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, key, make([]byte, 20), ""); err != nil {
 		t.Fatalf("seed content: %v", err)
 	}
 
@@ -433,7 +433,7 @@ func TestInterleavedWritesAllSurvive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := fsys.WriteFile(ctx, key, bytes.Repeat([]byte("."), 1100), etag); err != nil {
+	if _, err := fsys.WriteFile(ctx, key, bytes.Repeat([]byte("."), 1100), etag); err != nil {
 		t.Fatal(err)
 	}
 	ours, err := fsys.Open(ctx, key)
@@ -483,7 +483,7 @@ func TestFlushNotRefusedByLockBetweenEdits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := fsys.WriteFile(ctx, key, make([]byte, 1100), ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, key, make([]byte, 1100), ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := fsys.TryAcquireLockRange(ctx, key, 500, 510, "client-1", 30*time.Second); err != nil {

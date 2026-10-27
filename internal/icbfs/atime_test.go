@@ -82,7 +82,7 @@ func TestAtimeModes(t *testing.T) {
 	}
 	// ... until the file changes again.
 	time.Sleep(1100 * time.Millisecond)
-	if _, _, err := fsys.WriteFile(ctx, key, []byte("new"), ""); err != nil {
+	if _, err := fsys.WriteFile(ctx, key, []byte("new"), ""); err != nil {
 		t.Fatal(err)
 	}
 	touch(key, TypeFile)

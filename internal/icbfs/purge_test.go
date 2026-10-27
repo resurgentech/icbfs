@@ -33,7 +33,7 @@ func TestPurgeTrash(t *testing.T) {
 	root := f.RootKey()
 
 	key := writeNew(t, ctx, f, root, "a", "one")
-	if _, _, err := f.WriteFile(ctx, key, []byte("two"), ""); err != nil {
+	if _, err := f.WriteFile(ctx, key, []byte("two"), ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := f.CreateStream(ctx, key, TypeFile, "ads"); err != nil {
@@ -119,7 +119,7 @@ func TestPruneErasesHistory(t *testing.T) {
 	f, store := newTestFilesystem(t)
 	ctx := context.Background()
 	key := writeNew(t, ctx, f, f.RootKey(), "a", "one")
-	if _, _, err := f.WriteFile(ctx, key, []byte("two"), ""); err != nil {
+	if _, err := f.WriteFile(ctx, key, []byte("two"), ""); err != nil {
 		t.Fatal(err)
 	}
 	prefix := f.prefix()

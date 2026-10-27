@@ -225,7 +225,8 @@ source's changes oldest first.
 `Apply` returns an `Applied`: the item, and the actions it took. A
 `SourceItem` carries, besides its content, what the mirror records on the
 item: `ModTime`, `Created`, `Changed`, `App`, `Mode`, `WindowsAttrs`. All
-of it goes in the one metadata write of a create or a new version, and
+of it goes in the one metadata write of a create or a new version (on
+icbfs a new file is its content and its `.metadata`, each written once), and
 on the no-content path (`retimed`) in one `SetInfo`, only what differs;
 an item is `unchanged` only when none of it differs, and then nothing is
 written. That needs a drive that's an `InfoSetter`; on one that's only a
