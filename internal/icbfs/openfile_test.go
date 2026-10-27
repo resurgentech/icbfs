@@ -504,3 +504,32 @@ func TestFlushNotRefusedByLockBetweenEdits(t *testing.T) {
 		t.Fatalf("flush of an edit inside the lock: %v, want ErrLocked", err)
 	}
 }
+
+// TestCloseReportsUnsaved: the last Close of an open with writes no Flush
+// saved drops them, and says so; one after a Flush has nothing to say.
+func TestCloseReportsUnsaved(t *testing.T) {
+	fsys, _ := newTestFilesystem(t)
+	ctx := context.Background()
+	key := writeNew(t, ctx, fsys, fsys.RootKey(), "a.txt", "saved")
+	for _, flush := range []bool{true, false} {
+		open, err := fsys.Open(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := open.WriteAt([]byte("more"), 5); err != nil {
+			t.Fatal(err)
+		}
+		if flush {
+			if _, err := open.Flush(ctx); err != nil {
+				t.Fatal(err)
+			}
+		}
+		err = open.Close()
+		if flush && err != nil {
+			t.Fatalf("closing after a flush: %v", err)
+		}
+		if !flush && !errors.Is(err, ErrUnsaved) {
+			t.Fatalf("closing with writes unsaved: %v, want ErrUnsaved", err)
+		}
+	}
+}

@@ -168,7 +168,9 @@ file, for a mapping's pages written back after the close.
 - Every open of a file in one mount shares that one scratch file, so a
   write through one descriptor is read through every other at once, as on
   a local disk. Any close or `fsync` stores all of them; the last close
-  removes the scratch file. Opening a file already open picks up another
+  removes the scratch file. Writes still unsaved then (their flush
+  failed) are dropped, and the core's `Close` says so (`ErrUnsaved`);
+  a Windows close has nowhere to report it. Opening a file already open picks up another
   machine's newer version if nothing here is unflushed (close-to-open);
   otherwise the next flush merges onto it.
 - A file removed while it's open here lives until its last close, as on a

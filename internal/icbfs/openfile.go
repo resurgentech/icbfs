@@ -3,6 +3,7 @@ package icbfs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"sync"
@@ -26,6 +27,11 @@ const lockEscalationLeaseTTL = 30 * time.Second
 // mount without locking, or when, with locking, even the escalated write
 // can't land (for example, ctx ends before the lock is taken).
 var ErrWriteContention = errors.New("content write: exceeded retry budget and lock escalation under contention")
+
+// ErrUnsaved is a last Close's answer when it dropped writes no Flush
+// saved: the caller may have nowhere to report it (a Windows close), but
+// the core says so.
+var ErrUnsaved = errors.New("closed with writes that were never saved")
 
 // content is a file's content while it's open in this process: a local
 // scratch file every open of the file reads and writes, as on a local
@@ -187,6 +193,7 @@ func (f *Filesystem) NewOpenFile(key, etag string, data []byte) *OpenFile {
 // Close ends this open. Access layers call it exactly once, when the
 // handle closes. The last open's Close removes the scratch file, unflushed
 // writes and all: flushing is the caller's (Flush, at every close(2)).
+// Writes dropped that way are ErrUnsaved.
 //
 // The last Close of a file unlinked while open deletes its objects (see
 // openSessions).
@@ -212,6 +219,9 @@ func (o *OpenFile) Close() error {
 	err := c.file.Close()
 	_ = os.Remove(name)
 	c.file = nil
+	if c.dirty {
+		return fmt.Errorf("%s: %w", c.key, ErrUnsaved)
+	}
 	return err
 }
 

@@ -762,7 +762,8 @@ func (d *driver) releaseShared(h *fileHandle) {
 		s.mu.Lock()
 		if s.open != nil {
 			// Releases the private local scratch file — otherwise it leaks for the life of
-			// the mount process.
+			// the mount process. A Windows close has nowhere to report
+			// writes it couldn't save (icbfs.ErrUnsaved): dropped.
 			_ = s.open.Close()
 			s.open = nil
 		}
