@@ -252,6 +252,15 @@ and origin in one write.
 - On icbfs, finding a source item is a lookup (`OriginFinder`: an origin
   record per item, and a pointer from each trashed item to its entry);
   any other backend is searched, a listing of the drive and its trash.
+- Applying in parallel: on icbfs, items made or removed under one folder
+  contend on that folder's block, since each is a compare-and-swap of it.
+  Of several at once, one lands and the rest read the block again and
+  retry (with a short random pause, up to 20 times), so siblings cost
+  extra rounds but all land. Items under different folders don't contend
+  at all. A daemon can run applies across folders as wide as it likes;
+  under any one folder, a handful at once is the useful most, and the
+  retries are what bounds it, not correctness.
+  (`TestCreatesInParallel` shows both halves.)
 
 ### Capabilities
 
