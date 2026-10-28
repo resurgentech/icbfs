@@ -240,8 +240,12 @@ console window; run from a prompt, it writes to that prompt.
 
 ### The Windows package
 
-`icbfs-X.Y.Z-x64.msi` and `icbfs-X.Y.Z-arm64.msi`, one per
-architecture, built from a release tag (below). It installs
+Each [release](https://github.com/resurgentech/icbfs/releases) has an
+MSI per architecture, `icbfs-X.Y.Z-x64.msi` and `icbfs-X.Y.Z-arm64.msi`,
+built from the tag by the release workflow and signed through SignPath
+once the project is approved there (the README's "Code signing
+policy"; until then they are unsigned, and the release says so). It
+installs
 `icbfs-winfsp` and `icbfs-cli` under `C:\Program Files\icbfs`, and a
 scheduled task that mounts the drive at sign-in. WinFsp is not in it:
 install [WinFsp's own MSI](https://winfsp.dev/rel/) first, as above;
@@ -304,30 +308,29 @@ leaves WinFsp.
 
 **Building it.** The package is `packaging/windows` in the repository:
 `icbfs.wxs` (WiX), `mount-task.ps1` (registers the task; the installer
-runs it as the machine), `build.ps1` (signs the commands, builds the
-MSIs, signs those; on Windows) and `package.sh`, which drives it from
-the repository's checkout, with the Windows test VM
-([test/windows](../test/windows/README.md)) as the Windows machine:
+runs it as the machine), `build-commands.sh` (the commands, both
+architectures, cross-compiled from git with their version resources
+from [go-winres](https://github.com/tc-hib/go-winres), so `-version`
+says the tag), `build.ps1` (the MSIs, on Windows, with the .NET SDK
+and the WiX dotnet tool pinned in `.config`) and `check-msi.ps1`
+(installs, checks, repairs and uninstalls one). The release workflow
+runs the first two on a GitHub-hosted Windows runner, the check on
+another, and hands the MSIs to SignPath. To try the package before a
+tag, with the Windows test VM ([test/windows](../test/windows/README.md))
+as the Windows machine:
 
 ```
-just package           # HEAD's tag vX.Y.Z, from a clean checkout of it, into dist/icbfs-X.Y.Z-{x64,arm64}.msi
-just package 0.1.1     # this working tree as 0.1.1: a build to try, not to ship
-just package-test      # installs, checks, repairs and uninstalls dist/icbfs-X.Y.Z-x64.msi on the VM (check-msi.ps1)
+just package 0.1.1     # this working tree as 0.1.1, unsigned, into dist/icbfs-0.1.1-{x64,arm64}.msi
+just package           # HEAD's tag vX.Y.Z, from a clean checkout of it
+just package-test      # installs, checks, repairs and uninstalls dist/icbfs-X.Y.Z-x64.msi on the VM
 ```
 
-The commands are cross-compiled here, from git, so `-version` says the
-tag, with their version resources (product name `icbfs`, the version)
-from [go-winres](https://github.com/tc-hib/go-winres); the VM does the
-signing and the MSIs, with the .NET SDK and the WiX dotnet tool pinned
-in `packaging/windows/.config`. The commands and the MSIs are signed
-with the code signing key `package.sh` is given: from OpenBao
-(`ICBFS_CODESIGN_BAO_PATH`, after `bao login`), a PFX file
-(`ICBFS_CODESIGN=pfx`), or none (`ICBFS_CODESIGN=none`, unsigned). The
-key goes to the VM over SSH's standard input and is never written
-there. A self-signed signing certificate is trusted only on machines
-set up to trust it; a deployment does that before it installs. The
-package isn't published anywhere by itself: whoever builds it hands it
-on.
+`ICBFS_CODESIGN_PFX` (a PFX file; `ICBFS_CODESIGN_PASSWORD` its
+password; or `-` for the PFX in base64 and its password, a line each,
+on standard input) signs such a build with that key, to test signed
+installs, or for a deployment that trusts a key of its own;
+`package-test` then checks the signatures too. The key goes to the VM
+over SSH's standard input and is never written there.
 
 ### What works on Windows
 
