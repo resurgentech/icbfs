@@ -31,7 +31,6 @@ and an SSH key at `~/.ssh/id_ed25519.pub`.
 ./run-xfstests.sh <ip> [args]    # xfstests, -g quick by default (most of a day)
 ./run-cthon.sh <ip>              # Connectathon: basic, general, special and lock tests
 ./run-mount-helper-test.sh <ip>  # mount -t fuse.icbfs through the helper
-./run-logging-test.sh <ip>       # mount → icbfs-logd → icbfs-mockserver (~1 min)
 ./run-largefile-test.sh <ip>     # 6 GiB file; opt-in (~10 min, ~20 GB of traffic)
 ../metadata/run-linux.sh <ip>    # metadata copies (see test/metadata)
 ```
@@ -51,17 +50,6 @@ real bucket or container instead of MinIO (`test/store.sh`).
 
 Re-check a saved log with `./pjdfstest-check.sh work/<log>`.
 
-**The logging test** runs `icbfs-mockserver` in a container on the host,
-and `icbfs-logd` plus a mount on the VM.
-
-- The mount gets its store credentials only from the server.
-- A shell then makes a directory, and writes, reads, lists, appends to,
-  renames and removes a file. The server's log must hold exactly the
-  seven events those produce.
-- It runs with synchronous logging, then with `-log-async`.
-- It checks that a drive the server doesn't know can't mount, and that a
-  read-only drive on a directory mounts just that directory.
-- It runs `icbfs-cli` through the daemon, with no credentials.
 
 **The large-file test** is not part of the regular runs. Run it after
 changing the content write path (flush, multipart uploads, truncate, the

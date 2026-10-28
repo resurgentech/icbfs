@@ -164,8 +164,6 @@ Linux-only flags:
 | `-locking=false` | refuse `flock`/`fcntl` (ENOSYS). By default they're locks shared with every other mount (see [architecture.md](architecture.md#locking)), which costs a read of the file's `.lock` object per flush. |
 | `-meta-cache D` | how long the kernel trusts names and attributes (above): `5s` by default, a day for `-as-of`, `0` for not at all |
 | `-notify` | MinIO change notifications: a lock wait retries as soon as the lock changes |
-| `-log-socket SOCK -drive ID` | mount a drive through the logging daemon (see [daemon.md](daemon.md)) |
-| `-log-async` | with `-log-socket`: queue events instead of waiting for the server |
 | `-read-only` | mount read-only |
 | `-dev`, `-suid` | honour device nodes, and setuid and setgid bits on executables (as root). Off by default, as on every FUSE mount: anyone who can write the filesystem, from any machine, could plant a device node or a setuid binary. |
 | `-noexec` | don't allow executing files from the mount |

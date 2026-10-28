@@ -1,7 +1,7 @@
 # icbfs tasks. `just` lists them.
 
-linux_cmds := "./cmd/icbfs ./cmd/icbfs-cli ./cmd/icbfs-logd ./cmd/icbfs-mockserver ./cmd/drive-api"
-windows_cmds := "./cmd/icbfs-winfsp ./cmd/icbfs-cli ./cmd/drive-api"
+linux_cmds := "./cmd/icbfs ./cmd/icbfs-cli"
+windows_cmds := "./cmd/icbfs-winfsp ./cmd/icbfs-cli"
 vm_ip := `virsh domifaddr icbfs-fuse-test 2>/dev/null | awk '/ipv4/{print $4}' | cut -d/ -f1`
 
 [private]
@@ -51,9 +51,8 @@ fmt-check:
 tidy-check:
     go mod tidy -diff
 
-# Regenerate the drive API code and the protobuf code
+# Regenerate the protobuf code
 generate:
-    go generate ./pkg/drive/driveapi
     PATH="$PATH:$(go env GOPATH)/bin" protoc --go_out=. --go_opt=module=github.com/resurgentech/icbfs spec/proto/icbfs/v1/*.proto
 
 # What CI checks

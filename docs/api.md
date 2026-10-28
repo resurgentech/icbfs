@@ -1,14 +1,10 @@
-# The drive API
+# The drive library
 
-A document API over **drives**, as a Go library with HTTP handlers. A host
-application mounts the handlers in its own server and supplies
-authentication, its drive registry and its permission check. The library
-does the rest. `cmd/drive-api` serves the same handlers on their own, for
-testing.
-
-[`spec/openapi/drive.yaml`](../spec/openapi/drive.yaml) is the contract.
-The Go models and client are generated from it into
-`pkg/drive/driveapi/api.gen.go` (`go generate ./pkg/drive/driveapi`).
+A document API over **drives**, as a Go library. A host application
+opens drives, says who is acting and as which profile, and the library
+does the rest: listing, reading, writing, versions, named versions,
+trash, drafts, copies between drives, diffs, mirroring a source, and a
+permission check per item.
 
 ## Terms
 
@@ -29,26 +25,11 @@ The Go models and client are generated from it into
 ```
 pkg/drive                 the Drive interface, capabilities, Copy, Diff, Drafts, profiles
 pkg/drive/icbfsdrive      the icbfs backend, and the side store on an icbfs filesystem
-pkg/drive/driveapi        Fiber v3 handlers (Mount), generated models and client, Standalone
 pkg/icbfs                 opening a bucket; creating and administering filesystems
 pkg/history               a filesystem's past for a program browsing it (below)
 pkg/icbfstest             a throwaway MinIO for tests of programs built on icbfs
 internal/acl              the Windows access check
-cmd/drive-api             the standalone server
 ```
-
-The host calls `driveapi.Mount(router, cfg)`. `Config` is what it
-supplies:
-
-| field | what it is |
-|---|---|
-| `Drive` | finds a drive by its registry ID, with its name and kind (a `DriveEntry`); `ErrNotFound` if there's none, or the actor may not know of it |
-| `Authorize` | may this request's actor do this permission on this drive? Answers the actor and the actor's profile on the drive. |
-| `AuthorizeBucket` | the same for a registered bucket. The profile is who a new filesystem's root is owned by. |
-| `Bucket` | opens a registered bucket |
-| `Drafts` | a drive's drafts store: the side store in the drive's own bucket where it has one, otherwise the deployment's. `nil` means drafts are not supported. |
-| `Stop` | when closed, ends every event stream |
-| `Audit` | told of every drive operation once it's answered: actor, profile, route, item, status |
 
 ## The `Drive` interface
 
@@ -107,12 +88,11 @@ Windows ReadOnly/Hidden/System/Archive bits. A source item locked at its
 source is written with mode 0444 (0555 for a folder) and ReadOnly, and
 every mount shows it read-only; a mount's own chmod still works. An item
 reports them back as `Item.App`, `Item.Mode` and `Item.WindowsAttrs`, to
-callers of the library only (not over HTTP).
+callers of the library.
 
 **Writing without spooling.** `WriteOptions.Size` is the body's length
 when the caller knows it: a download's reported length, a listing's size,
-a local file's, an HTTP upload's `Content-Length` (the HTTP handler and
-`drive.Copy` fill it in). Known, the body goes to the store as it
+a local file's, an upload's `Content-Length` (`drive.Copy` fills it in). Known, the body goes to the store as it
 arrives: one put when it fits one part, else parts straight from the
 body with one part in memory at a time, and nothing on disk. A body that
 turns out shorter or longer than its size fails the write, which then
@@ -148,7 +128,7 @@ keys use, say. `AppObject(ctx, name)`, `SetAppObject(ctx, name, data)`,
 app keys (`<tool>.<name>`), objects are small (4 MiB at most), and
 versioned, so a view of the past reads the one current then. Reading one
 needs the right to read the drive's root, writing one the right to write
-it. No mount shows them, and nothing over HTTP.
+it. No mount shows them.
 
 **Source time.** `drive.WithSourceTime(ctx, t)` says the changes made
 under ctx happened at t at their source: a mirror copying a source's
@@ -175,8 +155,6 @@ otherwise.
   returns the error, so applying it again is safe. From its first change
   under a source time on, a filesystem dates every version of its items,
   ordinary writes too.
-- The HTTP API doesn't take a source time: it's for a mirror using the
-  library.
 
 **Corrections.** A past the source got wrong (a date, a version that
 shouldn't be there) is put right by the caller, with a drive that's a
@@ -299,7 +277,7 @@ backend has them all:
 | `names` | named versions | yes |
 | `trash` | deleted items can be listed and restored | yes |
 | `purge` | permanent delete | yes |
-| `conditionalWrite` | `If-Match` / `If-None-Match` | yes |
+| `conditionalWrite` | a write only if still this version, or only if absent | yes |
 | `events` | a change stream | yes |
 | `origin` | a copy keeps where it came from | yes |
 | `permissions` | `windows`, `posix`, or none | the filesystem's primary mode |
@@ -376,22 +354,20 @@ doesn't make an open editor see a conflict.
 - `version=<id>` fetches a specific version in one store call. A time means
   listing the file's versions first. `version=` is a named version when the
   drive has a name of that value, and a version ID otherwise.
-- Content responses carry `ETag: "<version id>"`.
-  - A write with `If-Match: "<version id>"` lands only if the file is still
-    that version. Otherwise it answers 412, with the current version in
-    `x-drive-current-version`.
-  - `If-None-Match: *` means "only if absent".
+- A write with a `Condition` of a version ID lands only if the file is
+  still that version; otherwise it fails with a precondition error that
+  carries the current version. The other condition is "only if absent".
 - Precision is the store's: MinIO keeps milliseconds, and AWS S3 keeps
   seconds. Two saves in one second on S3 share a time, but their IDs still
   tell them apart.
-- A file the API creates starts with one version, its content.
+- A file the library creates starts with one version, its content.
 
 **Checksums.** Each version can have an MD5 and a SHA-256 (`checksums`,
 hex), on the item, on each version, and from `Checksums` (`drive.Checksummer`
-in Go, `GET …/checksums` over HTTP), which computes and keeps them for any
+), which computes and keeps them for any
 version that hasn't any.
 
-- A write through the drive API computes both as its bytes go by. A mount
+- A write through the library computes both as its bytes go by. A mount
   writing a file in one piece gets them at its flush; a mount's part-edit
   of a big file (a multipart write) doesn't, until they're asked for, not
   to read gigabytes for a few bytes.
@@ -405,19 +381,18 @@ version that hasn't any.
 **As of a time.** `asOf=<time>` on `list`, `stat` and `content` shows the
 drive read-only as it was then.
 
-- A time before the filesystem existed answers 404.
+- A time before the filesystem existed is not found.
 - A time in the future, by the store's clock, answers 400. A time up to two
   seconds ahead is waited for.
 
 **Named versions.**
 
-- `GET …/names` lists the drive's names and the filesystem-wide ones. A
+- `Names` lists the drive's names and the filesystem-wide ones. A
   sibling drive's names are not shown.
-- `POST …/names` with `{"name", "at"}` creates one. Without `at`, the time
-  is the store's timestamp for writing the name, so everything finished
-  before the request is included. `"scope": "filesystem"` makes a
-  filesystem-wide name.
-- `DELETE …/names/{name}` deletes one. Names are never moved.
+- `CreateName(name, at, filesystemWide)` creates one. With a zero time,
+  the time is the store's timestamp for writing the name, so everything
+  finished before the call is included.
+- `DeleteName` deletes one. Names are never moved.
 - A file version carries a name in `versions` when it was the file's
   current version at that name's time.
 
@@ -498,85 +473,62 @@ defer d.Close()
   a fresh bucket on a throwaway MinIO in Docker, and `Start(t)` also
   returns its store configuration, for code that opens a store itself.
 
-## Endpoints
+## Operations
 
-Drive paths are under `/api/v1/drives/{drive}`, where `{drive}` is the
-host's drive ID.
-
-- Items are named by `path=` (from the drive's root) or `id=`.
-- Metadata is JSON, content is raw bytes, and times are RFC 3339.
-- Paths are looked up case-insensitively on primary-Windows filesystems,
-  and exactly on primary-POSIX ones.
-
-### The drive
-
-- `GET /api/v1/drives/{drive}` returns the drive's id, name, kind and
-  capabilities, and the actor and its profile.
+Items are named by an `ItemRef`, a path from the drive's root or an ID.
+Paths are looked up case-insensitively on primary-Windows filesystems,
+and exactly on primary-POSIX ones. FIFOs, sockets, devices, and anything
+the profile may not see are left out of listings.
 
 ### Reading
 
-- `GET …/list?path=` lists one directory.
-  - Options: `depth`, `limit`, `cursor`, `sort`, and `asOf` or `version`.
-  - Each entry has: name, path, ID, type (`file`, `dir`, `symlink`), size,
-    contentType, the current version (time and ID), modified, changed,
-    created, `checksums` (when computed), `hasDraft` and `draftsBy`.
-  - FIFOs, sockets, devices, and anything the profile may not see are left
-    out.
-- `GET …/stat?path=` returns one item: the same fields, plus every path to
-  it (hard links), parentId, owner, and the actor's effective rights on it
-  (`read`, `write`, `delete`, `changePermissions`).
-- `GET …/content?path=` streams the bytes.
-  - Headers: `Content-Type`, `Content-Length`, `ETag`, `Last-Modified` and
-    `x-drive-item-id`.
-  - `Range` answers 206, and `If-None-Match` answers 304.
-  - Options: `version=`, `asOf=`, and `download=1` for an attachment.
-  - `HEAD` returns the headers only.
-- `GET …/versions?id=` lists a file's versions.
-- `GET …/checksums?path=` (or `id=`, and `version=`) returns a version's
-  `{"md5", "sha256"}`, computing and keeping them if they weren't.
-- `GET …/diff?id=&from=&to=` returns a unified diff of two versions of a
+- `List` lists one directory, with depth, a page limit and cursor, a
+  sort, and an `At`. Each `Item` has its name, path, ID, type (file,
+  dir, symlink), size, content type, current version (time and ID),
+  modified, changed and created times, checksums when computed, and
+  whether anyone has a draft of it.
+- `Stat` is one item, with every path to it (hard links), its parent,
+  its owner, and the actor's effective rights on it: read, write,
+  delete, change permissions.
+- `Read` streams a version's bytes, or a range of them.
+- `Versions` lists a file's versions; `Checksums` (on a
+  `drive.Checksummer`) a version's MD5 and SHA-256, computing and keeping
+  them if they weren't; `drive.Diff` a unified diff of two versions of a
   text file.
 
 ### Writing
 
-- `PUT …/content?path=` makes the body the file's content.
-  - It takes `If-Match`, `If-None-Match`, or neither for an unconditional
-    write; and `parents=1` to create missing directories.
-  - `X-Drive-MD5` and `X-Drive-SHA256` (hex) are the content's checksums as
-    the caller knows them: if what arrived doesn't match, nothing is
-    written (400, `checksum_mismatch`).
-  - The body can be up to the filesystem's max file size; anything larger
-    answers 413.
-- `POST …/mkdir` takes `{"path", "parents"}`.
-- `POST …/move` takes `{"from"` or `"fromId", "to", "replace"}`. The
-  item's ID doesn't change.
-- `POST …/copy` takes `{"from"` or `"fromId", "version"` or `"asOf", "to",
-  "toDrive"}`. It copies within the drive or to another drive, optionally
-  from an old or named version, or as the source was at a time.
-- `DELETE …/content?path=` moves the item to the trash. `recursive=1`
-  deletes a non-empty directory as one trash batch. `If-Match` is honored.
-- `POST …/restore-version` takes `{"id", "version"}`. That version's content
-  becomes current again, as a new version.
+- `Write` makes the body a file's content, with a `Condition` (still
+  this version, absent, or none), `parents` to create missing directories,
+  and the checksums the caller knows: if what arrived doesn't match,
+  nothing is written. A body past the filesystem's max file size fails.
+- `Mkdir`, `Move` (the item's ID doesn't change; `replace` takes a taken
+  name), `drive.Copy` (within the drive or to another, from a version, a
+  named version or a time).
+- `Delete` moves the item to the trash; `recursive` deletes a non-empty
+  directory as one trash batch. A `Condition` is honored.
+- Restoring a version is a `Write` of that version's content: it becomes
+  current again, as a new version.
 
 ### Trash
 
-A delete from the API or from any mount records a trash entry when a file's
-last name goes or a directory is removed. An entry holds the ID, name,
-original path, when, by whom, the last version and size, and the item's
-origin (where it had been copied from: `origin`, as on an item) if it had
+A delete from the library or from any mount records a trash entry when a
+file's last name goes or a directory is removed. An entry holds the ID,
+name, original path, when, by whom, the last version and size, and the
+item's origin (where it had been copied from, as on an item) if it had
 one. Nothing expires: an entry stays until the item is purged.
 
-- `GET …/trash?path=` lists deleted items, newest first, optionally only
-  those from under a directory. A trashed item's versions and content can
-  be read before restoring it (`versions?id=`, `content?id=&version=`).
-- `originDrive=` keeps only entries whose item had been copied from that
-  drive, and `originId=` only from that item there. A mirror finds this
-  way what it trashed when its source brings an item back with the same
-  id, restores it, then writes a new version only if the source's version
-  differs.
-- `POST …/trash/{entry}/restore` takes `{"to", "parents", "replace"}`.
-  - Without `to`, the item goes back to its original path.
-  - A taken name answers 409.
+- `Trash` lists deleted items, newest first, optionally only those from
+  under a directory. A trashed item's versions and content can be read
+  before restoring it.
+- `TrashOptions.OriginDrive` keeps only entries whose item had been
+  copied from that drive, and `OriginID` only from that item there. A
+  mirror finds this way what it trashed when its source brings an item
+  back with the same id, restores it, then writes a new version only if
+  the source's version differs.
+- `Restore` takes `RestoreOptions`: `To`, `Parents` and `Replace`.
+  - Without `To`, the item goes back to its original path.
+  - A taken name is refused.
   - Restoring a directory restores its whole batch.
   - A restored item keeps its origin and every version.
 - A file that still has another name (a hard link) was never deleted, so it
@@ -584,7 +536,7 @@ one. Nothing expires: an entry stays until the item is purged.
 
 ### Permanent delete
 
-`DELETE …/purge?id=` permanently deletes a live or trashed item. It erases:
+`Purge` permanently deletes a live or trashed item. It erases:
 
 - every version of its content, metadata and stream objects;
 - its trash entry;
@@ -593,24 +545,24 @@ one. Nothing expires: an entry stays until the item is purged.
 
 What remains:
 
-- The name stays in old versions of the parent directory, so an `asOf`
+- The name stays in old versions of the parent directory, so an as-of
   listing still shows it, but it can't be opened.
-- The audit log remains.
+- The host's own audit log, if it keeps one.
 
-A file with other names is refused (409 `has_other_names`) unless the
-request has `allNames=1`.
+A file with other names is refused unless `allNames` is given.
 
 ### Drafts
 
-An editor's autosave goes to drafts, not to versions.
+An editor's autosave goes to drafts (`drive.Drafts`, on a side store),
+not to versions.
 
-- `PUT …/drafts?id=` saves the body, with `x-drive-base-version: <version
-  id>`.
-- `GET …/drafts?id=` returns the actor's draft and its base version.
-- `POST …/drafts/publish?id=` makes the draft the file's content, if the
-  file is still at the base version. Otherwise it answers 412 with both
-  versions; `force=1` overwrites anyway.
-- `DELETE …/drafts?id=` discards the draft.
+- `Save` keeps a body for one user and item, with the version it was
+  based on.
+- `Get` returns the user's draft and its base version.
+- `Publish` makes the draft the file's content, if the file is still at
+  the base version. Otherwise it fails with both versions; `force`
+  overwrites anyway.
+- `Discard` drops the draft.
 
 Drafts live in the side store, one object per user and file. Publishing or
 discarding a draft removes its old versions too, so autosaves don't pile
@@ -622,71 +574,49 @@ Every other drive uses the deployment's side store.
 
 ### Permissions
 
-- `POST …/identities` starts a scan of every ACL (or every owner and group)
-  on the drive.
-- `GET …/identities/{job}` reports the scan's progress. When it's done, it
-  lists every SID or uid/gid found, with how many items each appears on.
-  icbfs holds SIDs, not names, so the host resolves names its own way.
-- `GET …/permissions?id=` returns one item's security descriptor (SDDL,
-  and the ancestor it's inherited from when it has none of its own), or its
+- `Identities` scans every ACL (or every owner and group) on the drive,
+  reporting progress, and lists every SID or uid/gid found, with how many
+  items each appears on. icbfs holds SIDs, not names, so the host
+  resolves names its own way.
+- `Permissions` returns one item's security descriptor (SDDL, and the
+  ancestor it's inherited from when it has none of its own), or its
   owner, group and mode.
 
 ### Change events
 
-`GET …/events` is a Server-Sent Events stream.
+`Changes` is a channel of changes.
 
-- Each `changed` event carries the directory (path and ID) that changed,
-  where known; otherwise it is a bare `changed`.
-- It carries the API's own writes.
+- Each carries the directory (path and ID) that changed, where known;
+  otherwise it is a bare change.
+- It carries the library's own writes.
 - It can also carry changes made elsewhere, such as through mounts, as
-  bare `changed` events: `pkg/icbfs.WatchMinIO` turns MinIO's bucket
+  bare changes: `pkg/icbfs.WatchMinIO` turns MinIO's bucket
   notifications for a filesystem into wake-ups (a burst of writes is one),
-  and `icbfsdrive.Drive.Notify` takes them. The standalone server does this
-  for a bucket with `"notify": {"<bucket>": "minio"}` in its
-  configuration. A drive on a directory gets wake-ups for its whole
-  filesystem.
+  and `icbfsdrive.Drive.Notify` takes them. A drive on a directory gets
+  wake-ups for its whole filesystem.
 
 ### Storage administration
 
-These are under `/api/v1/buckets/{bucket}/filesystems`, where `{bucket}` is
-a registered bucket's ID.
-
-- `GET …/filesystems` lists the bucket's filesystems and their settings.
-- `GET …/filesystems/{name}` describes one: primary mode, max file size,
-  declared size, used, archived, and created.
-- `POST …/filesystems` takes `{"name", "primaryMode", "maxFileSize",
-  "size"}` and creates a filesystem. The root starts out owned by the
-  creating actor's profile, with full control.
-- `PATCH …/filesystems/{name}` takes `{"size"}`. The declared size is the
-  only setting that can change; primary mode and max file size are fixed.
-- `POST …/filesystems/{name}/archive` makes the filesystem read-only from
-  then on.
-- `DELETE …/filesystems/{name}` prunes it, erasing every object and
-  version. It works on archived filesystems only, and can't be undone.
+`pkg/icbfs` administers a bucket's filesystems, above under opening
+drives: list, describe (primary mode, max file size, declared size, used,
+archived, created), create (the root starts out owned by the creating
+profile, with full control), resize (the declared size is the only
+setting that can change), archive (read-only from then on) and prune
+(archived filesystems only, erasing every object and version; it can't
+be undone).
 
 ## Errors
 
-Errors are JSON, `{"error", "code"}`; a 412 also has the current version
-in `currentVersion`, as well as in the `x-drive-current-version` header.
-
-| condition | status | code |
-|---|---|---|
-| no such drive, item, version or name; or the actor may not see it | 404 | `not_found` |
-| allowed to see, not to do this | 403 | `forbidden` |
-| no profile on this drive | 403 | `no_access` |
-| the backend can't do this | 501 | `not_supported` |
-| already exists | 409 | `exists` |
-| directory not empty | 409 | `not_empty` |
-| not a directory / is a directory | 409 | `not_dir` / `is_dir` |
-| other names exist (purge) | 409 | `has_other_names` |
-| stale version (`If-Match`, a draft's base) | 412 | `precondition_failed` |
-| bad name or path | 400 | `invalid_name` |
-| a malformed request | 400 | `invalid` |
-| the content doesn't match `X-Drive-MD5` or `X-Drive-SHA256` | 400 | `checksum_mismatch` |
-| past the max file size | 413 | `too_large` |
-| write to an as-of view, a read-only drive or an archived filesystem; prune of one that isn't archived | 409 | `read_only` |
-| write contention exhausted the retries | 503 | `busy` |
-| anything else | 500 | `internal` |
+The library's errors are typed, and a host maps them as it likes:
+`ErrNotFound` (no such drive, item, version or name, or the actor may not
+see it), `ErrForbidden` (allowed to see, not to do this), `ErrNoAccess`
+(no profile on this drive), `ErrNotSupported`, `ErrExists`,
+`ErrNotEmpty`, `ErrNotDir` and `ErrIsDir`, `ErrHasLinks` (purge),
+`ErrPrecondition` (a stale version; a `PreconditionError` carries the
+current one), `ErrInvalidName`, `ErrInvalid`, `ErrChecksum`,
+`ErrTooLarge`, `ErrReadOnly` (an as-of view, a read-only drive or an
+archived filesystem) and `ErrBusy` (write contention exhausted the
+retries).
 
 ## Consistency
 
@@ -696,48 +626,10 @@ in `currentVersion`, as well as in the `x-drive-current-version` header.
 - A move between directories is a remove then an insert, so a listing made
   in between can show the item in neither directory or in both.
 
-## The standalone server
-
-```
-drive-api -config drive-api.json [-listen :8080] [-audit]
-```
-
-The configuration (`driveapi.Standalone`) stands in for a host:
-
-```json
-{
-  "listen": ":8080",
-  "token": "a-static-token",
-  "buckets": {"main": {"kind": "s3", "s3": {"endpoint": "http://127.0.0.1:9000", "bucket": "icbfs",
-                                           "accessKey": "…", "secretKey": "…"}},
-              "archive": {"kind": "azure", "azure": {"account": "…", "container": "icbfs", "key": "…"}}},
-  "drives": {"docs": {"name": "Documents", "bucket": "main", "filesystem": "docs", "root": "/"}},
-  "sideStore": {"bucket": "main", "filesystem": "drafts"},
-  "profiles": {"alice": {"windows": {"user": "S-1-5-21-…-1001"}}},
-  "permissions": {"alice": ["drive.*", "bucket.read"]}
-}
-```
-
-- Each bucket is a store configuration, S3 or Azure, as in
-  [mount.md](mount.md).
-- Requests carry `Authorization: Bearer <token>` and `X-Drive-Actor: <actor>`.
-- An actor not listed in `permissions` has every permission.
-- `driveProfiles` gives a drive its own profiles, and `bucketSideStores`
-  gives a bucket its own side store. A drive with `"readOnly": true`
-  refuses every change.
-- `notify` feeds a bucket's drives' event streams with changes made
-  elsewhere (`"minio"`).
-- `cacheDir` holds the drives' temporary files, as-of reads' history
-  caches among them (the system's temporary directory if it's empty).
-- `-audit` writes every operation to stdout as one JSON line.
-
 ## Not supported
 
-- Signed links for fetching bytes directly from the store; the API proxies
-  all content.
 - Document conversion, thumbnails, previews, search, and real-time
   co-editing.
-- Editing ACLs or modes through the API; Windows mounts can do that.
+- Editing ACLs through the library; Windows mounts can do that.
 - Alternate data streams and locks.
-- Running several API instances against one bucket has not been designed
-  for.
+- Several hosts writing one drive at once has not been designed for.

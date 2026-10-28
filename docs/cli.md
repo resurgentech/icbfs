@@ -42,16 +42,8 @@ JSON output where it's shown.
 | `-azure-endpoint` | `ICBFS_AZURE_ENDPOINT` | `https://ACCOUNT.blob.core.windows.net/` |
 | `-azure-token-command` | `ICBFS_AZURE_TOKEN_COMMAND` | none: a program that gets a token, instead of the key (see [mount.md](mount.md)) |
 
-A DRIVE is then `-fs NAME`, optionally with `-root DIR` for a directory
-in the filesystem.
-
-**Through the daemon**, with `-daemon SOCKET` (or `ICBFS_DAEMON`). The
-command goes to the server, which records who asked (`host/uid:N`, from
-the daemon), may refuse it, and runs it; no store credentials are needed
-on the machine. A DRIVE is then
-`-drive ID`, the server's ID for it. See [daemon.md](daemon.md).
-
-The `fs` commands always name a filesystem with `-fs`, either way.
+A DRIVE is `-fs NAME`, optionally with `-root DIR` for a directory in
+the filesystem. The `fs` commands always name a filesystem with `-fs`.
 
 ## Filesystems
 
@@ -136,5 +128,5 @@ icbfs-cli trash restore -fs docs -id ENTRY -to /elsewhere/name -parents
 - A taken name is refused, unless `-replace` is given; that moves what's
   there now to the trash first.
 
-Permanent deletion of a single item is done through the drive API's purge
+Permanent deletion of a single item is the drive library's `Purge`
 (see [api.md](api.md#permanent-delete)).

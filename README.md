@@ -10,9 +10,9 @@ the spirit of [JuiceFS](https://juicefs.com/), but is simpler: there is no
 chunking and no block format of its own. A file is one object, and the
 bucket's own version history is the filesystem's history.
 
-It mounts on Linux (FUSE) and on Windows (WinFsp). It also serves the same
-files through an HTTP document API, and keeps Windows folders in step with
-a drive.
+It mounts on Linux (FUSE) and on Windows (WinFsp). It also opens the same
+files to Go programs as drives, and keeps Windows folders in step with a
+drive.
 
 ## Goals
 
@@ -38,13 +38,13 @@ flowchart LR
   subgraph Clients
     L["Linux apps"]
     W["Windows apps"]
-    H["Web apps / services"]
+    H["Go programs"]
     F["Windows folders"]
   end
   subgraph icbfs
     FUSE["icbfs mount<br/>FUSE"]
     WFS["icbfs-winfsp<br/>WinFsp"]
-    API["drive API<br/>pkg/drive"]
+    API["drive library<br/>pkg/drive"]
     SYNC["icbfs-sync"]
     CORE["filesystem core<br/>internal/icbfs"]
   end
@@ -82,9 +82,8 @@ flowchart LR
 | **Windows** | security descriptors (SDDL), ACL inheritance, attribute bits, alternate data streams, creation times, case-insensitive lookup, share modes |
 | **Large files** | multipart uploads that send only the parts an edit changed; per-filesystem max file size (default 1 TiB) |
 | **Locking** | `flock`/`fcntl` byte-range locks shared between Linux mounts, with leases (on by default) |
-| **Drive API** | HTTP API and Go library: browse, read, write, versions, diffs, drafts, trash, copy between drives, permissions checked per item |
+| **Drive library** | a Go library over drives: browse, read, write, versions, diffs, drafts, trash, copy between drives, mirror a source, permissions checked per item |
 | **Folder sync** | `icbfs-sync`: one-way or two-way sync of Windows folders, including WebDAV drives, with a tray app |
-| **Managed mounts** | mounts and CLI commands through a local daemon that gets credentials from a server and logs every access (Linux) |
 
 ## Tools
 
@@ -94,13 +93,10 @@ flowchart LR
 | `icbfs-winfsp` | mount a filesystem on Windows (WinFsp) | [mount.md](docs/mount.md#windows-winfsp) |
 | `icbfs-cli` | create and manage filesystems; named versions; trash | [cli.md](docs/cli.md) |
 | `icbfs-sync` | keep Windows folders in step with drives | [sync.md](docs/sync.md) |
-| `drive-api` | serve the drive API on its own | [api.md](docs/api.md) |
-| `icbfs-logd` | the local daemon for managed mounts (Linux) | [daemon.md](docs/daemon.md) |
-| `icbfs-mockserver` | a stand-in server for the daemon | [daemon.md](docs/daemon.md) |
 
 ## Status
 
-The core filesystem, both mounts, the drive API, and icbfs-sync are built
+The core filesystem, both mounts, the drive library, and icbfs-sync are built
 and tested against MinIO, and the Linux mount against AWS S3 and Azure
 Blob Storage as well. What has been tested:
 
@@ -135,8 +131,8 @@ Blob Storage as well. What has been tested:
     the inherited entries of the ACLs it copies at create, leaving an
     empty DACL; use `robocopy /SEC`. Hard links can't be made on a Windows mount (WinFsp
     has no way to).
-- **End to end:** the managed-mount logging chain, icbfs-sync against a
-  drive, and large files (6 GiB, multipart edits, the maximum size).
+- **End to end:** icbfs-sync against a drive, and large files (6 GiB,
+  multipart edits, the maximum size).
 - **On AWS S3 and Azure Blob Storage:** the store layer's conformance
   suite, and on a FUSE mount of each, pjdfstest, Connectathon and the full
   multi-machine set, all passing as on MinIO.
@@ -177,8 +173,8 @@ just                # every recipe, including the VM suites
 Without just:
 
 ```sh
-go build -o bin/ ./cmd/icbfs ./cmd/icbfs-cli ./cmd/icbfs-logd ./cmd/icbfs-mockserver ./cmd/drive-api
-GOOS=windows go build -o bin/ ./cmd/icbfs-winfsp ./cmd/icbfs-cli ./cmd/drive-api
+go build -o bin/ ./cmd/icbfs ./cmd/icbfs-cli
+GOOS=windows go build -o bin/ ./cmd/icbfs-winfsp ./cmd/icbfs-cli
 GOOS=windows go build -ldflags -H=windowsgui -o bin/icbfs-sync.exe ./cmd/icbfs-sync
 go test ./...
 ```
@@ -188,8 +184,7 @@ Linux, with Docker and FUSE, and builds and runs the portable tests on
 Windows. The VM suites are run by hand ([docs/testing.md](docs/testing.md)).
 
 The generated code is checked in. `just generate` regenerates it after a
-schema change: the drive API from `spec/openapi/drive.yaml`, and the
-Protobuf code from `spec/proto` (needs `protoc`; see
+schema change: the Protobuf code from `spec/proto` (needs `protoc`; see
 [spec/proto/README.md](spec/proto/README.md)).
 
 ## Quick start
@@ -228,9 +223,8 @@ same `ICBFS_*` variables, so keys need not be on a command line.
 | [architecture.md](docs/architecture.md) | the design: objects, directories, metadata, concurrency, locking, past views, trash, Windows compatibility |
 | [mount.md](docs/mount.md) | mounting on Linux and Windows, installing WinFsp, mounting the past |
 | [cli.md](docs/cli.md) | `icbfs-cli`: filesystems, named versions, trash |
-| [api.md](docs/api.md) | the drive API: library, endpoints, permissions, versions, drafts |
+| [api.md](docs/api.md) | the drive library: drives, permissions, versions, drafts, mirroring |
 | [sync.md](docs/sync.md) | `icbfs-sync`: setup, settings, how it decides, safety, the tray |
-| [daemon.md](docs/daemon.md) | managed mounts through `icbfs-logd`, and what is logged |
 | [testing.md](docs/testing.md) | the test layers, how to run them, latest results, known issues |
 | [test/linux](test/linux/README.md), [test/windows](test/windows/README.md) | the disposable test VMs |
 
@@ -248,17 +242,16 @@ internal/
   winfspserver/ the WinFsp driver
   acl/          the Windows access check
   notify/       change-notification sources (MinIO, SQS, Azure change feed)
-  fslog/ logd/ logserver/ sidecmd/   the daemon chain
   syncer/       icbfs-sync's engine, and its folder and drive sides
   pb/           generated Protobuf code
 pkg/
-  drive/        the drive library, icbfs backend, and HTTP handlers
+  drive/        the drive library and its icbfs backend
   icbfs/        opening a store; filesystem administration
   tokencmd/     a token credential from a program the mount runs
   history/      a filesystem's past for programs that browse it: folders at
                 any moment, a file's versions, search including the trash
   icbfstest/    a throwaway MinIO for other modules' tests
-spec/           Protobuf schemas and the OpenAPI spec
+spec/           Protobuf schemas
 test/           VM test environments and runners
   metadata/     the metadata copy tests: a reference tree and the tools that
                 copy it

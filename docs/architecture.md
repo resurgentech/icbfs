@@ -17,7 +17,7 @@ flowchart TB
   subgraph Access["Access layers"]
     FUSE["icbfs mount<br/>(FUSE, Linux)"]
     WinFsp["icbfs-winfsp<br/>(WinFsp, Windows)"]
-    API["drive library + HTTP API<br/>(pkg/drive)"]
+    API["drive library<br/>(pkg/drive)"]
     CLI["icbfs-cli"]
     Sync["icbfs-sync"]
   end
@@ -45,8 +45,7 @@ interface in its own terms (`internal/objstore.Store`), and each store
 implements it in its own: `s3store` and `azurestore`, equals, with one
 conformance suite (`storetest`) that both pass. A store is chosen by a
 store configuration, a kind (`s3` or `azure`) and that kind's section,
-which the mounts take as flags and the drive API, icbfs-sync and the
-logging server as JSON.
+which the mounts take as flags and icbfs-sync as JSON.
 
 | icbfs needs | S3 | Azure Blob Storage |
 |---|---|---|
@@ -148,7 +147,7 @@ uploads only what changed, but the result is still one object.
   `STATUS_FILE_TOO_LARGE` on Windows.
 
 **A file made whole is two writes.** A mount creates a file empty and
-writes it at close. The drive API has the content in hand (up to 64 MiB;
+writes it at close. The drive library has the content in hand (up to 64 MiB;
 past that it writes as a mount does): `CreateWith` writes the content
 object once, with it, and `.metadata` once, with what the write records
 (times, app data, mode, checksums), then the directory entry. A new version
@@ -265,7 +264,7 @@ content:
   ETag: computed as a whole file is written, or later on demand. Recording
   them, like an access time, isn't a change: the new `.metadata` version
   keeps the time of the one it replaces, and ctime doesn't move;
-- data icbfs's own tools keep about the item, such as the drive API's
+- data icbfs's own tools keep about the item, such as the drive library's
   content type and copy origin, and a mirror's record of its source item.
   Like access times and checksums, it's bookkeeping, not a change to the
   item: writing it doesn't move ctime;
@@ -337,7 +336,7 @@ object.
 - **ctime** is the later of the recorded change time and the content's last
   write.
 - **Creation time** is the time in the UUIDv7 key (the creating machine's
-  clock), unless overridden (`SetFileTime`, the sync, the drive API's
+  clock), unless overridden (`SetFileTime`, the sync, the drive library's
   `WriteOptions.Created`); an override stays through later writes. The
   root's key isn't a UUID, so its creation time is zero until one is set. Linux mounts report it through
   `statx` (Linux 6.6 and later); Linux has no way to set one.
@@ -354,14 +353,14 @@ object.
 
 A full `stat()` is two requests, one for `.metadata` and one `HEAD` on the
 content, issued concurrently. The `HEAD` answers the current version's id
-too, which the attributes keep, so the drive API's listing describes a
+too, which the attributes keep, so the drive library's listing describes a
 file's version in those two requests (a third, its `.version`, only for a
 dated item). A walk down a path stats each directory with a `GET` of its
 block instead of the `HEAD`, still one request, and the lookup in it
 starts from that block (`StatStep`, `FindStep`): a step down is two
 requests, `.metadata` and the block.
 
-The drive API remembers the directories its walks read, with their
+The drive library remembers the directories its walks read, with their
 blocks. It checks one it holds with a conditional read of each of its two
 objects (`Revalidate`, `If-None-Match`: no body when unchanged), since a
 change to a directory's permissions or record moves only its `.metadata`
@@ -398,7 +397,7 @@ land, as they would on a local disk.
   turn it on by default), the writer takes the file's lock (below) and
   makes one last conditional attempt while holding it, so a writer under
   contention eventually gets through.
-- Everywhere else (Windows mounts, the drive API, icbfs-sync) the write
+- Everywhere else (Windows mounts, the drive library, icbfs-sync) the write
   then fails with a contention error, and the caller can try again.
 
 When two link-count changes race, the one reaching zero first writes a
@@ -453,7 +452,7 @@ the structure these rely on.
 ## Locking
 
 Linux mounts lock by default (`icbfs mount -locking=false` turns it off,
-and lock calls are then refused); the drive API and icbfs-sync don't take
+and lock calls are then refused); the drive library and icbfs-sync don't take
 locks. Locking is best-effort, built from the same object-store
 primitives as everything else, not from a coordination service. With it
 on, every flush first reads the file's `.lock` object (a not-found for a
@@ -511,9 +510,9 @@ is a hint to "go look". It never says authoritatively what changed.
   table of watched files holds only the inodes the kernel holds: an entry
   goes when the kernel forgets its inode.
 - **For locking**, a notification wakes a waiter early.
-- **In the drive API**, MinIO notifications become bare `changed` events
+- **In the drive library**, MinIO notifications become bare `changed` events
   on a drive's event stream (`pkg/icbfs.WatchMinIO` into
-  `icbfsdrive.Drive.Notify`; the standalone server's `notify` setting).
+  `icbfsdrive.Drive.Notify`).
 
 The sources are behind one interface (`internal/notify`):
 
@@ -523,7 +522,7 @@ The sources are behind one interface (`internal/notify`):
 | latency | near real time | seconds, sometimes a minute | minutes |
 | can drop events | yes, in async mode under overload | no (at least once) | no |
 | server-side prefix filter | yes | yes | no |
-| status | wired to `icbfs mount -notify` and the drive API | adapter built, not wired to a command | filter logic only, no client |
+| status | wired to `icbfs mount -notify` and the drive library | adapter built, not wired to a command | filter logic only, no client |
 
 A mount with no notification source behaves exactly as one that never had
 the feature.
@@ -570,7 +569,7 @@ it was written under a source time (see below).
   write is put off to the second's end (so the last change is always
   marked), and sent at the latest when the drive closes. The drive's own
   views forget at once, without waiting for it.
-  `pkg/history` and the drive API's views check it at most every 30
+  `pkg/history` and the drive library's views check it at most every 30
   seconds, and an as-of mount when it starts (`icbfs.ForgetChangedPast`);
   a new version since the cache last looked drops everything it kept of
   that filesystem. A view that finds a cached version erased forgets that
@@ -586,13 +585,13 @@ writing it, which orders it after every write that had already finished.
 Names are created and deleted, never moved, and can't look like a time:
 up to 63 letters, digits, `.`, `_`, `-` and spaces, starting with a letter
 or digit. A name can record the subtree it was made for (its scope): the
-drive API shows it only to drives at or above that path, though its time
+drive library shows it only to drives at or above that path, though its time
 covers the whole filesystem.
 
 **Source time.** A mirror copies a source that has a history of its own,
 and a user browsing icbfs wants the source's dates, not the moment the
 store received each copy. A change made under `objstore.WithDeclaredTime`
-(the drive API's `drive.WithSourceTime`) happened at that time as far as
+(the drive library's `drive.WithSourceTime`) happened at that time as far as
 the filesystem's history goes:
 
 - a version's date is the store's `LastModified` unless the item's
@@ -707,7 +706,7 @@ is part of the restore: if it can't be, the restore says so (the item is
 back; the entry left behind is stale).
 
 **Purge** permanently erases every version of an item's objects, its trash
-entries, and its drafts (the drive API's autosaves, kept in the drive's
+entries, and its drafts (the drive library's autosaves, kept in the drive's
 side store). For a directory, that includes every block its tree
 has had and everything under it.
 
@@ -764,9 +763,9 @@ derived when a mount needs them.
   - Listing streams needs WinFsp's `GetStreamInfo` callback. The copy of
     go-winfsp vendored in `third_party/go-winfsp` is patched to expose it.
 
-## The drive API's permission check
+## The drive library's permission check
 
-The drive API has no operating system between it and the store, so it
+The drive library has no operating system between it and the store, so it
 checks file permissions itself (`internal/acl`):
 
 - **Primary-Windows:** a Windows access check of the actor's SIDs against
@@ -781,7 +780,7 @@ See [api.md](api.md).
 
 ## Not supported
 
-- **Change notifications on Azure:** `-notify` and the drive API's
+- **Change notifications on Azure:** `-notify` and the drive library's
   `"notify": "minio"` need MinIO's bucket notifications; on Azure, locks
   wait by polling and the event stream carries only the API's own changes.
 - **Directory structure:** 8.3 short names, directory junctions, and volume

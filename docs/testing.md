@@ -53,8 +53,6 @@ runners (Docker and FUSE available), and `just build-windows` and
   bucket.
 - `internal/fuseserver`'s tests mount real FUSE filesystems in the test
   process, and run helper processes for the cross-process lock tests.
-- `pkg/drive/driveapi`'s `TestGeneratedMatchesSpec` regenerates the API
-  code and fails if `api.gen.go` is out of date.
 
 What they cover:
 
@@ -67,8 +65,7 @@ What they cover:
 | `internal/winfspserver` | path resolution and case folding (portable parts); on Windows only, ACL control flags and inheritance marks (`security_test.go`, run by `test/metadata/run-windows.sh`); the driver itself is tested by winfsp-tests |
 | `internal/acl` | the Windows access check and inheritance |
 | `internal/notify/...` | MinIO notifications for real; SQS and Azure against fakes |
-| `internal/logd`, `logserver`, `fslog`, `sidecmd` | the daemon chain |
-| `pkg/drive/...` | the drive library, the icbfs backend, the HTTP handlers, drafts, copy, diff, mirroring, times, and a ceiling on the store requests each mirror operation and a listing take |
+| `pkg/drive/...` | the drive library, the icbfs backend, drafts, copy, diff, mirroring, times, and a ceiling on the store requests each mirror operation and a listing take |
 | `pkg/history` | a filesystem's past for programs browsing it, and that revisiting a moment costs no store requests |
 | `internal/namecache` | the mounts' name cache |
 | `internal/storeconfig`, `pkg/storeflags` | store configurations and the store flags |
@@ -253,13 +250,6 @@ case-sensitive.
 
 ## End-to-end runs
 
-- **Logging chain** (`test/linux/run-logging-test.sh`): `icbfs-mockserver`,
-  `icbfs-logd` and a mount, all real binaries. Checks:
-  - exactly the expected events are logged, synchronously and with
-    `-log-async`;
-  - an unknown drive can't mount;
-  - a read-only directory drive mounts read-only;
-  - `icbfs-cli` works through the daemon.
 - **icbfs-sync** (`test/windows/run-sync-test.sh`): the real
   `icbfs-sync.exe`, checked through a real mount. Twelve checks:
   - capability detection;
