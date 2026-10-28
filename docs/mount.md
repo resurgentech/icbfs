@@ -240,15 +240,14 @@ console window; run from a prompt, it writes to that prompt.
 
 ### The Windows package
 
-Each [release](https://github.com/resurgentech/icbfs/releases) has an
-MSI per architecture, `icbfs-X.Y.Z-x64.msi` and `icbfs-X.Y.Z-arm64.msi`,
-built by the release workflow from the tag. It installs `icbfs-winfsp`
-and `icbfs-cli` under `C:\Program Files\icbfs`, and a scheduled task
-that mounts the drive at sign-in. WinFsp is not in it: install
-[WinFsp's own MSI](https://winfsp.dev/rel/) first, as above; without
-it the installer stops with a message saying so. Together they install
-a file system driver (WinFsp's) and a sign-in task (ours), and the
-installer's README says so.
+`icbfs-X.Y.Z-x64.msi` and `icbfs-X.Y.Z-arm64.msi`, one per
+architecture, built from a release tag (below). It installs
+`icbfs-winfsp` and `icbfs-cli` under `C:\Program Files\icbfs`, and a
+scheduled task that mounts the drive at sign-in. WinFsp is not in it:
+install [WinFsp's own MSI](https://winfsp.dev/rel/) first, as above;
+without it the installer stops with a message saying so. Together they
+install a file system driver (WinFsp's) and a sign-in task (ours), and
+the installer's README says so.
 
 The settings are installer properties, for an Azure Blob Storage
 account:
@@ -303,15 +302,32 @@ settings above (`Account`, `Container`, `Filesystem`, `DriveLetter`)
 beside it. Uninstalling removes the key, the task and the files, and
 leaves WinFsp.
 
-The package is `packaging/windows` in the repository: `icbfs.wxs` (WiX
-v5), `mount-task.ps1` (registers the task; the installer runs it as
-the machine), and `check-msi.ps1`, which installs, checks and
-uninstalls an MSI as the release workflow does on a GitHub-hosted
-runner. `just package X.Y.Z` builds the MSIs on Windows, with
-[go-winres](https://github.com/tc-hib/go-winres) for the commands'
-version resources and the [WiX](https://wixtoolset.org) 5 dotnet tool
-(`dotnet tool install --global wix --version 5.0.2`, then `wix extension
-add -g WixToolset.Util.wixext/5.0.2`).
+**Building it.** The package is `packaging/windows` in the repository:
+`icbfs.wxs` (WiX), `mount-task.ps1` (registers the task; the installer
+runs it as the machine), `build.ps1` (signs the commands, builds the
+MSIs, signs those; on Windows) and `package.sh`, which drives it from
+the repository's checkout, with the Windows test VM
+([test/windows](../test/windows/README.md)) as the Windows machine:
+
+```
+just package           # HEAD's tag vX.Y.Z, from a clean checkout of it, into dist/icbfs-X.Y.Z-{x64,arm64}.msi
+just package 0.1.1     # this working tree as 0.1.1: a build to try, not to ship
+just package-test      # installs, checks, repairs and uninstalls dist/icbfs-X.Y.Z-x64.msi on the VM (check-msi.ps1)
+```
+
+The commands are cross-compiled here, from git, so `-version` says the
+tag, with their version resources (product name `icbfs`, the version)
+from [go-winres](https://github.com/tc-hib/go-winres); the VM does the
+signing and the MSIs, with the .NET SDK and the WiX dotnet tool pinned
+in `packaging/windows/.config`. The commands and the MSIs are signed
+with the code signing key `package.sh` is given: from OpenBao
+(`ICBFS_CODESIGN_BAO_PATH`, after `bao login`), a PFX file
+(`ICBFS_CODESIGN=pfx`), or none (`ICBFS_CODESIGN=none`, unsigned). The
+key goes to the VM over SSH's standard input and is never written
+there. A self-signed signing certificate is trusted only on machines
+set up to trust it; a deployment does that before it installs. The
+package isn't published anywhere by itself: whoever builds it hands it
+on.
 
 ### What works on Windows
 

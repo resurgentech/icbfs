@@ -277,9 +277,11 @@ case-sensitive.
   Windows machine with WinFsp, as an administrator): installs an MSI
   with every setting, checks the files, their version resources, the
   registry key and the sign-in task, repairs it without settings (they
-  must stay), and uninstalls it (everything must go). The release
-  workflow runs it on a GitHub-hosted runner, after checking that the
-  installer refuses without WinFsp. The sign-in itself is checked by
+  must stay), and uninstalls it (everything must go); with `-Signed`,
+  that the MSI and the commands carry a signature. `just package-test`
+  runs it on the Windows VM against the package `just package` built.
+  That the installer refuses without WinFsp was checked once on a
+  machine without it. The sign-in itself is checked by
   hand: install with a real account, put the key in the user's
   environment, turn auto-logon on (`test/windows/enable-autologon.sh`)
   and restart; the task's last run time, the `icbfs-winfsp` process in

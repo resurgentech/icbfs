@@ -21,23 +21,13 @@ build-windows:
     GOOS=windows go build -ldflags -H=windowsgui -o bin/icbfs-winfsp.exe ./cmd/icbfs-winfsp
     GOOS=windows go build -ldflags -H=windowsgui -o bin/icbfs-sync.exe ./cmd/icbfs-sync
 
-# The Windows package, VERSION as X.Y.Z: version resources, both architectures' commands, and an MSI each into bin/ (needs go-winres and WiX 5, on Windows)
-package VERSION:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    v="{{VERSION}}"
-    [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "package: $v: want X.Y.Z" >&2; exit 1; }
-    for c in icbfs-winfsp icbfs-cli; do
-        go-winres make --in "cmd/$c/winres/winres.json" --out "cmd/$c/rsrc" --arch amd64,arm64 --product-version "$v" --file-version "$v"
-    done
-    for arch in amd64:x64 arm64:arm64; do
-        goarch="${arch%:*}"; msiarch="${arch#*:}"
-        GOOS=windows GOARCH="$goarch" go build -trimpath -ldflags "-s -w -H=windowsgui" -o "bin/$msiarch/icbfs-winfsp.exe" ./cmd/icbfs-winfsp
-        GOOS=windows GOARCH="$goarch" go build -trimpath -ldflags "-s -w" -o "bin/$msiarch/icbfs-cli.exe" ./cmd/icbfs-cli
-        wix build -arch "$msiarch" -d "Version=$v" -d "BinDir=$PWD/bin/$msiarch" -ext WixToolset.Util.wixext/5.0.2 \
-            -o "bin/icbfs-$v-$msiarch.msi" packaging/windows/icbfs.wxs
-    done
-    ls -l bin/*.msi
+# The Windows package into dist/, signed, MSIs built on the Windows VM: HEAD's tag from a clean checkout, or this tree as X.Y.Z (ICBFS_CODESIGN=none: unsigned)
+package *version:
+    packaging/windows/package.sh {{version}}
+
+# That package's install, checks, repair and uninstall on the Windows VM (packaging/windows/check-msi.ps1)
+package-test *version:
+    packaging/windows/package-test.sh {{version}}
 
 # Every Go test (needs Docker, and /dev/fuse for the mount tests)
 test *args:

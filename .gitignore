@@ -14,3 +14,4 @@
 /test/azure/tofu/terraform.tfstate
 /test/azure/tofu/terraform.tfstate.backup
 *.syso
+/dist/

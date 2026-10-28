@@ -4,13 +4,16 @@
 # workflow runs it on a GitHub runner; by hand, on a test VM, as an
 # administrator, with WinFsp installed:
 #
-#   check-msi.ps1 -Msi C:\path\icbfs-0.1.1-x64.msi -Version 0.1.1 [-Tag v0.1.1]
+#   check-msi.ps1 -Msi C:\path\icbfs-0.1.1-x64.msi -Version 0.1.1 [-Tag v0.1.1] [-Signed]
 #
 # -Tag is what the commands' -version should print (a build of the tag).
+# -Signed checks that the MSI and the commands carry a signature; whether
+# this machine trusts the certificate doesn't matter.
 param(
   [Parameter(Mandatory)][string]$Msi,
   [Parameter(Mandatory)][string]$Version,
-  [string]$Tag = ''
+  [string]$Tag = '',
+  [switch]$Signed
 )
 $ErrorActionPreference = 'Stop'
 $Msi = (Get-Item $Msi).FullName
@@ -27,6 +30,17 @@ function Run-Msiexec($arguments) {
     Get-Content $log | Select-Object -Last 60
     throw "msiexec $($arguments): exit $($p.ExitCode) (log: $log)"
   }
+}
+
+function Check-Signature($file) {
+  $s = Get-AuthenticodeSignature $file
+  if (-not $s.SignerCertificate) { throw "$(Split-Path -Leaf $file) isn't signed ($($s.Status))" }
+  "$(Split-Path -Leaf $file): signed by $($s.SignerCertificate.Subject), $($s.Status)"
+}
+
+if ($Signed) {
+  "--- signatures"
+  Check-Signature $Msi
 }
 
 "--- install"
@@ -53,6 +67,7 @@ foreach ($exe in 'icbfs-winfsp.exe', 'icbfs-cli.exe') {
   Start-Process "$($key.InstallDir)$exe" -ArgumentList '-version' -RedirectStandardOutput $out -NoNewWindow -Wait
   $v = (Get-Content $out -Raw).Trim()
   if ($Tag) { Check "$exe -version" $v $Tag } else { "$($exe) -version: $v" }
+  if ($Signed) { Check-Signature "$($key.InstallDir)$exe" }
 }
 $task = Get-ScheduledTask -TaskName 'icbfs mount'
 Check 'task user' $task.Principal.GroupId 'Users'
