@@ -90,7 +90,7 @@ flowchart LR
 | command | what it does | docs |
 |---|---|---|
 | `icbfs mount` | mount a filesystem on Linux (FUSE) | [mount.md](docs/mount.md) |
-| `icbfs-winfsp` | mount a filesystem on Windows (WinFsp) | [mount.md](docs/mount.md#windows-winfsp) |
+| `icbfs-winfsp` | mount a filesystem on Windows (WinFsp); the [Windows package](docs/mount.md#the-windows-package) installs it with a sign-in mount | [mount.md](docs/mount.md#windows-winfsp) |
 | `icbfs-cli` | create and manage filesystems; named versions; trash | [cli.md](docs/cli.md) |
 | `icbfs-sync` | keep Windows folders in step with drives | [sync.md](docs/sync.md) |
 
@@ -174,7 +174,8 @@ Without just:
 
 ```sh
 go build -o bin/ ./cmd/icbfs ./cmd/icbfs-cli
-GOOS=windows go build -o bin/ ./cmd/icbfs-winfsp ./cmd/icbfs-cli
+GOOS=windows go build -o bin/ ./cmd/icbfs-cli
+GOOS=windows go build -ldflags -H=windowsgui -o bin/icbfs-winfsp.exe ./cmd/icbfs-winfsp
 GOOS=windows go build -ldflags -H=windowsgui -o bin/icbfs-sync.exe ./cmd/icbfs-sync
 go test ./...
 ```
@@ -197,6 +198,36 @@ tags HEAD once it is on `origin/main` with CI green, builds the commands
 into `bin/`, and prints the `git push` of the tag, which is done by
 hand. A tag is a version of the Go module too: [docs/api.md](docs/api.md)
 says which packages it promises.
+
+The pushed tag runs the release workflow
+([.github/workflows/release.yml](.github/workflows/release.yml)), which
+builds the Windows package ([docs/mount.md](docs/mount.md#the-windows-package))
+on GitHub-hosted runners, installs and uninstalls it on one, signs it
+when SignPath has approved the project (below), and publishes a GitHub
+release with the MSIs, their checksums and the notes from
+[.github/release-notes.md](.github/release-notes.md). The Linux
+commands are built from source.
+
+### Code signing policy
+
+Free code signing provided by [SignPath.io](https://signpath.io),
+certificate by [SignPath Foundation](https://signpath.org).
+
+- **Committers and reviewers:** [@jaredeh](https://github.com/jaredeh).
+  Changes from anyone else come as pull requests, reviewed before they
+  are merged.
+- **Approvers:** [@jaredeh](https://github.com/jaredeh) approves each
+  signing request.
+
+**Privacy:** icbfs sends data only to the storage the user configures,
+and to nothing else. It has no telemetry and phones nowhere home.
+
+The release workflow signs through SignPath only when the repository
+has the `SIGNPATH_API_TOKEN` secret; until then a release's MSIs are
+unsigned, and the release notes say so. Each signing request is for the
+release's artifact, under
+[packaging/windows/signpath-artifact-configuration.xml](packaging/windows/signpath-artifact-configuration.xml):
+the programs inside each MSI, then the MSI.
 
 ## Quick start
 
@@ -263,6 +294,7 @@ pkg/
                 any moment, a file's versions, search including the trash
   icbfstest/    a throwaway MinIO for other modules' tests
 spec/           Protobuf schemas
+packaging/windows/   the Windows package (WiX), its sign-in task and its check
 test/           VM test environments and runners
   metadata/     the metadata copy tests: a reference tree and the tools that
                 copy it

@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  icbfs's Windows package: icbfs-winfsp and icbfs-cli under Program
+  Files, a registry key saying where, and a task that mounts the drive
+  at each user's sign-in. One MSI per architecture (WiX v5):
+
+    wix build -arch x64 -d Version=0.1.1 -d BinDir=../../bin/x64 \
+        -ext WixToolset.Util.wixext/5.0.2 -o icbfs-0.1.1-x64.msi icbfs.wxs
+
+  It needs WinFsp installed first (its own MSI, from winfsp.dev) and
+  refuses to install without it. docs/mount.md, "The Windows package",
+  is the user's side of this file; packaging/windows/README.md the
+  builder's.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <!-- One upgrade code per architecture: an x64 install and an arm64
+       one are different products, never upgrades of each other. -->
+  <?if $(sys.BUILDARCH) = x64 ?>
+    <?define UpgradeCode = "213ac801-fa3d-485b-8f28-142f77746cc6" ?>
+  <?elseif $(sys.BUILDARCH) = arm64 ?>
+    <?define UpgradeCode = "ebd6d305-40ac-449a-994f-5d4b7d3c6265" ?>
+  <?else ?>
+    <?error icbfs is packaged for x64 and arm64 (-arch) ?>
+  <?endif ?>
+
+  <Package Name="icbfs" Manufacturer="resurgentech" Version="$(Version)"
+           UpgradeCode="$(UpgradeCode)" Language="1033" Scope="perMachine"
+           Compressed="yes" InstallerVersion="500">
+    <SummaryInformation Description="icbfs: mount a filesystem as a drive"
+                        Manufacturer="resurgentech" />
+    <MajorUpgrade DowngradeErrorMessage="A newer icbfs is installed. Uninstall it first." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- The settings, as installer properties (msiexec /i icbfs.msi
+         ACCOUNT=... ): an Azure storage account, its container, the
+         filesystem in it, and the drive letter. They are kept in the
+         registry, so a repair or an upgrade without them keeps the
+         ones given before. Without ACCOUNT nothing is mounted at
+         sign-in, and the task isn't registered. -->
+    <Property Id="ACCOUNT" Secure="yes" />
+    <Property Id="CONTAINER" Secure="yes" />
+    <Property Id="FILESYSTEM" Secure="yes" />
+    <Property Id="DRIVELETTER" Secure="yes" />
+    <Property Id="SAVED_ACCOUNT">
+      <RegistrySearch Root="HKLM" Key="SOFTWARE\resurgentech\icbfs" Name="Account" Type="raw" />
+    </Property>
+    <Property Id="SAVED_CONTAINER">
+      <RegistrySearch Root="HKLM" Key="SOFTWARE\resurgentech\icbfs" Name="Container" Type="raw" />
+    </Property>
+    <Property Id="SAVED_FILESYSTEM">
+      <RegistrySearch Root="HKLM" Key="SOFTWARE\resurgentech\icbfs" Name="Filesystem" Type="raw" />
+    </Property>
+    <Property Id="SAVED_DRIVELETTER">
+      <RegistrySearch Root="HKLM" Key="SOFTWARE\resurgentech\icbfs" Name="DriveLetter" Type="raw" />
+    </Property>
+    <SetProperty Id="ACCOUNT" Value="[SAVED_ACCOUNT]" After="AppSearch" Condition="NOT ACCOUNT AND SAVED_ACCOUNT" />
+    <SetProperty Id="CONTAINER" Value="[SAVED_CONTAINER]" After="AppSearch" Condition="NOT CONTAINER AND SAVED_CONTAINER" />
+    <SetProperty Id="FILESYSTEM" Value="[SAVED_FILESYSTEM]" After="AppSearch" Condition="NOT FILESYSTEM AND SAVED_FILESYSTEM" />
+    <SetProperty Id="DRIVELETTER" Value="[SAVED_DRIVELETTER]" After="AppSearch" Condition="NOT DRIVELETTER AND SAVED_DRIVELETTER" />
+    <!-- The defaults, once the saved values have had their chance. -->
+    <SetProperty Id="CONTAINER" Action="DefaultCONTAINER" Value="icbfs" After="AppSearch" Condition="NOT CONTAINER AND NOT SAVED_CONTAINER" />
+    <SetProperty Id="FILESYSTEM" Action="DefaultFILESYSTEM" Value="default" After="AppSearch" Condition="NOT FILESYSTEM AND NOT SAVED_FILESYSTEM" />
+    <SetProperty Id="DRIVELETTER" Action="DefaultDRIVELETTER" Value="I" After="AppSearch" Condition="NOT DRIVELETTER AND NOT SAVED_DRIVELETTER" />
+
+    <!-- WinFsp must be installed first. Its installer is a 32-bit MSI,
+         so its key is in the 32-bit view of the registry. -->
+    <Property Id="WINFSPINSTALLDIR">
+      <RegistrySearch Root="HKLM" Key="SOFTWARE\WinFsp" Name="InstallDir" Type="raw" Bitness="always32" />
+    </Property>
+    <Launch Condition="Installed OR WINFSPINSTALLDIR"
+            Message="icbfs needs WinFsp, which isn't installed. Install WinFsp from https://winfsp.dev/rel/ first, then run this installer again." />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="icbfs" />
+    </StandardDirectory>
+
+    <Feature Id="Main">
+      <ComponentGroupRef Id="Files" />
+    </Feature>
+
+    <ComponentGroup Id="Files" Directory="INSTALLFOLDER">
+      <Component>
+        <File Source="$(BinDir)/icbfs-winfsp.exe" />
+      </Component>
+      <Component>
+        <File Source="$(BinDir)/icbfs-cli.exe" />
+      </Component>
+      <Component>
+        <File Source="mount-task.ps1" />
+      </Component>
+      <Component>
+        <File Source="../../LICENSE" Name="LICENSE.txt" />
+      </Component>
+      <Component>
+        <File Source="README.txt" />
+      </Component>
+      <!-- The detection contract: another package that needs icbfs
+           looks for InstallDir here (docs/mount.md). The key goes with
+           the uninstall. -->
+      <Component Id="Registry">
+        <RegistryKey Root="HKLM" Key="SOFTWARE\resurgentech\icbfs" ForceDeleteOnUninstall="yes">
+          <RegistryValue Name="InstallDir" Type="string" Value="[INSTALLFOLDER]" KeyPath="yes" />
+          <RegistryValue Name="Version" Type="string" Value="$(Version)" />
+          <RegistryValue Name="Account" Type="string" Value="[ACCOUNT]" />
+          <RegistryValue Name="Container" Type="string" Value="[CONTAINER]" />
+          <RegistryValue Name="Filesystem" Type="string" Value="[FILESYSTEM]" />
+          <RegistryValue Name="DriveLetter" Type="string" Value="[DRIVELETTER]" />
+        </RegistryKey>
+      </Component>
+    </ComponentGroup>
+
+    <!-- The sign-in task, registered by mount-task.ps1 (in the install
+         folder) after the files are in place, and removed before they
+         go. Deferred, as the machine, without a window (WixQuietExec).
+         The command lines are the custom actions' data. -->
+    <SetProperty Id="RegisterTask" Sequence="execute" Before="RegisterTask"
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]mount-task.ps1&quot; -Register -Exe &quot;[INSTALLFOLDER]icbfs-winfsp.exe&quot; -Account &quot;[ACCOUNT]&quot; -Container &quot;[CONTAINER]&quot; -Filesystem &quot;[FILESYSTEM]&quot; -DriveLetter &quot;[DRIVELETTER]&quot;" />
+    <SetProperty Id="UnregisterTask" Sequence="execute" Before="UnregisterTask"
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]mount-task.ps1&quot; -Unregister" />
+    <SetProperty Id="RollbackRegisterTask" Sequence="execute" Before="RollbackRegisterTask"
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]mount-task.ps1&quot; -Unregister" />
+    <CustomAction Id="RegisterTask" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="RollbackRegisterTask" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  Execute="rollback" Impersonate="no" Return="ignore" />
+    <CustomAction Id="UnregisterTask" DllEntry="WixQuietExec" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="UnregisterTask" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="RollbackRegisterTask" After="InstallFiles" Condition="NOT (REMOVE~=&quot;ALL&quot;) AND ACCOUNT" />
+      <Custom Action="RegisterTask" After="RollbackRegisterTask" Condition="NOT (REMOVE~=&quot;ALL&quot;) AND ACCOUNT" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

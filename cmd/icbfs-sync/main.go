@@ -31,12 +31,13 @@ import (
 	"time"
 
 	"github.com/resurgentech/icbfs/internal/buildinfo"
+	"github.com/resurgentech/icbfs/internal/console"
 )
 
 func main() {
 	args := os.Args[1:]
 	if len(args) == 1 && args[0] == "-version" {
-		useParentConsole()
+		console.UseParent()
 		fmt.Println(buildinfo.Version())
 		return
 	}
@@ -48,7 +49,7 @@ func main() {
 		cmd = "tray"
 	}
 	if cmd != "tray" {
-		useParentConsole()
+		console.UseParent()
 	}
 	fset := flag.NewFlagSet(cmd, flag.ExitOnError)
 	paths := defaultPaths()

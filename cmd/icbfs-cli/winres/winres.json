@@ -1,0 +1,33 @@
+{
+  "RT_MANIFEST": {
+    "#1": {
+      "0409": {
+        "identity": {"name": "icbfs-cli", "version": ""},
+        "description": "icbfs: create and manage filesystems",
+        "minimum-os": "win7",
+        "execution-level": "as invoker",
+        "ui-access": false,
+        "auto-elevate": false,
+        "dpi-awareness": "system",
+        "long-path-aware": true
+      }
+    }
+  },
+  "RT_VERSION": {
+    "#1": {
+      "0000": {
+        "fixed": {"file_version": "0.0.0.0", "product_version": "0.0.0.0"},
+        "info": {
+          "0409": {
+            "CompanyName": "resurgentech",
+            "FileDescription": "icbfs: create and manage filesystems; named versions; trash",
+            "InternalName": "icbfs-cli",
+            "LegalCopyright": "MIT license",
+            "OriginalFilename": "icbfs-cli.exe",
+            "ProductName": "icbfs"
+          }
+        }
+      }
+    }
+  }
+}

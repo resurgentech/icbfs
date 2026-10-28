@@ -14,9 +14,30 @@ build: build-linux build-windows
 build-linux:
     go build -o bin/ {{linux_cmds}}
 
+# icbfs-winfsp and icbfs-sync are windowed programs: no console window
+# when they start at sign-in; from a prompt, they write to its console.
 build-windows:
-    GOOS=windows go build -o bin/ {{windows_cmds}}
+    GOOS=windows go build -o bin/ ./cmd/icbfs-cli
+    GOOS=windows go build -ldflags -H=windowsgui -o bin/icbfs-winfsp.exe ./cmd/icbfs-winfsp
     GOOS=windows go build -ldflags -H=windowsgui -o bin/icbfs-sync.exe ./cmd/icbfs-sync
+
+# The Windows package, VERSION as X.Y.Z: version resources, both architectures' commands, and an MSI each into bin/ (needs go-winres and WiX 5, on Windows)
+package VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v="{{VERSION}}"
+    [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "package: $v: want X.Y.Z" >&2; exit 1; }
+    for c in icbfs-winfsp icbfs-cli; do
+        go-winres make --in "cmd/$c/winres/winres.json" --out "cmd/$c/rsrc" --arch amd64,arm64 --product-version "$v" --file-version "$v"
+    done
+    for arch in amd64:x64 arm64:arm64; do
+        goarch="${arch%:*}"; msiarch="${arch#*:}"
+        GOOS=windows GOARCH="$goarch" go build -trimpath -ldflags "-s -w -H=windowsgui" -o "bin/$msiarch/icbfs-winfsp.exe" ./cmd/icbfs-winfsp
+        GOOS=windows GOARCH="$goarch" go build -trimpath -ldflags "-s -w" -o "bin/$msiarch/icbfs-cli.exe" ./cmd/icbfs-cli
+        wix build -arch "$msiarch" -d "Version=$v" -d "BinDir=$PWD/bin/$msiarch" -ext WixToolset.Util.wixext/5.0.2 \
+            -o "bin/icbfs-$v-$msiarch.msi" packaging/windows/icbfs.wxs
+    done
+    ls -l bin/*.msi
 
 # Every Go test (needs Docker, and /dev/fuse for the mount tests)
 test *args:

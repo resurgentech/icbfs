@@ -232,6 +232,85 @@ A drive letter mounted from one logon session is visible only in that
 session. A mount started over SSH can't be seen from the desktop, or from
 another SSH session.
 
+`-log FILE` appends the log to a file instead of standard error. A
+mount with no standard error at all, one the task below starts at
+sign-in, logs to `%LOCALAPPDATA%\icbfs\icbfs-winfsp.log` by itself.
+`icbfs-winfsp` is a windowed program, so starting it at sign-in opens no
+console window; run from a prompt, it writes to that prompt.
+
+### The Windows package
+
+Each [release](https://github.com/resurgentech/icbfs/releases) has an
+MSI per architecture, `icbfs-X.Y.Z-x64.msi` and `icbfs-X.Y.Z-arm64.msi`,
+built by the release workflow from the tag. It installs `icbfs-winfsp`
+and `icbfs-cli` under `C:\Program Files\icbfs`, and a scheduled task
+that mounts the drive at sign-in. WinFsp is not in it: install
+[WinFsp's own MSI](https://winfsp.dev/rel/) first, as above; without
+it the installer stops with a message saying so. Together they install
+a file system driver (WinFsp's) and a sign-in task (ours), and the
+installer's README says so.
+
+The settings are installer properties, for an Azure Blob Storage
+account:
+
+```
+msiexec /i icbfs-X.Y.Z-x64.msi ACCOUNT=mystorage CONTAINER=icbfs FILESYSTEM=default DRIVELETTER=I
+```
+
+| property | default | meaning |
+|---|---|---|
+| `ACCOUNT` | none | the storage account. Without it the files are installed but nothing is mounted at sign-in, and no task is registered. |
+| `CONTAINER` | `icbfs` | the container |
+| `FILESYSTEM` | `default` | the filesystem in it |
+| `DRIVELETTER` | `I` | the drive |
+
+They are kept in the registry, so a repair or an upgrade without them
+keeps what was given before. A silent install (`/qn`) needs an
+administrator's prompt; a double-clicked one asks.
+
+**The sign-in task**, `icbfs mount`, runs `icbfs-winfsp -store azure
+-azure-account ACCOUNT -azure-container CONTAINER -fs FILESYSTEM
+DRIVELETTER:` when any member of Users signs in, as that user, in
+their own session, with no time limit. It runs as the user because the
+drive is theirs (a drive letter is visible only in the session that
+mounted it) and because a token command may have to sign them in. It
+starts nothing at install: the first mount is at the next sign-in. One
+interactive user at a time: a second user signing in while the first
+is still logged on finds the drive letter taken, and their mount fails,
+in their log.
+
+**The credential is the user's own, never the package's.** The task
+line holds the account and container only. The mount gets its
+credential the usual way:
+
+- a token command, when the machine provides one:
+  `ICBFS_AZURE_TOKEN_COMMAND` in the machine's environment names a
+  program that signs the user in (above). That is what a package built
+  around one sets up; this package does nothing about it.
+- or the account's key in the user's own environment variables,
+  `ICBFS_AZURE_KEY` (Settings, "Edit environment variables for your
+  account"). Never in the machine's: every user of the machine could
+  read it there.
+
+The mount's log is `%LOCALAPPDATA%\icbfs\icbfs-winfsp.log`; a mount that
+fails at sign-in says why there.
+
+**The registry key** `HKLM\SOFTWARE\resurgentech\icbfs` (64-bit view)
+is the contract for a package that needs icbfs installed first:
+`InstallDir` (REG_SZ, the install folder, with its trailing backslash)
+is there exactly while icbfs is installed, with `Version` and the
+settings above (`Account`, `Container`, `Filesystem`, `DriveLetter`)
+beside it. Uninstalling removes the key, the task and the files, and
+leaves WinFsp.
+
+The package is `packaging/windows` in the repository: `icbfs.wxs` (WiX
+v5), `mount-task.ps1` (registers the task; the installer runs it as
+the machine), and `check-msi.ps1`, which installs, checks and
+uninstalls an MSI as the release workflow does on a GitHub-hosted
+runner. `just package X.Y.Z` builds the MSIs on Windows, with
+[go-winres](https://github.com/tc-hib/go-winres) for the commands'
+version resources and the [WiX](https://wixtoolset.org) 5 dotnet tool.
+
 ### What works on Windows
 
 - Security descriptors, stored with full fidelity on primary-Windows

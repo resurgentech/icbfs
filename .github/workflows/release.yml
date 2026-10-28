@@ -1,0 +1,177 @@
+# A release: on a version tag, the Windows package is built on
+# GitHub-hosted runners, installed and uninstalled on one to check it,
+# signed through SignPath when the repository has the token (README.md,
+# "Code signing policy"), and published as a GitHub release with the
+# notes from .github/release-notes.md. Run by hand (workflow_dispatch)
+# it builds and checks the package, as version 0.0.0, and publishes
+# nothing.
+name: Release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_WINRES_VERSION: v0.3.3
+  WIX_VERSION: 5.0.2
+  # The WinFsp the package is checked against (the package doesn't
+  # carry WinFsp; see docs/mount.md). The hash is from its release notes.
+  WINFSP_VERSION: '2.1'
+  WINFSP_BUILD: 2.1.25156
+  WINFSP_SHA256: 073A70E00F77423E34BED98B86E600DEF93393BA5822204FAC57A29324DB9F7A
+
+jobs:
+  package:
+    name: Build the MSIs
+    runs-on: windows-latest
+    timeout-minutes: 30
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      sign: ${{ steps.version.outputs.sign }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: taiki-e/install-action@just
+      - name: The version, from the tag
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"; version="${tag#v}"
+          else
+            tag=""; version="0.0.0"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sign=${{ secrets.SIGNPATH_API_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+      - name: go-winres and WiX
+        shell: bash
+        run: |
+          go install "github.com/tc-hib/go-winres@$GO_WINRES_VERSION"
+          dotnet tool install --global wix --version "$WIX_VERSION"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          echo "$USERPROFILE/.dotnet/tools" >> "$GITHUB_PATH"
+      - run: just package ${{ steps.version.outputs.version }}
+      - name: The build's own idea of its version
+        shell: bash
+        run: |
+          v=$(bin/x64/icbfs-cli.exe -version)
+          echo "icbfs-cli -version: $v"
+          if [ -n "${{ steps.version.outputs.tag }}" ] && [ "$v" != "${{ steps.version.outputs.tag }}" ]; then
+            echo "want ${{ steps.version.outputs.tag }}" >&2; exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        id: upload
+        with:
+          name: msi
+          path: bin/*.msi
+          if-no-files-found: error
+
+  test:
+    name: Install, check, uninstall
+    needs: package
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: msi
+          path: msi
+      - name: Without WinFsp the installer refuses
+        run: |
+          $msi = (Get-Item msi\icbfs-*-x64.msi).FullName
+          $p = Start-Process msiexec -ArgumentList "/i `"$msi`" /qn /norestart /l*v nowinfsp.log ACCOUNT=example" -Wait -PassThru
+          if ($p.ExitCode -ne 1603) { Get-Content nowinfsp.log | Select-Object -Last 40; throw "without WinFsp: exit $($p.ExitCode), want 1603" }
+          if (-not (Select-String -Path nowinfsp.log -Pattern 'icbfs needs WinFsp' -Quiet)) { Get-Content nowinfsp.log | Select-Object -Last 40; throw "the log doesn't say WinFsp is missing" }
+          "refused, as it should: the log says WinFsp is missing"
+      - name: Install WinFsp
+        run: |
+          Invoke-WebRequest "https://github.com/winfsp/winfsp/releases/download/v$env:WINFSP_VERSION/winfsp-$env:WINFSP_BUILD.msi" -OutFile winfsp.msi
+          $hash = (Get-FileHash winfsp.msi -Algorithm SHA256).Hash
+          if ($hash -ne $env:WINFSP_SHA256) { throw "winfsp.msi: SHA256 $hash, want $env:WINFSP_SHA256" }
+          $p = Start-Process msiexec -ArgumentList '/i winfsp.msi /qn /norestart' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "WinFsp: exit $($p.ExitCode)" }
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: packaging/windows
+      - name: Install, check, repair, uninstall
+        run: |
+          $msi = (Get-Item msi\icbfs-*-x64.msi).FullName
+          packaging\windows\check-msi.ps1 -Msi $msi -Version '${{ needs.package.outputs.version }}' -Tag '${{ needs.package.outputs.tag }}'
+
+  sign:
+    name: Sign through SignPath
+    needs: [package, test]
+    if: needs.package.outputs.sign == 'true' && needs.package.outputs.tag != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    steps:
+      # Waits for the signing request's approval (README.md, "Code
+      # signing policy"), up to an hour.
+      - uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ needs.package.outputs.artifact-id }}
+          wait-for-completion: true
+          wait-for-completion-timeout-in-seconds: 3600
+          output-artifact-directory: signed
+          parameters: |
+            version: ${{ toJSON(needs.package.outputs.version) }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: msi-signed
+          path: signed/*.msi
+          if-no-files-found: error
+
+  publish:
+    name: GitHub release
+    needs: [package, test, sign]
+    if: always() && needs.package.outputs.tag != '' && needs.test.result == 'success' && (needs.sign.result == 'success' || needs.sign.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.sign.result == 'success' && 'msi-signed' || 'msi' }}
+          path: msi
+      - name: Checksums and notes
+        run: |
+          tag='${{ needs.package.outputs.tag }}'
+          version='${{ needs.package.outputs.version }}'
+          (cd msi && sha256sum *.msi > SHA256SUMS && cat SHA256SUMS)
+          previous=$(git describe --tags --abbrev=0 "$tag^" 2>/dev/null || true)
+          if [ -n "$previous" ]; then
+            changes="[Changes since $previous](https://github.com/${{ github.repository }}/compare/$previous...$tag)."
+          else
+            changes="The first release."
+          fi
+          if [ '${{ needs.sign.result }}' = success ]; then
+            signed="The MSIs are signed: free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org)."
+          else
+            signed="The MSIs of this release are not signed. Windows SmartScreen will warn when they are run; check them against \`SHA256SUMS\`."
+          fi
+          sed -e "s|@VERSION@|$version|g" -e "s|@TAG@|$tag|g" -e "s|@CHANGES@|$changes|" -e "s|@SIGNED@|$signed|" \
+            .github/release-notes.md > notes.md
+          cat notes.md
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create '${{ needs.package.outputs.tag }}' msi/*.msi msi/SHA256SUMS \
+            --verify-tag --title 'icbfs ${{ needs.package.outputs.tag }}' --notes-file notes.md

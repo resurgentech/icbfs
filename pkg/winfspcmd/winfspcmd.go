@@ -14,12 +14,14 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	winfsp "github.com/winfsp/go-winfsp"
 
 	"github.com/resurgentech/icbfs/internal/buildinfo"
+	"github.com/resurgentech/icbfs/internal/console"
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/internal/winfspserver"
@@ -54,6 +56,7 @@ func Main(args []string, newStore func() storeflags.Store) int {
 	atime := fset.String("atime", "hourly", "when reads and folder listings record access times: hourly (when the recorded one is over an hour old, as NTFS does), relatime (when it's no newer than the last change, or a day old), strict (every read and listing), or noatime (never)")
 	noDirAtime := fset.Bool("nodiratime", false, "don't record access times for folders")
 	version := fset.Bool("version", false, "print which build this is and exit")
+	logFile := fset.String("log", "", "append the log to this file instead of standard error (default when there is no standard error, as from a sign-in task: %LOCALAPPDATA%\\icbfs\\icbfs-winfsp.log)")
 	metaCache := fset.Duration("meta-cache", 5*time.Second, "how long Windows trusts file and directory information, as the Linux mount's -meta-cache: other machines' changes can take this long to show in a listing or a file's details; an open still checks the store (0: trust nothing; as-of mounts default to without limit)")
 	if err := fset.Parse(args); err != nil {
 		return 2
@@ -65,6 +68,20 @@ func Main(args []string, newStore func() storeflags.Store) int {
 	if fset.NArg() != 1 {
 		fset.Usage()
 		return 2
+	}
+	if *logFile == "" && !console.HaveStderr() {
+		*logFile = os.ExpandEnv(defaultLog)
+	}
+	if *logFile != "" {
+		if err := os.MkdirAll(filepath.Dir(*logFile), 0o700); err != nil {
+			return fail("-log: %v", err)
+		}
+		f, err := os.OpenFile(*logFile, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+		if err != nil {
+			return fail("-log: %v", err)
+		}
+		defer f.Close()
+		log.SetOutput(f)
 	}
 	if *metaCache < 0 || *metaCache > time.Duration(math.MaxUint32-1)*time.Millisecond {
 		return fail("-meta-cache %v: from 0 to %v", *metaCache, time.Duration(math.MaxUint32-1)*time.Millisecond)
@@ -191,6 +208,11 @@ func Main(args []string, newStore func() storeflags.Store) int {
 	<-sigs
 	return 0
 }
+
+// defaultLog is where the log goes when there is no standard error to
+// write it to: a mount the Windows package's task starts at sign-in.
+// Expanded by os.ExpandEnv.
+const defaultLog = `${LOCALAPPDATA}\icbfs\icbfs-winfsp.log`
 
 // fail logs why the mount can't go on, for Main's exit status.
 func fail(format string, a ...any) int {
