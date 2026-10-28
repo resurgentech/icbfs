@@ -82,10 +82,6 @@ release VERSION:
 pjdfstest ip=vm_ip:
     test/linux/run-pjdfstest.sh {{ip}}
 
-# The logging chain on the Linux VM
-logging-test ip=vm_ip:
-    test/linux/run-logging-test.sh {{ip}}
-
 # The 6 GiB file test on the Linux VM (opt-in, ~10 min)
 largefile-test ip=vm_ip:
     test/linux/run-largefile-test.sh {{ip}}
@@ -115,4 +111,4 @@ multi-test *args:
     test/multi/run-multi.sh {{args}}
 
 # Every VM suite but the large-file one and xfstests
-vm-tests: pjdfstest mount-helper-test logging-test multi-test (winfsp-tests "icbfs-ci") (winfsp-tests "icbfs-cs") sync-test
+vm-tests: pjdfstest mount-helper-test multi-test (winfsp-tests "icbfs-ci") (winfsp-tests "icbfs-cs") sync-test

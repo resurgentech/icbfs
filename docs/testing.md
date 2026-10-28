@@ -275,11 +275,11 @@ case-sensitive.
   memory, once per `-meta-cache` value.
 
 From the repository root, `just pjdfstest`, `just xfstests [tests]`,
-`just mount-helper-test`, `just logging-test`, `just largefile-test`,
+`just mount-helper-test`, `just largefile-test`,
 `just winfsp-tests [icbfs-ci|icbfs-cs|cmemfs-ci]` and `just sync-test`
 run the VM suites (the Linux ones find the VM's address themselves).
-`just vm-tests` runs pjdfstest, the mount-helper test, the logging chain,
-the multi-machine set, both winfsp-tests runs and the sync test: not the
+`just vm-tests` runs pjdfstest, the mount-helper test, the
+multi-machine set, both winfsp-tests runs and the sync test: not the
 large-file test, xfstests (most of a day), the single-machine Connectathon
 run (`test/linux/run-cthon.sh`), or the metadata copies.
 
