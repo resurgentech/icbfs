@@ -40,6 +40,7 @@ JSON output where it's shown.
 | `-azure-container` | `ICBFS_AZURE_CONTAINER` | `icbfs` |
 | `-azure-key` | `ICBFS_AZURE_KEY` | |
 | `-azure-endpoint` | `ICBFS_AZURE_ENDPOINT` | `https://ACCOUNT.blob.core.windows.net/` |
+| `-azure-token-command` | `ICBFS_AZURE_TOKEN_COMMAND` | none: a program that gets a token, instead of the key (see [mount.md](mount.md)) |
 
 A DRIVE is then `-fs NAME`, optionally with `-root DIR` for a directory
 in the filesystem.

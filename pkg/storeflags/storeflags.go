@@ -18,6 +18,11 @@
 //	-azure-container  $ICBFS_AZURE_CONTAINER  (icbfs)
 //	-azure-key        $ICBFS_AZURE_KEY
 //	-azure-endpoint   $ICBFS_AZURE_ENDPOINT   (https://ACCOUNT.blob.core.windows.net/)
+//
+// Or, instead of the account's key, a program that gets a token for it
+// (pkg/tokencmd is the protocol):
+//
+//	-azure-token-command $ICBFS_AZURE_TOKEN_COMMAND
 package storeflags
 
 import (
@@ -31,6 +36,7 @@ import (
 
 	"github.com/resurgentech/icbfs/internal/objstore"
 	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
+	"github.com/resurgentech/icbfs/pkg/tokencmd"
 )
 
 // Store is a command's way to its store: flags of its own on the
@@ -50,23 +56,65 @@ type Store interface {
 	Identity() string
 }
 
-// Flags is the Store the flags above describe, opened by pkg/icbfs.Open.
+// Flags is the Store the flags above describe, opened by pkg/icbfs.Open:
+// with the key, or, if TokenCommand names a program, with the tokens it
+// gives (pkg/tokencmd).
 type Flags struct {
-	Config *pkgicbfs.StoreConfig
+	Config       *pkgicbfs.StoreConfig
+	TokenCommand string
 }
 
 // Default is a new Flags, empty until its flags are parsed.
 func Default() Store { return &Flags{Config: &pkgicbfs.StoreConfig{}} }
 
-func (f *Flags) AddFlags(fset *flag.FlagSet)                  { add(fset, f.Config) }
-func (f *Flags) Check() error                                 { return Check(f.Config) }
-func (f *Flags) Open(context.Context) (pkgicbfs.Store, error) { return pkgicbfs.Open(*f.Config) }
-func (f *Flags) String() string                               { return f.Config.String() }
+func (f *Flags) AddFlags(fset *flag.FlagSet) {
+	add(fset, f.Config)
+	fset.StringVar(&f.TokenCommand, "azure-token-command", env("ICBFS_AZURE_TOKEN_COMMAND", ""), "Azure: instead of the key, a program that gets a token for the account, asked on its standard input (see docs/mount.md) ($ICBFS_AZURE_TOKEN_COMMAND)")
+}
+
+// Check is Check below; with a token command, an Azure store needs no
+// key, and may not have one.
+func (f *Flags) Check() error {
+	if f.Config.Kind != pkgicbfs.KindAzure || f.TokenCommand == "" {
+		return Check(f.Config)
+	}
+	if f.Config.Azure.Key != "" {
+		return errors.New("an Azure store takes the account's key or a token command, not both")
+	}
+	if f.Config.Azure.Account == "" || f.Config.Azure.Container == "" {
+		return errors.New("an Azure store needs an account and a container")
+	}
+	return nil
+}
+
+// Open opens the store. With a token command, it starts the command
+// and asks it for a first token, which may be a sign-in; ctx bounds the
+// wait. The command then runs as long as the store is open.
+func (f *Flags) Open(ctx context.Context) (pkgicbfs.Store, error) {
+	if f.Config.Kind != pkgicbfs.KindAzure || f.TokenCommand == "" {
+		return pkgicbfs.Open(*f.Config)
+	}
+	cred, err := tokencmd.New(ctx, f.TokenCommand)
+	if err != nil {
+		return nil, err
+	}
+	if who := cred.Account(); who != "" {
+		log.Printf("azure: the token command's identity is %s", who)
+	}
+	return pkgicbfs.OpenAzureWithCredential(f.Config.Azure, cred)
+}
+
+func (f *Flags) String() string { return f.Config.String() }
 
 // Identity is the S3 access key, or the Azure account, which the key
-// stands for.
+// stands for; with a token command, the account "by token command",
+// since whose the tokens are is the command's business, and its history
+// cache isn't the key's.
 func (f *Flags) Identity() string {
 	if f.Config.Kind == pkgicbfs.KindAzure {
+		if f.TokenCommand != "" {
+			return f.Config.Azure.Account + " by token command"
+		}
 		return f.Config.Azure.Account
 	}
 	return f.Config.S3.AccessKey

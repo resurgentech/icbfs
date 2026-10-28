@@ -32,7 +32,7 @@ test-ci:
 
 # The Go tests that run on Windows (no Docker there)
 test-windows:
-    go test ./internal/acl ./internal/block ./internal/syncer ./internal/syncer/folderside ./pkg/storeflags
+    go test ./internal/acl ./internal/block ./internal/syncer ./internal/syncer/folderside ./pkg/storeflags ./pkg/tokencmd
 
 # go vet, for Linux and for the Windows packages
 vet:

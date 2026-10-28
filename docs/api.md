@@ -476,7 +476,9 @@ defer d.Close()
   and `pkg/storeflags` the store flags they take: `storeflags.Default`
   is this module's, and a host with a store of its own, a credential it
   holds, say, implements `storeflags.Store` and builds the same commands
-  around it.
+  around it. `pkg/tokencmd` is a `TokenCredential` backed by a program
+  the mount runs, `-azure-token-command`'s (the protocol is in
+  [mount.md](mount.md)).
 - `icbfsdrive.Config` names the filesystem, the drive's root directory in
   it, and the drive's registry `ID` (recorded in the origin of copies made
   from it). `History` is a history cache to share with other views; without

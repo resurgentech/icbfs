@@ -254,6 +254,7 @@ internal/
 pkg/
   drive/        the drive library, icbfs backend, and HTTP handlers
   icbfs/        opening a store; filesystem administration
+  tokencmd/     a token credential from a program the mount runs
   history/      a filesystem's past for programs that browse it: folders at
                 any moment, a file's versions, search including the trash
   icbfstest/    a throwaway MinIO for other modules' tests

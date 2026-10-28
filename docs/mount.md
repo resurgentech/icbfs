@@ -31,9 +31,56 @@ versioning on:
 | `-azure-container` | `ICBFS_AZURE_CONTAINER` | `icbfs` |
 | `-azure-key` | `ICBFS_AZURE_KEY` | none: the account's key |
 | `-azure-endpoint` | `ICBFS_AZURE_ENDPOINT` | `https://ACCOUNT.blob.core.windows.net/` |
+| `-azure-token-command` | `ICBFS_AZURE_TOKEN_COMMAND` | none: a program that gets a token for the account, instead of the key (below) |
 
 Prefer the variables for the keys: a flag's value is visible to other
 users in the process list.
+
+### A token command instead of the key
+
+An Azure store can be opened with tokens for a signed-in identity
+rather than the account's key: `-azure-token-command` names a program,
+and the mount asks it for a token. How the program gets one (a sign-in,
+the machine's account broker, a managed identity, the `az` CLI) is its
+own business, and so is its configuration: it inherits the mount's
+environment, and takes no arguments. The identity's role on the
+container (Storage Blob Data Reader, or Contributor) decides what the
+mount may do, and icbfs's own ACLs still decide per file. A key and a
+token command together is an error; with a token command, only the
+account and the container are needed.
+
+The mount starts the program once, on open, and keeps it running: it
+sends one JSON line on the program's standard input per ask and reads
+one line back on its standard output, keeps the token until five
+minutes before it expires, and asks again then. The program's standard
+error is the mount's. The first ask is interactive, the one moment a
+sign-in may be shown; the rest are silent. A program that exits is
+started once more; one that answers with an error, or doesn't start,
+fails the open. The program exits when its standard input closes.
+
+```
+> {"version": 1, "scopes": ["https://storage.azure.com/.default"], "interactive": true}
+< {"version": 1, "token": "...", "expiresOn": "2026-10-27T12:34:56Z", "account": "who@tenant"}
+< {"version": 1, "error": "what went wrong", "code": "interaction_required"}
+```
+
+- `version` is the protocol's, 1, in every request and every reply. A
+  reply with another version is an error that names both; a program
+  that doesn't speak the request's version answers
+  `unsupported_version`.
+- `scopes` is what the token is for: Azure Storage's.
+- `interactive` false means answer silently, or reply
+  `interaction_required`; true lets the program show a sign-in.
+- `expiresOn` is RFC 3339. `account` is whose identity the token is; the
+  mount only logs it. The codes are `interaction_required`,
+  `unsupported_version` and `failed`.
+
+The history cache of a store opened this way is its own, not the key's
+(the cache is one per store and identity). `pkg/tokencmd` is the
+mount's side, usable from Go by anything that takes a
+`TokenCredential`, and its tests drive a fake program (the test binary
+itself, run with `ICBFS_FAKE_TOKEN_COMMAND` as a script of replies),
+the example of one.
 
 | flag | default | meaning |
 |---|---|---|
