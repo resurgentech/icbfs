@@ -309,7 +309,9 @@ the machine), and `check-msi.ps1`, which installs, checks and
 uninstalls an MSI as the release workflow does on a GitHub-hosted
 runner. `just package X.Y.Z` builds the MSIs on Windows, with
 [go-winres](https://github.com/tc-hib/go-winres) for the commands'
-version resources and the [WiX](https://wixtoolset.org) 5 dotnet tool.
+version resources and the [WiX](https://wixtoolset.org) 5 dotnet tool
+(`dotnet tool install --global wix --version 5.0.2`, then `wix extension
+add -g WixToolset.Util.wixext/5.0.2`).
 
 ### What works on Windows
 

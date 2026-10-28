@@ -24,6 +24,7 @@ Each run against a fresh store: MinIO unless the row says otherwise.
 | winfsp-tests `--external`, case-insensitive | 2026-10-28 | Windows Server 2025 VM | 78 / 78 pass (2026-10-17: also at `-meta-cache 0`) |
 | winfsp-tests `--external`, case-sensitive | 2026-10-28 | Windows Server 2025 VM | 77 / 78 pass; `getfileinfo_name_test` fails, as on WinFsp's memfs |
 | icbfs-sync end to end | 2026-10-28 | Windows Server 2025 VM | 12 / 12 checks pass; its Go tests pass on NTFS |
+| the Windows package | 2026-10-28 | Windows Server 2025 VM | install, every check, repair and uninstall pass (`check-msi.ps1`); a real sign-in started the task in the user's session, without a window, with the user's key and the default log |
 | large files (6 GiB, opt-in) | 2026-10-14 | Ubuntu 24.04 VM | 7 / 7 checks pass (6 GiB written in 73 s; a one-byte edit in 22 s) |
 | metadata copies (test/metadata) | 2026-10-24 | Ubuntu 24.04 VM, FUSE, root | `cp -a`, `cp -rp`, `rsync -aAXH(U)`, `tar --xattrs --acls`: all keep exactly what they keep on tmpfs |
 | metadata copies (test/metadata) | 2026-10-24 | Windows 11 VM, WinFsp | robocopy (`/COPY:DAT /DCOPY:DAT` and `/COPY:DATSO`), Copy-Item and DISM keep exactly what they keep on NTFS; hard links not compared (WinFsp can't make them); xcopy `/O` fails: WinFsp drops the inherited entries of an ACL given at create, leaving an empty DACL |
@@ -272,6 +273,18 @@ case-sensitive.
   Office do to a mount (listing many files, opening small ones, a deep
   path, an Office-style save, copying a folder in) and the mount's peak
   memory, once per `-meta-cache` value.
+- **The Windows package** (`packaging/windows/check-msi.ps1`, on a
+  Windows machine with WinFsp, as an administrator): installs an MSI
+  with every setting, checks the files, their version resources, the
+  registry key and the sign-in task, repairs it without settings (they
+  must stay), and uninstalls it (everything must go). The release
+  workflow runs it on a GitHub-hosted runner, after checking that the
+  installer refuses without WinFsp. The sign-in itself is checked by
+  hand: install with a real account, put the key in the user's
+  environment, turn auto-logon on (`test/windows/enable-autologon.sh`)
+  and restart; the task's last run time, the `icbfs-winfsp` process in
+  the console session and `%LOCALAPPDATA%\icbfs\icbfs-winfsp.log` say
+  what happened.
 
 From the repository root, `just pjdfstest`, `just xfstests [tests]`,
 `just mount-helper-test`, `just largefile-test`,

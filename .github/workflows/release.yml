@@ -57,6 +57,7 @@ jobs:
         run: |
           go install "github.com/tc-hib/go-winres@$GO_WINRES_VERSION"
           dotnet tool install --global wix --version "$WIX_VERSION"
+          "$USERPROFILE/.dotnet/tools/wix" extension add -g "WixToolset.Util.wixext/$WIX_VERSION"
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
           echo "$USERPROFILE/.dotnet/tools" >> "$GITHUB_PATH"
       - run: just package ${{ steps.version.outputs.version }}
