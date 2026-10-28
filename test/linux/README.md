@@ -23,6 +23,11 @@ and an SSH key at `~/.ssh/id_ed25519.pub`.
   copy of `cloud-init.yaml`.
 - Log in as `ubuntu`, with key auth and passwordless `sudo`.
 - `work/` (gitignored) holds downloads and each run's logs.
+- Every run first sets the VM's clock to the host's and lets timesyncd
+  make its first correction (`sync_vm_clock` in `lib.sh`). A freshly
+  booted VM can run a second or more behind until that correction,
+  which otherwise lands mid-run and puts a status change before a
+  creation the store timed.
 
 ## Runs
 

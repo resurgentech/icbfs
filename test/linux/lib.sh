@@ -53,16 +53,31 @@ create_fs() {
   "$WORK_DIR/icbfs-cli" fs create $STORE_ARGS -fs "$fs" -root-uid 0 -root-gid 0 "$@" >/dev/null
 }
 
+# sync_vm_clock sets the VM's clock to this host's, then has timesyncd
+# make its first correction now rather than mid-run. A freshly started
+# VM can run a second or more behind the host until timesyncd's initial
+# synchronization steps it, which was about 45 seconds after boot: a
+# chmod's ctime (the VM's clock) then came out before the file's
+# creation (the store's, on the host), and pjdfstest's chmod/00.t failed
+# on the first run after a boot, 2026-10-28.
+sync_vm_clock() {
+  local ip="$1"
+  ssh_vm "$ip" "sudo date -s @$(date +%s.%N) >/dev/null; sudo systemctl try-restart systemd-timesyncd 2>/dev/null
+    for i in \$(seq 1 60); do [ \"\$(timedatectl show -p NTPSynchronized --value)\" = yes ] && exit 0; sleep 1; done; exit 0"
+}
+
 # deploy_icbfs <ip> copies this working tree (tracked plus
 # untracked-but-not-ignored files) to the VM fresh and builds the icbfs
-# mount command and icbfs-cli there. Always fresh: a stale checkout on
-# the VM once built a mount command that rejected -allow-other, and
-# pjdfstest went on to "pass" against the VM's own disk.
+# mount command and icbfs-cli there, after sync_vm_clock. Always fresh:
+# a stale checkout on the VM once built a mount command that rejected
+# -allow-other, and pjdfstest went on to "pass" against the VM's own
+# disk.
 deploy_icbfs() {
   local ip="$1" repo tarball
   repo="$(cd "$HERE/../.." && pwd)"
   mkdir -p "$WORK_DIR"
   tarball="$WORK_DIR/icbfs-src-$ip.tar" # one per VM: two runs can deploy at once
+  sync_vm_clock "$ip"
   echo "Deploying working tree to ${VM_SRC} and building icbfs and icbfs-cli..." >&2
   (cd "$repo" && git ls-files -co --exclude-standard -z | tar --null -T - -cf "$tarball") || return 1
   scp_to_vm "$ip" "$tarball" /tmp/icbfs-src.tar >/dev/null || return 1
