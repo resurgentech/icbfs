@@ -425,10 +425,12 @@ Mounts read names too: `icbfs mount -as-of q3-signoff`.
 
 **Browsing the past: `pkg/history`.** A program that moves through a
 filesystem's history (a slider over time, say) opens it with
-`history.Open(ctx, history.Config{Store, Filesystem, Root, CacheDir, TTL})`
+`history.Open(ctx, history.Config{Store, Filesystem, Root, CacheDir, TTL, TokenCommand})`
 (a store configuration, not an open store; `CacheDir` and `TTL` default to
-the user's cache directory and 30 days) and asks, as the profile in each
-call's context:
+the user's cache directory and 30 days; `TokenCommand`, for an Azure
+store, is a program giving tokens in place of the key, as the mount's
+`-azure-token-command`, [mount.md](mount.md)) and asks, as the profile in
+each call's context:
 
 - `List(ctx, dir, at)`: a directory as it was at a moment (now, for the
   zero time);

@@ -37,6 +37,11 @@ type Config struct {
 	// days).
 	CacheDir string        `json:"cacheDir,omitempty"`
 	TTL      time.Duration `json:"ttl,omitempty"`
+	// TokenCommand, for an Azure store, is a program that gives tokens
+	// for it in place of the account's key: the mount's
+	// -azure-token-command (pkg/tokencmd, docs/mount.md). It runs as long
+	// as the process does.
+	TokenCommand string `json:"tokenCommand,omitempty"`
 }
 
 // pastCheck is how often a history looks for a change to the past (a
@@ -68,14 +73,29 @@ func Open(ctx context.Context, cfg Config) (*History, error) {
 	if cfg.TTL == 0 {
 		cfg.TTL = objstore.DefaultHistoryTTL
 	}
-	if err := cfg.Store.Check(); err != nil {
-		return nil, err
+	flags := &storeflags.Flags{Config: &cfg.Store, TokenCommand: cfg.TokenCommand}
+	var store pkgicbfs.Store
+	if cfg.TokenCommand == "" {
+		if err := cfg.Store.Check(); err != nil {
+			return nil, err
+		}
+		s, err := openStore(cfg.Store)
+		if err != nil {
+			return nil, err
+		}
+		store = s
+	} else {
+		// The command's first ask may be a sign-in; ctx bounds it.
+		if err := flags.Check(); err != nil {
+			return nil, err
+		}
+		s, err := flags.Open(ctx)
+		if err != nil {
+			return nil, err
+		}
+		store = s
 	}
-	store, err := openStore(cfg.Store)
-	if err != nil {
-		return nil, err
-	}
-	hist, err := (&storeflags.History{Dir: cfg.CacheDir, TTL: cfg.TTL}).Open(ctx, store, &storeflags.Flags{Config: &cfg.Store})
+	hist, err := (&storeflags.History{Dir: cfg.CacheDir, TTL: cfg.TTL}).Open(ctx, store, flags)
 	if err != nil {
 		return nil, err
 	}
