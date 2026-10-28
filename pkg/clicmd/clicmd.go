@@ -42,11 +42,11 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/resurgentech/icbfs/internal/fslog"
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore"
-	"github.com/resurgentech/icbfs/internal/sidecmd"
 	"github.com/resurgentech/icbfs/pkg/drive"
+	"github.com/resurgentech/icbfs/pkg/fslog"
+	"github.com/resurgentech/icbfs/pkg/sidecmd"
 	"github.com/resurgentech/icbfs/pkg/storeflags"
 )
 

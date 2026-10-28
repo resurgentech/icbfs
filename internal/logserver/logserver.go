@@ -23,12 +23,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
-	"github.com/resurgentech/icbfs/internal/fslog"
 	"github.com/resurgentech/icbfs/internal/objstore"
-	"github.com/resurgentech/icbfs/internal/sidecmd"
 	"github.com/resurgentech/icbfs/pkg/drive"
 	"github.com/resurgentech/icbfs/pkg/drive/icbfsdrive"
+	"github.com/resurgentech/icbfs/pkg/fslog"
 	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
+	"github.com/resurgentech/icbfs/pkg/sidecmd"
 )
 
 // Config is what the server hands out and where it logs.

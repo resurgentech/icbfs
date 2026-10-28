@@ -12,12 +12,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/resurgentech/icbfs/internal/fslog"
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/logserver"
 	"github.com/resurgentech/icbfs/internal/storeconfig"
 	"github.com/resurgentech/icbfs/internal/testutil/miniotest"
 	"github.com/resurgentech/icbfs/pkg/drive"
+	"github.com/resurgentech/icbfs/pkg/fslog"
 )
 
 // TestCommandsThroughTheDaemon: icbfs-cli's side commands go through the

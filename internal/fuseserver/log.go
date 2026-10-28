@@ -7,8 +7,8 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fuse"
 
-	"github.com/resurgentech/icbfs/internal/fslog"
 	"github.com/resurgentech/icbfs/internal/icbfs"
+	"github.com/resurgentech/icbfs/pkg/fslog"
 )
 
 // Logger receives the actions a mount logs — fslog.Client, relaying to

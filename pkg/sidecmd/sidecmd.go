@@ -8,10 +8,10 @@
 //     only its own names and trash.
 //
 // icbfs-cli runs them itself when it has the store's credentials (a drive
-// is then a filesystem, or a directory in one); on a machine with the
-// daemon it sends them through it (icbfs-logd), and the server runs them
-// here, as the actor the daemon vouches for, on the drive its registry
-// names. Arguments are strings, results JSON.
+// is then a filesystem, or a directory in one); on a machine with a
+// daemon (-daemon) it sends them through it, and the server behind the
+// daemon runs them here, as the actor the daemon vouches for, on the
+// drive its registry names. Arguments are strings, results JSON.
 package sidecmd
 
 import (

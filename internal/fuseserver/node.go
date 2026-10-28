@@ -17,9 +17,9 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
-	"github.com/resurgentech/icbfs/internal/fslog"
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/notify"
+	"github.com/resurgentech/icbfs/pkg/fslog"
 )
 
 // Node is one entry: the root, or the item at key. Its type is fixed for

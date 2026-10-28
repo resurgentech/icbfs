@@ -16,11 +16,11 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
-	"github.com/resurgentech/icbfs/internal/fslog"
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/logd"
 	"github.com/resurgentech/icbfs/internal/logserver"
 	"github.com/resurgentech/icbfs/internal/storeconfig"
+	"github.com/resurgentech/icbfs/pkg/fslog"
 )
 
 // TestMountLogsThroughDaemon is the whole chain, the way `icbfs mount

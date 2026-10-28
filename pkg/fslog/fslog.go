@@ -1,8 +1,9 @@
 // Package fslog is how an icbfs mount reports what happens on it, and
-// gets the credentials it mounts with, through a local daemon
-// (internal/logd, cmd/icbfs-logd) that relays to a server over one
-// websocket: local clients on a Unix socket, the daemon holding the only
-// connection to the server.
+// gets the credentials it mounts with, through a local daemon that
+// relays to a server over one websocket: local clients on a Unix socket
+// (icbfs mount -log-socket, icbfs-cli -daemon), the daemon holding the
+// only connection to the server. The daemon and the server are not in
+// this module; Client is the mount's end, and Frame what both hops carry.
 //
 // Both hops carry the same JSON Frames: one per line on the Unix socket,
 // one per message on the websocket. Every request has an id, and its

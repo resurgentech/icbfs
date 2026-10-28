@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/resurgentech/icbfs/internal/fslog"
 	"github.com/resurgentech/icbfs/internal/logd"
 	"github.com/resurgentech/icbfs/internal/logserver"
 	"github.com/resurgentech/icbfs/internal/storeconfig"
+	"github.com/resurgentech/icbfs/pkg/fslog"
 )
 
 const secret = "s3cret"

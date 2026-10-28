@@ -24,7 +24,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/resurgentech/icbfs/internal/fslog"
+	"github.com/resurgentech/icbfs/pkg/fslog"
 )
 
 // Config is where the daemon listens and what it connects to.

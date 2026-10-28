@@ -17,12 +17,12 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
-	"github.com/resurgentech/icbfs/internal/fslog"
 	"github.com/resurgentech/icbfs/internal/fuseserver"
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/notify"
 	"github.com/resurgentech/icbfs/internal/notify/miniosrc"
 	"github.com/resurgentech/icbfs/internal/objstore"
+	"github.com/resurgentech/icbfs/pkg/fslog"
 	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
 	"github.com/resurgentech/icbfs/pkg/storeflags"
 )

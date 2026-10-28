@@ -13,8 +13,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/resurgentech/icbfs/internal/fslog"
 	"github.com/resurgentech/icbfs/internal/logserver"
+	"github.com/resurgentech/icbfs/pkg/fslog"
 	"github.com/resurgentech/icbfs/pkg/storeflags"
 )
 
