@@ -43,7 +43,7 @@ codesign_key() {
 }
 
 command -v go-winres >/dev/null || { echo "go-winres isn't on PATH: go install github.com/tc-hib/go-winres@v0.3.3" >&2; exit 1; }
-ip="$(vm_ip)"
+ip="$(vm_ip || true)" # with the VM down, virsh fails and set -e would end this before the message
 [ -n "$ip" ] || { echo "no address for $VM_NAME; is it running?" >&2; exit 1; }
 
 # The key first, so a missing one stops this before the build.

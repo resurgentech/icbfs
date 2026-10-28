@@ -22,7 +22,7 @@ else
 fi
 msi="icbfs-$version-x64.msi"
 [ -f "$ROOT/dist/$msi" ] || { echo "no dist/$msi: just package first" >&2; exit 1; }
-ip="$(vm_ip)"
+ip="$(vm_ip || true)" # with the VM down, virsh fails and set -e would end this before the message
 [ -n "$ip" ] || { echo "no address for $VM_NAME; is it running?" >&2; exit 1; }
 
 # PowerShell over SSH drops an empty argument, so -Tag only with one.
