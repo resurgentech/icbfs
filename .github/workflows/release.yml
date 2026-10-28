@@ -82,6 +82,10 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
+      # The checkout first: it empties the workspace.
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: packaging/windows
       - uses: actions/download-artifact@v4
         with:
           name: msi
@@ -100,9 +104,6 @@ jobs:
           if ($hash -ne $env:WINFSP_SHA256) { throw "winfsp.msi: SHA256 $hash, want $env:WINFSP_SHA256" }
           $p = Start-Process msiexec -ArgumentList '/i winfsp.msi /qn /norestart' -Wait -PassThru
           if ($p.ExitCode -ne 0) { throw "WinFsp: exit $($p.ExitCode)" }
-      - uses: actions/checkout@v4
-        with:
-          sparse-checkout: packaging/windows
       - name: Install, check, repair, uninstall
         run: |
           $msi = (Get-Item msi\icbfs-*-x64.msi).FullName
