@@ -445,6 +445,8 @@ defer d.Close()
   `Prune` (archived filesystems only). `DefaultSettings(name)` is a
   filesystem with `icbfs-cli fs create`'s defaults (primary-POSIX, 100 GiB
   declared, root mode 0755), to change what's needed and create.
+  `ParseAsOf` reads a moment as the mounts' `-as-of` does, and
+  `CheckVersionName` says whether a name can name a version.
   `WatchMinIO` is below, under change events.
 - `pkg/clicmd` and `pkg/winfspcmd` are the `icbfs-cli` and
   `icbfs-winfsp` commands as packages, each a `Main(args, newStore)`,

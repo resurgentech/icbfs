@@ -7,6 +7,7 @@ package icbfs
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -167,3 +168,15 @@ var ErrNotArchived = errNotArchived{}
 type errNotArchived struct{}
 
 func (errNotArchived) Error() string { return "the filesystem isn't archived" }
+
+// ParseAsOf reads a moment the way the mounts' -as-of does, in loc
+// unless it says otherwise: a bare date (2026-10-12) means the end of
+// that day; a date-time with a zone (RFC 3339) is taken as given; one
+// without a zone (2026-10-12T15:04, 2026-10-12 15:04:05, fractional
+// seconds allowed) is in loc.
+func ParseAsOf(s string, loc *time.Location) (time.Time, error) { return core.ParseAsOf(s, loc) }
+
+// CheckVersionName says whether name can name a version: letters,
+// digits, '.', '_', '-' and spaces, up to 63, and not something
+// ParseAsOf would read as a time.
+func CheckVersionName(name string) error { return core.CheckVersionName(name) }
