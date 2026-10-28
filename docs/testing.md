@@ -13,18 +13,17 @@ Each run against a fresh store: MinIO unless the row says otherwise.
 
 | suite | when | where | result |
 |---|---|---|---|
-| Go tests (`-race`) | 2026-10-24 | Linux host, Docker | all 24 packages with tests pass |
-| pjdfstest | 2026-10-16 | Ubuntu 24.04 VM, FUSE, root | 238 files, 8,798 assertions; 0 unexpected failures, 4 accepted |
+| Go tests (`-race`) | 2026-10-28 | Linux host, Docker; CI | every package with tests passes |
+| pjdfstest | 2026-10-28 | Ubuntu 24.04 VM, FUSE, root | 238 files, 8,798 assertions; 0 unexpected failures, 4 accepted |
 | pjdfstest, on AWS S3 and on Azure | 2026-10-18 | Linux VM, FUSE, root | the same on each: 0 unexpected failures, 4 accepted |
 | xfstests `-g quick` | 2026-10-16 | Ubuntu 24.04 VM, FUSE | 647 tests: 169 pass, 467 don't run, 11 fail, each listed with its reason |
-| several machines | 2026-10-17 | Linux VM and two small VMs, one MinIO | 3 machines: every workload passes (14 checks); `fs check` clean |
+| several machines | 2026-10-28 | Linux VM and two small VMs, one MinIO | 3 machines: every workload passes (14 checks); `fs check` clean |
 | several machines, on AWS S3 and on Azure | 2026-10-18 | 3 Linux VMs | all 8 workloads on each, fsstress at 2,000 operations per machine; `fs check` clean |
 | Connectathon (cthon04) | 2026-10-17 | Ubuntu 24.04 VM, FUSE | basic, general, special and lock tests all pass; one warning (lock 13.1, mandatory locking) |
 | Connectathon, on AWS S3 and on Azure | 2026-10-18 | Linux VM, FUSE | all groups pass on each; the same warning |
-| winfsp-tests `--external`, case-insensitive | 2026-10-17 | Windows Server 2025 VM | 78 / 78 pass, at the default `-meta-cache` and at 0 |
-| winfsp-tests `--external`, case-sensitive | 2026-10-16 | Windows Server 2025 VM | 77 / 78 pass; `getfileinfo_name_test` fails, as on WinFsp's memfs |
-| logging chain | 2026-10-14 | Ubuntu 24.04 VM | 5 / 5 checks pass |
-| icbfs-sync end to end | 2026-10-14 | Windows Server 2025 VM | 12 / 12 checks pass; its Go tests pass on NTFS |
+| winfsp-tests `--external`, case-insensitive | 2026-10-28 | Windows Server 2025 VM | 78 / 78 pass (2026-10-17: also at `-meta-cache 0`) |
+| winfsp-tests `--external`, case-sensitive | 2026-10-28 | Windows Server 2025 VM | 77 / 78 pass; `getfileinfo_name_test` fails, as on WinFsp's memfs |
+| icbfs-sync end to end | 2026-10-28 | Windows Server 2025 VM | 12 / 12 checks pass; its Go tests pass on NTFS |
 | large files (6 GiB, opt-in) | 2026-10-14 | Ubuntu 24.04 VM | 7 / 7 checks pass (6 GiB written in 73 s; a one-byte edit in 22 s) |
 | metadata copies (test/metadata) | 2026-10-24 | Ubuntu 24.04 VM, FUSE, root | `cp -a`, `cp -rp`, `rsync -aAXH(U)`, `tar --xattrs --acls`: all keep exactly what they keep on tmpfs |
 | metadata copies (test/metadata) | 2026-10-24 | Windows 11 VM, WinFsp | robocopy (`/COPY:DAT /DCOPY:DAT` and `/COPY:DATSO`), Copy-Item and DISM keep exactly what they keep on NTFS; hard links not compared (WinFsp can't make them); xcopy `/O` fails: WinFsp drops the inherited entries of an ACL given at create, leaving an empty DACL |
