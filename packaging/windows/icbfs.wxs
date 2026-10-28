@@ -88,13 +88,13 @@
         <File Source="$(BinDir)/icbfs-cli.exe" />
       </Component>
       <Component>
-        <File Source="mount-task.ps1" />
+        <File Source="$(sys.SOURCEFILEDIR)mount-task.ps1" />
       </Component>
       <Component>
-        <File Source="../../LICENSE" Name="LICENSE.txt" />
+        <File Source="$(sys.SOURCEFILEDIR)../../LICENSE" Name="LICENSE.txt" />
       </Component>
       <Component>
-        <File Source="README.txt" />
+        <File Source="$(sys.SOURCEFILEDIR)README.txt" />
       </Component>
       <!-- The detection contract: another package that needs icbfs
            looks for InstallDir here (docs/mount.md). The key goes with
