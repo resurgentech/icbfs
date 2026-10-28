@@ -55,6 +55,17 @@ echo "=== winfsp-tests $TARGET (full result: $result) ===" >&2
 ok=$(grep -cE '^[a-z0-9_]+\.+ OK ' "$result")
 # The runner's own lines ("name ... MOUNT-FAILED") have a space before the dots.
 bad=$(grep -E '^[a-z0-9_]+ ?\.+ (KO|TIMEOUT|MOUNT-FAILED)' "$result")
+# Case-sensitive: getfileinfo_name_test reopens a file under another
+# case, and fails as WinFsp's own memfs does (docs/testing.md). Accepted
+# there; reported if it starts passing, so this can't go stale.
+if [ "$TARGET" = icbfs-cs ]; then
+  if echo "$bad" | grep -q '^getfileinfo_name_test'; then
+    bad=$(echo "$bad" | grep -v '^getfileinfo_name_test' || true)
+    echo "accepted: getfileinfo_name_test (case-sensitive, as memfs)" >&2
+  elif grep -qE '^getfileinfo_name_test\.+ OK ' "$result"; then
+    echo "note: getfileinfo_name_test passes case-sensitive now; drop it from the accepted list here and in docs/testing.md" >&2
+  fi
+fi
 if [ "$ok" -eq 0 ] && [ -z "$bad" ]; then
   bad="no test passed (no results?)"
 fi
