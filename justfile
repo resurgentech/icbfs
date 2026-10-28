@@ -58,6 +58,24 @@ generate:
 # What CI checks
 ci: fmt-check tidy-check vet build test-ci
 
+# Tag HEAD as VERSION (vX.Y.Z, new; tree clean, on origin/main, CI green) and build bin/; the tag's push is printed, not done
+release VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    v="{{VERSION}}"
+    [[ "$v" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "release: $v: want vX.Y.Z" >&2; exit 1; }
+    git diff --quiet && git diff --cached --quiet || { echo "release: the tree has uncommitted changes" >&2; exit 1; }
+    ! git rev-parse -q --verify "refs/tags/$v" >/dev/null || { echo "release: $v exists already" >&2; exit 1; }
+    sha=$(git rev-parse HEAD)
+    git fetch -q origin main
+    git merge-base --is-ancestor "$sha" origin/main || { echo "release: HEAD isn't on origin/main; push it first" >&2; exit 1; }
+    status=$(gh run list -b main -c "$sha" -L 1 --json status,conclusion -q '.[0] | "\(.status) \(.conclusion)"')
+    [ "$status" = "completed success" ] || { echo "release: CI at ${sha:0:7} is '$status', want 'completed success'" >&2; exit 1; }
+    git tag -a "$v" -m "$v"
+    just build
+    echo "tagged $v at ${sha:0:7}, built into bin/ (bin/icbfs -version says $(bin/icbfs -version))"
+    echo "to publish it: git push origin $v"
+
 # --- the VM suites (docs/testing.md) ---
 
 # pjdfstest on the Linux VM

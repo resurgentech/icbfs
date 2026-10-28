@@ -6,6 +6,17 @@ does the rest: listing, reading, writing, versions, named versions,
 trash, drafts, copies between drives, diffs, mirroring a source, and a
 permission check per item.
 
+## What a version promises
+
+A release tag (`v0.x.y`, `just release`) is a version of this module
+that dependents `require`. Within `v0` the tag promises not to break
+`pkg/drive`, `pkg/drive/icbfsdrive`, `pkg/icbfs`, `pkg/icbfstest`,
+`pkg/history`, `pkg/storeflags` and `pkg/tokencmd`: what they export
+stays, and additions are compatible. `pkg/clicmd` and `pkg/winfspcmd`
+promise their `Main`. `pkg/fslog` and `pkg/sidecmd` are importable and
+promise nothing, and `internal/` nothing. A change to the on-store
+format is announced in the tag's message.
+
 ## Terms
 
 | term | meaning |

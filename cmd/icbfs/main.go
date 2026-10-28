@@ -17,6 +17,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 
+	"github.com/resurgentech/icbfs/internal/buildinfo"
 	"github.com/resurgentech/icbfs/internal/fuseserver"
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/notify"
@@ -31,8 +32,12 @@ func main() {
 	if filepath.Base(os.Args[0]) == helperName {
 		os.Exit(mountHelper(os.Args[1:]))
 	}
+	if len(os.Args) == 2 && os.Args[1] == "-version" {
+		fmt.Println(buildinfo.Version())
+		return
+	}
 	if len(os.Args) < 2 || os.Args[1] != "mount" {
-		fmt.Fprintln(os.Stderr, "usage: icbfs mount [flags] <mountpoint>")
+		fmt.Fprintln(os.Stderr, "usage: icbfs mount [flags] <mountpoint>, or icbfs -version")
 		os.Exit(2)
 	}
 
@@ -57,8 +62,13 @@ func main() {
 	cacheDir := fset.String("cache-dir", "", "local disk directory for open files and the read cache (default: a new directory under the system temp directory)")
 	cacheSize := fset.Uint64("cache-size", 512<<20, "maximum total bytes the local disk cache (-cache-dir) may hold before evicting the least-recently-used cached file")
 	metaCache := fset.Duration("meta-cache", 5*time.Second, "how long the kernel trusts names and attributes, as NFS's attribute cache: other machines' renames, creates and chmods can take this long to show here; opens and locks still check the store (0: trust nothing; as-of mounts default to a day)")
+	version := fset.Bool("version", false, "print which build this is and exit")
 	if err := fset.Parse(os.Args[2:]); err != nil {
 		os.Exit(2)
+	}
+	if *version {
+		fmt.Println(buildinfo.Version())
+		return
 	}
 	if fset.NArg() != 1 {
 		fmt.Fprintln(os.Stderr, "usage: icbfs mount [flags] <mountpoint>")

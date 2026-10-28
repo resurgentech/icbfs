@@ -42,6 +42,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/resurgentech/icbfs/internal/buildinfo"
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/pkg/drive"
@@ -69,6 +70,10 @@ var newStore func() storeflags.Store
 // Main runs the command args name (the program's arguments, without its
 // name) with the store flags newStore makes, and returns the exit status.
 func Main(args []string, newStore func() storeflags.Store) int {
+	if len(args) == 1 && args[0] == "-version" {
+		fmt.Println(buildinfo.Version())
+		return 0
+	}
 	if len(args) < 2 {
 		fmt.Fprintln(os.Stderr, usage)
 		return 2

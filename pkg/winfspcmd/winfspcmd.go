@@ -19,6 +19,7 @@ import (
 
 	winfsp "github.com/winfsp/go-winfsp"
 
+	"github.com/resurgentech/icbfs/internal/buildinfo"
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/internal/winfspserver"
@@ -52,9 +53,14 @@ func Main(args []string, newStore func() storeflags.Store) int {
 	cacheSize := fset.Uint64("cache-size", 512<<20, "maximum total bytes the local disk cache (-cache-dir) may hold before evicting the least-recently-used cached file")
 	atime := fset.String("atime", "hourly", "when reads and folder listings record access times: hourly (when the recorded one is over an hour old, as NTFS does), relatime (when it's no newer than the last change, or a day old), strict (every read and listing), or noatime (never)")
 	noDirAtime := fset.Bool("nodiratime", false, "don't record access times for folders")
+	version := fset.Bool("version", false, "print which build this is and exit")
 	metaCache := fset.Duration("meta-cache", 5*time.Second, "how long Windows trusts file and directory information, as the Linux mount's -meta-cache: other machines' changes can take this long to show in a listing or a file's details; an open still checks the store (0: trust nothing; as-of mounts default to without limit)")
 	if err := fset.Parse(args); err != nil {
 		return 2
+	}
+	if *version {
+		fmt.Println(buildinfo.Version())
+		return 0
 	}
 	if fset.NArg() != 1 {
 		fset.Usage()

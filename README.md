@@ -187,6 +187,17 @@ The generated code is checked in. `just generate` regenerates it after a
 schema change: the Protobuf code from `spec/proto` (needs `protoc`; see
 [spec/proto/README.md](spec/proto/README.md)).
 
+### Releases
+
+Every command says which build it is with `-version`: the release tag
+for a build of a tagged commit (`v0.1.0`), otherwise the commit, with
+`+dirty` if the tree had changes. It comes from what Go stamps into the
+binary, so there is no version to keep by hand. `just release vX.Y.Z`
+tags HEAD once it is on `origin/main` with CI green, builds the commands
+into `bin/`, and prints the `git push` of the tag, which is done by
+hand. A tag is a version of the Go module too: [docs/api.md](docs/api.md)
+says which packages it promises.
+
 ## Quick start
 
 Start a MinIO with a versioned bucket, create a filesystem, and mount it:

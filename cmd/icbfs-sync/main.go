@@ -29,10 +29,17 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/resurgentech/icbfs/internal/buildinfo"
 )
 
 func main() {
 	args := os.Args[1:]
+	if len(args) == 1 && args[0] == "-version" {
+		useParentConsole()
+		fmt.Println(buildinfo.Version())
+		return
+	}
 	cmd := ""
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		cmd, args = args[0], args[1:]
