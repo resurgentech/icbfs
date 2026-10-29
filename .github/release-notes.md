@@ -24,8 +24,10 @@ uninstall. The Linux commands are built from source
 Free code signing provided by [SignPath.io](https://signpath.io),
 certificate by [SignPath Foundation](https://signpath.org).
 
-- **Committers and reviewers:** [@jaredeh](https://github.com/jaredeh)
-- **Approvers:** [@jaredeh](https://github.com/jaredeh)
+- **Committers and reviewers:** the [members of resurgentech](https://github.com/orgs/resurgentech/people)
+- **Approvers:** the organization's owners
 
-**Privacy:** icbfs sends data only to the storage the user configures,
-and to nothing else. It has no telemetry and phones nowhere home.
+**Privacy:** this program will not transfer any information to other
+networked systems unless specifically requested by the user or the
+person installing or operating it. icbfs talks only to the storage the
+user configures, and has no telemetry.

@@ -214,14 +214,17 @@ package here, unsigned, to try it before a tag.
 Free code signing provided by [SignPath.io](https://signpath.io),
 certificate by [SignPath Foundation](https://signpath.org).
 
-- **Committers and reviewers:** [@jaredeh](https://github.com/jaredeh).
-  Changes from anyone else come as pull requests, reviewed before they
-  are merged.
-- **Approvers:** [@jaredeh](https://github.com/jaredeh) approves each
-  signing request.
+- **Committers and reviewers:** the
+  [members of resurgentech](https://github.com/orgs/resurgentech/people).
+  Changes from anyone else come as pull requests, reviewed by a member
+  before they are merged.
+- **Approvers:** the organization's owners, among those members, approve
+  each signing request.
 
-**Privacy:** icbfs sends data only to the storage the user configures,
-and to nothing else. It has no telemetry and phones nowhere home.
+**Privacy:** this program will not transfer any information to other
+networked systems unless specifically requested by the user or the
+person installing or operating it. icbfs talks only to the storage the
+user configures, and has no telemetry.
 
 The release workflow signs through SignPath only when the repository
 has the `SIGNPATH_API_TOKEN` secret; until then a release's MSIs are
