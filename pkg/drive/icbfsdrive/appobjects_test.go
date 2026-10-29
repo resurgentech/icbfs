@@ -176,8 +176,16 @@ func TestConditionalAppObjects(t *testing.T) {
 	if _, _, err := c.AppObjectVersion(ctx, "tool.table"); !errors.Is(err, drive.ErrNotFound) {
 		t.Fatalf("after delete: %v; want ErrNotFound", err)
 	}
-	if err := c.DeleteAppObjectIf(ctx, "tool.table", drive.Condition{IfMatch: v3}); !errors.Is(err, drive.ErrNotFound) {
-		t.Fatalf("delete again: %v; want ErrNotFound", err)
+	// Conditioned on a version, a missing object is the same answer from
+	// a delete as from a write: not the version read, and nothing there.
+	if err := c.DeleteAppObjectIf(ctx, "tool.table", drive.Condition{IfMatch: v3}); !errors.As(err, &pe) || pe.Current != "" {
+		t.Fatalf("delete again: %v; want PreconditionError with current %q", err, "")
+	}
+	if _, err := c.SetAppObjectIf(ctx, "tool.table", []byte("x"), drive.Condition{IfMatch: v3}); !errors.As(err, &pe) || pe.Current != "" {
+		t.Fatalf("write again: %v; want PreconditionError with current %q", err, "")
+	}
+	if err := c.DeleteAppObject(ctx, "tool.table"); !errors.Is(err, drive.ErrNotFound) {
+		t.Fatalf("unconditional delete of nothing: %v; want ErrNotFound", err)
 	}
 
 	// Rights as for the unconditional calls: a reader of the root can't write.

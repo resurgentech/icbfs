@@ -175,8 +175,12 @@ land between a writer's check and its write. A Linux mount with
 `-locking=false` neither takes nor honours them, and a Windows mount
 never does (WinFsp keeps its locks in its driver). Locking a file takes
 the right to write it. Each write on a drive with locks on costs one
-read of the file's lock object, as a mount's flush does; `NoLocking`
-saves it and gives the drive no locks.
+read of the file's lock object, as a mount's flush does, and a folder's
+move or recursive delete walks the folder and reads every file's below
+it; `NoLocking` saves all of it and gives the drive no locks. A
+`DeleteAppObjectIf` checks the version and then deletes: the store has
+no delete-if-match, so a write landing between the two is deleted with
+it, where `SetAppObjectIf`'s write is conditional at the store.
 
 **Source time.** `drive.WithSourceTime(ctx, t)` says the changes made
 under ctx happened at t at their source: a mirror copying a source's

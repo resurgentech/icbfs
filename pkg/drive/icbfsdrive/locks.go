@@ -113,3 +113,16 @@ func (d *Drive) lockCheck(ctx context.Context, n *node) error {
 	}
 	return mapErr(err)
 }
+
+// lockCheckBelow is lockCheck for n and, if n is a directory, every file
+// under it: what a move of n does before storing anything, as a
+// recursive delete does. A drive with locks off reads nothing.
+func (d *Drive) lockCheckBelow(ctx context.Context, n *node) error {
+	if d.cfg.NoLocking {
+		return nil
+	}
+	if n.typ != icbfs.TypeDir {
+		return d.lockCheck(ctx, n)
+	}
+	return d.walkBelow(ctx, n, func(c *node) error { return d.lockCheck(ctx, c) })
+}

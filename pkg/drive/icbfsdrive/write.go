@@ -564,7 +564,7 @@ func (d *Drive) Move(ctx context.Context, from drive.ItemRef, to string, replace
 	if err := d.canDelete(ctx, src); err != nil {
 		return drive.Item{}, err
 	}
-	if err := d.lockCheck(ctx, src); err != nil {
+	if err := d.lockCheckBelow(ctx, src); err != nil {
 		return drive.Item{}, err
 	}
 	parent, name, err := d.resolveParent(ctx, to, false)
@@ -583,7 +583,7 @@ func (d *Drive) Move(ctx context.Context, from drive.ItemRef, to string, replace
 			if err := d.canDelete(ctx, existing); err != nil {
 				return drive.Item{}, err
 			}
-			if err := d.lockCheck(ctx, existing); err != nil {
+			if err := d.lockCheckBelow(ctx, existing); err != nil {
 				return drive.Item{}, err
 			}
 		}

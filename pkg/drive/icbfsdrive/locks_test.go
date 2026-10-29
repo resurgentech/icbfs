@@ -55,6 +55,17 @@ func TestLocks(t *testing.T) {
 	if _, err := other.Move(as2, drive.ByPath("/elsewhere.txt"), "/set/a.txt", true); !errors.Is(err, drive.ErrLocked) {
 		t.Fatalf("move over it: %v; want ErrLocked", err)
 	}
+	// Nor is its folder moved out from under it, or another moved over it.
+	if _, err := other.Move(as2, drive.ByPath("/set"), "/moved", false); !errors.Is(err, drive.ErrLocked) {
+		t.Fatalf("move the folder: %v; want ErrLocked", err)
+	}
+	write(t, as2, other, "/other/x.txt", "x", drive.Condition{})
+	if _, err := other.Move(as2, drive.ByPath("/other"), "/set", true); !errors.Is(err, drive.ErrLocked) {
+		t.Fatalf("move a folder over its folder: %v; want ErrLocked", err)
+	}
+	if read(t, ctx, d, drive.ByPath("/set/a.txt"), drive.At{}) != "a" {
+		t.Fatal("the folder moved")
+	}
 	if err := other.Delete(as2, drive.ByPath("/set/a.txt"), false, drive.Condition{}); !errors.Is(err, drive.ErrLocked) {
 		t.Fatalf("delete: %v; want ErrLocked", err)
 	}

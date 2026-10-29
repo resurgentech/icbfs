@@ -110,7 +110,14 @@ func (d *Drive) DeleteAppObject(ctx context.Context, name string) error {
 
 // DeleteAppObjectIf deletes app object name when cond holds: IfMatch, the
 // version it still has to be. IfNoneMatch is meaningless for a delete and
-// ErrInvalid.
+// ErrInvalid. An object that isn't that version, or is gone, is a
+// *drive.PreconditionError with the current version ("" when there is no
+// object), as SetAppObjectIf answers; only an unconditional delete of
+// nothing is ErrNotFound. Unlike SetAppObjectIf's write, the delete
+// itself isn't conditional: the store has no delete-if-match, so the
+// version is checked and then the object deleted, and a write that lands
+// between the two is deleted with it (it stays in the object's history).
+// Best-effort there, as locks are.
 func (d *Drive) DeleteAppObjectIf(ctx context.Context, name string, cond drive.Condition) (err error) {
 	if cond.IfNoneMatch {
 		return fmt.Errorf("delete app object %q: IfNoneMatch: %w", name, drive.ErrInvalid)
@@ -126,6 +133,9 @@ func (d *Drive) DeleteAppObjectIf(ctx context.Context, name string, cond drive.C
 	if cond.IfMatch != "" {
 		cur, err := d.fs.HeadAppObject(ctx, name)
 		if err != nil {
+			if errors.Is(err, icbfs.ErrNotFound) {
+				return &drive.PreconditionError{}
+			}
 			return mapErr(err)
 		}
 		if cur.VersionID != cond.IfMatch {
