@@ -48,6 +48,13 @@ type Config struct {
 	// when nothing changed). Changes made through this drive are seen at
 	// once either way; changes made elsewhere, after at most TrustFor.
 	TrustFor time.Duration
+	// NoLocking turns locks off for this drive, as a mount's
+	// -locking=false does: Lock is refused, and Write, Move and Delete
+	// look for no one's locks, which saves a read of the file's lock
+	// object per write. With it off (the default) the drive is a
+	// drive.Locker, and its writes refuse a file another holder has
+	// locked, from a mount or through a drive.
+	NoLocking bool
 }
 
 // Drive is an icbfs drive.
@@ -74,6 +81,7 @@ func New(ctx context.Context, cfg Config) (*Drive, error) {
 	if err := fsys.Attach(ctx); err != nil {
 		return nil, mapErr(err)
 	}
+	fsys.EnableLocking(!cfg.NoLocking)
 	d := &Drive{cfg: cfg, fs: fsys, windows: fsys.PrimaryWindows(), dirs: dirs}
 	d.root = cleanPath(cfg.Root)
 	d.views.d = d
@@ -111,7 +119,8 @@ func (d *Drive) Capabilities() drive.Capabilities {
 		perms = "windows"
 	}
 	return drive.Capabilities{IDs: true, Versions: true, AsOf: true, Names: true, Trash: true, Purge: true,
-		ConditionalWrite: true, Events: true, Origin: true, Permissions: perms, Diff: "computed", AppObjects: true}
+		ConditionalWrite: true, Events: true, Origin: true, Permissions: perms, Diff: "computed", AppObjects: true,
+		ConditionalAppObjects: true, Locks: !d.cfg.NoLocking}
 }
 
 // --- paths ---
@@ -442,7 +451,8 @@ func mapErr(err error) error {
 		return nil
 	case errors.Is(err, drive.ErrNotFound), errors.Is(err, drive.ErrForbidden), errors.Is(err, drive.ErrPrecondition),
 		errors.Is(err, drive.ErrNoAccess), errors.Is(err, drive.ErrReadOnly),
-		errors.Is(err, drive.ErrInvalid), errors.Is(err, drive.ErrChecksum):
+		errors.Is(err, drive.ErrInvalid), errors.Is(err, drive.ErrChecksum),
+		errors.Is(err, drive.ErrLocked), errors.Is(err, drive.ErrNotLockHolder), errors.Is(err, drive.ErrNotSupported):
 		return err
 	case errors.Is(err, icbfs.ErrNotFound), objstore.IsNotFound(err):
 		return fmt.Errorf("%w (%v)", drive.ErrNotFound, err)
@@ -462,6 +472,12 @@ func mapErr(err error) error {
 		return fmt.Errorf("%w (%v)", drive.ErrTooLarge, err)
 	case errors.Is(err, icbfs.ErrReadOnly), errors.Is(err, icbfs.ErrArchived), errors.Is(err, objstore.ErrReadOnly):
 		return fmt.Errorf("%w (%v)", drive.ErrReadOnly, err)
+	case errors.Is(err, icbfs.ErrLocked):
+		return fmt.Errorf("%w (%v)", drive.ErrLocked, err)
+	case errors.Is(err, icbfs.ErrNotLockHolder):
+		return fmt.Errorf("%w (%v)", drive.ErrNotLockHolder, err)
+	case errors.Is(err, icbfs.ErrLockingDisabled):
+		return fmt.Errorf("%w (%v)", drive.ErrNotSupported, err)
 	case objstore.IsPreconditionFailed(err):
 		return fmt.Errorf("%w (%v)", drive.ErrBusy, err)
 	}

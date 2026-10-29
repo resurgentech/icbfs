@@ -147,6 +147,12 @@ type Capabilities struct {
 	Permissions      string `json:"permissions"` // "windows", "posix", or "" for none
 	Diff             string `json:"diff"`        // "computed" or "native"
 	AppObjects       bool   `json:"appObjects"`  // keeps a tool's objects beside the drive (AppObjects)
+	// ConditionalAppObjects: app object writes can be conditioned on the
+	// version read (ConditionalAppObjects).
+	ConditionalAppObjects bool `json:"conditionalAppObjects"`
+	// Locks: items can be locked (Locker), and Write, Move and Delete
+	// refuse an item another holder has locked (ErrLocked).
+	Locks bool `json:"locks"`
 }
 
 // AppObjects is a drive that keeps objects for a tool beside its
@@ -161,6 +167,62 @@ type AppObjects interface {
 	DeleteAppObject(ctx context.Context, name string) error
 	// ListAppObjects lists the names starting with prefix ("" for all).
 	ListAppObjects(ctx context.Context, prefix string) ([]string, error)
+}
+
+// ConditionalAppObjects is an AppObjects whose writes can be conditioned
+// on the version read, as Write and Delete are on an item's: two tools
+// rewriting one object then can't lose each other's update. A lost race
+// is ErrPrecondition, a *PreconditionError with the current version.
+// Versions are the store's, opaque; compare them, don't order them.
+type ConditionalAppObjects interface {
+	AppObjects
+	// AppObjectVersion is AppObject with the version read.
+	AppObjectVersion(ctx context.Context, name string) (data []byte, version string, err error)
+	// SetAppObjectIf writes name when cond holds (IfMatch: it is still that
+	// version; IfNoneMatch: it doesn't exist yet; neither: always), and
+	// returns the version written.
+	SetAppObjectIf(ctx context.Context, name string, data []byte, cond Condition) (version string, err error)
+	// DeleteAppObjectIf deletes name when cond holds (IfMatch; IfNoneMatch
+	// is meaningless here and ErrInvalid).
+	DeleteAppObjectIf(ctx context.Context, name string, cond Condition) error
+}
+
+// Locker is a drive whose files can be locked against others' writes: a
+// whole-file, exclusive, leased lock, the same lock a mount's flock or
+// fcntl takes, so a file locked either way is locked to both. A tool
+// locks the files it is about to write and read back, so the set is all
+// its own at one moment. Locks are best-effort, built from the store's
+// conditional writes (docs/architecture.md, "Locking"): a lock can land
+// between a writer's check and its write.
+//
+// holder names who holds the lock: any string, the same for every call
+// of one holder, and what a mount's fcntl(F_GETLK) reports. Writes pass
+// a lock only under a context WithLockHolder of the same holder.
+//
+// A mount honours these locks only with its locking on (the default on
+// Linux; -locking=false turns it off), and a Windows mount never does:
+// WinFsp keeps its byte-range locks in its driver, and they never reach
+// the store.
+type Locker interface {
+	// Lock takes item for holder, for ttl, without waiting: ErrLocked if
+	// another holder has it; ErrIsDir for a directory. A holder that
+	// locks a file it holds already extends the lease.
+	Lock(ctx context.Context, item ItemRef, holder string, ttl time.Duration) (Lease, error)
+	// Renew extends l for ttl more from now. ErrNotLockHolder once the
+	// lease lapsed and the lock is gone or another's.
+	Renew(ctx context.Context, l Lease, ttl time.Duration) error
+	// Unlock releases l. ErrNotLockHolder if it had lapsed and another
+	// holder took the lock; releasing a lock that simply expired is fine.
+	Unlock(ctx context.Context, l Lease) error
+}
+
+// Lease is a lock held: the item, by id, whose, and until when, by this
+// program's clock at the moment of the Lock or Renew plus the ttl. The
+// store's clock decides the real expiry, so renew well before it.
+type Lease struct {
+	Item    ItemRef
+	Holder  string
+	Expires time.Time
 }
 
 // ItemRef names an item by its id or by its path; ID wins if both are set.
@@ -490,6 +552,10 @@ var (
 	ErrBusy         = errors.New("busy")
 	ErrInvalid      = errors.New("invalid request")
 	ErrChecksum     = errors.New("the content doesn't match the checksum given")
+	// ErrLocked: the item is locked by another holder (Locker).
+	ErrLocked = errors.New("locked by another holder")
+	// ErrNotLockHolder: the lease lapsed and the lock is gone or another's (Locker).
+	ErrNotLockHolder = errors.New("not the lock's holder")
 )
 
 // PreconditionError is ErrPrecondition with the current version.

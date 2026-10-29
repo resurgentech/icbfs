@@ -452,12 +452,18 @@ the structure these rely on.
 ## Locking
 
 Linux mounts lock by default (`icbfs mount -locking=false` turns it off,
-and lock calls are then refused); the drive library and icbfs-sync don't take
-locks. Locking is best-effort, built from the same object-store
-primitives as everything else, not from a coordination service. With it
-on, every flush first reads the file's `.lock` object (a not-found for a
-file nobody locked), and each lock and unlock is a read and a conditional
-write.
+and lock calls are then refused). The drive library does too
+(`icbfsdrive.Config.NoLocking` turns it off): a program takes whole-file
+exclusive locks through `drive.Locker`, and the library's writes, moves
+and deletes refuse a file another holder has locked, so a tool's lock
+and a mount's are one and the same lock ([api.md](api.md), "Locks").
+icbfs-sync takes no locks, but it writes through the library, so a
+locked file fails that pass's write with the error reported and is
+tried again the next pass. Locking is best-effort, built from the same
+object-store primitives as everything else, not from a coordination
+service. With it on, every flush, and every write through the library,
+first reads the file's `.lock` object (a not-found for a file nobody
+locked), and each lock and unlock is a read and a conditional write.
 
 - A file's locks are a list of `{range, holder, shared, expires}` entries
   in its `.lock` object. Acquiring one checks for overlaps, then writes
@@ -490,6 +496,12 @@ write.
   file go when it closes any descriptor for it (the kernel's FLUSH names
   the closing process's lock owner); `flock` locks go with the last close
   of the open file they were taken on.
+- **Holders.** A claim names its holder. A mount qualifies its holders
+  with an id of its own, so its own processes' locks never block its
+  own writes (POSIX advisory locks); the drive library stores the
+  holder string it was given as it is, so a lease outlives the program
+  that took it, another process can renew or release it, and the
+  library's writes pass only the holder the context names.
 - **Windows mounts don't take part.** WinFsp has no byte-range-lock
   callback; its kernel driver keeps `LockFileEx` locks in a table local to
   the machine. So locks on a Windows mount neither see nor conflict with

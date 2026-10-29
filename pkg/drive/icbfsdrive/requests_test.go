@@ -182,7 +182,9 @@ var requestCeilings = map[string][4]int{
 	// drive then read again; a pass over unchanged files reads it once.
 	// The origin record and the file's stat, when trusting.
 	"the same file, a third time": {9, 10, 3, 4},
-	"a new version of it":         {23, 28, 11, 16},
+	// One of them is the file's lock object, read before the content
+	// goes, as a mount's flush reads it (lockCheck).
+	"a new version of it": {24, 29, 12, 17},
 	// The root, then a step per folder and the file's own stat: two
 	// requests each (a folder's are none when trusted), and its .version
 	// in source time.

@@ -161,7 +161,7 @@ Linux-only flags:
 | flag | meaning |
 |---|---|
 | `-allow-other` | let users other than the one mounting use the mount. Without it, the kernel refuses every other user, whatever the file modes say. |
-| `-locking=false` | refuse `flock`/`fcntl` (ENOSYS). By default they're locks shared with every other mount (see [architecture.md](architecture.md#locking)), which costs a read of the file's `.lock` object per flush. |
+| `-locking=false` | refuse `flock`/`fcntl` (ENOSYS), and ignore locks others hold. By default they're locks shared with every other mount and with programs using the drive library (see [architecture.md](architecture.md#locking)), which costs a read of the file's `.lock` object per flush. |
 | `-meta-cache D` | how long the kernel trusts names and attributes (above): `5s` by default, a day for `-as-of`, `0` for not at all |
 | `-notify` | MinIO change notifications: a lock wait retries as soon as the lock changes |
 | `-read-only` | mount read-only |

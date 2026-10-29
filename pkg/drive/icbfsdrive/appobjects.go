@@ -3,12 +3,14 @@ package icbfsdrive
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
+	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/pkg/drive"
 )
 
-var _ drive.AppObjects = (*Drive)(nil)
+var _ drive.ConditionalAppObjects = (*Drive)(nil)
 
 // appObjectAccess checks the actor may read or write the drive's root:
 // an app object is about the whole drive.
@@ -39,27 +41,80 @@ func (d *Drive) AppObject(ctx context.Context, name string) ([]byte, error) {
 	return data, nil
 }
 
+// AppObjectVersion is AppObject with the version read, for a
+// SetAppObjectIf or DeleteAppObjectIf conditioned on it.
+func (d *Drive) AppObjectVersion(ctx context.Context, name string) ([]byte, string, error) {
+	if err := d.appObjectAccess(ctx, name, false); err != nil {
+		return nil, "", err
+	}
+	data, obj, err := d.fs.GetAppObject(ctx, name)
+	if err != nil {
+		return nil, "", mapErr(err)
+	}
+	return data, obj.VersionID, nil
+}
+
 // SetAppObject writes app object name.
-func (d *Drive) SetAppObject(ctx context.Context, name string, data []byte) (err error) {
+func (d *Drive) SetAppObject(ctx context.Context, name string, data []byte) error {
+	_, err := d.SetAppObjectIf(ctx, name, data, drive.Condition{})
+	return err
+}
+
+// SetAppObjectIf writes app object name when cond holds, and returns the
+// version written. As a file's conditional write: the version in
+// IfMatch is checked against the current one, then the store's own
+// compare-and-swap on that version makes the write itself conditional,
+// so a writer that slips in between is caught too. A condition that
+// doesn't hold is a *drive.PreconditionError with the current version
+// ("" when there is no object).
+func (d *Drive) SetAppObjectIf(ctx context.Context, name string, data []byte, cond drive.Condition) (version string, err error) {
 	ctx, done, err := d.begin(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer done(&err)
 	if err := d.appObjectAccess(ctx, name, true); err != nil {
-		return err
+		return "", err
 	}
-	if _, err := d.fs.PutAppObject(ctx, name, data); err != nil {
-		if errors.Is(err, icbfs.ErrFileTooLarge) {
-			return drive.ErrTooLarge
+	ifMatch := "" // the store's condition: an ETag
+	if cond.IfMatch != "" {
+		cur, err := d.fs.HeadAppObject(ctx, name)
+		if err != nil {
+			if errors.Is(err, icbfs.ErrNotFound) {
+				return "", &drive.PreconditionError{}
+			}
+			return "", mapErr(err)
 		}
-		return mapErr(err)
+		if cur.VersionID != cond.IfMatch {
+			return "", &drive.PreconditionError{Current: cur.VersionID}
+		}
+		ifMatch = cur.ETag
 	}
-	return nil
+	obj, err := d.fs.PutAppObjectIf(ctx, name, data, ifMatch, cond.IfNoneMatch)
+	if err != nil {
+		switch {
+		case errors.Is(err, icbfs.ErrFileTooLarge):
+			return "", drive.ErrTooLarge
+		case objstore.IsPreconditionFailed(err):
+			return "", d.appObjectPrecondition(ctx, name)
+		}
+		return "", mapErr(err)
+	}
+	return obj.VersionID, nil
 }
 
 // DeleteAppObject deletes app object name.
-func (d *Drive) DeleteAppObject(ctx context.Context, name string) (err error) {
+func (d *Drive) DeleteAppObject(ctx context.Context, name string) error {
+	return d.DeleteAppObjectIf(ctx, name, drive.Condition{})
+}
+
+// DeleteAppObjectIf deletes app object name when cond holds: IfMatch, the
+// version it still has to be. IfNoneMatch is meaningless for a delete and
+// ErrInvalid.
+func (d *Drive) DeleteAppObjectIf(ctx context.Context, name string, cond drive.Condition) (err error) {
+	if cond.IfNoneMatch {
+		return fmt.Errorf("delete app object %q: IfNoneMatch: %w", name, drive.ErrInvalid)
+	}
 	ctx, done, err := d.begin(ctx)
 	if err != nil {
 		return err
@@ -68,7 +123,26 @@ func (d *Drive) DeleteAppObject(ctx context.Context, name string) (err error) {
 	if err := d.appObjectAccess(ctx, name, true); err != nil {
 		return err
 	}
+	if cond.IfMatch != "" {
+		cur, err := d.fs.HeadAppObject(ctx, name)
+		if err != nil {
+			return mapErr(err)
+		}
+		if cur.VersionID != cond.IfMatch {
+			return &drive.PreconditionError{Current: cur.VersionID}
+		}
+	}
 	return mapErr(d.fs.DeleteAppObject(ctx, name))
+}
+
+// appObjectPrecondition is the error for a conditional write of name the
+// store refused: a PreconditionError with the version there is now.
+func (d *Drive) appObjectPrecondition(ctx context.Context, name string) error {
+	e := &drive.PreconditionError{}
+	if cur, err := d.fs.HeadAppObject(ctx, name); err == nil {
+		e.Current = cur.VersionID
+	}
+	return e
 }
 
 // ListAppObjects lists the app objects named with prefix.

@@ -38,6 +38,7 @@ type POSIXProfile struct {
 type (
 	actorKey      struct{}
 	profileKey    struct{}
+	lockHolderKey struct{}
 	passKey       struct{}
 	sourceTimeKey struct{}
 )
@@ -83,6 +84,20 @@ func WithActor(ctx context.Context, actor string) context.Context {
 func Actor(ctx context.Context) string {
 	a, _ := ctx.Value(actorKey{}).(string)
 	return a
+}
+
+// WithLockHolder names the lock holder (Locker) whose locks writes
+// under ctx may pass: a Write, Move or Delete of an item locked by
+// anyone else is ErrLocked, and so is one under a context with no
+// holder.
+func WithLockHolder(ctx context.Context, holder string) context.Context {
+	return context.WithValue(ctx, lockHolderKey{}, holder)
+}
+
+// LockHolder is ctx's lock holder, or "".
+func LockHolder(ctx context.Context) string {
+	h, _ := ctx.Value(lockHolderKey{}).(string)
+	return h
 }
 
 // WithProfile attaches the profile the actor acts as on the drive.

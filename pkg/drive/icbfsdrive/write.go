@@ -146,6 +146,9 @@ func (d *Drive) write(ctx context.Context, p string, src writeSource, cond drive
 			if err := d.check(ctx, n, needWrite); err != nil {
 				return drive.Item{}, err
 			}
+			if err := d.lockCheck(ctx, n); err != nil {
+				return drive.Item{}, err
+			}
 			cur, ok := a.ContentVersion()
 			if !ok {
 				head, err := d.fs.Store().Head(ctx, n.key)
@@ -561,6 +564,9 @@ func (d *Drive) Move(ctx context.Context, from drive.ItemRef, to string, replace
 	if err := d.canDelete(ctx, src); err != nil {
 		return drive.Item{}, err
 	}
+	if err := d.lockCheck(ctx, src); err != nil {
+		return drive.Item{}, err
+	}
 	parent, name, err := d.resolveParent(ctx, to, false)
 	if err != nil {
 		return drive.Item{}, err
@@ -575,6 +581,9 @@ func (d *Drive) Move(ctx context.Context, from drive.ItemRef, to string, replace
 	if replace {
 		if existing, err := d.resolvePath(ctx, d.fs, joinPath(parent.path, name)); err == nil {
 			if err := d.canDelete(ctx, existing); err != nil {
+				return drive.Item{}, err
+			}
+			if err := d.lockCheck(ctx, existing); err != nil {
 				return drive.Item{}, err
 			}
 		}
@@ -606,6 +615,9 @@ func (d *Drive) Delete(ctx context.Context, ref drive.ItemRef, recursive bool, c
 	if err := d.canDelete(ctx, n); err != nil {
 		return err
 	}
+	if err := d.lockCheck(ctx, n); err != nil {
+		return err
+	}
 	if cond.IfMatch != "" {
 		cur, err := d.fs.Store().Head(ctx, n.key)
 		if err != nil {
@@ -632,11 +644,15 @@ func (d *Drive) Delete(ctx context.Context, ref drive.ItemRef, recursive bool, c
 		d.changed(parentNode(n))
 		return nil
 	}
-	// Everything under it must be deletable before anything is.
+	// Everything under it must be deletable, and unlocked, before
+	// anything is.
 	var below []*node
 	if err := d.walkBelow(ctx, n, func(c *node) error {
 		below = append(below, c)
-		return d.canDelete(ctx, c)
+		if err := d.canDelete(ctx, c); err != nil {
+			return err
+		}
+		return d.lockCheck(ctx, c)
 	}); err != nil {
 		return err
 	}

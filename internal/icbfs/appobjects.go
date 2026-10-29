@@ -58,8 +58,31 @@ func (f *Filesystem) GetAppObject(ctx context.Context, name string) ([]byte, *ob
 	return data, obj, nil
 }
 
+// HeadAppObject is app object name's current version, without its
+// content; none is ErrNotFound.
+func (f *Filesystem) HeadAppObject(ctx context.Context, name string) (*objstore.Object, error) {
+	key, err := f.appObjectKey(name)
+	if err != nil {
+		return nil, err
+	}
+	obj, err := f.store.Head(ctx, key)
+	if err != nil {
+		return nil, mapNotFound(err)
+	}
+	return obj, nil
+}
+
 // PutAppObject writes app object name, as a new version.
 func (f *Filesystem) PutAppObject(ctx context.Context, name string, data []byte) (*objstore.Object, error) {
+	return f.PutAppObjectIf(ctx, name, data, "", false)
+}
+
+// PutAppObjectIf is PutAppObject conditioned as the store conditions a
+// write: on the current version's ETag (ifMatch), or on there being no
+// object yet (ifAbsent); neither means always. A condition that doesn't
+// hold is an error objstore.IsPreconditionFailed recognizes, and nothing
+// is written.
+func (f *Filesystem) PutAppObjectIf(ctx context.Context, name string, data []byte, ifMatch string, ifAbsent bool) (*objstore.Object, error) {
 	if err := f.checkWritable(); err != nil {
 		return nil, err
 	}
@@ -70,7 +93,10 @@ func (f *Filesystem) PutAppObject(ctx context.Context, name string, data []byte)
 	if len(data) > MaxAppObjectSize {
 		return nil, fmt.Errorf("app object %q: %d bytes, the most is %d: %w", name, len(data), MaxAppObjectSize, ErrFileTooLarge)
 	}
-	return f.store.Put(ctx, key, bytes.NewReader(data), nil, "")
+	if ifAbsent {
+		return f.store.PutIfAbsent(ctx, key, bytes.NewReader(data), nil)
+	}
+	return f.store.Put(ctx, key, bytes.NewReader(data), nil, ifMatch)
 }
 
 // DeleteAppObject deletes app object name; none is ErrNotFound.

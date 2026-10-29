@@ -141,6 +141,43 @@ versioned, so a view of the past reads the one current then. Reading one
 needs the right to read the drive's root, writing one the right to write
 it. No mount shows them.
 
+A drive that's a `drive.ConditionalAppObjects` (icbfs's is;
+`Capabilities.ConditionalAppObjects`) conditions those writes as a
+file's: `AppObjectVersion(ctx, name)` is the content with the version
+read, `SetAppObjectIf(ctx, name, data, cond)` writes only if the object
+is still that version (`IfMatch`) or doesn't exist yet (`IfNoneMatch`)
+and returns the version written, and `DeleteAppObjectIf(ctx, name,
+cond)` deletes only if it is still that version. A condition that
+doesn't hold is `ErrPrecondition`, a `PreconditionError` with the
+current version, so two tools rewriting one table can't lose each
+other's update: read, change, write with `IfMatch`, and on
+`ErrPrecondition` read again.
+
+**Locks.** A drive that's a `drive.Locker` (icbfs's is, unless opened
+with `NoLocking`; `Capabilities.Locks`) locks files against others'
+writes: `Lock(ctx, item, holder, ttl)` takes a whole-file exclusive lock
+for `holder`, any string that names who holds it, leased for `ttl`,
+without waiting (`ErrLocked` if another holder has it); `Renew(ctx,
+lease, ttl)` extends it; `Unlock(ctx, lease)` releases it; a lapsed
+lease answers `ErrNotLockHolder`. With `Locks`, `Write`, `Move` and
+`Delete` of a locked file are `ErrLocked` unless the context names the
+lock's holder (`drive.WithLockHolder`); deleting or moving a folder
+refuses if any file in it is locked, before touching any. A tool
+writing a set of files it will read back locks them first, with one
+holder, writes under that holder, and unlocks.
+
+These are the mount's locks: the same claims, in the file's `.lock`
+object, that a Linux mount's `flock` and `fcntl` take and that its
+flushes check ([architecture.md](architecture.md#locking)), so a file
+locked either way is locked to both, and `fcntl(F_GETLK)` on a mount
+reports the drive's holder. Best-effort, as they are there: a lock can
+land between a writer's check and its write. A Linux mount with
+`-locking=false` neither takes nor honours them, and a Windows mount
+never does (WinFsp keeps its locks in its driver). Locking a file takes
+the right to write it. Each write on a drive with locks on costs one
+read of the file's lock object, as a mount's flush does; `NoLocking`
+saves it and gives the drive no locks.
+
 **Source time.** `drive.WithSourceTime(ctx, t)` says the changes made
 under ctx happened at t at their source: a mirror copying a source's
 history. `Write`, `Mkdir`, `Move`, `Delete`, `SetTimes`, `SetOrigin` and
@@ -293,6 +330,9 @@ backend has them all:
 | `origin` | a copy keeps where it came from | yes |
 | `permissions` | `windows`, `posix`, or none | the filesystem's primary mode |
 | `diff` | `computed` or `native` | computed |
+| `appObjects` | a tool's objects beside the drive | yes |
+| `conditionalAppObjects` | app object writes conditioned on the version read | yes |
+| `locks` | whole-file exclusive leased locks; writes refuse locked files | yes, unless opened with `NoLocking` |
 
 ## Permissions
 
@@ -628,8 +668,9 @@ see it), `ErrForbidden` (allowed to see, not to do this), `ErrNoAccess`
 `ErrPrecondition` (a stale version; a `PreconditionError` carries the
 current one), `ErrInvalidName`, `ErrInvalid`, `ErrChecksum`,
 `ErrTooLarge`, `ErrReadOnly` (an as-of view, a read-only drive or an
-archived filesystem) and `ErrBusy` (write contention exhausted the
-retries).
+archived filesystem), `ErrBusy` (write contention exhausted the
+retries), `ErrLocked` (another holder's lock on the file) and
+`ErrNotLockHolder` (the lease lapsed and the lock is gone or another's).
 
 ## Consistency
 
@@ -644,5 +685,6 @@ retries).
 - Document conversion, thumbnails, previews, search, and real-time
   co-editing.
 - Editing ACLs through the library; Windows mounts can do that.
-- Alternate data streams and locks.
+- Alternate data streams. Byte-range and shared locks: the library's
+  locks are whole-file and exclusive.
 - Several hosts writing one drive at once has not been designed for.

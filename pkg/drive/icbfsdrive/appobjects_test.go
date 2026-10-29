@@ -105,3 +105,83 @@ func TestAppObjects(t *testing.T) {
 		t.Fatal("a reader wrote an app object")
 	}
 }
+
+// TestConditionalAppObjects: an app object's writes conditioned on the
+// version read, as a file's are: a stale version loses with the current
+// one named, a first write can insist on there being nothing, a delete
+// can insist on a version, and the unconditional calls still work.
+func TestConditionalAppObjects(t *testing.T) {
+	d := newDrive(t, miniotest.Store(t), icbfs.Settings{Name: "appobjcond", Size: 1 << 30, RootMode: 0o755}, "")
+	ctx := system()
+	if !d.Capabilities().ConditionalAppObjects {
+		t.Fatal("the drive doesn't say its app objects are conditional")
+	}
+	var c drive.ConditionalAppObjects = d
+
+	// A first write that insists on nothing being there.
+	v1, err := c.SetAppObjectIf(ctx, "tool.table", []byte("one"), drive.Condition{IfNoneMatch: true})
+	if err != nil || v1 == "" {
+		t.Fatalf("first write: %q, %v", v1, err)
+	}
+	if _, err := c.SetAppObjectIf(ctx, "tool.table", []byte("again"), drive.Condition{IfNoneMatch: true}); !errors.Is(err, drive.ErrPrecondition) {
+		t.Fatalf("second first-write: %v; want ErrPrecondition", err)
+	}
+	data, got, err := c.AppObjectVersion(ctx, "tool.table")
+	if err != nil || string(data) != "one" || got != v1 {
+		t.Fatalf("read: %q %q, %v; want one %q", data, got, err, v1)
+	}
+
+	// Two writers from one version: the second loses, and is told the
+	// current version.
+	v2, err := c.SetAppObjectIf(ctx, "tool.table", []byte("two"), drive.Condition{IfMatch: v1})
+	if err != nil || v2 == "" || v2 == v1 {
+		t.Fatalf("write from v1: %q, %v", v2, err)
+	}
+	_, err = c.SetAppObjectIf(ctx, "tool.table", []byte("two-prime"), drive.Condition{IfMatch: v1})
+	var pe *drive.PreconditionError
+	if !errors.As(err, &pe) || pe.Current != v2 {
+		t.Fatalf("stale write: %v; want PreconditionError with current %q", err, v2)
+	}
+	if data, _, err := c.AppObjectVersion(ctx, "tool.table"); err != nil || string(data) != "two" {
+		t.Fatalf("after the lost race: %q, %v", data, err)
+	}
+	// A version an object never had, and a condition on an object that
+	// doesn't exist.
+	if _, err := c.SetAppObjectIf(ctx, "tool.table", []byte("x"), drive.Condition{IfMatch: "nonesuch"}); !errors.Is(err, drive.ErrPrecondition) {
+		t.Fatalf("made-up version: %v; want ErrPrecondition", err)
+	}
+	if _, err := c.SetAppObjectIf(ctx, "tool.missing", []byte("x"), drive.Condition{IfMatch: v1}); !errors.Is(err, drive.ErrPrecondition) {
+		t.Fatalf("IfMatch on nothing: %v; want ErrPrecondition", err)
+	}
+
+	// Unconditional still works, and moves the version on.
+	if err := c.SetAppObject(ctx, "tool.table", []byte("three")); err != nil {
+		t.Fatal(err)
+	}
+	_, v3, err := c.AppObjectVersion(ctx, "tool.table")
+	if err != nil || v3 == v2 {
+		t.Fatalf("after an unconditional write: %q, %v", v3, err)
+	}
+
+	// Deletes.
+	if err := c.DeleteAppObjectIf(ctx, "tool.table", drive.Condition{IfMatch: v2}); !errors.Is(err, drive.ErrPrecondition) {
+		t.Fatalf("stale delete: %v; want ErrPrecondition", err)
+	}
+	if err := c.DeleteAppObjectIf(ctx, "tool.table", drive.Condition{IfNoneMatch: true}); !errors.Is(err, drive.ErrInvalid) {
+		t.Fatalf("delete IfNoneMatch: %v; want ErrInvalid", err)
+	}
+	if err := c.DeleteAppObjectIf(ctx, "tool.table", drive.Condition{IfMatch: v3}); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, _, err := c.AppObjectVersion(ctx, "tool.table"); !errors.Is(err, drive.ErrNotFound) {
+		t.Fatalf("after delete: %v; want ErrNotFound", err)
+	}
+	if err := c.DeleteAppObjectIf(ctx, "tool.table", drive.Condition{IfMatch: v3}); !errors.Is(err, drive.ErrNotFound) {
+		t.Fatalf("delete again: %v; want ErrNotFound", err)
+	}
+
+	// Rights as for the unconditional calls: a reader of the root can't write.
+	if _, err := c.SetAppObjectIf(as(1000), "tool.table", []byte("x"), drive.Condition{}); !errors.Is(err, drive.ErrForbidden) {
+		t.Fatalf("write without the right: %v; want ErrForbidden", err)
+	}
+}
