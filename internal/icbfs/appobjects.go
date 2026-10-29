@@ -128,3 +128,54 @@ func (f *Filesystem) ListAppObjects(ctx context.Context, prefix string) ([]strin
 	sort.Strings(names)
 	return names, nil
 }
+
+// AppObjectHistory is app object name's history, newest first: its
+// versions and its deletions (Deleted). Never written is ErrNotFound.
+func (f *Filesystem) AppObjectHistory(ctx context.Context, name string) ([]objstore.Object, error) {
+	key, err := f.appObjectKey(name)
+	if err != nil {
+		return nil, err
+	}
+	objs, err := f.store.History(ctx, key)
+	if err != nil {
+		return nil, mapNotFound(err)
+	}
+	if len(objs) == 0 {
+		return nil, fmt.Errorf("app object %q: %w", name, ErrNotFound)
+	}
+	return objs, nil
+}
+
+// GetAppObjectVersion is the content of one version of app object name;
+// an unknown version, or a deletion's, is ErrNotFound.
+func (f *Filesystem) GetAppObjectVersion(ctx context.Context, name, versionID string) ([]byte, error) {
+	key, err := f.appObjectKey(name)
+	if err != nil {
+		return nil, err
+	}
+	if versionID == "" {
+		return nil, fmt.Errorf("app object %q: no version: %w", name, ErrNotFound)
+	}
+	body, obj, err := f.store.GetVersion(ctx, key, versionID)
+	if err != nil {
+		if !objstore.IsNotFound(err) {
+			// A store may refuse an id it can't parse some other way than
+			// not-found; an id the history doesn't hold is not found.
+			if hist, herr := f.store.History(ctx, key); herr == nil {
+				known := false
+				for _, o := range hist {
+					known = known || o.VersionID == versionID
+				}
+				if !known {
+					return nil, fmt.Errorf("app object %q: no version %q: %w", name, versionID, ErrNotFound)
+				}
+			}
+		}
+		return nil, mapNotFound(err)
+	}
+	defer body.Close()
+	if obj != nil && obj.Deleted {
+		return nil, fmt.Errorf("app object %q: version %q is a deletion: %w", name, versionID, ErrNotFound)
+	}
+	return io.ReadAll(body)
+}

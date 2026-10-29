@@ -185,6 +185,13 @@ type ConditionalAppObjects interface {
 	// DeleteAppObjectIf deletes name when cond holds (IfMatch; IfNoneMatch
 	// is meaningless here and ErrInvalid).
 	DeleteAppObjectIf(ctx context.Context, name string, cond Condition) error
+	// AppObjectVersions lists name's versions, newest first, with their
+	// times; a deleted object's still list. A name never written is
+	// ErrNotFound.
+	AppObjectVersions(ctx context.Context, name string) ([]Version, error)
+	// AppObjectAt reads one of those versions; an unknown one is
+	// ErrNotFound.
+	AppObjectAt(ctx context.Context, name, version string) ([]byte, error)
 }
 
 // Locker is a drive whose files can be locked against others' writes: a

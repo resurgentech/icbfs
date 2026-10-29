@@ -173,3 +173,39 @@ func (d *Drive) ListAppObjects(ctx context.Context, prefix string) ([]string, er
 	}
 	return names, nil
 }
+
+// AppObjectVersions lists app object name's versions, newest first. A
+// deletion has no content and isn't one; Current is the newest unless
+// the object is deleted now.
+func (d *Drive) AppObjectVersions(ctx context.Context, name string) ([]drive.Version, error) {
+	if err := d.appObjectAccess(ctx, name, false); err != nil {
+		return nil, err
+	}
+	hist, err := d.fs.AppObjectHistory(ctx, name)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	out := []drive.Version{}
+	for i, o := range hist {
+		if o.Deleted {
+			continue
+		}
+		out = append(out, drive.Version{ID: o.VersionID, Time: o.LastModified, Stored: o.LastModified, Size: o.Size, Current: i == 0})
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("app object %q: %w", name, drive.ErrNotFound)
+	}
+	return out, nil
+}
+
+// AppObjectAt is the content of one version of app object name.
+func (d *Drive) AppObjectAt(ctx context.Context, name, version string) ([]byte, error) {
+	if err := d.appObjectAccess(ctx, name, false); err != nil {
+		return nil, err
+	}
+	data, err := d.fs.GetAppObjectVersion(ctx, name, version)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	return data, nil
+}

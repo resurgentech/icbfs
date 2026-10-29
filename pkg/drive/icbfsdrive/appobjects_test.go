@@ -193,3 +193,76 @@ func TestConditionalAppObjects(t *testing.T) {
 		t.Fatalf("write without the right: %v; want ErrForbidden", err)
 	}
 }
+
+// TestAppObjectVersions: an object written three times lists its three
+// versions, newest first, each reads back, a deleted object's versions
+// still list and read, and the access checks are AppObject's.
+func TestAppObjectVersions(t *testing.T) {
+	d := newDrive(t, miniotest.Store(t), icbfs.Settings{Name: "appobjver", Size: 1 << 30, RootMode: 0o700}, "")
+	ctx := system()
+	var c drive.ConditionalAppObjects = d
+
+	if _, err := c.AppObjectVersions(ctx, "mirror.log"); !errors.Is(err, drive.ErrNotFound) {
+		t.Fatalf("never written: %v; want ErrNotFound", err)
+	}
+	bodies := []string{"one", "two!", "three"}
+	var ids []string
+	for _, b := range bodies {
+		v, err := c.SetAppObjectIf(ctx, "mirror.log", []byte(b), drive.Condition{})
+		if err != nil || v == "" {
+			t.Fatalf("write %q: %q, %v", b, v, err)
+		}
+		ids = append(ids, v)
+		time.Sleep(1100 * time.Millisecond)
+	}
+	check := func(when string, current bool) {
+		t.Helper()
+		vs, err := c.AppObjectVersions(ctx, "mirror.log")
+		if err != nil || len(vs) != 3 {
+			t.Fatalf("%s: %+v, %v; want 3 versions", when, vs, err)
+		}
+		for i, v := range vs {
+			j := 2 - i // newest first
+			if v.ID != ids[j] || v.Size != int64(len(bodies[j])) || v.Time.IsZero() || !v.Time.Equal(v.Stored) {
+				t.Fatalf("%s: version %d is %+v; want id %q size %d", when, i, v, ids[j], len(bodies[j]))
+			}
+			if i > 0 && v.Time.After(vs[i-1].Time) {
+				t.Fatalf("%s: version %d is newer than %d", when, i, i-1)
+			}
+			if v.Current != (current && i == 0) {
+				t.Fatalf("%s: version %d Current = %v", when, i, v.Current)
+			}
+			got, err := c.AppObjectAt(ctx, "mirror.log", v.ID)
+			if err != nil || string(got) != bodies[j] {
+				t.Fatalf("%s: read %q: %q, %v", when, v.ID, got, err)
+			}
+		}
+	}
+	check("written", true)
+	if err := c.DeleteAppObject(ctx, "mirror.log"); err != nil {
+		t.Fatal(err)
+	}
+	check("deleted", false)
+
+	if _, err := c.AppObjectAt(ctx, "mirror.log", "no-such-version"); !errors.Is(err, drive.ErrNotFound) {
+		t.Fatalf("unknown version: %v; want ErrNotFound", err)
+	}
+	if _, err := c.AppObjectVersions(ctx, "nodot"); !errors.Is(err, drive.ErrInvalid) {
+		t.Fatalf("bad name, versions: %v; want ErrInvalid", err)
+	}
+	if _, err := c.AppObjectAt(ctx, "nodot", ids[0]); !errors.Is(err, drive.ErrInvalid) {
+		t.Fatalf("bad name, at: %v; want ErrInvalid", err)
+	}
+	// An actor who can't read the root is refused as AppObject refuses.
+	other := as(1001, 1001)
+	_, want := c.AppObject(other, "mirror.log")
+	if want == nil {
+		t.Fatal("AppObject let a non-reader through")
+	}
+	if _, err := c.AppObjectVersions(other, "mirror.log"); !errors.Is(err, drive.ErrForbidden) || !errors.Is(want, drive.ErrForbidden) {
+		t.Fatalf("versions as non-reader: %v (AppObject: %v)", err, want)
+	}
+	if _, err := c.AppObjectAt(other, "mirror.log", ids[0]); !errors.Is(err, drive.ErrForbidden) {
+		t.Fatalf("at as non-reader: %v", err)
+	}
+}
