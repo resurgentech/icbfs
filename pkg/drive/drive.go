@@ -376,6 +376,15 @@ type Checksummer interface {
 	Checksums(ctx context.Context, item ItemRef, version string) (Checksums, error)
 }
 
+// Clock is a drive that tells its store's time: the clock the store
+// stamps versions with, rather than the caller's. Its resolution is
+// whole seconds (a response's Date header), coarser than a store's
+// stamps (milliseconds on MinIO and Azure, seconds on AWS S3).
+type Clock interface {
+	// StoreTime is the store's clock now, truncated to the second.
+	StoreTime(ctx context.Context) (time.Time, error)
+}
+
 // ListOptions for List.
 type ListOptions struct {
 	At     At
