@@ -83,6 +83,26 @@ with its four-hex-digit ID, so one prefix listing finds all of it.
 | `<id>-app-<tool>.<name>` | an object a tool keeps beside the filesystem, not about any item: a mirror's table of the ids its app keys use |
 | `<id>-past` | empty; written again whenever the filesystem's past changes (a purge, a change made under a source time), telling history caches to drop what they kept (see Past views) |
 
+**Stubs.** A file's content version can be a stub: a version that holds
+no bytes of its own but names another version, its target, whose bytes
+are the file's. Its body is a `RefRecord` (`ref.proto`: the target's key,
+version id, size and SHA-256, and a `layout`), and its user metadata says
+the same: `icbfs_ref=1`, `icbfs_ref_key`, `icbfs_ref_version` and
+`icbfs_ref_size`, so a Head learns the real size without reading the
+body. A target is never itself a stub. Every reader of a file's bytes
+follows a stub with one more `GetVersion` of the target
+(`icbfs.FollowRef`): opens and their rebases, whole-file reads, checksums
+and the drive's reads, now, by version or as of a time. The stub's own
+ETag stays the content's, for `If-Match`. Every reader of a file's size
+reports `icbfs_ref_size`, not the stub's few hundred bytes: stat (and
+through it getattr, the drive's stat and listings, and icbfs-sync), trash
+entries, and a version's size; `df`'s "Used" still sums what is stored,
+so the saving shows. A stub to a stub, or a record in a layout this
+build doesn't read, is refused (a newer one with `ErrNewerFormat`), never
+served as bytes. Until range copies follow a stub, a write over one
+uploads every part: none is copied from the stub's own bytes. A target
+whose item was deleted still reads by version.
+
 Item keys are **UUIDv7**. Their embedded millisecond timestamp gives each
 item a creation time for free and keeps keys roughly time-ordered.
 
@@ -94,7 +114,13 @@ and `-past` is empty.
 
 **Format versions.** Each Protobuf message carries the number of its
 format, a `layout` field, and the master block gives each filesystem a
-`format_version`, the format of its objects as a whole. All are 1. A
+`format_version`, the format of its objects as a whole. All are 1,
+except that a filesystem's `format_version` 2 says it may hold stubs:
+this build opens 1 and 2 and still creates filesystems at 1, and a
+filesystem is raised to 2 at its first stub, so a binary that can't
+follow one won't open it. Every binary is upgraded before any filesystem
+gets a stub: a mount already open on an older one isn't stopped, since
+the format is read only when a filesystem is opened. A
 reader refuses any number it doesn't know (a newer one with
 `ErrNewerFormat`): a binary that is too old won't open a filesystem in a
 newer format, or read an object in one, rather than misread it or write
@@ -264,6 +290,12 @@ content:
   ETag: computed as a whole file is written, or later on demand. Recording
   them, like an access time, isn't a change: the new `.metadata` version
   keeps the time of the one it replaces, and ctime doesn't move;
+- the content's stubs (Object layout), by each stub's ETag: its target's
+  key, version and size. The store's history listings carry no user
+  metadata, so a listing of a file's versions (`FileHistory`, the
+  drive's `Versions`) reads a stub's real size here rather than with a
+  Head per version. The stub's own metadata stays the authority; this is
+  a cache that `.metadata` writes keep;
 - data icbfs's own tools keep about the item, such as the drive library's
   content type and copy origin, and a mirror's record of its source item.
   Like access times and checksums, it's bookkeeping, not a change to the
@@ -588,6 +620,10 @@ it was written under a source time (see below).
   key and asks again. And everything is fetched again once it's older
   than the cache's TTL (30 days by default), so nothing stays in it
   longer.
+- A stub in the view is followed to its target as it is anywhere else:
+  `GetVersion` names one version, so it passes through the view
+  unchanged, and the bytes are the target's whatever its key has done
+  since.
 - `df` and `du` are computed as of T, from every version under the prefix.
   That is slow for a long history, so a mount computes them once.
 

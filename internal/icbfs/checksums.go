@@ -135,7 +135,9 @@ func (f *Filesystem) VersionChecksums(ctx context.Context, key, versionID string
 	if c := attr.Checksums[obj.ETag]; c.Complete() {
 		return c, nil
 	}
-	content, _, err := f.store.GetVersion(ctx, key, obj.VersionID)
+	// A stub's are its target's bytes', recorded under the stub's ETag,
+	// which is what the file's content version is.
+	content, _, err := GetContentVersion(ctx, f.store, key, obj.VersionID)
 	if err != nil {
 		return Checksums{}, mapNotFound(err)
 	}

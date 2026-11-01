@@ -167,8 +167,12 @@ func (d *Drive) Stat(ctx context.Context, ref drive.ItemRef, at drive.At) (drive
 		if err != nil {
 			return drive.Item{}, mapErr(err)
 		}
-		it.Size = obj.Size
-		it.Version = &drive.Version{ID: obj.VersionID, Time: obj.LastModified, Size: obj.Size, Current: it.Version != nil && it.Version.ID == obj.VersionID}
+		size, err := icbfs.ContentSize(obj) // a stub's is its target's
+		if err != nil {
+			return drive.Item{}, mapErr(err)
+		}
+		it.Size = size
+		it.Version = &drive.Version{ID: obj.VersionID, Time: obj.LastModified, Size: size, Current: it.Version != nil && it.Version.ID == obj.VersionID}
 	}
 	if len(n.chain) > 0 {
 		it.ParentID = n.parentKey()
@@ -199,9 +203,13 @@ func (d *Drive) statTrashed(ctx context.Context, id, version string) (drive.Item
 	if err != nil {
 		return drive.Item{}, mapErr(err)
 	}
-	return drive.Item{ID: id, Name: e.Name, Path: e.Path, Type: e.Type, Size: obj.Size,
+	size, err := icbfs.ContentSize(obj) // a stub's is its target's
+	if err != nil {
+		return drive.Item{}, mapErr(err)
+	}
+	return drive.Item{ID: id, Name: e.Name, Path: e.Path, Type: e.Type, Size: size,
 		ContentType: contentType(e.Name, icbfs.Attr{}), Modified: obj.LastModified,
-		Version: &drive.Version{ID: obj.VersionID, Time: obj.LastModified, Size: obj.Size}}, nil
+		Version: &drive.Version{ID: obj.VersionID, Time: obj.LastModified, Size: size}}, nil
 }
 
 // Read streams a file's content: now, as of a time or name, or one
@@ -230,12 +238,13 @@ func (d *Drive) Read(ctx context.Context, ref drive.ItemRef, at drive.At, rng *d
 	if err != nil {
 		return nil, drive.Item{}, err
 	}
+	// Through a stub: its target's bytes.
 	store := fsys.Store()
 	var body io.ReadCloser
 	if it.Version != nil && it.Version.ID != "" {
-		body, _, err = store.GetVersion(ctx, it.ID, it.Version.ID)
+		body, _, err = icbfs.GetContentVersion(ctx, store, it.ID, it.Version.ID)
 	} else {
-		body, _, err = store.Get(ctx, it.ID)
+		body, _, err = icbfs.GetContent(ctx, store, it.ID)
 	}
 	if err != nil {
 		return nil, drive.Item{}, mapErr(err)
@@ -303,10 +312,13 @@ func (d *Drive) Versions(ctx context.Context, ref drive.ItemRef) ([]drive.Versio
 	}
 	sort.SliceStable(objs, func(i, j int) bool { return dates.Time(&objs[i]).After(dates.Time(&objs[j])) })
 	var sums map[string]icbfs.Checksums
+	var refs map[string]icbfs.Ref
 	if n != nil {
-		sums = n.attr.Checksums
+		sums, refs = n.attr.Checksums, n.attr.Refs
 	} else if attr, err := d.fs.Stat(ctx, id, icbfs.TypeFile); err == nil {
-		sums = attr.Checksums
+		sums, refs = attr.Checksums, attr.Refs
+	} else {
+		refs, _ = d.fs.ContentRefs(ctx, id) // a trashed file's: best effort, as its checksums are
 	}
 	names, _ := d.Names(ctx)
 	var out []drive.Version
@@ -316,6 +328,11 @@ func (d *Drive) Versions(ctx context.Context, ref drive.ItemRef) ([]drive.Versio
 		}
 		v := drive.Version{ID: o.VersionID, Time: dates.Time(&o), Stored: o.LastModified, Size: o.Size, Current: o.VersionID == current,
 			Checksums: toChecksums(sums[o.ETag])}
+		// A history listing carries no metadata: a stub's real size is
+		// .metadata's record of it.
+		if r, ok := refs[o.ETag]; ok {
+			v.Size = r.Size
+		}
 		// Current at a name's time: written at or before it, and the next
 		// version (or delete) came after it.
 		until := time.Now().Add(time.Hour)

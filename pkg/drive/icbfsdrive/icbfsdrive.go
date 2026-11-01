@@ -420,13 +420,16 @@ func (d *Drive) item(ctx context.Context, n *node, withVersion bool) drive.Item 
 // currentVersion is file n's current version: the one its stat read,
 // dated by dates if given, else by its .version record if it has one.
 func (d *Drive) currentVersion(ctx context.Context, n *node, dates objstore.Dates) *drive.Version {
-	obj, ok := n.attr.ContentVersion()
+	obj, ok := n.attr.ContentVersion() // its Size is already a stub's real one
 	if !ok {
 		head, err := n.fsys.Store().Head(ctx, n.key)
 		if err != nil {
 			return nil
 		}
 		obj = *head
+		if obj.Size, err = icbfs.ContentSize(head); err != nil {
+			return nil
+		}
 	}
 	if dates == nil {
 		dates = objstore.Dates{}

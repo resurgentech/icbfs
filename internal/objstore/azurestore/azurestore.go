@@ -587,7 +587,11 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 			}
 			continue
 		}
-		src, auth, err := s.source(ctx, key, p.CopyVersion)
+		from := key
+		if p.CopyKey != "" {
+			from = p.CopyKey
+		}
+		src, auth, err := s.source(ctx, from, p.CopyVersion)
 		if err != nil {
 			return nil, err
 		}
@@ -595,6 +599,12 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 			Range:                   blob.HTTPRange{Offset: p.CopyOffset, Count: p.Size},
 			CopySourceAuthorization: auth,
 		}); err != nil {
+			// A missing source comes back as CannotVerifyCopySource, not
+			// BlobNotFound; a Head of it says which it was. Staged blocks
+			// are never committed, so nothing is written.
+			if _, herr := s.HeadVersion(ctx, from, p.CopyVersion); objstore.IsNotFound(herr) {
+				return nil, fmt.Errorf("put parts %s: copy from %s version %s: %w (%v)", key, from, p.CopyVersion, objstore.ErrNotFound, err)
+			}
 			return nil, azureErr("put parts", key, err)
 		}
 	}

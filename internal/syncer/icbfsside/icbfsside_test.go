@@ -1,18 +1,22 @@
 package icbfsside_test
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
+	"github.com/resurgentech/icbfs/internal/pb"
 	"github.com/resurgentech/icbfs/internal/syncer"
 	"github.com/resurgentech/icbfs/internal/syncer/icbfsside"
 	"github.com/resurgentech/icbfs/internal/syncer/memside"
 	"github.com/resurgentech/icbfs/internal/testutil/miniotest"
+	"google.golang.org/protobuf/proto"
 )
 
 var t0 = time.Date(2026, 9, 22, 10, 0, 0, 0, time.UTC)
@@ -243,5 +247,46 @@ func TestCreationTimesCarryToICBFS(t *testing.T) {
 	st, _ := remote.Stat(ctx, "Reports/brief.docx")
 	if n := countVersions(t, fs, st.ID); n != 1 {
 		t.Fatalf("a creation time change re-uploaded: %d versions", n)
+	}
+}
+
+// TestStubSizesMatch: a drive file whose content is a stub lists at its
+// target's size, so a pass that copies it down sees no size mismatch.
+func TestStubSizesMatch(t *testing.T) {
+	ctx := context.Background()
+	remote, fs := open(t)
+	local := memside.NewFolder(false, time.Second)
+	e := syncer.New(syncer.Config{Name: "t", Local: local, Remote: remote, State: &syncer.MemState{}, CaseInsensitive: true, SpoolDir: t.TempDir()})
+	data := strings.Repeat("a document's bytes, longer than a stub. ", 30)
+	local.Put("Docs/report.docx", data, t0)
+	if rep := e.Pass(ctx); len(rep.Errors) > 0 {
+		t.Fatalf("pass: %v", rep.Errors)
+	}
+	st, err := remote.Stat(ctx, "Docs/report.docx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The file's content becomes a stub naming its own first version.
+	body, err := proto.Marshal(&pb.RefRecord{Layout: 1, Key: st.ID, VersionId: st.Version, Size: int64(len(data))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fs.Store().Put(ctx, st.ID, bytes.NewReader(body), map[string]string{
+		icbfs.MetaRef: "1", icbfs.MetaRefKey: st.ID, icbfs.MetaRefVersion: st.Version, icbfs.MetaRefSize: strconv.Itoa(len(data)),
+	}, ""); err != nil {
+		t.Fatal(err)
+	}
+	stubbed, err := remote.Stat(ctx, "Docs/report.docx")
+	if err != nil || stubbed.Size != int64(len(data)) {
+		t.Fatalf("stubbed entry %+v, %v; want size %d", stubbed, err, len(data))
+	}
+	if rep := e.Pass(ctx); len(rep.Errors) > 0 {
+		t.Fatalf("pass over a stub: %v", rep.Errors)
+	}
+	if got, want := treeOf(t, remote), local.Tree(); got != want {
+		t.Fatalf("drive %s\nfolder %s", got, want)
+	}
+	if rep := e.Pass(ctx); len(rep.Errors) > 0 || rep.Planned != 0 {
+		t.Fatalf("a pass after the stub: %+v", rep)
 	}
 }

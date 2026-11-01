@@ -165,10 +165,14 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 				}
 				etag = out.ETag
 			} else {
+				from := key
+				if p.CopyKey != "" {
+					from = p.CopyKey
+				}
 				out, err := s.client.UploadPartCopy(pctx, &s3.UploadPartCopyInput{
 					Bucket: aws.String(s.bucket), Key: aws.String(s.k(key)), UploadId: up.UploadId,
 					PartNumber:      num,
-					CopySource:      aws.String(s.bucket + "/" + s.k(key) + "?versionId=" + p.CopyVersion),
+					CopySource:      aws.String(s.bucket + "/" + s.k(from) + "?versionId=" + p.CopyVersion),
 					CopySourceRange: aws.String(fmt.Sprintf("bytes=%d-%d", p.CopyOffset, p.CopyOffset+p.Size-1)),
 				})
 				if err != nil {

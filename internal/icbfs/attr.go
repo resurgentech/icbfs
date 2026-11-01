@@ -128,6 +128,11 @@ type Attr struct {
 	// Checksums); a file's current one is ContentChecksums.
 	Checksums map[string]Checksums
 
+	// Refs are the content's stubs' targets, by each stub's ETag (see
+	// Ref): a cache of what each stub's own metadata says, for readers of
+	// a history listing, which carries no metadata.
+	Refs map[string]Ref
+
 	// Streams maps a named data stream's name to its id (see StreamKey)
 	// — Windows alternate data streams; nil when there are none.
 	Streams map[string]uint64
@@ -204,6 +209,7 @@ func encodeFileMetadata(ctx context.Context, a Attr) ([]byte, error) {
 		PosixAclDefault:   a.PosixACLDefault,
 		App:               a.App,
 		Checksums:         checksumsToWire(a.Checksums),
+		Refs:              refsToWire(a.Refs),
 		Rdev:              a.Rdev,
 		Atime:             timestampOrNil(a.Atime),
 		MtimeOverride:     timestampOrNil(a.Mtime),
@@ -255,6 +261,7 @@ func decodeFileMetadata(data []byte) (Attr, error) {
 		PosixACLDefault: m.PosixAclDefault,
 		App:             m.App,
 		Checksums:       checksumsFromWire(m.Checksums),
+		Refs:            refsFromWire(m.Refs),
 		Atime:           timeOrZero(m.Atime),
 		// Only the explicit override, if any; combineFileAttr falls back to
 		// the content's time.

@@ -62,6 +62,11 @@ type content struct {
 	// unknown, as right after Create; then nothing is copied.
 	baseVersion string
 	baseSize    int64
+	// baseKey is the key whose version the base's bytes are: key itself,
+	// or, when the base is a stub, its target's key. A stub's own version
+	// holds only its record, so then baseVersion is empty and nothing is
+	// copied from it (until range copies follow a stub through baseKey).
+	baseKey string
 
 	// touched is every byte range written since the last flush, through
 	// any open. The writes themselves are already merged in the scratch
@@ -141,8 +146,15 @@ func (f *Filesystem) Open(ctx context.Context, key string) (*OpenFile, error) {
 		}
 		return o, nil
 	}
+	baseKey, baseVersion, err := contentBase(key, head)
+	if err != nil {
+		return nil, err
+	}
+	// The cache keeps the file's bytes under key and the stub's ETag when
+	// it's a stub: the ETag names the content key's version, whatever its
+	// bytes are.
 	fetch := func(ctx context.Context) (io.ReadCloser, error) {
-		body, _, err := f.store.Get(ctx, key)
+		body, _, err := GetContent(ctx, f.store, key)
 		if err != nil {
 			return nil, mapNotFound(err)
 		}
@@ -153,7 +165,7 @@ func (f *Filesystem) Open(ctx context.Context, key string) (*OpenFile, error) {
 		return nil, err
 	}
 	c := f.installContent(&content{fsys: f, key: key, file: file, size: size, etag: head.ETag,
-		baseVersion: head.VersionID, baseSize: size})
+		baseVersion: baseVersion, baseKey: baseKey, baseSize: size})
 	o := &OpenFile{fsys: f, key: key, holder: holder, c: c}
 	f.holdOpen(o)
 	return o, nil
@@ -562,8 +574,12 @@ func (c *content) rebaseLocked(ctx context.Context) error {
 	if err != nil {
 		return mapNotFound(err)
 	}
+	baseKey, baseVersion, err := contentBase(c.key, head)
+	if err != nil {
+		return err
+	}
 	fetch := func(ctx context.Context) (io.ReadCloser, error) {
-		body, _, err := c.fsys.store.Get(ctx, c.key)
+		body, _, err := GetContent(ctx, c.fsys.store, c.key)
 		if err != nil {
 			return nil, mapNotFound(err)
 		}
@@ -601,8 +617,23 @@ func (c *content) rebaseLocked(ctx context.Context) error {
 		_ = os.Remove(oldName)
 	}
 	c.etag = head.ETag
-	c.baseVersion, c.baseSize = head.VersionID, size
+	c.baseVersion, c.baseKey, c.baseSize = baseVersion, baseKey, size
 	return nil
+}
+
+// contentBase is what a scratch file seeded from head's content is based
+// on, for range copies (partsLocked): head's own key and version, or, for
+// a stub, its target's key and no version, so that every part is uploaded
+// and none is copied from the stub's own bytes, its record.
+func contentBase(key string, head *objstore.Object) (baseKey, version string, err error) {
+	ref, ok, err := RefOf(head)
+	if err != nil {
+		return "", "", err
+	}
+	if ok {
+		return ref.Key, "", nil
+	}
+	return key, head.VersionID, nil
 }
 
 // Flush writes the content back as one whole-object write, conditional on
@@ -710,7 +741,7 @@ func (c *content) uploadLocked(ctx context.Context) (Attr, error) {
 		return Attr{}, err
 	}
 	c.etag = obj.ETag
-	c.baseVersion, c.baseSize = obj.VersionID, c.size
+	c.baseVersion, c.baseKey, c.baseSize = obj.VersionID, c.key, c.size
 	c.touched.clear()
 	c.dirty = false
 	c.truncated = false

@@ -295,12 +295,14 @@ func (f *Filesystem) Bootstrap(ctx context.Context, size uint64, mode, uid, gid 
 // its master-block entry, refusing a filesystem in any format but this
 // build's (ErrNewerFormat for a newer one).
 func (f *Filesystem) applyEntry(id string, entry *pb.FilesystemEntry) error {
-	if entry.FormatVersion != FormatVersion {
+	// FormatVersion (1) and formatVersionRefs (2: it may hold stubs) are
+	// both read; new filesystems are created at FormatVersion.
+	if entry.FormatVersion < FormatVersion || entry.FormatVersion > maxFormatVersion {
 		err := ErrUnknownFormat
-		if entry.FormatVersion > FormatVersion {
+		if entry.FormatVersion > maxFormatVersion {
 			err = ErrNewerFormat
 		}
-		return fmt.Errorf("filesystem %q is format %d, this build reads %d: %w", entry.Name, entry.FormatVersion, FormatVersion, err)
+		return fmt.Errorf("filesystem %q is format %d, this build reads %d to %d: %w", entry.Name, entry.FormatVersion, FormatVersion, maxFormatVersion, err)
 	}
 	f.id = id
 	f.archived.Store(entry.Archived)
@@ -494,10 +496,15 @@ func combineFileAttr(key string, metaData []byte, metaLastModified time.Time, co
 	if ctime.IsZero() {
 		ctime = metaLastModified
 	}
-	attr.Size = contentObj.Size
+	// A stub's size is its target's: the file's real size (ContentSize).
+	size, err := ContentSize(contentObj)
+	if err != nil {
+		return Attr{}, err
+	}
+	attr.Size = size
 	attr.contentETag = contentObj.ETag
 	attr.content = objstore.Object{Key: contentObj.Key, VersionID: contentObj.VersionID, ETag: contentObj.ETag,
-		Size: contentObj.Size, LastModified: contentObj.LastModified}
+		Size: size, LastModified: contentObj.LastModified}
 	// attr.Mtime and attr.Btime from decodeFileMetadata are only explicit
 	// overrides (SetAttr); real content writes never set them. Without an
 	// override, mtime is the content's last write and btime the time in the
@@ -2311,7 +2318,7 @@ func (f *Filesystem) ReadFile(ctx context.Context, key string) ([]byte, Attr, st
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		body, obj, err := f.store.Get(ctx, key)
+		body, obj, err := GetContent(ctx, f.store, key)
 		if err != nil {
 			contentErr = mapNotFound(err)
 			return

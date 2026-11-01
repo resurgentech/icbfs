@@ -29,6 +29,8 @@ func Run(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	t.Run("PutCutOffIsLostRaceOnlyIfChanged", func(t *testing.T) { putCutOffIsLostRaceOnlyIfChanged(t, newStore) })
 	t.Run("PutPartsCopiesAndUploadsUnderIfMatch", func(t *testing.T) { putPartsCopiesAndUploadsUnderIfMatch(t, newStore) })
 	t.Run("PutPartsFromStream", func(t *testing.T) { putPartsFromStream(t, newStore) })
+	t.Run("PutPartsCopiesFromAnotherKey", func(t *testing.T) { putPartsCopiesFromAnotherKey(t, newStore) })
+	t.Run("PutPartsCopyFromMissingIsNotFound", func(t *testing.T) { putPartsCopyFromMissingIsNotFound(t, newStore) })
 	t.Run("HistoryIsNewestFirstWithTimestamps", func(t *testing.T) { historyIsNewestFirstWithTimestamps(t, newStore) })
 	t.Run("HistoryPaginatesAndIncludesDeletions", func(t *testing.T) { historyPaginatesAndIncludesDeletions(t, newStore) })
 	t.Run("DeleteAndUndelete", func(t *testing.T) { deleteAndUndelete(t, newStore) })
@@ -480,6 +482,121 @@ func putPartsCopiesAndUploadsUnderIfMatch(t *testing.T, newStore func(*testing.T
 	}
 	if head, err := store.Head(ctx, "big"); err != nil || head.ETag != v2.ETag {
 		t.Fatalf("object after a failed PutParts: %v, %v; want unchanged %s", head, err, v2.ETag)
+	}
+}
+
+// putPartsCopiesFromAnotherKey: a part with CopyKey set is copied from
+// that key's version, not the one being written; the key being written
+// keeps its own If-Match, and a write to a key that doesn't exist yet can
+// be made entirely of another key's ranges.
+func putPartsCopiesFromAnotherKey(t *testing.T, newStore func(*testing.T) objstore.Store) {
+	store := newStore(t)
+	ctx := context.Background()
+	const mib = 1 << 20
+	part := max(store.PartLimits().Min, 5*mib)
+
+	src := make([]byte, 2*part+3*mib)
+	for i := range src {
+		src[i] = byte(i % 241)
+	}
+	sv, err := store.Put(ctx, "src", bytes.NewReader(src), nil, "")
+	if err != nil {
+		t.Fatalf("put src: %v", err)
+	}
+	// The source key's newer version must not be what gets copied.
+	if _, err := store.Put(ctx, "src", bytes.NewReader(bytes.Repeat([]byte("z"), len(src))), nil, sv.ETag); err != nil {
+		t.Fatalf("put src v2: %v", err)
+	}
+
+	// dst doesn't exist yet: every part comes from src.
+	whole := []objstore.Part{
+		{Size: part, CopyKey: "src", CopyVersion: sv.VersionID, CopyOffset: 0},
+		{Size: part, CopyKey: "src", CopyVersion: sv.VersionID, CopyOffset: part},
+		{Size: 3 * mib, CopyKey: "src", CopyVersion: sv.VersionID, CopyOffset: 2 * part},
+	}
+	d1, err := store.PutParts(ctx, "dst", whole, nil, "")
+	if err != nil {
+		t.Fatalf("PutParts from another key: %v", err)
+	}
+	if got := mustGetVersion(t, store, "dst", d1.VersionID); !bytes.Equal(got, src) {
+		t.Fatalf("dst from src's ranges: %d bytes, equal %v; want src's %d bytes", len(got), bytes.Equal(got, src), len(src))
+	}
+
+	// Mixed: a range of src, an upload, and a range of dst's own version
+	// (CopyKey empty). If-Match is dst's.
+	middle := bytes.Repeat([]byte("M"), int(part))
+	mixed := func() []objstore.Part {
+		return []objstore.Part{
+			{Size: part, CopyKey: "src", CopyVersion: sv.VersionID, CopyOffset: part},
+			{Size: part, Body: bytes.NewReader(middle)},
+			{Size: 3 * mib, CopyVersion: d1.VersionID, CopyOffset: 0},
+		}
+	}
+	if _, err := store.PutParts(ctx, "dst", mixed(), nil, `"stale-etag"`); !objstore.IsPreconditionFailed(err) {
+		t.Fatalf("PutParts from another key with a stale If-Match: %v, want precondition failed", err)
+	}
+	// src's ETag is not dst's: If-Match is checked on the key written.
+	if _, err := store.PutParts(ctx, "dst", mixed(), nil, sv.ETag); !objstore.IsPreconditionFailed(err) {
+		t.Fatalf("PutParts with the source's ETag as If-Match: %v, want precondition failed", err)
+	}
+	d2, err := store.PutParts(ctx, "dst", mixed(), nil, d1.ETag)
+	if err != nil {
+		t.Fatalf("PutParts mixed: %v", err)
+	}
+	want := append(append(append([]byte{}, src[part:2*part]...), middle...), src[:3*mib]...)
+	if got := mustGetVersion(t, store, "dst", d2.VersionID); !bytes.Equal(got, want) {
+		t.Fatalf("mixed parts: %d bytes, equal %v; want %d", len(got), bytes.Equal(got, want), len(want))
+	}
+	if got := mustGetVersion(t, store, "src", sv.VersionID); !bytes.Equal(got, src) {
+		t.Fatal("the copy changed its source")
+	}
+}
+
+// putPartsCopyFromMissingIsNotFound: a part copied from a version that
+// is gone, or from a key that never existed, fails the whole write with
+// an error IsNotFound recognizes, and nothing is written.
+func putPartsCopyFromMissingIsNotFound(t *testing.T, newStore func(*testing.T) objstore.Store) {
+	store := newStore(t)
+	ctx := context.Background()
+	const mib = 1 << 20
+	part := max(store.PartLimits().Min, 5*mib)
+
+	src := bytes.Repeat([]byte("s"), int(part)+mib)
+	gone, err := store.Put(ctx, "src", bytes.NewReader(src), nil, "")
+	if err != nil {
+		t.Fatalf("put src: %v", err)
+	}
+	if _, err := store.Put(ctx, "src", bytes.NewReader(src), nil, gone.ETag); err != nil {
+		t.Fatalf("put src v2: %v", err)
+	}
+	if err := store.Erase(ctx, "src", gone.VersionID); err != nil {
+		t.Fatalf("erase src v1: %v", err)
+	}
+	dv, err := store.Put(ctx, "dst", bytes.NewReader([]byte("dst before")), nil, "")
+	if err != nil {
+		t.Fatalf("put dst: %v", err)
+	}
+	other, err := store.Put(ctx, "other", bytes.NewReader([]byte("x")), nil, "")
+	if err != nil {
+		t.Fatalf("put other: %v", err)
+	}
+
+	for name, from := range map[string]objstore.Part{
+		"an erased version": {Size: part, CopyKey: "src", CopyVersion: gone.VersionID},
+		// A real version ID, of another key: a key that was never written.
+		"a key never written": {Size: part, CopyKey: "never", CopyVersion: other.VersionID},
+	} {
+		parts := []objstore.Part{from, {Size: mib, Body: bytes.NewReader(bytes.Repeat([]byte("u"), mib))}}
+		if _, err := store.PutParts(ctx, "dst", parts, nil, dv.ETag); !objstore.IsNotFound(err) {
+			t.Fatalf("PutParts copying from %s: %v, want not found", name, err)
+		}
+		h, err := store.History(ctx, "dst")
+		if err != nil {
+			t.Fatalf("history: %v", err)
+		}
+		if len(h) != 1 || h[0].VersionID != dv.VersionID {
+			t.Fatalf("dst after a failed copy from %s: %d versions %+v, want only %s", name, len(h), h, dv.VersionID)
+		}
 	}
 }
 

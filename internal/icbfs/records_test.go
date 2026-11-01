@@ -105,7 +105,7 @@ func TestNewerFormatsRefusedInStore(t *testing.T) {
 	}
 
 	// The filesystem's format version raised past this build's.
-	if err := updateFilesystemEntry(ctx, store, "test", func(e *pb.FilesystemEntry) { e.FormatVersion = FormatVersion + 1 }); err != nil {
+	if err := updateFilesystemEntry(ctx, store, "test", func(e *pb.FilesystemEntry) { e.FormatVersion = maxFormatVersion + 1 }); err != nil {
 		t.Fatal(err)
 	}
 	if err := New(store, "test").Attach(ctx); !errors.Is(err, ErrNewerFormat) {
@@ -124,11 +124,11 @@ func TestNewerFormatsRefusedInStore(t *testing.T) {
 	if err := New(store, "test").Attach(ctx); !errors.Is(err, ErrUnknownFormat) {
 		t.Fatalf("attach a filesystem of format 0: %v, want ErrUnknownFormat", err)
 	}
-	if err := updateFilesystemEntry(ctx, store, "test", func(e *pb.FilesystemEntry) { e.FormatVersion = FormatVersion + 1 }); err != nil {
+	if err := updateFilesystemEntry(ctx, store, "test", func(e *pb.FilesystemEntry) { e.FormatVersion = maxFormatVersion + 1 }); err != nil {
 		t.Fatal(err)
 	}
 	info, err := DescribeFilesystem(ctx, store, "test")
-	if err != nil || info.FormatVersion != FormatVersion+1 {
+	if err != nil || info.FormatVersion != maxFormatVersion+1 {
 		t.Fatalf("describe = %+v, %v", info, err)
 	}
 

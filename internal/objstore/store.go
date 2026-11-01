@@ -72,10 +72,13 @@ func DeclaredTime(ctx context.Context) (time.Time, bool) {
 
 // Part is one part of a PutParts write: Size bytes, either uploaded from
 // Body or, when Body is nil, copied on the server from [CopyOffset,
-// CopyOffset+Size) of version CopyVersion of the object being written.
+// CopyOffset+Size) of version CopyVersion of CopyKey, or of the object
+// being written when CopyKey is empty. A copy from a key or version that
+// isn't there fails the whole write with an error IsNotFound recognizes.
 type Part struct {
 	Size        int64
 	Body        io.ReadSeeker
+	CopyKey     string
 	CopyVersion string
 	CopyOffset  int64
 }
@@ -105,7 +108,8 @@ type Store interface {
 	// PutParts is Put of an object assembled from parts, in order: for an
 	// object too big for one write, or to rewrite a big object without
 	// resending what didn't change, since a part can be copied on the
-	// server from a range of an earlier version of key itself. It is
+	// server from a range of an earlier version of key itself, or of
+	// another key (Part.CopyKey). It is
 	// conditional on ifMatch as Put is, checked when the parts are
 	// assembled, and all or nothing. Parts keep to PartLimits.
 	PutParts(ctx context.Context, key string, parts []Part, metadata map[string]string, ifMatch string) (*Object, error)

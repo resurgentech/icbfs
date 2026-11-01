@@ -3,6 +3,7 @@ syntax = "proto3";
 package icbfs.v1;
 
 import "google/protobuf/timestamp.proto";
+import "spec/proto/icbfs/v1/ref.proto";
 
 option go_package = "github.com/resurgentech/icbfs/internal/pb";
 
@@ -102,6 +103,12 @@ message Metadata {
   // one, and never cleared. A reader that wants a version's date reads
   // .version only when it's set.
   bool dated = 23;
+
+  // The content's stubs (versions that name another version's bytes; see
+  // ref.proto), by each stub's ETag: its target and real size. A cache of
+  // what each stub's own metadata says, kept by .metadata writes, for
+  // readers of a history listing, which carries no metadata.
+  map<string, Ref> refs = 24;
 }
 
 // Checksums are a content version's MD5 and SHA-256; either may be empty

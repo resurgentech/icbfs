@@ -31,9 +31,12 @@ type FileState struct {
 type FileVersion struct {
 	VersionID string
 	ETag      string
-	Size      int64
+	Size      int64 // the content's: a stub's target's, not the stub's own
 	At        time.Time
 	Stored    time.Time
+	// Ref is a stub's target, when the version is one (as .metadata's
+	// Refs records it); nil otherwise.
+	Ref *Ref
 }
 
 // ErrFileChanged is ReplaceFileHistory's refusal when the file isn't the
@@ -57,6 +60,12 @@ func (f *Filesystem) FileHistory(ctx context.Context, key string) ([]FileVersion
 	if err != nil {
 		return nil, "", err
 	}
+	// A history listing carries no metadata, so a stub's target and real
+	// size come from .metadata's Refs, by its ETag, not a Head per version.
+	refs, err := f.contentRefs(ctx, key)
+	if err != nil {
+		return nil, "", err
+	}
 	current := ""
 	var out []FileVersion
 	for i, o := range history {
@@ -66,7 +75,11 @@ func (f *Filesystem) FileHistory(ctx context.Context, key string) ([]FileVersion
 		if i == 0 {
 			current = o.VersionID
 		}
-		out = append(out, FileVersion{VersionID: o.VersionID, ETag: o.ETag, Size: o.Size, At: dates.Time(&o), Stored: o.LastModified})
+		v := FileVersion{VersionID: o.VersionID, ETag: o.ETag, Size: o.Size, At: dates.Time(&o), Stored: o.LastModified}
+		if r, ok := refs[o.ETag]; ok {
+			v.Size, v.Ref = r.Size, &r
+		}
+		out = append(out, v)
 	}
 	for i := 1; i < len(out); i++ { // insertion sort: newest first by date, the store's order on ties
 		for j := i; j > 0 && out[j].At.After(out[j-1].At); j-- {
@@ -74,6 +87,49 @@ func (f *Filesystem) FileHistory(ctx context.Context, key string) ([]FileVersion
 		}
 	}
 	return out, current, nil
+}
+
+// ContentRefs is file key's stubs' targets, by each stub's ETag, as its
+// .metadata's Refs records them: for a reader of its history listing,
+// which carries no metadata. A deleted (trashed) file's are its last
+// .metadata's; a key with no .metadata at all has none.
+func (f *Filesystem) ContentRefs(ctx context.Context, key string) (map[string]Ref, error) {
+	return f.contentRefs(ctx, key)
+}
+
+func (f *Filesystem) contentRefs(ctx context.Context, key string) (map[string]Ref, error) {
+	mk := metadataObjectKey(key)
+	body, _, err := f.store.Get(objstore.CacheContent(ctx), mk)
+	if objstore.IsNotFound(err) {
+		history, herr := f.store.History(ctx, mk)
+		if objstore.IsNotFound(herr) {
+			return nil, nil
+		}
+		if herr != nil {
+			return nil, herr
+		}
+		i := 0
+		for i < len(history) && history[i].Deleted {
+			i++
+		}
+		if i == len(history) {
+			return nil, nil
+		}
+		body, _, err = f.store.GetVersion(objstore.CacheContent(ctx), mk, history[i].VersionID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(body)
+	body.Close()
+	if err != nil {
+		return nil, err
+	}
+	attr, err := decodeFileMetadata(data)
+	if err != nil {
+		return nil, err
+	}
+	return attr.Refs, nil
 }
 
 // ReplaceFileHistory erases file key's history (its content's versions

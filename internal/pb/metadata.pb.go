@@ -100,7 +100,12 @@ type Metadata struct {
 	// set by any write made under a declared time, which is what writes
 	// one, and never cleared. A reader that wants a version's date reads
 	// .version only when it's set.
-	Dated         bool `protobuf:"varint,23,opt,name=dated,proto3" json:"dated,omitempty"`
+	Dated bool `protobuf:"varint,23,opt,name=dated,proto3" json:"dated,omitempty"`
+	// The content's stubs (versions that name another version's bytes; see
+	// ref.proto), by each stub's ETag: its target and real size. A cache of
+	// what each stub's own metadata says, kept by .metadata writes, for
+	// readers of a history listing, which carries no metadata.
+	Refs          map[string]*Ref `protobuf:"bytes,24,rep,name=refs,proto3" json:"refs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -275,6 +280,13 @@ func (x *Metadata) GetDated() bool {
 	return false
 }
 
+func (x *Metadata) GetRefs() map[string]*Ref {
+	if x != nil {
+		return x.Refs
+	}
+	return nil
+}
+
 // Checksums are a content version's MD5 and SHA-256; either may be empty
 // (not computed).
 type Checksums struct {
@@ -407,7 +419,7 @@ var File_spec_proto_icbfs_v1_metadata_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\n" +
-	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xd4\b\n" +
+	"\"spec/proto/icbfs/v1/metadata.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1dspec/proto/icbfs/v1/ref.proto\"\xce\t\n" +
 	"\bMetadata\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\rR\x04mode\x12\x10\n" +
 	"\x03uid\x18\x02 \x01(\rR\x03uid\x12\x10\n" +
@@ -429,7 +441,8 @@ const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\x03app\x18\x14 \x03(\v2\x1b.icbfs.v1.Metadata.AppEntryR\x03app\x12\x16\n" +
 	"\x06layout\x18\x15 \x01(\rR\x06layout\x12?\n" +
 	"\tchecksums\x18\x16 \x03(\v2!.icbfs.v1.Metadata.ChecksumsEntryR\tchecksums\x12\x14\n" +
-	"\x05dated\x18\x17 \x01(\bR\x05dated\x1a9\n" +
+	"\x05dated\x18\x17 \x01(\bR\x05dated\x120\n" +
+	"\x04refs\x18\x18 \x03(\v2\x1c.icbfs.v1.Metadata.RefsEntryR\x04refs\x1a9\n" +
 	"\vXattrsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\x1a:\n" +
@@ -441,7 +454,10 @@ const file_spec_proto_icbfs_v1_metadata_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\fR\x05value:\x028\x01\x1aQ\n" +
 	"\x0eChecksumsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12)\n" +
-	"\x05value\x18\x02 \x01(\v2\x13.icbfs.v1.ChecksumsR\x05value:\x028\x01J\x04\b\x06\x10\aJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
+	"\x05value\x18\x02 \x01(\v2\x13.icbfs.v1.ChecksumsR\x05value:\x028\x01\x1aF\n" +
+	"\tRefsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12#\n" +
+	"\x05value\x18\x02 \x01(\v2\r.icbfs.v1.RefR\x05value:\x028\x01J\x04\b\x06\x10\aJ\x04\b\b\x10\tJ\x04\b\t\x10\n" +
 	"\"5\n" +
 	"\tChecksums\x12\x10\n" +
 	"\x03md5\x18\x01 \x01(\fR\x03md5\x12\x16\n" +
@@ -468,7 +484,7 @@ func file_spec_proto_icbfs_v1_metadata_proto_rawDescGZIP() []byte {
 	return file_spec_proto_icbfs_v1_metadata_proto_rawDescData
 }
 
-var file_spec_proto_icbfs_v1_metadata_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_spec_proto_icbfs_v1_metadata_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_spec_proto_icbfs_v1_metadata_proto_goTypes = []any{
 	(*Metadata)(nil),              // 0: icbfs.v1.Metadata
 	(*Checksums)(nil),             // 1: icbfs.v1.Checksums
@@ -477,24 +493,28 @@ var file_spec_proto_icbfs_v1_metadata_proto_goTypes = []any{
 	nil,                           // 4: icbfs.v1.Metadata.StreamsEntry
 	nil,                           // 5: icbfs.v1.Metadata.AppEntry
 	nil,                           // 6: icbfs.v1.Metadata.ChecksumsEntry
-	(*timestamppb.Timestamp)(nil), // 7: google.protobuf.Timestamp
+	nil,                           // 7: icbfs.v1.Metadata.RefsEntry
+	(*timestamppb.Timestamp)(nil), // 8: google.protobuf.Timestamp
+	(*Ref)(nil),                   // 9: icbfs.v1.Ref
 }
 var file_spec_proto_icbfs_v1_metadata_proto_depIdxs = []int32{
 	3,  // 0: icbfs.v1.Metadata.xattrs:type_name -> icbfs.v1.Metadata.XattrsEntry
 	4,  // 1: icbfs.v1.Metadata.streams:type_name -> icbfs.v1.Metadata.StreamsEntry
-	7,  // 2: icbfs.v1.Metadata.atime:type_name -> google.protobuf.Timestamp
-	7,  // 3: icbfs.v1.Metadata.mtime_override:type_name -> google.protobuf.Timestamp
-	7,  // 4: icbfs.v1.Metadata.btime_override:type_name -> google.protobuf.Timestamp
-	7,  // 5: icbfs.v1.Metadata.ctime:type_name -> google.protobuf.Timestamp
+	8,  // 2: icbfs.v1.Metadata.atime:type_name -> google.protobuf.Timestamp
+	8,  // 3: icbfs.v1.Metadata.mtime_override:type_name -> google.protobuf.Timestamp
+	8,  // 4: icbfs.v1.Metadata.btime_override:type_name -> google.protobuf.Timestamp
+	8,  // 5: icbfs.v1.Metadata.ctime:type_name -> google.protobuf.Timestamp
 	2,  // 6: icbfs.v1.Metadata.windows:type_name -> icbfs.v1.Windows
 	5,  // 7: icbfs.v1.Metadata.app:type_name -> icbfs.v1.Metadata.AppEntry
 	6,  // 8: icbfs.v1.Metadata.checksums:type_name -> icbfs.v1.Metadata.ChecksumsEntry
-	1,  // 9: icbfs.v1.Metadata.ChecksumsEntry.value:type_name -> icbfs.v1.Checksums
-	10, // [10:10] is the sub-list for method output_type
-	10, // [10:10] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	7,  // 9: icbfs.v1.Metadata.refs:type_name -> icbfs.v1.Metadata.RefsEntry
+	1,  // 10: icbfs.v1.Metadata.ChecksumsEntry.value:type_name -> icbfs.v1.Checksums
+	9,  // 11: icbfs.v1.Metadata.RefsEntry.value:type_name -> icbfs.v1.Ref
+	12, // [12:12] is the sub-list for method output_type
+	12, // [12:12] is the sub-list for method input_type
+	12, // [12:12] is the sub-list for extension type_name
+	12, // [12:12] is the sub-list for extension extendee
+	0,  // [0:12] is the sub-list for field type_name
 }
 
 func init() { file_spec_proto_icbfs_v1_metadata_proto_init() }
@@ -502,6 +522,7 @@ func file_spec_proto_icbfs_v1_metadata_proto_init() {
 	if File_spec_proto_icbfs_v1_metadata_proto != nil {
 		return
 	}
+	file_spec_proto_icbfs_v1_ref_proto_init()
 	file_spec_proto_icbfs_v1_metadata_proto_msgTypes[2].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -509,7 +530,7 @@ func file_spec_proto_icbfs_v1_metadata_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_spec_proto_icbfs_v1_metadata_proto_rawDesc), len(file_spec_proto_icbfs_v1_metadata_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
