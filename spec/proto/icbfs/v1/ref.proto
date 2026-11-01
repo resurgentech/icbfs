@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package icbfs.v1;
+
+option go_package = "github.com/resurgentech/icbfs/internal/pb";
+
+// RefRecord is the body of a stub: a content version that holds no bytes
+// of its own but names the version that does, its target (another key's
+// version, which is never itself a stub). The stub's user metadata says
+// it is one (icbfs_ref=1) and repeats the target and its size
+// (icbfs_ref_key, icbfs_ref_version, icbfs_ref_size); this body is what a
+// reader follows. See docs/architecture.md's Object layout section.
+message RefRecord {
+  // layout is this format: 1. A reader refuses any other (internal/icbfs's
+  // ErrNewerFormat for a newer one), and never serves a stub it can't read
+  // as bytes.
+  uint32 layout = 1;
+  // The target: the key and version whose bytes this stub's are.
+  string key = 2;
+  string version_id = 3;
+  // The target's size: the file's real size.
+  int64 size = 4;
+  // The target's SHA-256, when known.
+  bytes sha256 = 5;
+}
+
+// Ref is a stub's target, as an item's .metadata keeps it (Metadata.refs):
+// the store's history listings carry no user metadata, so a listing of an
+// item's versions learns each stub's target and real size from here, not
+// from a Head per version. The stub's own metadata is the authority.
+message Ref {
+  string key = 1;
+  string version_id = 2;
+  int64 size = 3;
+}
