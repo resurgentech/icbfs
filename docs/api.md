@@ -136,7 +136,8 @@ ctime.
 the tree and not about any one item: a mirror's table of the ids its app
 keys use, say. `AppObject(ctx, name)`, `SetAppObject(ctx, name, data)`,
 `DeleteAppObject(ctx, name)` and `ListAppObjects(ctx, prefix)`; names are
-app keys (`<tool>.<name>`), objects are small (4 MiB at most), and
+app keys (`<tool>.<name>`, the name part any characters but NUL, `/`
+and spaces included), objects are small (4 MiB at most), and
 versioned, so a view of the past reads the one current then. Reading one
 needs the right to read the drive's root, writing one the right to write
 it. No mount shows them.

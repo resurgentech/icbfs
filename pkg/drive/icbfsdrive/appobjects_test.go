@@ -266,3 +266,107 @@ func TestAppObjectVersions(t *testing.T) {
 		t.Fatalf("at as non-reader: %v", err)
 	}
 }
+
+// TestAppObjectNamePart: after "<tool>." an app object's name may hold
+// any character but NUL: a slash, a space, git's ref specials, "..", a
+// percent, a plus and a non-ASCII letter each round-trip through every
+// app-object call, a listing by a prefix inside or before the slash finds
+// them, fsck reports nothing and the tree stays empty. NUL is refused.
+func TestAppObjectNamePart(t *testing.T) {
+	d := newDrive(t, miniotest.Store(t), icbfs.Settings{Name: "appobjnames", Size: 1 << 30, RootMode: 0o755}, "")
+	ctx := system()
+	fs := d.fs
+	id := strings.Repeat("0123456789abcdef", 4)
+	note := "clone.note.desk/comments." + id
+	// Through the drive first, as a caller meets it.
+	if err := d.SetAppObject(ctx, note, []byte("via drive")); err != nil {
+		t.Fatalf("drive set %q: %v", note, err)
+	}
+	if got, err := d.AppObject(ctx, note); err != nil || string(got) != "via drive" {
+		t.Fatalf("drive get %q: %q, %v", note, got, err)
+	}
+	names := []string{
+		note,
+		"clone.note.a b." + id,
+		`clone.note.~^:?*[\.` + id,
+		"clone.note.a..b." + id,
+		"clone.note.100%." + id,
+		"clone.note.a+b." + id,
+		"clone.note.café/ü." + id,
+		"other.x/y",
+	}
+	bg := context.Background()
+	for _, n := range names {
+		first, second := []byte("one "+n), []byte("two "+n)
+		v1, err := fs.PutAppObject(bg, n, first)
+		if err != nil {
+			t.Fatalf("put %q: %v", n, err)
+		}
+		v2, err := fs.PutAppObjectIf(bg, n, second, v1.ETag, false)
+		if err != nil {
+			t.Fatalf("put if %q: %v", n, err)
+		}
+		if got, obj, err := fs.GetAppObject(bg, n); err != nil || !bytes.Equal(got, second) || obj.VersionID != v2.VersionID {
+			t.Fatalf("get %q: %q, %+v, %v", n, got, obj, err)
+		}
+		if obj, err := fs.HeadAppObject(bg, n); err != nil || obj.VersionID != v2.VersionID {
+			t.Fatalf("head %q: %+v, %v", n, obj, err)
+		}
+		hist, err := fs.AppObjectHistory(bg, n)
+		if err != nil || len(hist) < 2 || hist[0].VersionID != v2.VersionID {
+			t.Fatalf("history %q: %+v, %v", n, hist, err)
+		}
+		if got, err := fs.GetAppObjectVersion(bg, n, v1.VersionID); err != nil || !bytes.Equal(got, first) {
+			t.Fatalf("version %q: %q, %v", n, got, err)
+		}
+
+	}
+	all, err := fs.ListAppObjects(bg, "")
+	if err != nil || len(all) != len(names) {
+		t.Fatalf("list all: %q, %v; want %d", all, err, len(names))
+	}
+	for _, c := range []struct {
+		prefix string
+		want   []string
+	}{
+		{"clone.note.desk/com", []string{note}}, // ends inside the part after the slash
+		{"clone.note.desk", []string{note}},     // ends before the slash
+		{"clone.note.café/", []string{"clone.note.café/ü." + id}},
+		{"other.x/", []string{"other.x/y"}},
+	} {
+		got, err := fs.ListAppObjects(bg, c.prefix)
+		if err != nil || strings.Join(got, "|") != strings.Join(c.want, "|") {
+			t.Fatalf("list %q: %q, %v; want %q", c.prefix, got, err, c.want)
+		}
+	}
+	report, err := fs.Check(bg)
+	if err != nil || report.Unreachable != 0 || len(report.Problems) != 0 {
+		t.Fatalf("fsck: unreachable %d, problems %+v, %v", report.Unreachable, report.Problems, err)
+	}
+	if page, err := d.List(ctx, drive.ByPath("/"), drive.ListOptions{}); err != nil || len(page.Items) != 0 {
+		t.Fatalf("the tree: %+v, %v", page.Items, err)
+	}
+	for _, n := range names {
+		if err := fs.DeleteAppObject(bg, n); err != nil {
+			t.Fatalf("delete %q: %v", n, err)
+		}
+		if _, _, err := fs.GetAppObject(bg, n); !errors.Is(err, icbfs.ErrNotFound) {
+			t.Fatalf("after delete %q: %v", n, err)
+		}
+	}
+	// NUL, anywhere in the name, is refused.
+	for _, bad := range []string{"clone.note.a\x00b", "clone.\x00", "clone.x\x00", "clo\x00ne.x"} {
+		if _, err := fs.PutAppObject(bg, bad, []byte("v")); !errors.Is(err, icbfs.ErrInvalidArgument) {
+			t.Fatalf("put %q: %v; want ErrInvalidArgument", bad, err)
+		}
+		if _, _, err := fs.GetAppObject(bg, bad); !errors.Is(err, icbfs.ErrInvalidArgument) {
+			t.Fatalf("get %q: %v; want ErrInvalidArgument", bad, err)
+		}
+	}
+	// The tool part is unchanged: no dot, an empty tool or an empty name.
+	for _, bad := range []string{"nodot", ".x", "clone.", "Clone.x", "a/b.x"} {
+		if _, err := fs.PutAppObject(bg, bad, []byte("v")); !errors.Is(err, icbfs.ErrInvalidArgument) {
+			t.Fatalf("put %q: %v; want ErrInvalidArgument", bad, err)
+		}
+	}
+}

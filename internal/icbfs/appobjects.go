@@ -13,9 +13,11 @@ import (
 
 // App objects are data a tool keeps beside a filesystem, not about any
 // one item and not in the tree: a mirror's table of the ids its app keys
-// use, say. One object each, <id>-app-<tool>.<name>, named as app keys
-// are; versioned by the store like everything else, so a view of the past
-// reads the one current then. No mount shows them; fsck knows them; a
+// use, say. One object each, <id>-app-<tool>.<name>: a tool of lowercase
+// letters and digits, and a name of any characters but NUL ("/" and
+// spaces included: nothing parses it, and the stores list without a
+// delimiter). Versioned by the store like everything else, so a view of
+// the past reads the one current then. No mount shows them; fsck knows them; a
 // purge leaves them; DeleteAppObject is the only way one goes (short of
 // the whole filesystem).
 
@@ -26,10 +28,11 @@ const MaxAppObjectSize = 4 << 20
 func (f *Filesystem) appPrefix() string { return f.id + "-app-" }
 
 // appObjectKey is the key of app object name, checked: "<tool>.<name>",
-// a tool of lowercase letters and digits.
+// a tool of lowercase letters and digits, and a non-empty name of any
+// characters but NUL.
 func (f *Filesystem) appObjectKey(name string) (string, error) {
 	tool, rest, ok := strings.Cut(name, ".")
-	if !ok || tool == "" || rest == "" || strings.ContainsAny(name, "/\x00") {
+	if !ok || tool == "" || rest == "" || strings.ContainsRune(name, 0) {
 		return "", fmt.Errorf("app object %q: want <tool>.<name>: %w", name, ErrInvalidArgument)
 	}
 	for _, r := range tool {
