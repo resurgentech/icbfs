@@ -151,7 +151,10 @@ type Store interface {
 	// Erase permanently removes one entry of key's history, a version or a
 	// deletion, that isn't key's current version. EraseAll permanently
 	// removes every key starting with prefix, and all its history: the only
-	// operations that lose anything.
+	// operations that lose anything. EraseAll promises no order among the
+	// keys or their versions, and a version written while it runs may
+	// survive it: a caller that needs one key's history gone before
+	// another's erases that key first.
 	Erase(ctx context.Context, key, versionID string) error
 	EraseAll(ctx context.Context, prefix string) error
 

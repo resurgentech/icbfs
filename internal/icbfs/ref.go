@@ -446,10 +446,10 @@ func (f *Filesystem) updateRefs(ctx context.Context, key string, mutate func(*pb
 // addReferrer adds key's entry, pending, to t's target's .refs: before
 // the stub on key is written. A retired .refs (a purge of the target has
 // begun) refuses it, ErrRefTarget. A .refs this creates may be one a
-// purge erased just before, with the target's versions (a purge erases
-// the content key before its .refs), so then the target's version is
-// looked for again: gone, the entry is taken back, and that too is
-// ErrRefTarget.
+// purge erased just before, with the target's versions (an erase whole
+// erases the content key's history before its .refs: eraseWhole), so
+// then the target's version is looked for again: gone, the entry is
+// taken back, and that too is ErrRefTarget.
 func (f *Filesystem) addReferrer(ctx context.Context, t *stubTarget, key string) error {
 	fresh := false
 	err := f.updateRefs(ctx, t.key, func(refs *pb.Refs) (bool, error) {
@@ -680,8 +680,8 @@ func (f *Filesystem) markRetired(ctx context.Context, key string) error {
 // an entry leaves (a referrer's purge, a history rewrite dropping or
 // replacing a stub, a stub re-pointed, fsck's repair). A target already
 // gone is fine. When target is a retired holder (its .refs retired, no
-// .metadata) and no entry left in it is live, the holder goes: one
-// EraseAll of its prefix, the key's versions and its .refs.
+// .metadata) and no entry left in it is live, the holder goes, erased
+// whole: the key's versions, then its .refs (eraseWhole).
 func (f *Filesystem) dropRef(ctx context.Context, target string, drop func(*pb.Referrer) bool) error {
 	ctx = undeclared(ctx)
 	retired := false
@@ -729,9 +729,9 @@ func (f *Filesystem) settleHolder(ctx context.Context, target string) error {
 		}
 	}
 	// A retired .refs takes no new entry, so none can come between the
-	// look above and the erase. The prefix's listing puts the key's own
-	// versions before its .refs.
-	return f.store.EraseAll(ctx, target)
+	// look above and the erase. A stub write already past its check finds
+	// the .refs gone only once the key's own versions are (eraseWhole).
+	return f.eraseWhole(ctx, target)
 }
 
 // copyReferrer prepares a copy of stub version oldVersion of key, naming

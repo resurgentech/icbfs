@@ -133,9 +133,12 @@ compare-and-swap, creating the object if there is none), before it
 erases anything; a `.refs` that is retired refuses a new entry, so a
 stub written meanwhile is refused with `ErrRefTarget` rather than left
 naming nothing. (A stub whose `.refs` entry creates the object looks for
-its target version again: an item erased whole loses its `.refs` after
-its versions, so a fresh `.refs` with no version beside it is refused
-too.) What a retired item leaves, the *retired holder*, is the content
+its target version again: icbfs erases an item whole by erasing its
+content key's history first and only then the rest of its prefix,
+`.refs` included, so a fresh `.refs` with no version beside it is
+refused too. The order is icbfs's, not the store's: `EraseAll` promises
+none, and Azure's ends every current blob, `.refs` included, before it
+erases any version.) What a retired item leaves, the *retired holder*, is the content
 versions its live referrers name, under its key behind a delete marker
 (so a plain Get finds nothing), and its `.refs`: no name, `.metadata`,
 streams, lock, `.version` or trash entry. Stubs read on by version id,
@@ -830,7 +833,12 @@ has had and everything under it.
   its last referrer goes. The purge reports each item it retired, with
   its referrers by path where one resolves (`PurgeWithReport`). With no
   live referrer, never any or all in the same purge, the item is erased
-  whole, `.refs` included.
+  whole, `.refs` included: first every version of its key (behind a
+  delete marker, since no store erases a current version), then one
+  `EraseAll` of its prefix for the rest. A holder whose last referrer
+  goes is erased the same way. The key goes first so that a stub write
+  racing the erase, which finds no `.refs` and looks for its target
+  version again, finds it gone (Stubs, above).
 
 **fsck** (`icbfs-cli fs check`) walks the tree and reports what doesn't
 add up; it counts retired holders, which are neither unreachable nor

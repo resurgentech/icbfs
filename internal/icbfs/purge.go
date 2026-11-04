@@ -301,10 +301,10 @@ func (f *Filesystem) eraseItems(ctx context.Context, items []block.Entry) (Purge
 				}
 			}
 			rep.Retired = append(rep.Retired, r)
-		} else if err := f.store.EraseAll(ctx, it.UUID); err != nil {
+		} else if err := f.eraseWhole(ctx, it.UUID); err != nil {
 			// The item's key, its .metadata, its streams and its .refs all
 			// start with it (its id is fixed-length, so nothing else
-			// does), the key's own versions listed, and erased, first.
+			// does); the key's own versions go first (eraseWhole).
 			return rep, fmt.Errorf("purge %s: %w", it.Name, err)
 		}
 		if err := f.store.EraseAll(ctx, f.trashByKey(it.UUID)); err != nil {
@@ -359,20 +359,8 @@ func (f *Filesystem) retireItem(ctx context.Context, key string, live []*pb.Refe
 	for _, e := range live {
 		keep[e.TargetVersion] = true
 	}
-	if err := f.store.Delete(ctx, key); err != nil && !objstore.IsNotFound(err) {
+	if err := f.eraseKeyHistory(ctx, key, keep); err != nil {
 		return err
-	}
-	history, err := f.store.History(ctx, key)
-	if err != nil {
-		return err
-	}
-	for i, v := range history {
-		if i == 0 && v.Deleted || !v.Deleted && keep[v.VersionID] {
-			continue // the marker just put, and what the referrers name
-		}
-		if err := f.store.Erase(ctx, key, v.VersionID); err != nil && !objstore.IsNotFound(err) {
-			return err
-		}
 	}
 	under, err := f.store.HistoryUnder(ctx, key)
 	if err != nil {
@@ -387,6 +375,43 @@ func (f *Filesystem) retireItem(ctx context.Context, key string, live []*pb.Refe
 	for k := range others {
 		// No other object's key is a start of the .refs's.
 		if err := f.store.EraseAll(ctx, k); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// eraseWhole erases item key whole: every object under its prefix, with
+// all its history. The key's own versions go first, then the rest (its
+// .metadata, streams, .lock, .version and .refs) by one EraseAll. That
+// order is what lets a stub write that finds no .refs trust a second look
+// at its target's version (addReferrer): a .refs gone means the versions
+// went before it. No store's EraseAll promises an order of its own.
+func (f *Filesystem) eraseWhole(ctx context.Context, key string) error {
+	ctx = undeclared(ctx)
+	if err := f.eraseKeyHistory(ctx, key, nil); err != nil {
+		return err
+	}
+	return f.store.EraseAll(ctx, key)
+}
+
+// eraseKeyHistory leaves key itself (nothing else under its prefix)
+// behind a delete marker, put first since no store can erase a current
+// version, with only the content versions keep names: every other entry
+// of its history is erased.
+func (f *Filesystem) eraseKeyHistory(ctx context.Context, key string, keep map[string]bool) error {
+	if err := f.store.Delete(ctx, key); err != nil && !objstore.IsNotFound(err) {
+		return err
+	}
+	history, err := f.store.History(ctx, key)
+	if err != nil {
+		return err
+	}
+	for i, v := range history {
+		if i == 0 && v.Deleted || !v.Deleted && keep[v.VersionID] {
+			continue // the marker just put, and what keep names
+		}
+		if err := f.store.Erase(ctx, key, v.VersionID); err != nil && !objstore.IsNotFound(err) {
 			return err
 		}
 	}
