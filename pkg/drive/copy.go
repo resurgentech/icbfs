@@ -3,6 +3,7 @@ package drive
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -24,7 +25,7 @@ func Copy(ctx context.Context, src Drive, srcID string, from ItemRef, at At, dst
 	}
 	switch it.Type {
 	case TypeFile:
-		return copyFile(ctx, src, srcID, ItemRef{ID: it.ID, Path: it.Path}, at, dst, to, cond)
+		return copyFile(ctx, src, srcID, it, at, dst, to, cond)
 	case TypeDir:
 	default:
 		return Item{}, fmt.Errorf("%s is a %s: %w", it.Path, it.Type, ErrNotSupported)
@@ -52,14 +53,39 @@ func Copy(ctx context.Context, src Drive, srcID string, from ItemRef, at At, dst
 	return top, nil
 }
 
-func copyFile(ctx context.Context, src Drive, srcID string, from ItemRef, at At, dst Drive, to string, cond Condition) (Item, error) {
-	body, it, err := src.Read(ctx, from, at, nil)
-	if err != nil {
-		return Item{}, err
+// copyFile copies the file src stated as it (at at) to dst's path to.
+// Within one drive it writes a reference to the source's version
+// (WriteOptions.SameAs), which on icbfs is a stub and no bytes; one the
+// drive can't make (ErrRefUnavailable), or a write to another drive,
+// streams the bytes.
+func copyFile(ctx context.Context, src Drive, srcID string, it Item, at At, dst Drive, to string, cond Condition) (Item, error) {
+	from := ItemRef{ID: it.ID, Path: it.Path}
+	var out Item
+	err := ErrRefUnavailable
+	if src == dst && it.Version != nil && it.Version.ID != "" {
+		ref := &Ref{ID: it.ID, Version: it.Version.ID}
+		if it.Version.Checksums != nil {
+			ref.SHA256 = it.Version.Checksums.SHA256
+		}
+		// The body too, opened only if it's read: a drive that keeps no
+		// references writes it.
+		body := &lazyBody{open: func() (io.ReadCloser, error) {
+			b, _, err := src.Read(ctx, ItemRef{ID: it.ID, Path: it.Path}, At{Version: it.Version.ID}, nil)
+			return b, err
+		}}
+		defer body.Close()
+		out, err = dst.Write(ctx, to, body, cond, WriteOptions{ContentType: it.ContentType, Size: it.Size, SameAs: ref})
 	}
-	defer body.Close()
-	// The source's size lets the target write as the bytes arrive.
-	out, err := dst.Write(ctx, to, body, cond, WriteOptions{ContentType: it.ContentType, Size: it.Size})
+	if errors.Is(err, ErrRefUnavailable) {
+		var body io.ReadCloser
+		body, it, err = src.Read(ctx, from, at, nil)
+		if err != nil {
+			return Item{}, err
+		}
+		defer body.Close()
+		// The source's size lets the target write as the bytes arrive.
+		out, err = dst.Write(ctx, to, body, cond, WriteOptions{ContentType: it.ContentType, Size: it.Size})
+	}
 	if err != nil {
 		return Item{}, err
 	}
@@ -74,6 +100,30 @@ func copyFile(ctx context.Context, src Drive, srcID string, from ItemRef, at At,
 		out.Origin = &o
 	}
 	return out, nil
+}
+
+// lazyBody is a body opened at its first Read.
+type lazyBody struct {
+	open func() (io.ReadCloser, error)
+	body io.ReadCloser
+	err  error
+}
+
+func (b *lazyBody) Read(p []byte) (int, error) {
+	if b.body == nil && b.err == nil {
+		b.body, b.err = b.open()
+	}
+	if b.err != nil {
+		return 0, b.err
+	}
+	return b.body.Read(p)
+}
+
+func (b *lazyBody) Close() error {
+	if b.body != nil {
+		return b.body.Close()
+	}
+	return nil
 }
 
 // maxDiffBytes bounds each side of a diff.

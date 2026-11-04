@@ -33,7 +33,7 @@ func (d *Drive) Write(ctx context.Context, p string, body io.Reader, cond drive.
 // WriteFrom is Write from content the caller holds (drive.FileWriter):
 // parts are read from it at offsets as they go up, and nothing is copied.
 func (d *Drive) WriteFrom(ctx context.Context, p string, content io.ReaderAt, size int64, cond drive.Condition, opts drive.WriteOptions) (drive.Item, error) {
-	if content == nil || size < 0 {
+	if opts.SameAs == nil && (content == nil || size < 0) {
 		return drive.Item{}, fmt.Errorf("write from: no content: %w", drive.ErrInvalid)
 	}
 	return d.write(ctx, p, writeSource{at: content, size: size}, cond, opts)
@@ -67,6 +67,13 @@ func (d *Drive) write(ctx context.Context, p string, src writeSource, cond drive
 	if _, err := appData(opts.App, nil); err != nil { // refused before anything is written
 		return drive.Item{}, err
 	}
+	var ref *refTarget
+	if opts.SameAs != nil {
+		src = writeSource{} // the body is ignored
+		if ref, err = d.refTarget(ctx, *opts.SameAs, opts.Checksums); err != nil {
+			return drive.Item{}, err
+		}
+	}
 	parent, name, err := d.resolveParent(ctx, p, opts.Parents)
 	if err != nil {
 		return drive.Item{}, err
@@ -89,6 +96,14 @@ func (d *Drive) write(ctx context.Context, p string, src writeSource, cond drive
 		}
 		read = true
 		switch {
+		case ref != nil:
+			// A stub, not bytes: its checksums are the target's, which
+			// writing it records.
+			put = func(ctx context.Context, key, etag string) (*objstore.Object, error) {
+				obj, err := d.fs.PutRef(ctx, key, ref.key, ref.version, ref.sha256, etag)
+				return obj, refErr(err)
+			}
+			return nil
 		case src.at != nil:
 			if src.size > d.fs.MaxFileSize() {
 				return drive.ErrTooLarge
@@ -207,7 +222,12 @@ func (d *Drive) write(ctx context.Context, p string, src writeSource, cond drive
 		if err := readBody(); err != nil {
 			return drive.Item{}, err
 		}
-		n, err := d.create(ctx, parent, name, data, spool, put, late, opts, &sums)
+		var n *node
+		if ref != nil {
+			n, err = d.createRef(ctx, parent, name, ref, opts)
+		} else {
+			n, err = d.create(ctx, parent, name, data, spool, put, late, opts, &sums)
+		}
 		if errors.Is(err, icbfs.ErrExists) {
 			if cond.IfNoneMatch {
 				return drive.Item{}, &drive.PreconditionError{}
@@ -237,6 +257,108 @@ func (d *Drive) written(ctx context.Context, n *node) drive.Item {
 		it.Version = d.currentVersion(ctx, n, objstore.Dates{obj.VersionID: t})
 	}
 	return it
+}
+
+// refTarget is what a WriteOptions.SameAs names, checked: the version a
+// stub of it names (the version itself, or, if that's a stub, its
+// target: never a chain), and the SHA-256 the caller knows, if any.
+type refTarget struct {
+	key, version string
+	sha256       []byte
+}
+
+// refTarget checks what r names before anything is written: the item is
+// a file of this drive the profile may read (ErrForbidden), and its
+// version exists and has, if recorded, the checksums the caller gives
+// (in r, or the write's, want). A version it can't be is
+// ErrRefUnavailable; the filesystem checks the rest as it writes the
+// stub (PutRef, CreateWithRef: refErr).
+func (d *Drive) refTarget(ctx context.Context, r drive.Ref, want *drive.Checksums) (*refTarget, error) {
+	if r.ID == "" || r.Version == "" {
+		return nil, fmt.Errorf("SameAs names no item or no version: %w", drive.ErrInvalid)
+	}
+	sha, err := hex.DecodeString(r.SHA256)
+	if err != nil {
+		return nil, fmt.Errorf("SameAs SHA-256 %q: %w", r.SHA256, drive.ErrInvalid)
+	}
+	unavailable := func(why string, args ...any) error {
+		return fmt.Errorf("%s version %s: %s: %w", r.ID, r.Version, fmt.Sprintf(why, args...), drive.ErrRefUnavailable)
+	}
+	n, err := d.resolve(ctx, d.fs, drive.ByID(r.ID))
+	if errors.Is(err, drive.ErrNotFound) {
+		return nil, unavailable("not an item of this drive") // another drive's or filesystem's, or gone
+	}
+	if err != nil {
+		return nil, err
+	}
+	if n.typ != icbfs.TypeFile {
+		return nil, unavailable("not a file")
+	}
+	if err := d.check(ctx, n, needRead); err != nil {
+		return nil, err
+	}
+	obj, err := d.fs.Store().HeadVersion(ctx, n.key, r.Version)
+	if objstore.IsNotFound(err) {
+		return nil, unavailable("no such version")
+	}
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	if obj.Deleted {
+		return nil, unavailable("a delete marker")
+	}
+	// A stub's .metadata records its target's checksums under its own
+	// ETag, as any version's are.
+	if sums, ok := n.attr.Checksums[obj.ETag]; ok {
+		known := &drive.Checksums{SHA256: r.SHA256}
+		for _, w := range []*drive.Checksums{known, want} {
+			if err := checkSums(w, sums); err != nil {
+				return nil, unavailable("%v", err)
+			}
+		}
+	}
+	if len(sha) == 0 && want != nil && want.SHA256 != "" {
+		if sha, err = hex.DecodeString(want.SHA256); err != nil {
+			return nil, fmt.Errorf("Checksums SHA-256 %q: %w", want.SHA256, drive.ErrInvalid)
+		}
+	}
+	t := &refTarget{key: n.key, version: obj.VersionID, sha256: sha}
+	if target, ok, err := icbfs.RefOf(obj); err != nil {
+		return nil, unavailable("%v", err)
+	} else if ok {
+		t.key, t.version = target.Key, target.VersionID
+	}
+	return t, nil
+}
+
+// refErr is the filesystem's refusal of a stub's target as the drive's:
+// ErrRefUnavailable, and nothing was written.
+func refErr(err error) error {
+	if errors.Is(err, icbfs.ErrRefTarget) || errors.Is(err, icbfs.ErrRefChecksum) || errors.Is(err, icbfs.ErrRefToRef) || errors.Is(err, icbfs.ErrBadRef) {
+		return fmt.Errorf("%w (%v)", drive.ErrRefUnavailable, err)
+	}
+	return err
+}
+
+// createRef makes the file name in parent whose first version is a stub
+// of ref's target (icbfs CreateWithRef), with what opts say recorded in
+// the same write, as create does.
+func (d *Drive) createRef(ctx context.Context, parent *node, name string, ref *refTarget, opts drive.WriteOptions) (*node, error) {
+	sddl, mode, uid, gid := d.newOwnership(ctx, parent, false)
+	info, err := d.writeInfo(ctx, opts, icbfs.Checksums{})
+	if err != nil {
+		return nil, err
+	}
+	key, attr, err := d.fs.CreateWithRef(ctx, parent.key, name, mode, uid, gid, sddl, info, ref.key, ref.version, ref.sha256)
+	if err != nil {
+		return nil, mapCreateErr(refErr(err))
+	}
+	if opts.Origin != nil {
+		if err := d.recordOrigin(ctx, key, joinPath(parent.path, name), *opts.Origin); err != nil {
+			return nil, err
+		}
+	}
+	return parent.child(block.Entry{Name: name, UUID: key, Type: icbfs.TypeFile}, attr), nil
 }
 
 // readBody reads up to the filesystem's max file size: into memory when
@@ -433,10 +555,14 @@ func (d *Drive) writeInfo(ctx context.Context, opts drive.WriteOptions, sums icb
 	if t, ok := drive.SourceTime(ctx); ok && mtime == nil {
 		mtime = &t // a version written in source time is modified then
 	}
-	return icbfs.ItemInfo{
+	info := icbfs.ItemInfo{
 		Mtime: mtime, Btime: timeOrNil(opts.Created),
 		Mode: opts.Mode, WindowsAttrs: opts.WindowsAttrs, App: app, Checksums: &sums,
-	}, nil
+	}
+	if len(sums.MD5) == 0 && len(sums.SHA256) == 0 {
+		info.Checksums = nil // a stub: writing it recorded its target's
+	}
+	return info, nil
 }
 
 // afterWrite records, in one metadata write, what opts say about content

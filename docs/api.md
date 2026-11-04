@@ -82,7 +82,10 @@ type Drive interface {
 from the source, writes to the target, and records where the copy came
 from (drive, ID, version) on targets that can keep it. It reads as the
 actor's profile on the source and writes as the actor's profile on the
-target. **Diff** is the library's own too: `drive.Diff(ctx, d, item, from,
+target. Within one drive (the same `Drive` value) it writes a reference
+to the source's version (`WriteOptions.SameAs`, below), which on icbfs is
+a stub holding no bytes, and streams the bytes only when the drive
+answers `ErrRefUnavailable`; between drives it streams them. **Diff** is the library's own too: `drive.Diff(ctx, d, item, from,
 to) (string, error)`, a unified diff of two versions of a text file.
 
 `WriteOptions.ModTime`, `WriteOptions.Created` and `WriteOptions.Origin`
@@ -117,6 +120,26 @@ is a `FileWriter` also takes content the caller holds open:
 from it at offsets as they go up, reads one again if it is retried, and
 copies nothing; the caller's checksums are checked before anything is
 written. The item that results is the same whichever way the bytes came.
+
+**Writing a reference.** `WriteOptions.SameAs` (a `drive.Ref{ID,
+Version, SHA256}`) says the new version's bytes are item `ID`'s version
+`Version`, already in the drive. An icbfs drive then writes a stub
+naming that version (see architecture.md, Stubs): over an existing file
+a new version (`PutRef`), else a new file (`CreateWithRef`, `Parents`
+honoured), under the write's `Condition`. The body is ignored and may be
+nil, as `Size` is; the times, origin, app keys, mode and content type
+apply as on a byte write. It needs the right to read the item named, as
+well as the write's own (`ErrForbidden`). A reference to a version that
+is itself a stub names that stub's target, so no stub names a stub.
+`SHA256` (hex) is optional; with it, or with `WriteOptions.Checksums`,
+a version whose recorded checksums differ can't be referenced. A version
+that can't be (an item of another drive or filesystem, gone or trashed,
+a version not dated in a filesystem that dates them, other checksums)
+is `ErrRefUnavailable`, and nothing is written: the caller writes the
+bytes. The item returned has the real size, the stub's version id and
+the target's checksums. A drive that keeps no references doesn't know
+`SameAs` and writes the body, so a caller that can't rule that out gives
+the body too; `drive.Copy` gives one it opens only if it's read.
 
 A drive that's a `drive.InfoSetter` (icbfs's is) records all of that on
 an existing item in one metadata write and no new version:
@@ -672,7 +695,8 @@ see it), `ErrForbidden` (allowed to see, not to do this), `ErrNoAccess`
 `ErrNotEmpty`, `ErrNotDir` and `ErrIsDir`, `ErrHasLinks` (purge),
 `ErrPrecondition` (a stale version; a `PreconditionError` carries the
 current one), `ErrInvalidName`, `ErrInvalid`, `ErrChecksum`,
-`ErrTooLarge`, `ErrReadOnly` (an as-of view, a read-only drive or an
+`ErrRefUnavailable` (a `SameAs` the drive can't reference; nothing was
+written), `ErrTooLarge`, `ErrReadOnly` (an as-of view, a read-only drive or an
 archived filesystem), `ErrBusy` (write contention exhausted the
 retries), `ErrLocked` (another holder's lock on the file) and
 `ErrNotLockHolder` (the lease lapsed and the lock is gone or another's).

@@ -238,6 +238,19 @@ is the content, then one `.metadata` write (`SetInfoWith`, which a
 directory's record takes too), whose result gives the item its attributes
 without a stat.
 
+**A reference write is a stub.** A drive write with `SameAs` (the
+library's `drive.Copy` within one drive makes one) sends no bytes: the
+drive resolves the item named in its own tree and checks the profile may
+read it, Heads the version (one that is a stub is replaced by its
+target), compares the checksums the caller gives with the ones
+`.metadata` records, and writes a stub of it: `PutRef` under the
+current ETag over an existing file, `CreateWithRef` for a new one, with
+the write's times, app data and mode recorded as for bytes. The stub's
+checksums are the target's, recorded by the stub's writer. Any target
+the drive or the filesystem refuses (`ErrRefTarget`, `ErrRefChecksum`,
+`ErrRefToRef`) is the library's `ErrRefUnavailable`, and nothing is
+written; the caller writes the bytes.
+
 **Open files are edited in a local scratch file, not in memory.** Opening a
 file copies it from a shared on-disk read cache into a private scratch
 file, fetching it from the store if the cache doesn't have it. Reads and

@@ -302,6 +302,30 @@ type WriteOptions struct {
 	App          map[string][]byte
 	Mode         *uint32
 	WindowsAttrs *uint32
+	// SameAs, if set, says the new version's bytes are another item's
+	// version's, already in the drive: the drive writes a reference to
+	// them (on icbfs, a stub) instead of the bytes, and the body is
+	// ignored (it may be nil), as Size is. Times, the origin, app keys
+	// and the mode apply as they do to a byte write, and so do cond and
+	// Parents. It needs the right to read the item it names, as well as
+	// the write's own (ErrForbidden). A drive that can't reference that
+	// version (on another drive or filesystem, gone, a write that may
+	// not have finished, or other bytes than the checksums say: SameAs's
+	// or Checksums) writes nothing and returns ErrRefUnavailable; the
+	// caller then writes the bytes. A drive that keeps no references
+	// doesn't know SameAs and writes the body: a caller that can't rule
+	// that out gives the body too (Copy does, opened only when it's read).
+	SameAs *Ref
+}
+
+// Ref names one version of an item, by the item's id and the version's,
+// for WriteOptions.SameAs. SHA256, if set, is what the caller knows the
+// version's SHA-256 to be, in hex: one the drive has recorded otherwise
+// makes the reference unavailable.
+type Ref struct {
+	ID      string
+	Version string
+	SHA256  string
 }
 
 // ItemInfo is what SetInfo records about an item in one metadata write,
@@ -568,6 +592,10 @@ var (
 	ErrBusy         = errors.New("busy")
 	ErrInvalid      = errors.New("invalid request")
 	ErrChecksum     = errors.New("the content doesn't match the checksum given")
+	// ErrRefUnavailable: WriteOptions.SameAs names a version this drive
+	// can't reference; nothing was written, and the caller writes the
+	// bytes instead.
+	ErrRefUnavailable = errors.New("that version can't be referenced here: write its bytes")
 	// ErrLocked: the item is locked by another holder (Locker).
 	ErrLocked = errors.New("locked by another holder")
 	// ErrNotLockHolder: the lease lapsed and the lock is gone or another's (Locker).
