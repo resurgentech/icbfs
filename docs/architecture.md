@@ -90,7 +90,8 @@ are the file's. Its body is a `RefRecord` (`ref.proto`: the target's key,
 version id, size and SHA-256, and a `layout`), and its user metadata says
 the same: `icbfs_ref=1`, `icbfs_ref_key`, `icbfs_ref_version` and
 `icbfs_ref_size`, so a Head learns the real size without reading the
-body. A target is never itself a stub. Every reader of a file's bytes
+body. A stub dedupe wrote also has `icbfs_ref_replaces`, the version it
+replaced (see Finding duplicates). A target is never itself a stub. Every reader of a file's bytes
 follows a stub with one more `GetVersion` of the target
 (`icbfs.FollowRef`): opens and their rebases, whole-file reads, checksums
 and the drive's reads, now, by version or as of a time. The stub's own
@@ -124,6 +125,82 @@ item's history: never dated, and never counted unreachable by fsck.
 Under a declared time the stub and its `.metadata` write are recorded
 and dated like any write.
 
+**Finding duplicates.** `icbfs-cli fs dedupe` (package `internal/dedupe`)
+scans for versions that could be stubs without writing any. One
+`HistoryUnder` of the filesystem's prefix lists every version of every
+key (and tells which items have a `.version` or a `.refs`); the directory
+tree is walked for the live files and their paths (the trash is not);
+then one GET of each file's `.metadata` gives its checksums and stubs'
+`refs` by ETag, and so each version's real size, a stub's included. A
+version with no recorded checksums is computed through
+`VersionChecksums` and recorded by `SetChecksums`, which writes under
+`KeepDate`, so the new `.metadata` version takes the date of the one it
+replaces and a source-time filesystem's history does not move. Versions
+are grouped by SHA-256 and size; a stub is never a candidate, only a
+referrer. Of a group's real copies the canonical one is the oldest by
+effective date, unless some copy already has referrers (`.refs` entries
+for its version, counted by `ReferrerCounts`, pending ones too, with no
+liveness check): then the one with the most stays. Current-only mode
+groups the files' current versions; history mode all versions.
+
+A writing run (`dedupe.Replace`, no `-dry-run`) replaces each duplicate
+current version by a stub naming its group's canonical copy, through
+`Filesystem.ReplaceWithRef`, in this order: the version is checked (still
+current, not a stub, no `.refs` entry naming it, its recorded SHA-256 the
+target's) and the target verified as `PutRef` does; the target's `.refs`
+gains a pending entry; the stub is put with `If-Match` on the version's
+ETag, under a declared time that is the old version's effective date (its
+`.version` line, else its store time to the millisecond), and dated by
+`RecordDates`; `.metadata` records the stub's `refs`, its checksums and
+the old version's mtime as an override, under `KeepDate`; the old
+version's `.version` line goes and the version is erased; the entry is
+finalized. The history keeps the same versions at the same dates, one of
+them now a stub. A lost `If-Match` (a writer got there first) drops the
+entry again, through `dropRef`, and the item is skipped, as is a version
+stubs name or one that is a stub already; the CLI reports each. The stub
+carries `icbfs_ref_replaces`, the version it replaces, so the pending
+entry is enough to finish a killed run: the next run's scan notes the
+pending entries of referrers in scope (in the `.refs` of the files it
+scans, and of retired holders), and `FinishReplacements` settles each as
+fsck's repair would, an entry whose stub is there finalized after the
+steps left are done, one with no stub dropped through `dropRef` (which
+erases a retired holder left with nothing live); then it scans again. A
+run with nothing left to do writes nothing. The filesystem's past is
+marked changed (the `-past` object) once, at the end. A mount holding a
+replaced file open with unflushed writes rebases them onto the stub's
+target when it flushes (a lost race, or a part copy finding the erased
+version gone).
+
+With `-history` (`Options.History`) the run replaces past versions too,
+each affected file's history rewritten by `ReplaceFileHistory`: its
+duplicate versions as stub states, every other version kept as a
+server-side copy, at the same dates in the same order (of versions at
+one date, a create and its first write under a source time, the older
+move back a nanosecond each, since the rewrite takes strictly
+increasing dates; the newest keeps it). A rewrite gives kept versions
+new ids, so the run picks canonical copies itself: items are ranked
+(those without a duplicate of their own first, then those with the most
+referrers, the oldest, by path), a group's canonical copy is its copy in
+the best-ranked item (the oldest there), and items are rewritten in rank
+order, each stub naming a version already final: in an item done
+before, by its new id, or an earlier version of the same item (a
+self-stub). So identical consecutive versions come out as the newer a
+stub at the older, unless the canonical copy is elsewhere, which both
+then name. An item with live referrers (`LiveReferrers`, its own stubs
+aside) has each re-pointed to its version's canonical copy first: a
+referrer's current stub by `RepointRef` (`ReplaceWithRef`'s steps for a
+stub, the old stub's `.refs` entry dropped once it is erased), a stub in
+its past by a rewrite of the referrer's history. A referrer naming a
+version that stays (a canonical copy, or the only copy) can't be
+re-pointed, and the item is skipped. Then stubs in scope naming a
+retired holder are re-pointed to a live copy of their content, where
+there is one; the last erases the holder (`dropRef`). An open file
+(`ErrFileOpen`), a lost `If-Match` and a refused rewrite are skipped and
+reported. The rewrites' own past marks are held back to the one at the
+end. Each item is rewritten or not, so a killed run is finished by the
+next, except an item killed inside its own `ReplaceFileHistory`, which is
+left as that leaves it (part of its new history on top of the old).
+
 **Retired holders.** A purge of an item that stubs still name retires it
 rather than refusing (see Trash and permanent delete). A referrer is
 live when a `HeadVersion` of its stub finds a stub that names the item;
@@ -156,7 +233,14 @@ gets the target's `.refs` entry first, pending, then finalized, and the
 original's entry is dropped. A history rewrite (`ReplaceFileHistory`)
 takes a stub as a state, checked and registered as `PutRef` does, and
 refuses an item with live referrers (`ErrReferenced`): it would erase
-the versions they name, and can't retire them.
+the versions they name, and can't retire them. The item's own stubs are
+not referrers: a stub state may name a version of the item itself, if an
+earlier state keeps that version and it isn't a stub. Kept versions are
+copied to new ids, so the stub names the copy's new id, and the item's
+own `.refs` lists it like any target's; a kept version that is such a
+stub is written again the same way, naming its target's copy. A rewrite
+of such an item drops the old self-entries with the old stubs (`dropRef`),
+and a purge of it erases it whole when nothing else names it.
 
 Item keys are **UUIDv7**. Their embedded millisecond timestamp gives each
 item a creation time for free and keeps keys roughly time-ordered.

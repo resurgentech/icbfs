@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/resurgentech/icbfs/internal/dedupe"
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/pkg/drive"
@@ -40,10 +41,19 @@ type Described struct {
 	Used uint64 `json:"used"`
 }
 
+// Deduped is fs dedupe's result: the scan's numbers (and a writing run's
+// writes, Report.Writes), and, when the dump was asked for, every version
+// scanned (the CLI writes the file: the daemon's client is the one with
+// it).
+type Deduped struct {
+	Report  dedupe.Report   `json:"report"`
+	Records []dedupe.Record `json:"records,omitempty"`
+}
+
 // Storage commands act on a bucket's filesystems; drive commands on a
 // drive.
 var (
-	StorageCommands = []string{"fs create", "fs list", "fs describe", "fs check", "fs resize", "fs archive", "fs prune"}
+	StorageCommands = []string{"fs create", "fs list", "fs describe", "fs check", "fs dedupe", "fs resize", "fs archive", "fs prune"}
 	DriveCommands   = []string{"names create", "names list", "names delete", "trash list", "trash restore"}
 )
 
@@ -140,6 +150,8 @@ func runStorage(ctx context.Context, store objstore.Store, r Request) (any, erro
 			return f.CheckRepair(ctx)
 		}
 		return f.Check(ctx)
+	case "fs dedupe":
+		return runDedupe(ctx, store, a)
 	case "fs resize":
 		size, err := a.uint("size", 0)
 		if err != nil {
@@ -162,6 +174,42 @@ func runStorage(ctx context.Context, store objstore.Store, r Request) (any, erro
 		return struct{}{}, icbfs.Prune(ctx, store, info.Name)
 	}
 	return nil, fmt.Errorf("unknown command %q", r.Name)
+}
+
+// runDedupe is fs dedupe: the scan of the filesystem (or of -path in it),
+// and with no -dry-run the replacement of its duplicate current versions
+// by stubs (dedupe.Replace), or with -history of every duplicate version,
+// past ones too (histories rewritten). The versions go back only for
+// -dump.
+func runDedupe(ctx context.Context, store objstore.Store, a args) (any, error) {
+	if a.str("fs") == "" {
+		return nil, errors.New("fs is required")
+	}
+	if a.bool("current") && a.bool("history") {
+		return nil, errors.New("current and history contradict each other")
+	}
+	minSize, err := a.uint("min-size", dedupe.DefaultMinSize)
+	if err != nil {
+		return nil, err
+	}
+	f := icbfs.New(store, a.str("fs"))
+	if err := f.Attach(ctx); err != nil {
+		return nil, err
+	}
+	o := dedupe.Options{Path: a.str("path"), MinSize: int64(min(minSize, 1<<62)), Current: a.bool("current"), History: a.bool("history")}
+	scan := dedupe.Replace
+	if a.bool("dry-run") {
+		scan = dedupe.Scan
+	}
+	res, err := scan(ctx, store, f, o)
+	if err != nil {
+		return nil, err
+	}
+	out := Deduped{Report: res.Report}
+	if a.bool("dump") {
+		out.Records = res.Records
+	}
+	return out, nil
 }
 
 func runOnDrive(ctx context.Context, d drive.Drive, r Request) (any, error) {

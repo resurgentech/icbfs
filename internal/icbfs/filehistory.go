@@ -155,11 +155,20 @@ func (f *Filesystem) contentRefs(ctx context.Context, key string) (map[string]Re
 // names are left as they are. The caller stops its own writes to the
 // file meanwhile.
 //
-// Stubs: a file with live referrers is refused (ErrReferenced). A stub
-// state is checked and written as PutRef writes one, its target's .refs
-// gaining its entry. A kept version that is a stub stays one, its copy's
-// entry replacing the original's (copyVersionOnTop); a stub not kept has
-// its entry dropped.
+// Stubs: a file with live referrers is refused (ErrReferenced); its own
+// stubs naming its own versions are not referrers. A stub state is
+// checked and written as PutRef writes one, its target's .refs gaining
+// its entry. A kept version that is a stub stays one, its copy's entry
+// replacing the original's (copyVersionOnTop); a stub not kept has its
+// entry dropped.
+//
+// A stub state may name a version of the file itself (RefKey key) only
+// if an earlier state keeps that version (Version) and it isn't a stub;
+// otherwise ErrInvalidArgument. Kept versions are copied to new ids, so
+// the stub names the copy's new version id, and the file's own .refs
+// lists it as any target's does. A kept version that is such a stub is
+// written again the same way, naming its target's copy (which, again,
+// an earlier state must keep).
 func (f *Filesystem) ReplaceFileHistory(ctx context.Context, key string, states []FileState, ifMatch string) error {
 	if err := f.checkWritable(); err != nil {
 		return err
@@ -185,21 +194,18 @@ func (f *Filesystem) ReplaceFileHistory(ctx context.Context, key string, states 
 		if n != 1 {
 			return fmt.Errorf("state %d: a version to keep, new content or a stub, one of the three: %w", i, ErrInvalidArgument)
 		}
-		if s.RefKey == key {
-			return fmt.Errorf("state %d: a stub naming the file's own history, which this erases: %w", i, ErrInvalidArgument)
-		}
 	}
 	if c := f.openContent(key); c != nil {
 		return fmt.Errorf("the file is open: %w", ErrFileOpen)
 	}
 	if live, err := f.liveReferrers(ctx, key, nil); err != nil {
 		return err
-	} else if len(live) > 0 {
-		return fmt.Errorf("%s: %d referrers: %w", key, len(live), ErrReferenced)
+	} else if n := len(live) - selfEntries(live, key); n > 0 {
+		return fmt.Errorf("%s: %d referrers: %w", key, n, ErrReferenced)
 	}
 	targets := make([]*stubTarget, len(states))
 	for i, s := range states {
-		if s.RefKey == "" {
+		if s.RefKey == "" || s.RefKey == key {
 			continue
 		}
 		t, err := f.checkRefTarget(ctx, s.RefKey, s.RefVersion, s.RefSHA256)
@@ -242,6 +248,16 @@ func (f *Filesystem) ReplaceFileHistory(ctx context.Context, key string, states 
 			byID[o.VersionID] = o
 		}
 	}
+	self, err := selfTargets(key, states, byID, oldRefs, attrNow.Checksums)
+	if err != nil {
+		return err
+	}
+	if len(self) > 0 {
+		if err := f.raiseFormat(ctx); err != nil {
+			return err
+		}
+	}
+	copies := map[string]*objstore.Object{} // the kept versions' copies, by the version copied
 
 	rec := &objstore.Recorder{}
 	// What each state's .metadata learns about its own content version
@@ -253,15 +269,15 @@ func (f *Filesystem) ReplaceFileHistory(ctx context.Context, key string, states 
 		sctx := objstore.WithRecorder(objstore.WithDeclaredTime(ctx, s.At), rec)
 		var obj *objstore.Object
 		var ref *Ref
+		if t, ok := self[i]; ok {
+			// A stub naming a version of this file kept earlier: its
+			// copy, written just now, is the target.
+			cp := copies[t.version]
+			t = &stubTarget{key: key, version: cp.VersionID, obj: &objstore.Object{Key: key, VersionID: cp.VersionID, ETag: cp.ETag, Size: byID[t.version].Size},
+				sums: t.sums, recorded: t.recorded, sha256: t.sha256}
+			targets[i] = t
+		}
 		switch {
-		case s.Version != "":
-			src, ok := byID[s.Version]
-			if !ok {
-				return fmt.Errorf("state %d: version %s: %w", i, s.Version, ErrNotFound)
-			}
-			if obj, ref, err = f.copyVersionOnTop(sctx, key, src); err != nil {
-				return err
-			}
 		case targets[i] != nil:
 			body, meta, err := targets[i].stub()
 			if err != nil {
@@ -273,6 +289,15 @@ func (f *Filesystem) ReplaceFileHistory(ctx context.Context, key string, states 
 			if obj, err = f.store.Put(sctx, key, bytes.NewReader(body), meta, ""); err != nil {
 				return err // the pending entry stays, for fsck
 			}
+		case s.Version != "":
+			src, ok := byID[s.Version]
+			if !ok {
+				return fmt.Errorf("state %d: version %s: %w", i, s.Version, ErrNotFound)
+			}
+			if obj, ref, err = f.copyVersionOnTop(sctx, key, src); err != nil {
+				return err
+			}
+			copies[s.Version] = obj
 		default:
 			if obj, err = f.store.Put(sctx, key, s.Content, nil, ""); err != nil {
 				return err
@@ -356,4 +381,65 @@ func (f *Filesystem) ReplaceFileHistory(ctx context.Context, key string, states 
 		}
 	}
 	return f.markPast(ctx)
+}
+
+// selfEntries counts the entries of live that are key's own: its stubs
+// naming its own versions, which a rewrite of key re-aims, not a
+// referrer that holds it back.
+func selfEntries(live []*pb.Referrer, key string) int {
+	n := 0
+	for _, e := range live {
+		if e.ReferrerKey == key {
+			n++
+		}
+	}
+	return n
+}
+
+// selfTargets checks ReplaceFileHistory's states that are stubs naming
+// file key itself: a stub state with RefKey key, or a kept Version that is
+// a stub naming key (its target moves with the rewrite, so it is written
+// again as a stub naming the new copy). Each must name a version that an
+// earlier state keeps (Version) and that isn't a stub. It returns them by
+// state index, each target's version the old one; its copy's id is known
+// only once that state is written.
+func selfTargets(key string, states []FileState, byID map[string]objstore.Object, oldRefs map[string]Ref, sums map[string]Checksums) (map[int]*stubTarget, error) {
+	out := map[int]*stubTarget{}
+	kept := map[string]bool{} // versions the states so far keep
+	for i, s := range states {
+		target, sha := "", s.RefSHA256
+		switch {
+		case s.RefKey == key:
+			target = s.RefVersion
+		case s.Version != "":
+			if src, ok := byID[s.Version]; ok {
+				if r, ok := oldRefs[src.ETag]; ok && r.Key == key {
+					target = r.VersionID
+				}
+			}
+		}
+		if target == "" {
+			if s.Version != "" {
+				kept[s.Version] = true
+			}
+			continue
+		}
+		src, ok := byID[target]
+		if !ok || !kept[target] {
+			return nil, fmt.Errorf("state %d: a stub naming version %s of the file itself, which no earlier state keeps: %w", i, target, ErrInvalidArgument)
+		}
+		if _, stub := oldRefs[src.ETag]; stub {
+			return nil, fmt.Errorf("state %d: a stub naming version %s of the file itself, a stub: %w", i, target, ErrInvalidArgument)
+		}
+		t := &stubTarget{key: key, version: target, sha256: sha}
+		t.sums, t.recorded = sums[src.ETag]
+		if t.recorded && len(t.sums.SHA256) > 0 {
+			if len(sha) > 0 && !bytes.Equal(sha, t.sums.SHA256) {
+				return nil, fmt.Errorf("state %d: %s version %s: SHA-256 %x, given %x: %w", i, key, target, t.sums.SHA256, sha, ErrRefChecksum)
+			}
+			t.sha256 = t.sums.SHA256
+		}
+		out[i] = t
+	}
+	return out, nil
 }

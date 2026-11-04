@@ -91,7 +91,7 @@ flowchart LR
 |---|---|---|
 | `icbfs mount` | mount a filesystem on Linux (FUSE) | [mount.md](docs/mount.md) |
 | `icbfs-winfsp` | mount a filesystem on Windows (WinFsp); the [Windows package](docs/mount.md#the-windows-package) installs it with a sign-in mount | [mount.md](docs/mount.md#windows-winfsp) |
-| `icbfs-cli` | create and manage filesystems; named versions; trash | [cli.md](docs/cli.md) |
+| `icbfs-cli` | create and manage filesystems; find duplicate content (`fs dedupe`); named versions; trash | [cli.md](docs/cli.md) |
 | `icbfs-sync` | keep Windows folders in step with drives | [sync.md](docs/sync.md) |
 
 ## Status
@@ -268,7 +268,7 @@ same `ICBFS_*` variables, so keys need not be on a command line.
 |---|---|
 | [architecture.md](docs/architecture.md) | the design: objects, directories, metadata, concurrency, locking, past views, trash, Windows compatibility |
 | [mount.md](docs/mount.md) | mounting on Linux and Windows, installing WinFsp, mounting the past |
-| [cli.md](docs/cli.md) | `icbfs-cli`: filesystems, named versions, trash |
+| [cli.md](docs/cli.md) | `icbfs-cli`: filesystems, duplicate content, named versions, trash |
 | [api.md](docs/api.md) | the drive library: drives, permissions, versions, drafts, mirroring |
 | [sync.md](docs/sync.md) | `icbfs-sync`: setup, settings, how it decides, safety, the tray |
 | [testing.md](docs/testing.md) | the test layers, how to run them, latest results, known issues |

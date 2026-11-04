@@ -8,6 +8,7 @@ icbfs-cli fs create   -fs NAME [-primary-windows] [-size N] [-max-file-size N] [
 icbfs-cli fs list     [-json]
 icbfs-cli fs describe -fs NAME [-json]
 icbfs-cli fs check    -fs NAME [-repair] [-json]
+icbfs-cli fs dedupe   -fs NAME [-path PATH] [-min-size N] [-dump FILE|-] [-current] [-dry-run] [-history] [-json]
 icbfs-cli fs resize   -fs NAME -size N
 icbfs-cli fs archive  -fs NAME
 icbfs-cli fs prune    -fs NAME -yes
@@ -93,6 +94,56 @@ The other `fs` commands:
   then exits non-zero only for what it couldn't repair. Run it on a quiet
   filesystem: one changing while it's walked can show problems that
   aren't.
+- `fs dedupe` finds file content versions with identical bytes, in the
+  filesystem or under `-path`, and replaces copies with stubs (versions
+  that name another version instead of holding bytes). Without
+  `-dry-run`, each current version that is a copy of its group's
+  canonical one is replaced: the file reads the same bytes, and its
+  history has the same versions at the same dates, the current one now a
+  stub; the copy's bytes are freed. It prints how many versions (and
+  bytes) it replaced, and each one it skipped, with the reason:
+  `referrers` (stubs already name that version), `changed` (a writer
+  changed the file during the run), `stub` (it already is one) or
+  `target` (the canonical copy can't be a stub's target). A run that was
+  killed is finished by the next one ("finished N left by an earlier
+  run"); a run with nothing left to do writes nothing. With `-history`,
+  past versions are replaced too: each affected file's history is
+  rewritten, the same versions at the same dates with its duplicates now
+  stubs (of identical consecutive versions, the newer becomes a stub at
+  the older). Stubs that name a version of a file being rewritten are
+  first re-pointed to the copy that stays ("re-pointed N stubs"), and
+  stubs naming a purged file's retired holder are re-pointed to a live
+  copy of its content, if there is one. A file whose stubs elsewhere
+  name a version that stays is skipped (`referrers`), as is one open on
+  this machine (`open`).
+  - It lists the filesystem's objects once and reads each file's
+    `.metadata` once. Versions are grouped by SHA-256 and size, live files
+    only (the trash is not scanned). A version with no recorded checksums
+    (one a mount wrote) has them computed, which reads the version once,
+    and recorded in the file's `.metadata`, so the next scan reads none;
+    recording leaves the file's dates and history as they were.
+  - A version smaller than `-min-size` (default 2 MiB) is not looked at;
+    the report counts them. Hard-linked files count once.
+  - In each group the canonical copy, the one that would stay, is the
+    oldest version by date, unless another copy already has stubs naming
+    it: that one stays.
+  - `-dry-run` prints, for current versions only and for all versions: the
+    groups, the duplicate versions, the bytes they would free, the
+    versions already stubs and those below the minimum. `-current` scans
+    current versions only (cheaper: histories are not read) and leaves out
+    the all-versions numbers. `-history` is the run that rewrites
+    histories; it can't be combined with `-current`. A writing run prints the same numbers, from its scan
+    before the writes, then what it wrote.
+  - `-dump FILE` (`-` for standard output, the report then on standard
+    error) writes a JSON line for each version scanned, files in path
+    order, a file's versions newest first by date: `path`, `itemId`,
+    `versionId`, `etag`, `date`, `size` (the content's real size),
+    `md5` and `sha256` each with `md5_computed` / `sha256_computed`
+    (false: recorded before this run), and for a stub `ref` (`key`,
+    `version`). With a writing run, the dump is of the scan before the
+    writes.
+  - Through the daemon, the file is written on your machine: the server
+    sends the versions back.
 - `fs archive` makes a filesystem read-only. It takes effect at the next
   mount.
 - `fs prune -yes` erases every version of everything in an **archived**

@@ -9,6 +9,7 @@
 //	icbfs-cli fs list
 //	icbfs-cli fs describe -fs NAME
 //	icbfs-cli fs check    -fs NAME [-repair] [-json]
+//	icbfs-cli fs dedupe   -fs NAME [-path PATH] [-min-size N] [-dump FILE|-] [-current] [-dry-run] [-history] [-json]
 //	icbfs-cli fs resize   -fs NAME -size N
 //	icbfs-cli fs archive  -fs NAME
 //	icbfs-cli fs prune    -fs NAME -yes
@@ -31,11 +32,13 @@
 package clicmd
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -43,6 +46,7 @@ import (
 	"time"
 
 	"github.com/resurgentech/icbfs/internal/buildinfo"
+	"github.com/resurgentech/icbfs/internal/dedupe"
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/pkg/drive"
@@ -51,13 +55,13 @@ import (
 	"github.com/resurgentech/icbfs/pkg/storeflags"
 )
 
-const usage = `usage: icbfs-cli fs create|list|describe|check|resize|archive|prune [flags]
+const usage = `usage: icbfs-cli fs create|list|describe|check|dedupe|resize|archive|prune [flags]
        icbfs-cli names create|list|delete [flags]
        icbfs-cli trash list|restore [flags]
 run "icbfs-cli <group> <command> -h" for a command's flags`
 
 var commands = map[string]func([]string) error{
-	"fs create": fsCreate, "fs list": fsList, "fs describe": fsDescribe, "fs check": fsCheck, "fs resize": fsResize,
+	"fs create": fsCreate, "fs list": fsList, "fs describe": fsDescribe, "fs check": fsCheck, "fs dedupe": fsDedupe, "fs resize": fsResize,
 	"fs archive": fsArchive, "fs prune": fsPrune,
 	"names create": namesCreate, "names list": namesList, "names delete": namesDelete,
 	"trash list": trashList, "trash restore": trashRestore,
@@ -134,10 +138,11 @@ func (s storeFlags) runWith(name string, args map[string]string, out any, openDr
 		if err := s.s.Check(); err != nil {
 			return err
 		}
-		store, err := s.store()
-		if err != nil {
-			return err
+		store, serr := s.store()
+		if serr != nil {
+			return serr
 		}
+		// (Not "store, err :=": that would shadow err, and lose Run's.)
 		result, err = sidecmd.Run(ctx(), sidecmd.Env{Store: store, Drive: openDrive}, sidecmd.Request{Name: name, Args: args, Actor: actor()})
 	}
 	if err != nil {
@@ -312,6 +317,108 @@ func fsCheck(args []string) error {
 		return fmt.Errorf("%s: %d problems", *name, n)
 	}
 	return nil
+}
+
+// fsDedupe scans a filesystem (or the subtree -path) for content versions
+// with identical bytes, and replaces each duplicate current version with a
+// stub naming its canonical copy: the same bytes, the same history at the
+// same dates. It prints what it replaced, and each version it skipped and
+// why. -dry-run reports what replacing would reclaim and writes nothing
+// but the checksums it computes (recorded in the files' .metadata, so the
+// next scan reads them); -dump lists every version it looked at, one JSON
+// line each, to FILE on this machine (or stdout for "-", the report then
+// going to stderr). -history replaces past versions too, rewriting each
+// affected file's history (the same versions at the same dates), the
+// stubs that name a rewritten file's versions re-pointed first.
+func fsDedupe(args []string) error {
+	fset := flag.NewFlagSet("fs dedupe", flag.ExitOnError)
+	sf := addStoreFlags(fset)
+	name := fset.String("fs", "", "filesystem (required)")
+	path := fset.String("path", "", "only this subtree (or file) of the filesystem")
+	minSize := fset.Uint64("min-size", dedupe.DefaultMinSize, "versions smaller than this, in bytes, are left alone")
+	dumpTo := fset.String("dump", "", "write a JSON line for every version scanned to this file, or - for standard output")
+	current := fset.Bool("current", false, "scan current versions only, not histories")
+	dryRun := fset.Bool("dry-run", false, "report what would be reclaimed, and change nothing")
+	history := fset.Bool("history", false, "also replace past versions, rewriting histories, not only current versions")
+	asJSON := fset.Bool("json", false, "JSON output of the report")
+	if err := parse(fset, args); err != nil {
+		return err
+	}
+	if *name == "" {
+		return errors.New("-fs is required")
+	}
+	if *current && *history {
+		return errors.New("-current and -history contradict each other")
+	}
+	cmdArgs := map[string]string{"fs": *name, "min-size": strconv.FormatUint(*minSize, 10)}
+	for k, v := range map[string]bool{"current": *current, "dry-run": *dryRun, "history": *history, "dump": *dumpTo != ""} {
+		if v {
+			cmdArgs[k] = "true"
+		}
+	}
+	if *path != "" {
+		cmdArgs["path"] = *path
+	}
+	var d sidecmd.Deduped
+	if err := sf.run("fs dedupe", cmdArgs, &d); err != nil {
+		return err
+	}
+	report := io.Writer(os.Stdout)
+	if *dumpTo == "-" {
+		report = os.Stderr
+		if err := dedupe.WriteDump(os.Stdout, d.Records); err != nil {
+			return err
+		}
+	} else if *dumpTo != "" {
+		file, err := os.Create(*dumpTo)
+		if err != nil {
+			return err
+		}
+		w := bufio.NewWriter(file)
+		err = dedupe.WriteDump(w, d.Records)
+		if err == nil {
+			err = w.Flush()
+		}
+		if cerr := file.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return fmt.Errorf("-dump %s: %w", *dumpTo, err)
+		}
+	}
+	if *asJSON {
+		return json.NewEncoder(report).Encode(d.Report)
+	}
+	r := d.Report
+	fmt.Fprintf(report, "%s: %d files; computed and recorded checksums of %d versions", *name, r.Files, r.Computed)
+	if r.Skipped > 0 {
+		fmt.Fprintf(report, "; %d files or versions unreadable (fs check)", r.Skipped)
+	}
+	fmt.Fprintln(report)
+	printDedupeMode(report, "current versions", r.Current, *minSize)
+	if r.History != nil {
+		printDedupeMode(report, "all versions", *r.History, *minSize)
+	}
+	if w := r.Writes; w != nil {
+		fmt.Fprintf(report, "replaced %d versions (%d bytes) with stubs; finished %d left by an earlier run; skipped %d\n",
+			w.Replaced.Versions, w.Replaced.Bytes, w.Finished, len(w.Skipped))
+		if *history {
+			fmt.Fprintf(report, "re-pointed %d stubs to the copies that stay\n", w.Repointed)
+		}
+		for _, sk := range w.Skipped {
+			fmt.Fprintf(report, "  %s: %s", sk.Path, sk.Reason)
+			if sk.Detail != "" {
+				fmt.Fprintf(report, " (%s)", sk.Detail)
+			}
+			fmt.Fprintln(report)
+		}
+	}
+	return nil
+}
+
+func printDedupeMode(w io.Writer, what string, m dedupe.ModeReport, minSize uint64) {
+	fmt.Fprintf(w, "%s: %d groups, %d duplicate versions, %d bytes reclaimable (%d versions looked at, %d already stubs); %d versions, %d bytes, below the minimum of %d\n",
+		what, m.Groups, m.Duplicates, m.Reclaimable, m.Versions, m.Stubs, m.BelowMin.Versions, m.BelowMin.Bytes, minSize)
 }
 
 func fsResize(args []string) error {
