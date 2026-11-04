@@ -63,9 +63,10 @@ type content struct {
 	baseVersion string
 	baseSize    int64
 	// baseKey is the key whose version the base's bytes are: key itself,
-	// or, when the base is a stub, its target's key. A stub's own version
-	// holds only its record, so then baseVersion is empty and nothing is
-	// copied from it (until range copies follow a stub through baseKey).
+	// or, when the base is a stub, its target's key, and then baseVersion
+	// is the target's version. A stub's own version holds only its record,
+	// so a multipart flush copies the untouched parts from baseKey at
+	// baseVersion, never from the stub.
 	baseKey string
 
 	// touched is every byte range written since the last flush, through
@@ -623,15 +624,15 @@ func (c *content) rebaseLocked(ctx context.Context) error {
 
 // contentBase is what a scratch file seeded from head's content is based
 // on, for range copies (partsLocked): head's own key and version, or, for
-// a stub, its target's key and no version, so that every part is uploaded
-// and none is copied from the stub's own bytes, its record.
+// a stub, its target's key and version, so that parts are copied from the
+// target's bytes and never from the stub's own, its record.
 func contentBase(key string, head *objstore.Object) (baseKey, version string, err error) {
 	ref, ok, err := RefOf(head)
 	if err != nil {
 		return "", "", err
 	}
 	if ok {
-		return ref.Key, "", nil
+		return ref.Key, ref.VersionID, nil
 	}
 	return key, head.VersionID, nil
 }
@@ -645,7 +646,9 @@ func contentBase(key string, head *objstore.Object) (baseKey, version string, er
 // content that's no longer current, and would erase the other writer's
 // change. Flush instead rebases: fetches the current content, copies its
 // own touched ranges onto it, and tries again. Two writers editing
-// different ranges both land, as on a local disk, interleaved or not.
+// different ranges both land, as on a local disk, interleaved or not. A
+// multipart write whose base version was erased meanwhile (its part copies
+// find nothing: lostBaseLocked) rebases and tries again the same way.
 //
 // Retrying is bounded by contentWriteRetryBudget. After that, with locking
 // on, Flush escalates: it takes a lock over its touched ranges, makes one more
@@ -685,7 +688,7 @@ func (c *content) Flush(ctx context.Context, holder string) (Attr, error) {
 		if err == nil {
 			return attr, nil
 		}
-		if !objstore.IsPreconditionFailed(err) {
+		if !objstore.IsPreconditionFailed(err) && !c.lostBaseLocked(err) {
 			return Attr{}, err
 		}
 		if time.Now().After(deadline) {
@@ -780,12 +783,25 @@ func (c *content) partsLocked(partSize int64) []objstore.Part {
 		end := off + n
 		untouched := !c.touched.overlaps(off, end)
 		if c.baseVersion != "" && end <= c.baseSize && untouched {
-			parts = append(parts, objstore.Part{Size: n, CopyVersion: c.baseVersion, CopyOffset: off})
+			p := objstore.Part{Size: n, CopyVersion: c.baseVersion, CopyOffset: off}
+			if c.baseKey != c.key {
+				p.CopyKey = c.baseKey // a stub's target
+			}
+			parts = append(parts, p)
 		} else {
 			parts = append(parts, objstore.Part{Size: n, Body: io.NewSectionReader(c.file, off, n)})
 		}
 	}
 	return parts
+}
+
+// lostBaseLocked reports whether err, from uploadLocked, is a multipart
+// write's part copy finding its source gone: the base version was erased
+// (by dedupe, once it's a stub's, or by a purge) after the scratch file was
+// seeded from it. Like a lost race, that's mended by a rebase onto the
+// current content and another try. A one-Put write copies nothing.
+func (c *content) lostBaseLocked(err error) bool {
+	return objstore.IsNotFound(err) && c.baseVersion != "" && c.size > c.fsys.partSize()
 }
 
 // updateSharedCacheLocked puts what was just written in the shared cache,

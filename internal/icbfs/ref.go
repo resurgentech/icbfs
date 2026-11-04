@@ -1,11 +1,13 @@
 package icbfs
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"strconv"
+	"strings"
 
 	"google.golang.org/protobuf/proto"
 
@@ -42,6 +44,11 @@ const formatVersionRefs = 2
 
 // maxFormatVersion is the newest filesystem format this build opens.
 const maxFormatVersion = formatVersionRefs
+
+// openFormatVersion is the newest format applyEntry opens: this build's,
+// maxFormatVersion. A variable for the tests, which pin a build to an
+// older format to see it refuse a raised filesystem.
+var openFormatVersion uint32 = maxFormatVersion
 
 // maxRefRecordSize bounds how much of a stub's body is read: a RefRecord
 // is a key, a version id, a size and a hash, a few hundred bytes.
@@ -213,4 +220,545 @@ func refsFromWire(m map[string]*pb.Ref) map[string]Ref {
 		out[etag] = Ref{Key: r.GetKey(), VersionID: r.GetVersionId(), Size: r.GetSize()}
 	}
 	return out
+}
+
+// Writing a stub (PutRef, CreateWithRef) checks its target, then writes,
+// in this order: the target's .refs gains the stub's entry, pending; the
+// stub is put on its key; the key's .metadata records the target's
+// checksums and the stub's Ref under the stub's ETag; and the .refs entry
+// is finalized with the stub's version id, best effort. The entry comes
+// first on purpose: a crash before the stub leaves an entry naming no
+// stub, which only holds a purge of the target back until fsck drops it,
+// where the other order could leave a stub whose target is purged.
+
+// refsSuffix names a target's .refs object: <id>-<uuid>.refs beside its
+// content key, listing its referrers (pb.Refs).
+const refsSuffix = ".refs"
+
+// refsLayout is the .refs layout this package reads and writes.
+const refsLayout = 1
+
+// refsObjectKey is the key of the .refs object of the item at key.
+func refsObjectKey(key string) string { return key + refsSuffix }
+
+var (
+	// ErrRefTarget is the refusal of a stub's target: it doesn't exist,
+	// is a stub, isn't in this filesystem, is a version not dated in a
+	// filesystem that dates every version (one that may be a write that
+	// never finished, and swept), or is a purged item's (its .refs is
+	// retired). It wraps the reason.
+	ErrRefTarget = errors.New("not a stub's target")
+	// ErrRefChecksum is the refusal of a stub whose caller's SHA-256 isn't
+	// the one recorded for its target.
+	ErrRefChecksum = errors.New("the target's recorded SHA-256 differs")
+
+	errRefElsewhere = errors.New("not an item of this filesystem")
+	errRefUndated   = errors.New("not dated: a write that may not have finished")
+	errRefRetired   = errors.New("its item is purged: what is left of it is only for the stubs that already name it")
+)
+
+// stubTarget is a stub's target as checked before anything is written.
+type stubTarget struct {
+	key, version string
+	obj          *objstore.Object
+	sums         Checksums // the target's, as its .metadata records them
+	recorded     bool      // sums are recorded
+	sha256       []byte    // what the record says: the recorded hash, else the caller's
+}
+
+// ref is the stub's Ref: what its metadata and .metadata's Refs say.
+func (t *stubTarget) ref() Ref {
+	return Ref{Key: t.key, VersionID: t.version, Size: t.obj.Size}
+}
+
+// stub is the stub's body (its RefRecord) and user metadata.
+func (t *stubTarget) stub() ([]byte, map[string]string, error) {
+	body, err := proto.Marshal(&pb.RefRecord{Layout: refLayout, Key: t.key, VersionId: t.version, Size: t.obj.Size, Sha256: t.sha256})
+	if err != nil {
+		return nil, nil, err
+	}
+	return body, map[string]string{
+		MetaRef: "1", MetaRefKey: t.key, MetaRefVersion: t.version, MetaRefSize: strconv.FormatInt(t.obj.Size, 10),
+	}, nil
+}
+
+// record notes, in the .metadata of the stub's file, the stub's Ref and
+// (if recorded) the target's checksums, under the stub's ETag.
+func (t *stubTarget) record(a *Attr, etag string) {
+	if t.recorded {
+		if a.Checksums == nil {
+			a.Checksums = map[string]Checksums{}
+		}
+		a.Checksums[etag] = t.sums
+	}
+	if a.Refs == nil {
+		a.Refs = map[string]Ref{}
+	}
+	a.Refs[etag] = t.ref()
+}
+
+// checkRefTarget checks a stub's target before anything is written: its
+// version exists, isn't a stub, is an item of this filesystem, and is
+// dated if the filesystem dates every version (Filesystem.dated); and the
+// caller's SHA-256, if any, is the one its .metadata records, if any.
+func (f *Filesystem) checkRefTarget(ctx context.Context, targetKey, targetVersion string, sha []byte) (*stubTarget, error) {
+	refuse := func(reason error) error {
+		return fmt.Errorf("%s version %s: %w: %w", targetKey, targetVersion, ErrRefTarget, reason)
+	}
+	if !strings.HasPrefix(targetKey, f.prefix()) || objstore.BaseKey(targetKey) != targetKey || targetVersion == "" {
+		return nil, refuse(errRefElsewhere)
+	}
+	obj, err := f.store.HeadVersion(ctx, targetKey, targetVersion)
+	if objstore.IsNotFound(err) {
+		return nil, refuse(ErrNotFound)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if obj.Deleted {
+		return nil, refuse(ErrNotFound)
+	}
+	if IsRef(obj) {
+		return nil, refuse(ErrRefToRef)
+	}
+	if f.dated(targetKey) {
+		// An item with no table yet has every version at the store's
+		// time: its first record will list them all.
+		dates, err := objstore.ReadDates(undeclared(ctx), f.store, targetKey)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := dates[targetVersion]; len(dates) > 0 && !ok {
+			return nil, refuse(errRefUndated)
+		}
+	}
+	t := &stubTarget{key: targetKey, version: targetVersion, obj: obj, sha256: sha}
+	body, _, err := f.store.Get(objstore.CacheContent(ctx), metadataObjectKey(targetKey))
+	switch {
+	case objstore.IsNotFound(err):
+		// A trashed target: nothing recorded to compare.
+	case err != nil:
+		return nil, err
+	default:
+		data, err := io.ReadAll(body)
+		body.Close()
+		if err != nil {
+			return nil, err
+		}
+		attr, err := decodeFileMetadata(data)
+		if err != nil {
+			return nil, err
+		}
+		t.sums, t.recorded = attr.Checksums[obj.ETag]
+	}
+	if t.recorded && len(t.sums.SHA256) > 0 {
+		if len(sha) > 0 && !bytes.Equal(sha, t.sums.SHA256) {
+			return nil, fmt.Errorf("%s version %s: SHA-256 %x, given %x: %w", targetKey, targetVersion, t.sums.SHA256, sha, ErrRefChecksum)
+		}
+		t.sha256 = t.sums.SHA256
+	}
+	return t, nil
+}
+
+// raiseFormat raises this filesystem to formatVersionRefs, by CAS on the
+// master block, unless it's there already: before its first stub, so a
+// build that can't follow one won't open it. A filesystem at it needs
+// no master write.
+func (f *Filesystem) raiseFormat(ctx context.Context) error {
+	if f.format.Load() >= formatVersionRefs {
+		return nil
+	}
+	err := updateFilesystemEntryIf(undeclared(ctx), f.store, f.fsName, func(e *pb.FilesystemEntry) bool {
+		if e.FormatVersion >= formatVersionRefs {
+			return false
+		}
+		e.FormatVersion = formatVersionRefs
+		return true
+	})
+	if err != nil {
+		return fmt.Errorf("raise filesystem %q to format %d: %w", f.fsName, formatVersionRefs, err)
+	}
+	f.format.Store(formatVersionRefs)
+	return nil
+}
+
+// loadRefs is the item at key's .refs as it is now, and the store's
+// description of it: empty, with a nil object, if it has none.
+func loadRefs(ctx context.Context, store objstore.Store, key string) (*pb.Refs, *objstore.Object, error) {
+	body, obj, err := store.Get(ctx, refsObjectKey(key))
+	if objstore.IsNotFound(err) {
+		return &pb.Refs{}, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	data, err := io.ReadAll(body)
+	body.Close()
+	if err != nil {
+		return nil, nil, err
+	}
+	var refs pb.Refs
+	if err := proto.Unmarshal(data, &refs); err != nil {
+		return nil, nil, fmt.Errorf("decode %s: %w", refsObjectKey(key), err)
+	}
+	if err := block.CheckLayout("referrers", refs.Layout, refsLayout); err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", refsObjectKey(key), err)
+	}
+	return &refs, obj, nil
+}
+
+// updateRefs applies mutate to the .refs of the item at key: a Get, then
+// a Put conditional on it (or on there being none), retried on a lost
+// race. mutate may decline (false: nothing is written) or refuse (its
+// error, returned as is). The writes are bookkeeping, not the item's
+// history: never dated, whatever ctx declares.
+func (f *Filesystem) updateRefs(ctx context.Context, key string, mutate func(*pb.Refs) (bool, error)) error {
+	ctx = undeclared(ctx)
+	rk := refsObjectKey(key)
+	for attempt := 0; attempt < maxTreeRetries; attempt++ {
+		retryPause(ctx, attempt)
+		refs, obj, err := loadRefs(ctx, f.store, key)
+		if err != nil {
+			return err
+		}
+		ok, err := mutate(refs)
+		if err != nil || !ok {
+			return err
+		}
+		refs.Layout = refsLayout
+		data, err := proto.Marshal(refs)
+		if err != nil {
+			return err
+		}
+		if obj == nil {
+			_, err = f.store.PutIfAbsent(ctx, rk, bytes.NewReader(data), nil)
+		} else {
+			_, err = f.store.Put(ctx, rk, bytes.NewReader(data), nil, obj.ETag)
+		}
+		if objstore.IsPreconditionFailed(err) {
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("update %s: exceeded %d retries", rk, maxTreeRetries)
+}
+
+// addReferrer adds key's entry, pending, to t's target's .refs: before
+// the stub on key is written. A retired .refs (a purge of the target has
+// begun) refuses it, ErrRefTarget. A .refs this creates may be one a
+// purge erased just before, with the target's versions (a purge erases
+// the content key before its .refs), so then the target's version is
+// looked for again: gone, the entry is taken back, and that too is
+// ErrRefTarget.
+func (f *Filesystem) addReferrer(ctx context.Context, t *stubTarget, key string) error {
+	fresh := false
+	err := f.updateRefs(ctx, t.key, func(refs *pb.Refs) (bool, error) {
+		if refs.Retired {
+			return false, fmt.Errorf("%s version %s: %w: %w", t.key, t.version, ErrRefTarget, errRefRetired)
+		}
+		fresh = len(refs.Referrers) == 0
+		refs.Referrers = append(refs.Referrers, &pb.Referrer{ReferrerKey: key, Pending: true, TargetVersion: t.version})
+		return true, nil
+	})
+	if err != nil || !fresh {
+		return err
+	}
+	obj, err := f.store.HeadVersion(undeclared(ctx), t.key, t.version)
+	if err == nil && !obj.Deleted {
+		return nil
+	}
+	if err != nil && !objstore.IsNotFound(err) {
+		return err
+	}
+	mine := &pb.Referrer{ReferrerKey: key, Pending: true, TargetVersion: t.version}
+	if derr := f.dropRef(ctx, t.key, func(r *pb.Referrer) bool { return sameReferrer(r, mine) }); derr != nil {
+		return derr
+	}
+	// Nothing can name an item whose version is gone: a .refs left with
+	// no entries is this write's own, and goes.
+	if refs, _, lerr := loadRefs(undeclared(ctx), f.store, t.key); lerr == nil && len(refs.Referrers) == 0 {
+		_ = f.store.EraseAll(undeclared(ctx), refsObjectKey(t.key))
+	}
+	return fmt.Errorf("%s version %s: %w: %w", t.key, t.version, ErrRefTarget, ErrNotFound)
+}
+
+// finalizeReferrer marks key's pending entry in t's target's .refs as
+// the stub version versionID, best effort: a pending entry already holds
+// a purge back, and fsck settles it. An entry gone meanwhile is added
+// back, finalized.
+func (f *Filesystem) finalizeReferrer(ctx context.Context, t *stubTarget, key, versionID string) {
+	_ = f.updateRefs(ctx, t.key, func(refs *pb.Refs) (bool, error) {
+		for _, r := range refs.Referrers {
+			if r.ReferrerKey == key && r.Pending && r.ReferrerVersion == "" && r.TargetVersion == t.version {
+				r.ReferrerVersion, r.Pending = versionID, false
+				return true, nil
+			}
+		}
+		refs.Referrers = append(refs.Referrers, &pb.Referrer{ReferrerKey: key, ReferrerVersion: versionID, TargetVersion: t.version})
+		return true, nil
+	})
+}
+
+// PutRef writes a stub as key's new content version: a version holding
+// no bytes of its own, whose bytes are targetKey's version targetVersion
+// (see FollowRef). sha256, if given, must be the target's SHA-256 as its
+// .metadata records it, if it does (ErrRefChecksum); a target that isn't
+// one is ErrRefTarget. ifMatch makes the write conditional, as
+// WriteFile's does. The filesystem's first stub raises its format (see
+// formatVersionRefs). Under a declared time, the stub and its .metadata
+// write are recorded and dated as any write is (RecordDates). It returns
+// the stub's version.
+func (f *Filesystem) PutRef(ctx context.Context, key, targetKey, targetVersion string, sha256 []byte, ifMatch string) (*objstore.Object, error) {
+	if err := f.checkWritable(); err != nil {
+		return nil, err
+	}
+	t, err := f.checkRefTarget(ctx, targetKey, targetVersion, sha256)
+	if err != nil {
+		return nil, err
+	}
+	if testHookRefChecked != nil {
+		testHookRefChecked()
+	}
+	body, meta, err := t.stub()
+	if err != nil {
+		return nil, err
+	}
+	if err := f.raiseFormat(ctx); err != nil {
+		return nil, err
+	}
+	if err := f.addReferrer(ctx, t, key); err != nil {
+		return nil, err
+	}
+	stub, err := f.store.Put(ctx, key, bytes.NewReader(body), meta, ifMatch)
+	if err != nil {
+		return nil, err // the pending entry stays, for fsck
+	}
+	if _, _, err := f.writeMetadataRead(ctx, key, false, func(a *Attr) bool { t.record(a, stub.ETag); return true }); err != nil {
+		return nil, fmt.Errorf("stub %s version %s written; its .metadata: %w", key, stub.VersionID, err)
+	}
+	f.finalizeReferrer(ctx, t, key, stub.VersionID)
+	return stub, nil
+}
+
+// CreateWithRef is CreateWith whose content is a stub naming targetKey's
+// version targetVersion, as PutRef writes one: the new file's first
+// content version is the stub. The attributes returned are what a Stat
+// would say: the target's size.
+func (f *Filesystem) CreateWithRef(ctx context.Context, dirKey, name string, mode, uid, gid uint32, sddl []byte, info ItemInfo, targetKey, targetVersion string, sha256 []byte) (string, Attr, error) {
+	if err := f.checkWritable(); err != nil {
+		return "", Attr{}, err
+	}
+	if err := f.checkName(name); err != nil {
+		return "", Attr{}, err
+	}
+	t, err := f.checkRefTarget(ctx, targetKey, targetVersion, sha256)
+	if err != nil {
+		return "", Attr{}, err
+	}
+	body, meta, err := t.stub()
+	if err != nil {
+		return "", Attr{}, err
+	}
+	if err := f.raiseFormat(ctx); err != nil {
+		return "", Attr{}, err
+	}
+	key, attr, err := f.createWith(ctx, dirKey, name, mode, uid, gid, sddl, info,
+		func(ctx context.Context, key string) (*objstore.Object, error) {
+			if err := f.addReferrer(ctx, t, key); err != nil {
+				return nil, err
+			}
+			return f.store.Put(ctx, key, bytes.NewReader(body), meta, "")
+		},
+		func(a *Attr, content *objstore.Object) { t.record(a, content.ETag) })
+	if err != nil {
+		return "", Attr{}, err
+	}
+	if cv, ok := attr.ContentVersion(); ok {
+		f.finalizeReferrer(ctx, t, key, cv.VersionID)
+	}
+	return key, attr, nil
+}
+
+// testHookRefChecked, if set, runs in PutRef between the check of the
+// target and its .refs entry: for the tests, to race a purge there.
+var testHookRefChecked func()
+
+// Referrers, live and dead. A purge of a target retires it (see Purge):
+// its .refs is marked retired before anything is erased, and what it
+// keeps, as a retired holder, is only the versions its live referrers
+// name, behind a delete marker on its key, with the .refs beside them.
+// The holder goes with its last referrer (dropRef).
+
+// sameReferrer reports whether a and b are the same .refs entry.
+func sameReferrer(a, b *pb.Referrer) bool {
+	return a.ReferrerKey == b.ReferrerKey && a.ReferrerVersion == b.ReferrerVersion &&
+		a.Pending == b.Pending && a.TargetVersion == b.TargetVersion
+}
+
+// referrerLive reports whether finalized entry e of target's .refs names
+// a live stub: a HeadVersion of its version finds a stub, and it names
+// target's version e.TargetVersion. A pending entry isn't judged here.
+func (f *Filesystem) referrerLive(ctx context.Context, target string, e *pb.Referrer) (bool, error) {
+	if e.ReferrerVersion == "" {
+		return false, nil
+	}
+	obj, err := f.store.HeadVersion(ctx, e.ReferrerKey, e.ReferrerVersion)
+	if objstore.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if obj.Deleted {
+		return false, nil
+	}
+	r, ok, err := RefOf(obj)
+	if !ok || err != nil {
+		return false, nil
+	}
+	return r.Key == target && r.VersionID == e.TargetVersion, nil
+}
+
+// liveReferrers is key's .refs's live entries, dropping (dropRef) the
+// dead ones found on the way. A pending entry is live: it may be a stub
+// being written now, which a purge can't tell from one that never will
+// be (fsck settles those). An entry whose referrer is in gone (a purge's
+// own items) is dead.
+func (f *Filesystem) liveReferrers(ctx context.Context, key string, gone map[string]bool) ([]*pb.Referrer, error) {
+	ctx = undeclared(ctx)
+	refs, _, err := loadRefs(ctx, f.store, key)
+	if err != nil {
+		return nil, err
+	}
+	var live, dead []*pb.Referrer
+	for _, e := range refs.Referrers {
+		ok := false
+		switch {
+		case gone[e.ReferrerKey]:
+		case e.Pending:
+			ok = true
+		default:
+			if ok, err = f.referrerLive(ctx, key, e); err != nil {
+				return nil, err
+			}
+		}
+		if ok {
+			live = append(live, e)
+		} else {
+			dead = append(dead, e)
+		}
+	}
+	if len(dead) > 0 {
+		err := f.dropRef(ctx, key, func(r *pb.Referrer) bool {
+			for _, d := range dead {
+				if sameReferrer(r, d) {
+					return true
+				}
+			}
+			return false
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	return live, nil
+}
+
+// markRetired marks key's .refs retired, creating it if need be: from
+// then on no new stub names key (addReferrer).
+func (f *Filesystem) markRetired(ctx context.Context, key string) error {
+	return f.updateRefs(ctx, key, func(refs *pb.Refs) (bool, error) {
+		if refs.Retired {
+			return false, nil
+		}
+		refs.Retired = true
+		return true, nil
+	})
+}
+
+// dropRef removes from target's .refs every entry drop picks: the one way
+// an entry leaves (a referrer's purge, a history rewrite dropping or
+// replacing a stub, a stub re-pointed, fsck's repair). A target already
+// gone is fine. When target is a retired holder (its .refs retired, no
+// .metadata) and no entry left in it is live, the holder goes: one
+// EraseAll of its prefix, the key's versions and its .refs.
+func (f *Filesystem) dropRef(ctx context.Context, target string, drop func(*pb.Referrer) bool) error {
+	ctx = undeclared(ctx)
+	retired := false
+	err := f.updateRefs(ctx, target, func(refs *pb.Refs) (bool, error) {
+		retired = refs.Retired
+		kept := refs.Referrers[:0:0]
+		for _, r := range refs.Referrers {
+			if !drop(r) {
+				kept = append(kept, r)
+			}
+		}
+		if len(kept) == len(refs.Referrers) {
+			return false, nil
+		}
+		refs.Referrers = kept
+		return true, nil
+	})
+	if err != nil || !retired {
+		return err
+	}
+	return f.settleHolder(ctx, target)
+}
+
+// settleHolder erases target if it is a retired holder none of whose
+// entries is live (a pending one counts as live: it may be a copy of a
+// stub being written). Dead entries go with it.
+func (f *Filesystem) settleHolder(ctx context.Context, target string) error {
+	ctx = undeclared(ctx)
+	refs, _, err := loadRefs(ctx, f.store, target)
+	if err != nil || !refs.Retired {
+		return err
+	}
+	if _, err := f.store.Head(ctx, metadataObjectKey(target)); err == nil {
+		return nil // not a holder yet: a purge of it is under way, and decides
+	} else if !objstore.IsNotFound(err) {
+		return err
+	}
+	for _, e := range refs.Referrers {
+		if e.Pending {
+			return nil
+		}
+		live, err := f.referrerLive(ctx, target, e)
+		if err != nil || live {
+			return err
+		}
+	}
+	// A retired .refs takes no new entry, so none can come between the
+	// look above and the erase. The prefix's listing puts the key's own
+	// versions before its .refs.
+	return f.store.EraseAll(ctx, target)
+}
+
+// copyReferrer prepares a copy of stub version oldVersion of key, naming
+// r, as key's new version: r's .refs gains a pending entry for it. A
+// retired holder takes one only from a referrer that already holds it
+// (an entry for oldVersion).
+func (f *Filesystem) copyReferrer(ctx context.Context, r Ref, key, oldVersion string) error {
+	return f.updateRefs(ctx, r.Key, func(refs *pb.Refs) (bool, error) {
+		if refs.Retired {
+			held := false
+			for _, e := range refs.Referrers {
+				held = held || e.ReferrerKey == key && e.ReferrerVersion == oldVersion && e.TargetVersion == r.VersionID
+			}
+			if !held {
+				return false, fmt.Errorf("%s version %s: %w: %w", r.Key, r.VersionID, ErrRefTarget, errRefRetired)
+			}
+		}
+		refs.Referrers = append(refs.Referrers, &pb.Referrer{ReferrerKey: key, Pending: true, TargetVersion: r.VersionID})
+		return true, nil
+	})
+}
+
+// copiedReferrer, once the copy is written as newVersion, finalizes its
+// entry and drops the one for oldVersion (dropRef).
+func (f *Filesystem) copiedReferrer(ctx context.Context, r Ref, key, oldVersion, newVersion string) error {
+	f.finalizeReferrer(ctx, &stubTarget{key: r.Key, version: r.VersionID}, key, newVersion)
+	return f.dropRef(ctx, r.Key, func(e *pb.Referrer) bool {
+		return e.ReferrerKey == key && e.ReferrerVersion == oldVersion && !e.Pending
+	})
 }

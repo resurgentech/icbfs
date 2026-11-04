@@ -41,9 +41,9 @@ const versionDatesLayout = 1
 type Dates map[string]time.Time
 
 // BaseKey is the item key a key belongs to: the key itself, or the one
-// before a companion suffix (.metadata, .ads.N, .lock, .version).
+// before a companion suffix (.metadata, .ads.N, .lock, .refs, .version).
 func BaseKey(key string) string {
-	for _, suffix := range []string{".metadata", ".lock", VersionSuffix} {
+	for _, suffix := range []string{".metadata", ".lock", ".refs", VersionSuffix} {
 		if base, ok := strings.CutSuffix(key, suffix); ok {
 			return base
 		}

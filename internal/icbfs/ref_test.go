@@ -63,7 +63,7 @@ func newStubFixture(t *testing.T) *stubFixture {
 // TestStubReadsThrough: a file whose content is a stub opens, reads and
 // stats as its target: the target's bytes and size, with the stub's ETag
 // for conditional writes, and a write through it lands as real bytes. A
-// part is never copied from the stub's own bytes, and a trash entry has
+// part is copied from the target, never from the stub's own bytes, and a trash entry has
 // the real size.
 func TestStubReadsThrough(t *testing.T) {
 	x := newStubFixture(t)
@@ -100,12 +100,12 @@ func TestStubReadsThrough(t *testing.T) {
 	cEtag, cBaseVer, cBaseKey := o.c.etag, o.c.baseVersion, o.c.baseKey
 	parts := o.c.partsLocked(64)
 	o.c.mu.Unlock()
-	if cEtag != x.stub.ETag || cBaseVer != "" || cBaseKey != x.target {
-		t.Fatalf("content etag %s base %q key %s; want the stub's etag, no base version, the target's key %s", cEtag, cBaseVer, cBaseKey, x.target)
+	if cEtag != x.stub.ETag || cBaseVer != x.targetVer.VersionID || cBaseKey != x.target {
+		t.Fatalf("content etag %s base %q key %s; want the stub's etag, the target's version %s and key %s", cEtag, cBaseVer, cBaseKey, x.targetVer.VersionID, x.target)
 	}
 	for i, p := range parts {
-		if p.CopyVersion != "" {
-			t.Fatalf("part %d copies version %s from a stub base", i, p.CopyVersion)
+		if p.Body == nil && (p.CopyKey != x.target || p.CopyVersion != x.targetVer.VersionID) {
+			t.Fatalf("part %d copies %q version %s from a stub base; want the target's", i, p.CopyKey, p.CopyVersion)
 		}
 	}
 	if err := o.WriteAt([]byte("EDIT"), 3); err != nil {
@@ -171,7 +171,7 @@ func TestStubRebase(t *testing.T) {
 		t.Fatalf("rebased onto a stub: %q...", got[:min(len(got), 20)])
 	}
 	o.c.mu.Lock()
-	if o.c.etag != stub.ETag || o.c.baseVersion != "" || o.c.baseKey != x.target || o.c.size != n {
+	if o.c.etag != stub.ETag || o.c.baseVersion != x.targetVer.VersionID || o.c.baseKey != x.target || o.c.size != n {
 		t.Errorf("rebased content etag %s base %q key %s size %d", o.c.etag, o.c.baseVersion, o.c.baseKey, o.c.size)
 	}
 	o.c.mu.Unlock()

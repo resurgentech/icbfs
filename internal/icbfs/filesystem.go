@@ -86,6 +86,7 @@ type Filesystem struct {
 	archived           atomic.Bool           // set by Bootstrap; see ErrArchived
 	pastChanged        func(context.Context) // SetPastChanged's, if set
 	sourceTime         atomic.Bool           // the master entry's source_time; see dated
+	format             atomic.Uint32         // the master entry's format_version; see raiseFormat
 	readOnly           bool                  // set by BootstrapReadOnly; see ErrReadOnly
 	primaryWindows     bool                  // set by Bootstrap from the stored master-block value; see PrimaryWindows
 	maxFileSize        int64                 // set by Bootstrap from the stored master-block value; see MaxFileSize
@@ -297,14 +298,15 @@ func (f *Filesystem) Bootstrap(ctx context.Context, size uint64, mode, uid, gid 
 func (f *Filesystem) applyEntry(id string, entry *pb.FilesystemEntry) error {
 	// FormatVersion (1) and formatVersionRefs (2: it may hold stubs) are
 	// both read; new filesystems are created at FormatVersion.
-	if entry.FormatVersion < FormatVersion || entry.FormatVersion > maxFormatVersion {
+	if entry.FormatVersion < FormatVersion || entry.FormatVersion > openFormatVersion {
 		err := ErrUnknownFormat
-		if entry.FormatVersion > maxFormatVersion {
+		if entry.FormatVersion > openFormatVersion {
 			err = ErrNewerFormat
 		}
-		return fmt.Errorf("filesystem %q is format %d, this build reads %d to %d: %w", entry.Name, entry.FormatVersion, FormatVersion, maxFormatVersion, err)
+		return fmt.Errorf("filesystem %q is format %d, this build reads %d to %d: %w", entry.Name, entry.FormatVersion, FormatVersion, openFormatVersion, err)
 	}
 	f.id = id
+	f.format.Store(entry.FormatVersion)
 	f.archived.Store(entry.Archived)
 	f.sourceTime.Store(entry.SourceTime)
 	f.primaryWindows = entry.PrimaryWindows
@@ -1410,6 +1412,16 @@ func (f *Filesystem) Create(ctx context.Context, dirKey, name string, mode, uid,
 // empty version left behind; this costs two. The attributes returned are
 // what a Stat would say.
 func (f *Filesystem) CreateWith(ctx context.Context, dirKey, name string, mode, uid, gid uint32, data []byte, sddl []byte, info ItemInfo) (string, Attr, error) {
+	return f.createWith(ctx, dirKey, name, mode, uid, gid, sddl, info, func(ctx context.Context, key string) (*objstore.Object, error) {
+		return f.store.Put(ctx, key, bytes.NewReader(data), nil, "")
+	}, nil)
+}
+
+// createWith is CreateWith with the content's write, put, given the new
+// key (CreateWithRef's writes a stub), and edit, if not nil, recording
+// more in .metadata about the content version put wrote.
+func (f *Filesystem) createWith(ctx context.Context, dirKey, name string, mode, uid, gid uint32, sddl []byte, info ItemInfo,
+	put func(ctx context.Context, key string) (*objstore.Object, error), edit func(a *Attr, content *objstore.Object)) (string, Attr, error) {
 	if err := f.checkWritable(); err != nil {
 		return "", Attr{}, err
 	}
@@ -1427,12 +1439,15 @@ func (f *Filesystem) CreateWith(ctx context.Context, dirKey, name string, mode, 
 	if sddl != nil {
 		attr.WindowsSDDL = sddl
 	}
-	contentObj, err := f.store.Put(ctx, newUUID, bytes.NewReader(data), nil, "")
+	contentObj, err := put(ctx, newUUID)
 	if err != nil {
 		return "", Attr{}, err
 	}
 	info.ContentETag = contentObj.ETag
 	info.apply(&attr, TypeFile)
+	if edit != nil {
+		edit(&attr, contentObj)
+	}
 	metaData, err := f.encodeMetadata(ctx, attr)
 	if err != nil {
 		_ = f.store.Delete(ctx, newUUID)

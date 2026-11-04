@@ -173,6 +173,153 @@ func (x *Ref) GetSize() int64 {
 	return 0
 }
 
+// Refs is a target's referrers: the object <id>-<uuid>.refs beside the
+// target's content key, listing every stub that names one of its
+// versions, so a purge of the target knows what still reads it. A writer
+// adds its entry, pending, before it writes the stub, and finalizes it
+// with the stub's version id after (internal/icbfs's PutRef): an entry
+// left pending names no stub yet, or one never written, and only holds a
+// purge back until fsck drops it. Every change is a read and a
+// conditional write of the whole object.
+type Refs struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// layout is this format: 1. A reader refuses any other.
+	Layout    uint32      `protobuf:"varint,1,opt,name=layout,proto3" json:"layout,omitempty"`
+	Referrers []*Referrer `protobuf:"bytes,2,rep,name=referrers,proto3" json:"referrers,omitempty"`
+	// retired: the target is being purged, or has been, and what is left
+	// of it is only the versions its referrers name (a retired holder: no
+	// name, no .metadata). A purge sets it, creating the object if need
+	// be, before it erases anything; a new stub naming the target is then
+	// refused. The holder is erased with its last referrer.
+	Retired       bool `protobuf:"varint,3,opt,name=retired,proto3" json:"retired,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Refs) Reset() {
+	*x = Refs{}
+	mi := &file_spec_proto_icbfs_v1_ref_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Refs) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Refs) ProtoMessage() {}
+
+func (x *Refs) ProtoReflect() protoreflect.Message {
+	mi := &file_spec_proto_icbfs_v1_ref_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Refs.ProtoReflect.Descriptor instead.
+func (*Refs) Descriptor() ([]byte, []int) {
+	return file_spec_proto_icbfs_v1_ref_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *Refs) GetLayout() uint32 {
+	if x != nil {
+		return x.Layout
+	}
+	return 0
+}
+
+func (x *Refs) GetReferrers() []*Referrer {
+	if x != nil {
+		return x.Referrers
+	}
+	return nil
+}
+
+func (x *Refs) GetRetired() bool {
+	if x != nil {
+		return x.Retired
+	}
+	return false
+}
+
+// Referrer is one stub, as its target's .refs lists it.
+type Referrer struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The stub's key, and its version id once written (empty while
+	// pending).
+	ReferrerKey     string `protobuf:"bytes,1,opt,name=referrer_key,json=referrerKey,proto3" json:"referrer_key,omitempty"`
+	ReferrerVersion string `protobuf:"bytes,2,opt,name=referrer_version,json=referrerVersion,proto3" json:"referrer_version,omitempty"`
+	// pending: the stub's write began and hasn't been confirmed.
+	Pending bool `protobuf:"varint,3,opt,name=pending,proto3" json:"pending,omitempty"`
+	// The target's version the stub names.
+	TargetVersion string `protobuf:"bytes,4,opt,name=target_version,json=targetVersion,proto3" json:"target_version,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Referrer) Reset() {
+	*x = Referrer{}
+	mi := &file_spec_proto_icbfs_v1_ref_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Referrer) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Referrer) ProtoMessage() {}
+
+func (x *Referrer) ProtoReflect() protoreflect.Message {
+	mi := &file_spec_proto_icbfs_v1_ref_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Referrer.ProtoReflect.Descriptor instead.
+func (*Referrer) Descriptor() ([]byte, []int) {
+	return file_spec_proto_icbfs_v1_ref_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *Referrer) GetReferrerKey() string {
+	if x != nil {
+		return x.ReferrerKey
+	}
+	return ""
+}
+
+func (x *Referrer) GetReferrerVersion() string {
+	if x != nil {
+		return x.ReferrerVersion
+	}
+	return ""
+}
+
+func (x *Referrer) GetPending() bool {
+	if x != nil {
+		return x.Pending
+	}
+	return false
+}
+
+func (x *Referrer) GetTargetVersion() string {
+	if x != nil {
+		return x.TargetVersion
+	}
+	return ""
+}
+
 var File_spec_proto_icbfs_v1_ref_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_ref_proto_rawDesc = "" +
@@ -189,7 +336,16 @@ const file_spec_proto_icbfs_v1_ref_proto_rawDesc = "" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x1d\n" +
 	"\n" +
 	"version_id\x18\x02 \x01(\tR\tversionId\x12\x12\n" +
-	"\x04size\x18\x03 \x01(\x03R\x04sizeB+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
+	"\x04size\x18\x03 \x01(\x03R\x04size\"j\n" +
+	"\x04Refs\x12\x16\n" +
+	"\x06layout\x18\x01 \x01(\rR\x06layout\x120\n" +
+	"\treferrers\x18\x02 \x03(\v2\x12.icbfs.v1.ReferrerR\treferrers\x12\x18\n" +
+	"\aretired\x18\x03 \x01(\bR\aretired\"\x99\x01\n" +
+	"\bReferrer\x12!\n" +
+	"\freferrer_key\x18\x01 \x01(\tR\vreferrerKey\x12)\n" +
+	"\x10referrer_version\x18\x02 \x01(\tR\x0freferrerVersion\x12\x18\n" +
+	"\apending\x18\x03 \x01(\bR\apending\x12%\n" +
+	"\x0etarget_version\x18\x04 \x01(\tR\rtargetVersionB+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
 
 var (
 	file_spec_proto_icbfs_v1_ref_proto_rawDescOnce sync.Once
@@ -203,17 +359,20 @@ func file_spec_proto_icbfs_v1_ref_proto_rawDescGZIP() []byte {
 	return file_spec_proto_icbfs_v1_ref_proto_rawDescData
 }
 
-var file_spec_proto_icbfs_v1_ref_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_spec_proto_icbfs_v1_ref_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_spec_proto_icbfs_v1_ref_proto_goTypes = []any{
 	(*RefRecord)(nil), // 0: icbfs.v1.RefRecord
 	(*Ref)(nil),       // 1: icbfs.v1.Ref
+	(*Refs)(nil),      // 2: icbfs.v1.Refs
+	(*Referrer)(nil),  // 3: icbfs.v1.Referrer
 }
 var file_spec_proto_icbfs_v1_ref_proto_depIdxs = []int32{
-	0, // [0:0] is the sub-list for method output_type
-	0, // [0:0] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	3, // 0: icbfs.v1.Refs.referrers:type_name -> icbfs.v1.Referrer
+	1, // [1:1] is the sub-list for method output_type
+	1, // [1:1] is the sub-list for method input_type
+	1, // [1:1] is the sub-list for extension type_name
+	1, // [1:1] is the sub-list for extension extendee
+	0, // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_spec_proto_icbfs_v1_ref_proto_init() }
@@ -227,7 +386,7 @@ func file_spec_proto_icbfs_v1_ref_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_spec_proto_icbfs_v1_ref_proto_rawDesc), len(file_spec_proto_icbfs_v1_ref_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   2,
+			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -180,8 +180,8 @@ func (f *Filesystem) eraseUnfinished(ctx context.Context, key string, history []
 }
 
 // rekeyETag moves what a references by content ETag old (the mtime
-// override, the checksums) to new: for a content version copied, whose
-// copy has an ETag of its own.
+// override, the checksums, a stub's Ref) to new: for a content version
+// copied, whose copy has an ETag of its own.
 func rekeyETag(a *Attr, old, new string) {
 	if old == "" || new == "" || old == new {
 		return
@@ -191,6 +191,9 @@ func rekeyETag(a *Attr, old, new string) {
 	}
 	if c, ok := a.Checksums[old]; ok {
 		a.Checksums[new] = c
+	}
+	if r, ok := a.Refs[old]; ok {
+		a.Refs[new] = r
 	}
 }
 
@@ -241,7 +244,7 @@ func (f *Filesystem) restoreCurrent(ctx context.Context, w objstore.Written, tab
 		// write added about its own version (its checksums).
 		obj, err = f.mergeMetadataOnTop(cctx, w.Key, want, w.VersionID, rekeys[base])
 	} else {
-		obj, err = f.copyVersionOnTop(cctx, w.Key, want)
+		obj, _, err = f.copyVersionOnTop(cctx, w.Key, want)
 		if err == nil && obj.ETag != want.ETag {
 			rekeys[base] = [2]string{want.ETag, obj.ETag}
 			// Content: its .metadata follows the new ETag, now, unless a
@@ -304,6 +307,14 @@ func (f *Filesystem) mergeMetadataOnTop(ctx context.Context, key string, want ob
 			attr.Checksums[etag] = c
 		}
 	}
+	for etag, r := range late.Refs { // a late stub's, likewise
+		if _, ok := attr.Refs[etag]; !ok {
+			if attr.Refs == nil {
+				attr.Refs = map[string]Ref{}
+			}
+			attr.Refs[etag] = r
+		}
+	}
 	rekeyETag(&attr, rekey[0], rekey[1])
 	attr.dated = attr.dated || late.dated
 	data, err := f.encodeMetadata(ctx, attr)
@@ -317,7 +328,44 @@ func (f *Filesystem) mergeMetadataOnTop(ctx context.Context, key string, want ob
 // server-side copy (one part up to the part size, several past it; a
 // single part may be any size): nothing is downloaded. An empty version
 // is written empty.
-func (f *Filesystem) copyVersionOnTop(ctx context.Context, key string, want objstore.Object) (*objstore.Object, error) {
+//
+// A stub stays a stub: it's copied with its metadata (a history listing,
+// where want usually comes from, has none, so a version small enough to
+// be one is looked at first), and the copy is a referrer of its target
+// as the original was: the target's .refs gains the copy's entry before
+// it is written (pending, then finalized), and the original's entry goes
+// (dropRef). It returns the stub's Ref, for a copy of one.
+func (f *Filesystem) copyVersionOnTop(ctx context.Context, key string, want objstore.Object) (*objstore.Object, *Ref, error) {
+	if want.Metadata == nil && want.Size > 0 && want.Size <= maxRefRecordSize {
+		head, err := f.store.HeadVersion(ctx, key, want.VersionID)
+		if err != nil {
+			return nil, nil, err
+		}
+		want.Metadata = head.Metadata
+	}
+	ref, isRef, err := RefOf(&want)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !isRef {
+		obj, err := f.copyBytesOnTop(ctx, key, want)
+		return obj, nil, err
+	}
+	if err := f.copyReferrer(ctx, ref, key, want.VersionID); err != nil {
+		return nil, nil, err
+	}
+	obj, err := f.copyBytesOnTop(ctx, key, want)
+	if err != nil {
+		return nil, nil, err // the pending entry stays, for fsck
+	}
+	if err := f.copiedReferrer(ctx, ref, key, want.VersionID, obj.VersionID); err != nil {
+		return nil, nil, err
+	}
+	return obj, &ref, nil
+}
+
+// copyBytesOnTop is copyVersionOnTop's copy itself.
+func (f *Filesystem) copyBytesOnTop(ctx context.Context, key string, want objstore.Object) (*objstore.Object, error) {
 	if want.Size == 0 {
 		return f.store.Put(ctx, key, bytes.NewReader(nil), want.Metadata, "")
 	}

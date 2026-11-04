@@ -75,6 +75,7 @@ with its four-hex-digit ID, so one prefix listing finds all of it.
 | `<id>-<uuid>.metadata` | the item's attributes (mode, owner, times, ACLs, Windows state, xattrs, stream table) |
 | `<id>-<uuid>.ads.<n>` | an alternate data stream's bytes |
 | `<id>-<uuid>.lock` | byte-range and whole-file locks, when locking is on |
+| `<id>-<uuid>.refs` | the item's referrers: every stub that names one of its versions, and whether the item is retired (see Stubs) |
 | `<id>-trash-<inverted time>-<entry>` | one trash entry |
 | `<id>-trashby-<uuid>` | the key of the item's newest trash entry, so a trashed item's entry is one read |
 | `<id>-name-<name>` | a named version |
@@ -103,11 +104,63 @@ served as bytes. Until range copies follow a stub, a write over one
 uploads every part: none is copied from the stub's own bytes. A target
 whose item was deleted still reads by version.
 
+A stub is written by `PutRef` (over an existing file, with `If-Match`
+like any write) or `CreateWithRef` (a new file whose first content is
+one). Before anything is written, the target version must exist, not be
+a stub, be an item of the same filesystem, and, in a filesystem written
+in a source's time, be dated (an undated version may be a write that
+never finished, which the sweep erases); otherwise `ErrRefTarget`. A
+caller's SHA-256 must be the one the target's `.metadata` records, when
+both are there (`ErrRefChecksum`). Then, in this order: the target's
+`.refs` (`ref.proto`'s `Refs`) gains the stub's entry, pending, by a
+read and a conditional write retried on a lost race; the stub is put;
+the file's `.metadata` records the target's checksums and the stub's
+`refs` entry under the stub's ETag; and the `.refs` entry is finalized
+with the stub's version id, best effort. The entry comes first so that
+a crash in between leaves an entry naming no stub, which only holds a
+purge of the target back until fsck drops it; the other order could
+leave a stub whose target is purged. `.refs` is bookkeeping, not the
+item's history: never dated, and never counted unreachable by fsck.
+Under a declared time the stub and its `.metadata` write are recorded
+and dated like any write.
+
+**Retired holders.** A purge of an item that stubs still name retires it
+rather than refusing (see Trash and permanent delete). A referrer is
+live when a `HeadVersion` of its stub finds a stub that names the item;
+a pending entry counts as live, since it may be a stub being written. A
+purge first marks the item's `.refs` retired (`Refs.retired`, by
+compare-and-swap, creating the object if there is none), before it
+erases anything; a `.refs` that is retired refuses a new entry, so a
+stub written meanwhile is refused with `ErrRefTarget` rather than left
+naming nothing. (A stub whose `.refs` entry creates the object looks for
+its target version again: an item erased whole loses its `.refs` after
+its versions, so a fresh `.refs` with no version beside it is refused
+too.) What a retired item leaves, the *retired holder*, is the content
+versions its live referrers name, under its key behind a delete marker
+(so a plain Get finds nothing), and its `.refs`: no name, `.metadata`,
+streams, lock, `.version` or trash entry. Stubs read on by version id,
+unchanged. A holder is never a new target (no `.metadata`, and its
+`.refs` is retired). Every removal of a `.refs` entry goes through one
+path (`dropRef`): a referrer's purge, which drops the entry of each stub
+its `.metadata`'s `refs` lists; a history rewrite dropping or replacing
+a stub; fsck's repair. When the entry leaves a retired holder with no
+live entry, the holder goes, one erase of its prefix.
+
+**Stubs in a history.** A copy of a stub version on top of its key (the
+put-back after a late write, `restoreCurrent`, and a history rewrite's
+kept version) is copied with its metadata, so it stays a stub; the copy
+gets the target's `.refs` entry first, pending, then finalized, and the
+original's entry is dropped. A history rewrite (`ReplaceFileHistory`)
+takes a stub as a state, checked and registered as `PutRef` does, and
+refuses an item with live referrers (`ErrReferenced`): it would erase
+the versions they name, and can't retire them.
+
 Item keys are **UUIDv7**. Their embedded millisecond timestamp gives each
 item a creation time for free and keeps keys roughly time-ordered.
 
 The objects icbfs encodes itself (directory blocks, `.metadata`, locks,
-the master block, trash entries, named versions and origin records) are
+the master block, trash entries, named versions, origin records, stubs
+and `.refs`) are
 Protobuf; the schemas are in [`spec/proto`](../spec/proto). A file's
 content and its streams are its bytes; `-trashby-` holds a key as text,
 and `-past` is empty.
@@ -117,8 +170,9 @@ format, a `layout` field, and the master block gives each filesystem a
 `format_version`, the format of its objects as a whole. All are 1,
 except that a filesystem's `format_version` 2 says it may hold stubs:
 this build opens 1 and 2 and still creates filesystems at 1, and a
-filesystem is raised to 2 at its first stub, so a binary that can't
-follow one won't open it. Every binary is upgraded before any filesystem
+filesystem is raised to 2 at its first stub (by compare-and-swap on the
+master block, before the stub's first write; one already at 2 needs no
+master write), so a binary that can't follow one won't open it. Every binary is upgraded before any filesystem
 gets a stub: a mount already open on an older one isn't stopped, since
 the format is read only when a filesystem is opened. A
 reader refuses any number it doesn't know (a newer one with
@@ -624,6 +678,10 @@ it was written under a source time (see below).
   `GetVersion` names one version, so it passes through the view
   unchanged, and the bytes are the target's whatever its key has done
   since.
+- A retired item (a purged one stubs still name) looks in a view as a
+  purged one does: its name is in its directory's history, and opening
+  it finds no `.metadata`, so nothing, though the versions its referrers
+  name are still under its key.
 - `df` and `du` are computed as of T, from every version under the prefix.
   That is slow for a long history, so a mount computes them once.
 
@@ -764,6 +822,27 @@ has had and everything under it.
 - Purging from the trash (`PurgeTrash`) erases only what is still deleted.
   An entry whose item is live again (a restore that couldn't remove the
   entry) is stale: it goes, and the item is left alone.
+- An item with live referrers (stubs elsewhere that name its versions,
+  counted after the purge's own items have dropped theirs) is retired,
+  by either purge: its name, `.metadata`, streams, lock, `.version`,
+  trash entries and every content version no live stub names go; the
+  named versions stay as a retired holder (Object layout), erased when
+  its last referrer goes. The purge reports each item it retired, with
+  its referrers by path where one resolves (`PurgeWithReport`). With no
+  live referrer, never any or all in the same purge, the item is erased
+  whole, `.refs` included.
+
+**fsck** (`icbfs-cli fs check`) walks the tree and reports what doesn't
+add up; it counts retired holders, which are neither unreachable nor
+missing. For stubs it reports `ref-target-missing` (a stub's target
+version is gone), `ref-to-ref` (a stub names a stub), `ref-entry-dead`
+(a `.refs` entry names no live stub), `ref-entry-pending` (an entry
+never finalized) and `ref-holder-dead` (a retired holder with no live
+entry). The stubs it looks at are those the named files' `.metadata`
+`refs` list and those `.refs` entries name. With `-repair` it drops dead
+entries, finalizes a pending entry whose stub is there and drops one
+whose stub isn't, and erases dead holders; the two stub faults are
+reported, not repaired.
 
 ## Windows compatibility: primary mode
 

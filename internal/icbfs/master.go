@@ -49,8 +49,10 @@ func bootstrapMaster(ctx context.Context, store objstore.Store) error {
 
 // Layouts this package reads and writes; see the fields in
 // spec/proto/icbfs/v1/master.proto. FormatVersion is the format of a
-// filesystem's objects as a whole, recorded in its master-block entry at
-// creation: a filesystem with any other isn't opened at all.
+// filesystem's objects as a whole, recorded in its master-block entry: a
+// filesystem is created at it, and raised to formatVersionRefs at its
+// first stub (raiseFormat). One in a format this build doesn't read
+// (newer than maxFormatVersion) isn't opened at all.
 const (
 	masterLayout  = 1
 	FormatVersion = 1
@@ -163,22 +165,31 @@ func Archive(ctx context.Context, store objstore.Store, fsName string) error {
 }
 
 func updateFilesystemEntry(ctx context.Context, store objstore.Store, fsName string, mutate func(*pb.FilesystemEntry)) error {
+	return updateFilesystemEntryIf(ctx, store, fsName, func(e *pb.FilesystemEntry) bool { mutate(e); return true })
+}
+
+// updateFilesystemEntryIf is updateFilesystemEntry whose mutate can
+// decline (false), and then the master block isn't written.
+func updateFilesystemEntryIf(ctx context.Context, store objstore.Store, fsName string, mutate func(*pb.FilesystemEntry) bool) error {
 	for attempt := 0; attempt < maxTreeRetries; attempt++ {
 		retryPause(ctx, attempt)
 		mb, obj, err := readMaster(ctx, store)
 		if err != nil {
 			return mapNotFound(err)
 		}
-		found := false
+		found, changed := false, false
 		for _, e := range mb.Filesystems {
 			if e.Name == fsName {
-				mutate(e)
+				changed = mutate(e)
 				found = true
 				break
 			}
 		}
 		if !found {
 			return ErrNotFound
+		}
+		if !changed {
+			return nil
 		}
 		data, err := encodeMaster(mb)
 		if err != nil {

@@ -211,3 +211,138 @@ func TestMultipartFlush(t *testing.T) {
 		t.Fatal("a one-part file was written with PutParts")
 	}
 }
+
+// newPartsFilesystem is a filesystem with an 8 GiB limit (8 MiB parts) on
+// a store that records each multipart write's copied and uploaded parts.
+func newPartsFilesystem(t *testing.T) (*Filesystem, *partsStore) {
+	t.Helper()
+	store := &partsStore{Store: newTestStore(t)}
+	fsys := New(store, "mp")
+	fsys.SetCreationMaxFileSize(8 << 30)
+	if err := fsys.Bootstrap(context.Background(), 1<<40, 0755, 0, 0, false); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if part := fsys.partSize(); part != 8<<20 {
+		t.Fatalf("part size %d, want 8 MiB", part)
+	}
+	return fsys, store
+}
+
+// writeBig creates name in the root with data as its content, and
+// returns its key and the version written.
+func writeBig(t *testing.T, ctx context.Context, fsys *Filesystem, name string, data []byte) (string, *objstore.Object) {
+	t.Helper()
+	key, _, etag, err := fsys.Create(ctx, fsys.RootKey(), name, 0644, 0, 0)
+	if err != nil {
+		t.Fatalf("create %s: %v", name, err)
+	}
+	o := fsys.NewOpenFile(key, etag, nil)
+	defer o.Close()
+	if err := o.WriteAt(data, 0); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	if _, err := o.Flush(ctx); err != nil {
+		t.Fatalf("flush %s: %v", name, err)
+	}
+	head, err := fsys.store.Head(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key, head
+}
+
+// TestMultipartStubBase: one byte edited in a three-part file whose
+// content is a stub uploads exactly one part; the other two are copied
+// from the stub's target at its version. The result is a full version
+// under the file's own key, with the right bytes, and the target is
+// untouched.
+func TestMultipartStubBase(t *testing.T) {
+	fsys, store := newPartsFilesystem(t)
+	ctx := context.Background()
+	const mib = 1 << 20
+	data := bytes.Repeat([]byte("0123456789abcdef"), 20*mib/16) // parts of 8, 8 and 4 MiB
+	target, tv := writeBig(t, ctx, fsys, "target", data)
+
+	key, _, etag, err := fsys.Create(ctx, fsys.RootKey(), "a", 0644, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fsys.PutRef(ctx, key, target, tv.VersionID, nil, etag); err != nil {
+		t.Fatalf("put ref: %v", err)
+	}
+
+	o, err := fsys.Open(ctx, key)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := o.WriteAt([]byte("X"), 9*mib); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := o.Flush(ctx); err != nil {
+		t.Fatalf("flush over a stub: %v", err)
+	}
+	o.Close()
+	if c, u := store.last(t); c != 2 || u != 1 {
+		t.Fatalf("one-byte edit over a stub: %d copied, %d uploaded; want 2, 1", c, u)
+	}
+	want := append([]byte(nil), data...)
+	want[9*mib] = 'X'
+	got, _, _, err := fsys.ReadFile(ctx, key)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("content after the edit differs (%d bytes, %v)", len(got), err)
+	}
+	head, err := fsys.store.Head(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if IsRef(head) || head.Size != int64(len(want)) {
+		t.Fatalf("the edit is a stub (%v) of %d bytes; want a full version of %d", IsRef(head), head.Size, len(want))
+	}
+	if got, _, _, err := fsys.ReadFile(ctx, target); err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("the target changed (%d bytes, %v)", len(got), err)
+	}
+}
+
+// TestMultipartFlushBaseErased: the version an open, dirty file is based
+// on is erased under it, after another client replaced it (here by a stub,
+// as dedupe does). The flush's part copies from it fail not-found; the
+// flush rebases onto the current content and lands, with the edit on it.
+func TestMultipartFlushBaseErased(t *testing.T) {
+	fsys, store := newPartsFilesystem(t)
+	ctx := context.Background()
+	const mib = 1 << 20
+	old := bytes.Repeat([]byte("old content, 16."), 20*mib/16)
+	data := bytes.Repeat([]byte("0123456789abcdef"), 20*mib/16)
+	key, v1 := writeBig(t, ctx, fsys, "a", old)
+	target, tv := writeBig(t, ctx, fsys, "target", data)
+
+	o, err := fsys.Open(ctx, key)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer o.Close()
+	if err := o.WriteAt([]byte("X"), 9*mib); err != nil {
+		t.Fatal(err)
+	}
+
+	other := otherClient(t, fsys)
+	if _, err := other.PutRef(ctx, key, target, tv.VersionID, nil, v1.ETag); err != nil {
+		t.Fatalf("put ref elsewhere: %v", err)
+	}
+	if err := fsys.store.Erase(ctx, key, v1.VersionID); err != nil {
+		t.Fatalf("erase the base version: %v", err)
+	}
+
+	if _, err := o.Flush(ctx); err != nil {
+		t.Fatalf("flush with its base erased: %v", err)
+	}
+	want := append([]byte(nil), data...)
+	want[9*mib] = 'X'
+	got, _, _, err := fsys.ReadFile(ctx, key)
+	if err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("content after the flush differs (%d bytes, %v)", len(got), err)
+	}
+	if c, u := store.last(t); c != 2 || u != 1 {
+		t.Fatalf("rebased flush: %d copied, %d uploaded; want 2, 1", c, u)
+	}
+}

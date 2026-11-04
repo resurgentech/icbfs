@@ -7,7 +7,7 @@ filesystems, naming versions, and the trash.
 icbfs-cli fs create   -fs NAME [-primary-windows] [-size N] [-max-file-size N] [-dir-block-entries N] [root options]
 icbfs-cli fs list     [-json]
 icbfs-cli fs describe -fs NAME [-json]
-icbfs-cli fs check    -fs NAME [-json]
+icbfs-cli fs check    -fs NAME [-repair] [-json]
 icbfs-cli fs resize   -fs NAME -size N
 icbfs-cli fs archive  -fs NAME
 icbfs-cli fs prune    -fs NAME -yes
@@ -85,9 +85,14 @@ The other `fs` commands:
   nothing, and exits non-zero if it found any: directory blocks that don't
   decode or are out of order, names leading to missing objects, link
   counts that don't match the names, directories with two names. It also
-  counts objects nothing reaches, which some operations leave legitimately.
-  Run it on a quiet filesystem: one changing while it's walked can show
-  problems that aren't.
+  counts objects nothing reaches, which some operations leave legitimately,
+  and the retired holders purges left (an item stubs still name). For
+  stubs it reports `ref-target-missing`, `ref-to-ref`, `ref-entry-dead`,
+  `ref-entry-pending` and `ref-holder-dead`. `-repair` drops dead `.refs`
+  entries, finalizes or drops pending ones, and erases dead holders; it
+  then exits non-zero only for what it couldn't repair. Run it on a quiet
+  filesystem: one changing while it's walked can show problems that
+  aren't.
 - `fs archive` makes a filesystem read-only. It takes effect at the next
   mount.
 - `fs prune -yes` erases every version of everything in an **archived**

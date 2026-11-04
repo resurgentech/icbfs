@@ -1,8 +1,8 @@
 // Package sidecmd runs icbfs-cli's side commands, what isn't a filesystem
 // operation. Two kinds:
 //
-//   - storage administration (fs create, list, describe, resize, archive,
-//     prune), on the filesystems of a bucket;
+//   - storage administration (fs create, list, describe, check, resize,
+//     archive, prune), on the filesystems of a bucket;
 //   - commands on a drive (names create, list, delete; trash list,
 //     restore), through the drive library, so a drive on a directory sees
 //     only its own names and trash.
@@ -135,6 +135,9 @@ func runStorage(ctx context.Context, store objstore.Store, r Request) (any, erro
 		f := icbfs.New(store, a.str("fs"))
 		if err := f.Attach(ctx); err != nil {
 			return nil, err
+		}
+		if a.bool("repair") {
+			return f.CheckRepair(ctx)
 		}
 		return f.Check(ctx)
 	case "fs resize":

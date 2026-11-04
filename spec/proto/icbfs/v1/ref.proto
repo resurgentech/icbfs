@@ -33,3 +33,35 @@ message Ref {
   string version_id = 2;
   int64 size = 3;
 }
+
+// Refs is a target's referrers: the object <id>-<uuid>.refs beside the
+// target's content key, listing every stub that names one of its
+// versions, so a purge of the target knows what still reads it. A writer
+// adds its entry, pending, before it writes the stub, and finalizes it
+// with the stub's version id after (internal/icbfs's PutRef): an entry
+// left pending names no stub yet, or one never written, and only holds a
+// purge back until fsck drops it. Every change is a read and a
+// conditional write of the whole object.
+message Refs {
+  // layout is this format: 1. A reader refuses any other.
+  uint32 layout = 1;
+  repeated Referrer referrers = 2;
+  // retired: the target is being purged, or has been, and what is left
+  // of it is only the versions its referrers name (a retired holder: no
+  // name, no .metadata). A purge sets it, creating the object if need
+  // be, before it erases anything; a new stub naming the target is then
+  // refused. The holder is erased with its last referrer.
+  bool retired = 3;
+}
+
+// Referrer is one stub, as its target's .refs lists it.
+message Referrer {
+  // The stub's key, and its version id once written (empty while
+  // pending).
+  string referrer_key = 1;
+  string referrer_version = 2;
+  // pending: the stub's write began and hasn't been confirmed.
+  bool pending = 3;
+  // The target's version the stub names.
+  string target_version = 4;
+}

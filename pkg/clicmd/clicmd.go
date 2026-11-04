@@ -8,7 +8,7 @@
 //	icbfs-cli fs create   -fs NAME [-primary-windows] [-size N] [-max-file-size N] [-dir-block-entries N] [root options]
 //	icbfs-cli fs list
 //	icbfs-cli fs describe -fs NAME
-//	icbfs-cli fs check    -fs NAME [-json]
+//	icbfs-cli fs check    -fs NAME [-repair] [-json]
 //	icbfs-cli fs resize   -fs NAME -size N
 //	icbfs-cli fs archive  -fs NAME
 //	icbfs-cli fs prune    -fs NAME -yes
@@ -265,13 +265,17 @@ func fsDescribe(args []string) error {
 }
 
 // fsCheck walks a filesystem and reports inconsistencies, changing
-// nothing; it exits non-zero if it found any. Run it on a quiet
-// filesystem: one changing while it's walked can show problems that
-// aren't.
+// nothing unless -repair; it exits non-zero if it found any (with
+// -repair, any it couldn't repair). Run it on a quiet filesystem: one
+// changing while it's walked can show problems that aren't. -repair puts
+// stubs' bookkeeping right: a .refs entry naming no live stub is
+// dropped, a pending one finalized (its stub is there) or dropped, and a
+// retired holder nothing names any more is erased.
 func fsCheck(args []string) error {
 	fset := flag.NewFlagSet("fs check", flag.ExitOnError)
 	sf := addStoreFlags(fset)
 	name := fset.String("fs", "", "filesystem (required)")
+	repair := fset.Bool("repair", false, "repair what can be: dead and pending .refs entries, dead retired holders")
 	asJSON := fset.Bool("json", false, "JSON output")
 	if err := parse(fset, args); err != nil {
 		return err
@@ -279,8 +283,12 @@ func fsCheck(args []string) error {
 	if *name == "" {
 		return errors.New("-fs is required")
 	}
+	cmdArgs := map[string]string{"fs": *name}
+	if *repair {
+		cmdArgs["repair"] = "true"
+	}
 	var r icbfs.CheckReport
-	if err := sf.run("fs check", map[string]string{"fs": *name}, &r); err != nil {
+	if err := sf.run("fs check", cmdArgs, &r); err != nil {
 		return err
 	}
 	if *asJSON {
@@ -288,16 +296,20 @@ func fsCheck(args []string) error {
 			return err
 		}
 	} else {
-		fmt.Printf("%d directories, %d files, %d directory blocks; %d unreachable objects\n", r.Directories, r.Files, r.Blocks, r.Unreachable)
+		fmt.Printf("%d directories, %d files, %d directory blocks; %d unreachable objects; %d retired holders\n", r.Directories, r.Files, r.Blocks, r.Unreachable, r.RetiredHolders)
 		for _, k := range r.UnreachableListed {
 			fmt.Printf("  unreachable: %s\n", k)
 		}
 		for _, p := range r.Problems {
-			fmt.Printf("%s: %s %s: %s\n", p.Kind, p.Key, p.Path, p.Detail)
+			repaired := ""
+			if p.Repaired {
+				repaired = " (repaired)"
+			}
+			fmt.Printf("%s: %s %s: %s%s\n", p.Kind, p.Key, p.Path, p.Detail, repaired)
 		}
 	}
-	if !r.OK() {
-		return fmt.Errorf("%s: %d problems", *name, len(r.Problems))
+	if n := r.Unrepaired(); n > 0 {
+		return fmt.Errorf("%s: %d problems", *name, n)
 	}
 	return nil
 }

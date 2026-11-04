@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"time"
 
 	"github.com/resurgentech/icbfs/internal/objstore"
+	"github.com/resurgentech/icbfs/internal/pb"
 )
 
 // A file's history is its content's versions and its .metadata's. Like a
@@ -17,7 +19,9 @@ import (
 // source got wrong, a version that shouldn't be there).
 
 // FileState is one state of a file: from At, content Version (an
-// existing version of the file, copied) or Content (new bytes), with
+// existing version of the file, copied), Content (new bytes) or a stub
+// naming RefKey's version RefVersion (see PutRef; RefSHA256, if given,
+// must be the target's recorded SHA-256), one of the three, with
 // attributes Attr (nil: the file's attributes now), whose Mtime, if
 // zero, is At.
 type FileState struct {
@@ -25,6 +29,10 @@ type FileState struct {
 	Version string
 	Content io.Reader
 	Attr    *Attr
+
+	RefKey     string
+	RefVersion string
+	RefSHA256  []byte
 }
 
 // FileVersion is one content version of a file with its effective date.
@@ -46,6 +54,11 @@ var (
 	// ErrFileOpen is its refusal while the file is open through a mount or
 	// a session here: its content is in flux.
 	ErrFileOpen = errors.New("the file is open")
+	// ErrReferenced is its refusal of a file with live referrers (stubs
+	// elsewhere name its versions): a rewrite erases the versions they
+	// name, and can't retire them as a purge does. The referrers are
+	// re-pointed first.
+	ErrReferenced = errors.New("stubs name the file's versions")
 )
 
 // FileHistory is file key's content versions, newest first by effective
@@ -141,6 +154,12 @@ func (f *Filesystem) contentRefs(ctx context.Context, key string) (map[string]Re
 // ErrFileChanged if the file has changed since. Streams and the file's
 // names are left as they are. The caller stops its own writes to the
 // file meanwhile.
+//
+// Stubs: a file with live referrers is refused (ErrReferenced). A stub
+// state is checked and written as PutRef writes one, its target's .refs
+// gaining its entry. A kept version that is a stub stays one, its copy's
+// entry replacing the original's (copyVersionOnTop); a stub not kept has
+// its entry dropped.
 func (f *Filesystem) ReplaceFileHistory(ctx context.Context, key string, states []FileState, ifMatch string) error {
 	if err := f.checkWritable(); err != nil {
 		return err
@@ -157,12 +176,37 @@ func (f *Filesystem) ReplaceFileHistory(ctx context.Context, key string, states 
 		if s.At.After(now) || i > 0 && !s.At.After(states[i-1].At) {
 			return fmt.Errorf("state %d at %s: states go oldest first, none in the future: %w", i, s.At.Format(time.RFC3339Nano), ErrInvalidArgument)
 		}
-		if (s.Version == "") == (s.Content == nil) {
-			return fmt.Errorf("state %d: a version to keep or new content, one of the two: %w", i, ErrInvalidArgument)
+		n := 0
+		for _, set := range []bool{s.Version != "", s.Content != nil, s.RefKey != ""} {
+			if set {
+				n++
+			}
+		}
+		if n != 1 {
+			return fmt.Errorf("state %d: a version to keep, new content or a stub, one of the three: %w", i, ErrInvalidArgument)
+		}
+		if s.RefKey == key {
+			return fmt.Errorf("state %d: a stub naming the file's own history, which this erases: %w", i, ErrInvalidArgument)
 		}
 	}
 	if c := f.openContent(key); c != nil {
 		return fmt.Errorf("the file is open: %w", ErrFileOpen)
+	}
+	if live, err := f.liveReferrers(ctx, key, nil); err != nil {
+		return err
+	} else if len(live) > 0 {
+		return fmt.Errorf("%s: %d referrers: %w", key, len(live), ErrReferenced)
+	}
+	targets := make([]*stubTarget, len(states))
+	for i, s := range states {
+		if s.RefKey == "" {
+			continue
+		}
+		t, err := f.checkRefTarget(ctx, s.RefKey, s.RefVersion, s.RefSHA256)
+		if err != nil {
+			return fmt.Errorf("state %d: %w", i, err)
+		}
+		targets[i] = t
 	}
 	oldContent, err := f.store.History(ctx, key)
 	if err != nil {
@@ -180,6 +224,18 @@ func (f *Filesystem) ReplaceFileHistory(ctx context.Context, key string, states 
 	if err != nil {
 		return err
 	}
+	oldRefs, err := f.contentRefs(ctx, key)
+	if err != nil {
+		return err
+	}
+	for _, t := range targets {
+		if t != nil {
+			if err := f.raiseFormat(ctx); err != nil {
+				return err
+			}
+			break
+		}
+	}
 	byID := map[string]objstore.Object{}
 	for _, o := range oldContent {
 		if !o.Deleted {
@@ -188,29 +244,70 @@ func (f *Filesystem) ReplaceFileHistory(ctx context.Context, key string, states 
 	}
 
 	rec := &objstore.Recorder{}
+	// What each state's .metadata learns about its own content version
+	// (a kept version's checksums under its copy's ETag, a stub's Ref),
+	// every later state's carries too: the last is the .metadata history
+	// readers go by.
+	var carry []func(*Attr)
 	for i, s := range states {
 		sctx := objstore.WithRecorder(objstore.WithDeclaredTime(ctx, s.At), rec)
 		var obj *objstore.Object
-		if s.Version != "" {
+		var ref *Ref
+		switch {
+		case s.Version != "":
 			src, ok := byID[s.Version]
 			if !ok {
 				return fmt.Errorf("state %d: version %s: %w", i, s.Version, ErrNotFound)
 			}
-			if obj, err = f.copyVersionOnTop(sctx, key, src); err != nil {
+			if obj, ref, err = f.copyVersionOnTop(sctx, key, src); err != nil {
 				return err
 			}
-		} else if obj, err = f.store.Put(sctx, key, s.Content, nil, ""); err != nil {
-			return err
+		case targets[i] != nil:
+			body, meta, err := targets[i].stub()
+			if err != nil {
+				return err
+			}
+			if err := f.addReferrer(sctx, targets[i], key); err != nil {
+				return err
+			}
+			if obj, err = f.store.Put(sctx, key, bytes.NewReader(body), meta, ""); err != nil {
+				return err // the pending entry stays, for fsck
+			}
+		default:
+			if obj, err = f.store.Put(sctx, key, s.Content, nil, ""); err != nil {
+				return err
+			}
 		}
 		attr := attrNow
 		if s.Attr != nil {
 			attr = *s.Attr
 		}
+		// Each state's maps are its own (the states may share attrNow's),
+		// with what the states so far carry.
+		attr.Checksums = maps.Clone(attr.Checksums)
+		attr.Refs = maps.Clone(attr.Refs)
 		if attr.Mtime.IsZero() {
 			attr.Mtime = s.At
 		}
+		etag := obj.ETag
 		if s.Version != "" {
-			rekeyETag(&attr, byID[s.Version].ETag, obj.ETag) // the copy's checksums are the original's
+			old := byID[s.Version].ETag
+			carry = append(carry, func(a *Attr) { rekeyETag(a, old, etag) }) // the copy's checksums are the original's
+		}
+		if ref != nil {
+			r := *ref
+			carry = append(carry, func(a *Attr) { // the stub's own metadata says, whatever Attr did
+				if a.Refs == nil {
+					a.Refs = map[string]Ref{}
+				}
+				a.Refs[etag] = r
+			})
+		}
+		if t := targets[i]; t != nil {
+			carry = append(carry, func(a *Attr) { t.record(a, etag) })
+		}
+		for _, c := range carry {
+			c(&attr)
 		}
 		attr.mtimeOverrideETag = obj.ETag
 		if attr.Ctime.IsZero() || attr.Ctime.Before(s.At) {
@@ -223,12 +320,33 @@ func (f *Filesystem) ReplaceFileHistory(ctx context.Context, key string, states 
 		if _, err := f.store.Put(sctx, mk, bytes.NewReader(data), nil, ""); err != nil {
 			return err
 		}
+		if targets[i] != nil {
+			f.finalizeReferrer(ctx, targets[i], key, obj.VersionID)
+		}
 	}
 	if err := objstore.SetDates(ctx, f.store, key, rec.Dates()[key]); err != nil {
 		return err
 	}
 	for _, v := range oldContent {
 		if err := f.store.Erase(ctx, key, v.VersionID); err != nil && !objstore.IsNotFound(err) {
+			return err
+		}
+	}
+	// The old stubs' entries go with them (a kept one's went with its
+	// copy).
+	erased := map[string]map[string]bool{} // by target, the stub versions
+	for _, v := range oldContent {
+		if r, ok := oldRefs[v.ETag]; ok && !v.Deleted {
+			if erased[r.Key] == nil {
+				erased[r.Key] = map[string]bool{}
+			}
+			erased[r.Key][v.VersionID] = true
+		}
+	}
+	for target, versions := range erased {
+		if err := f.dropRef(ctx, target, func(e *pb.Referrer) bool {
+			return e.ReferrerKey == key && !e.Pending && versions[e.ReferrerVersion]
+		}); err != nil {
 			return err
 		}
 	}
