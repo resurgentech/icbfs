@@ -71,7 +71,7 @@ func decodeNamedVersion(data []byte) (NamedVersion, error) {
 
 func encodeOriginRecord(r OriginRecord) ([]byte, error) {
 	return proto.Marshal(&pb.OriginRecord{
-		Drive: r.Drive, Id: r.ID, ItemId: r.ItemID, Version: r.Version, Path: r.Path, Layout: recordLayout,
+		Drive: r.Drive, Id: r.ID, ItemId: r.ItemID, Version: r.Version, Path: r.Path, Layout: recordLayout, Alias: r.Alias,
 	})
 }
 
@@ -84,5 +84,5 @@ func decodeOriginRecord(data []byte) (OriginRecord, error) {
 	if err := checkRecordLayout("origin record", m.Layout); err != nil {
 		return r, err
 	}
-	return OriginRecord{Drive: m.Drive, ID: m.Id, ItemID: m.ItemId, Version: m.Version, Path: m.Path}, nil
+	return OriginRecord{Drive: m.Drive, ID: m.Id, ItemID: m.ItemId, Version: m.Version, Path: m.Path, Alias: m.Alias}, nil
 }

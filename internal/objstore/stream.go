@@ -44,6 +44,10 @@ type stream struct {
 	buf  []byte
 	cur  int // the part in buf; -1 before the first
 	err  error
+	// A stream of unknown length (size -1, StreamPartsUpTo): ended once r
+	// has, and at most limit bytes.
+	ended bool
+	limit int64
 }
 
 // StreamPart is one of StreamParts: an io.ReadSeeker over its part of the
@@ -72,6 +76,9 @@ func (p *StreamPart) fill() error {
 		s.err = fmt.Errorf("part %d: %w", p.i, errStreamOrder)
 		return s.err
 	}
+	if s.size < 0 {
+		return p.fillUpTo()
+	}
 	if int64(cap(s.buf)) < p.n {
 		s.buf = make([]byte, p.n)
 	}
@@ -95,6 +102,41 @@ func (p *StreamPart) fill() error {
 	return nil
 }
 
+// fillUpTo is fill for a stream of unknown length: the part takes what
+// r has, up to its most, and is as long as that.
+func (p *StreamPart) fillUpTo() error {
+	s := p.s
+	if int64(cap(s.buf)) < p.n {
+		s.buf = make([]byte, p.n)
+	}
+	n := 0
+	if !s.ended {
+		var err error
+		n, err = io.ReadFull(s.r, s.buf[:p.n])
+		switch {
+		case err == io.EOF || err == io.ErrUnexpectedEOF:
+			s.ended = true
+		case err != nil:
+			s.err = err
+			return err
+		case p.last:
+			var one [1]byte
+			if _, err := io.ReadFull(s.r, one[:]); err == nil {
+				s.err = fmt.Errorf("the body is longer than its most, %d bytes", s.limit)
+				return s.err
+			} else if err != io.EOF {
+				s.err = err
+				return err
+			}
+			s.ended = true
+		}
+	}
+	p.n = int64(n)
+	s.cur = p.i
+	p.rd = bytes.NewReader(s.buf[:n])
+	return nil
+}
+
 func (p *StreamPart) Read(b []byte) (int, error) {
 	if err := p.fill(); err != nil {
 		return 0, err
@@ -113,4 +155,42 @@ func (p *StreamPart) Seek(off int64, whence int) (int64, error) {
 		return 0, errStreamOrder
 	}
 	return p.rd.Seek(off, whence)
+}
+
+// StreamPartsUpTo are StreamParts for a reader whose length isn't known,
+// only that it's at most most bytes: every part but the last is partSize, and
+// r's end, not a size, says which part is last. A store takes each
+// part's size from PartSize before it sends it, in order, and stops at
+// the first one r ended before; the first part is always sent, empty if
+// r is. A part whose bytes r fails to give fails the write, as it does in
+// StreamParts; so does r going on past most.
+func StreamPartsUpTo(r io.Reader, most, partSize int64) []Part {
+	s := &stream{r: r, size: -1, cur: -1, limit: most}
+	count := max(1, (most+partSize-1)/partSize)
+	parts := make([]Part, count)
+	bodies := make([]StreamPart, count)
+	for i := range parts {
+		n := min(partSize, most-int64(i)*partSize)
+		bodies[i] = StreamPart{s: s, i: i, n: n, last: i == len(parts)-1}
+		parts[i] = Part{Size: n, Body: &bodies[i]}
+	}
+	return parts
+}
+
+// PartSize is the size of part p of a PutParts write, for a store to
+// send it with: its Size; but a part of StreamPartsUpTo is filled first,
+// and its size is what r gave, and ok is false for one that r ended
+// before, which the store sends no more than any part after it.
+func PartSize(p Part) (size int64, ok bool, err error) {
+	sp, isStream := p.Body.(*StreamPart)
+	if !isStream || sp.s.size >= 0 {
+		return p.Size, true, nil
+	}
+	if err := sp.fill(); err != nil {
+		return 0, false, err
+	}
+	if sp.n == 0 && sp.i > 0 {
+		return 0, false, nil
+	}
+	return sp.n, true, nil
 }

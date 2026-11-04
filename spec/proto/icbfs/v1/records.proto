@@ -51,4 +51,5 @@ message OriginRecord {
   string version = 4; // the source version last copied
   string path = 5;    // where the item was last known to be
   uint32 layout = 6;
+  bool alias = 7;     // the source item is folded into item_id's, not its origin
 }

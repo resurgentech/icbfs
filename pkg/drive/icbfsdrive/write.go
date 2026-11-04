@@ -1,7 +1,6 @@
 package icbfsdrive
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -18,10 +17,28 @@ import (
 	"github.com/resurgentech/icbfs/pkg/drive"
 )
 
-// inMemoryWrite is the largest write sent from memory; a bigger body is
-// spooled to a temporary file and written the way a mount writes a
-// large file (in parts, through a scratch file).
-var inMemoryWrite int64 = 64 << 20 // a variable for the tests
+// The tiers of a write of unknown length (drive.SpoolInMemory and
+// drive.SpoolInFile are the mirror's): inMemoryWrite is the largest
+// write sent from memory; a bigger body, up to inFileWrite, is spooled to
+// a temporary file in the cache directory and written the way a mount
+// writes a large file (in parts, through a scratch file); a bigger one
+// still goes up in parts as it arrives (icbfs.UnknownSize), hashed on the
+// way, after what was spooled. Variables, for the tests.
+var (
+	inMemoryWrite int64 = 2 << 20
+	inFileWrite   int64 = 100 << 20
+)
+
+// writeTier, if set (a test hook), is told how each write's content
+// goes: "memory", "file" or "stream" for a body of unknown length,
+// "known" for one of known length, "from" for the caller's (WriteFrom).
+var writeTier func(string)
+
+func tier(name string) {
+	if writeTier != nil {
+		writeTier(name)
+	}
+}
 
 // Write makes the body a file's content, creating the file if need be.
 // With opts.Size the body goes to the store as it arrives (source);
@@ -42,7 +59,8 @@ func (d *Drive) WriteFrom(ctx context.Context, p string, content io.ReaderAt, si
 var _ drive.FileWriter = (*Drive)(nil)
 
 // writeSource is a write's content, one of three: a body of unknown length
-// (r, size 0), read first, into memory or a temporary file; a body of
+// (r, size 0), read first, into memory or a temporary file, or, past
+// inFileWrite, sent as it arrives after what was read; a body of
 // known length (r, size), sent as it arrives, one part in memory at a
 // time; or content the caller holds (at, size), read at offsets.
 type writeSource struct {
@@ -86,8 +104,11 @@ func (d *Drive) write(ctx context.Context, p string, src writeSource, cond drive
 	// over their file, and sent by put.
 	var data []byte
 	var spool *os.File
+	var sp *drive.Spool
 	var sums icbfs.Checksums
 	var put putFunc
+	var stream io.Reader // a body past inFileWrite, as it arrives
+	var endErr error     // why stream stopped at its end
 	late := false
 	read := false
 	readBody := func() error {
@@ -112,6 +133,7 @@ func (d *Drive) write(ctx context.Context, p string, src writeSource, cond drive
 			if sums, err = icbfs.ChecksumsOf(io.NewSectionReader(src.at, 0, src.size)); err != nil {
 				return err
 			}
+			tier("from")
 			put = func(ctx context.Context, key, etag string) (*objstore.Object, error) {
 				return d.fs.WriteFrom(ctx, key, src.at, src.size, etag)
 			}
@@ -119,6 +141,7 @@ func (d *Drive) write(ctx context.Context, p string, src writeSource, cond drive
 			if src.size > d.fs.MaxFileSize() {
 				return drive.ErrTooLarge
 			}
+			tier("known")
 			sum := icbfs.NewChecksummer()
 			r := io.TeeReader(src.r, sum)
 			late = true
@@ -132,18 +155,36 @@ func (d *Drive) write(ctx context.Context, p string, src writeSource, cond drive
 			return nil
 		default:
 			var err error
-			if data, spool, sums, err = d.readBody(src.r); err != nil {
+			if sp, err = d.readBody(src.r); err != nil {
 				return err
 			}
+			if sp.Streamed() {
+				// Its checksums are known at its end, and checked then:
+				// a mismatch fails the read, so the upload is aborted.
+				stream = sp.Stream(func() error {
+					sums = icbfs.Checksums{MD5: sp.MD5, SHA256: sp.SHA256}
+					endErr = checkSums(opts.Checksums, sums)
+					return endErr
+				})
+				put = func(ctx context.Context, key, etag string) (*objstore.Object, error) {
+					return d.fs.WriteStream(ctx, key, stream, icbfs.UnknownSize, etag)
+				}
+				return nil
+			}
+			data, spool = sp.Bytes(), sp.File()
+			sums = icbfs.Checksums{MD5: sp.MD5, SHA256: sp.SHA256}
 		}
 		return checkSums(opts.Checksums, sums)
 	}
-	defer func() {
-		if spool != nil {
-			spool.Close()
-			os.Remove(spool.Name())
+	defer func() { sp.Close() }()
+	// streamErr is the error a write sent from stream failed with: the
+	// end's own, if that's why.
+	streamErr := func(err error) error {
+		if stream != nil && endErr != nil {
+			return endErr
 		}
-	}()
+		return err
+	}
 
 	for attempt := 0; attempt < 3; attempt++ {
 		// The first look starts from the block the parent's resolve
@@ -180,6 +221,7 @@ func (d *Drive) write(ctx context.Context, p string, src writeSource, cond drive
 			}
 			written, err := d.writeContent(ctx, n.key, data, spool, put, cur.ETag)
 			if err != nil {
+				err = streamErr(err)
 				if objstore.IsPreconditionFailed(err) {
 					if cond.IfMatch != "" {
 						now, _ := d.fs.Store().Head(ctx, n.key)
@@ -189,7 +231,7 @@ func (d *Drive) write(ctx context.Context, p string, src writeSource, cond drive
 						}
 						return drive.Item{}, &drive.PreconditionError{Current: current}
 					}
-					if src.streamed() {
+					if src.streamed() || stream != nil {
 						// The body went once and can't go again.
 						return drive.Item{}, fmt.Errorf("another write landed first and a streamed body can't be sent again: %w", drive.ErrBusy)
 					}
@@ -223,14 +265,21 @@ func (d *Drive) write(ctx context.Context, p string, src writeSource, cond drive
 			return drive.Item{}, err
 		}
 		var n *node
-		if ref != nil {
+		switch {
+		case ref != nil:
 			n, err = d.createRef(ctx, parent, name, ref, opts)
-		} else {
+		case stream != nil:
+			n, err = d.createStream(ctx, parent, name, stream, opts, &sums)
+			err = streamErr(err)
+		default:
 			n, err = d.create(ctx, parent, name, data, spool, put, late, opts, &sums)
 		}
 		if errors.Is(err, icbfs.ErrExists) {
 			if cond.IfNoneMatch {
 				return drive.Item{}, &drive.PreconditionError{}
+			}
+			if stream != nil {
+				return drive.Item{}, fmt.Errorf("another write made the file first and a streamed body can't be sent again: %w", drive.ErrBusy)
 			}
 			continue // made meanwhile: write over it
 		}
@@ -354,45 +403,32 @@ func (d *Drive) createRef(ctx context.Context, parent *node, name string, ref *r
 		return nil, mapCreateErr(refErr(err))
 	}
 	if opts.Origin != nil {
-		if err := d.recordOrigin(ctx, key, joinPath(parent.path, name), *opts.Origin); err != nil {
+		if err := d.recordOrigin(ctx, key, joinPath(parent.path, name), *opts.Origin, nil); err != nil {
 			return nil, err
 		}
 	}
 	return parent.child(block.Entry{Name: name, UUID: key, Type: icbfs.TypeFile}, attr), nil
 }
 
-// readBody reads up to the filesystem's max file size: into memory when
-// small, else into a temporary file; and the content's checksums, as it
-// goes by.
-func (d *Drive) readBody(body io.Reader) ([]byte, *os.File, icbfs.Checksums, error) {
-	max := d.fs.MaxFileSize()
-	sum := icbfs.NewChecksummer()
-	body = io.TeeReader(body, sum)
-	buf := &bytes.Buffer{}
-	n, err := io.CopyN(buf, body, inMemoryWrite+1)
-	if err != nil && err != io.EOF {
-		return nil, nil, icbfs.Checksums{}, err
-	}
-	if n <= inMemoryWrite {
-		if int64(buf.Len()) > max {
-			return nil, nil, icbfs.Checksums{}, drive.ErrTooLarge
-		}
-		return buf.Bytes(), nil, sum.Sum(), nil
-	}
-	f, err := os.CreateTemp(d.cfg.CacheDir, "drive-write-")
+// readBody reads up to the filesystem's max file size, through the
+// drive library's spool (drive.NewSpool), by the write tiers: into
+// memory when small, else into a temporary file, and past inFileWrite
+// only so far, the rest to be streamed (Spool.Stream); and the content's
+// checksums, as it goes by.
+func (d *Drive) readBody(body io.Reader) (*drive.Spool, error) {
+	sp, err := drive.NewSpool(body, drive.SpoolOptions{Dir: d.cfg.CacheDir, InMemory: inMemoryWrite, InFile: inFileWrite, Max: d.fs.MaxFileSize()})
 	if err != nil {
-		return nil, nil, icbfs.Checksums{}, err
+		return nil, err
 	}
-	total, err := io.Copy(f, io.MultiReader(buf, io.LimitReader(body, max-n+1)))
-	if err == nil && total > max {
-		err = drive.ErrTooLarge
+	switch {
+	case sp.Streamed():
+		tier("stream")
+	case sp.File() != nil:
+		tier("file")
+	default:
+		tier("memory")
 	}
-	if err != nil {
-		f.Close()
-		os.Remove(f.Name())
-		return nil, nil, icbfs.Checksums{}, err
-	}
-	return nil, f, sum.Sum(), nil
+	return sp, nil
 }
 
 // checkSums fails with ErrChecksum if a checksum the caller gave isn't
@@ -435,7 +471,7 @@ func (d *Drive) create(ctx context.Context, parent *node, name string, data []by
 			return nil, mapCreateErr(err)
 		}
 		if opts.Origin != nil {
-			if err := d.recordOrigin(ctx, key, p, *opts.Origin); err != nil {
+			if err := d.recordOrigin(ctx, key, p, *opts.Origin, nil); err != nil {
 				return nil, err
 			}
 		}
@@ -473,6 +509,30 @@ func (d *Drive) create(ctx context.Context, parent *node, name string, data []by
 	// API makes starts with just its content.
 	if created != nil && created.Size == 0 {
 		_ = d.fs.Store().Erase(ctx, key, created.VersionID)
+	}
+	return parent.child(block.Entry{Name: name, UUID: key, Type: icbfs.TypeFile}, attr), nil
+}
+
+// createStream makes the file name in parent with its content sent from
+// body as it arrives (icbfs CreateWithStream): nothing is written, the
+// name included, unless the whole body is. sums are the content's once
+// body has gone by, which is when they're recorded.
+func (d *Drive) createStream(ctx context.Context, parent *node, name string, body io.Reader, opts drive.WriteOptions, sums *icbfs.Checksums) (*node, error) {
+	sddl, mode, uid, gid := d.newOwnership(ctx, parent, false)
+	info, err := d.writeInfo(ctx, opts, icbfs.Checksums{})
+	if err != nil {
+		return nil, err
+	}
+	info.Checksums = sums // filled in as the body ends, before they're recorded
+	key, attr, err := d.fs.CreateWithStream(ctx, parent.key, name, mode, uid, gid, body, icbfs.UnknownSize, sddl, info)
+	if err != nil {
+		return nil, mapCreateErr(err)
+	}
+	p := joinPath(parent.path, name)
+	if opts.Origin != nil {
+		if err := d.recordOrigin(ctx, key, p, *opts.Origin, nil); err != nil {
+			return nil, err
+		}
 	}
 	return parent.child(block.Entry{Name: name, UUID: key, Type: icbfs.TypeFile}, attr), nil
 }
@@ -578,7 +638,7 @@ func (d *Drive) afterWrite(ctx context.Context, key, p string, written *objstore
 		return icbfs.Attr{}, mapErr(err)
 	}
 	if opts.Origin != nil {
-		return attr, d.recordOrigin(ctx, key, p, *opts.Origin)
+		return attr, d.recordOrigin(ctx, key, p, *opts.Origin, nil)
 	}
 	return attr, nil
 }
@@ -934,10 +994,11 @@ func (d *Drive) SetOrigin(ctx context.Context, ref drive.ItemRef, o drive.Origin
 	if err != nil {
 		return err
 	}
+	prev := priorOrigin(n)
 	if err := d.fs.SetAppData(ctx, n.key, n.typ, icbfs.AppDriveOrigin, data); err != nil {
 		return mapErr(err)
 	}
-	return d.recordOrigin(ctx, n.key, n.path, o)
+	return d.recordOrigin(ctx, n.key, n.path, o, prev)
 }
 
 // SetTimes sets an item's times at its source (drive.TimeSetter), in one
@@ -968,6 +1029,7 @@ func (d *Drive) SetInfo(ctx context.Context, ref drive.ItemRef, info drive.ItemI
 	// A file's mtime is tied to the content version it's set on, as
 	// SetAttr's is: the one the resolve read.
 	fi := icbfs.ItemInfo{Btime: timeOrNil(info.Created), Mtime: timeOrNil(info.Modified), Mode: info.Mode, WindowsAttrs: info.WindowsAttrs, App: app}
+	prev := priorOrigin(n)
 	cur, ok := n.attr.ContentVersion()
 	if !ok {
 		head, err := d.fs.Store().Head(ctx, n.key)
@@ -982,7 +1044,7 @@ func (d *Drive) SetInfo(ctx context.Context, ref drive.ItemRef, info drive.ItemI
 		}
 	}
 	if info.Origin != nil {
-		if err := d.recordOrigin(ctx, n.key, n.path, *info.Origin); err != nil {
+		if err := d.recordOrigin(ctx, n.key, n.path, *info.Origin, prev); err != nil {
 			return drive.Item{}, err
 		}
 	}
@@ -1015,6 +1077,15 @@ func timeOrNil(t time.Time) *time.Time {
 		return nil
 	}
 	return &t
+}
+
+// priorOrigin is n's origin as its attributes were read, if it has one:
+// what an origin set over it may no longer claim (recordOrigin).
+func priorOrigin(n *node) *drive.Origin {
+	if o, ok := n.attr.App[icbfs.AppDriveOrigin]; ok {
+		return decodeOrigin(o)
+	}
+	return nil
 }
 
 func decodeOrigin(data []byte) *drive.Origin {

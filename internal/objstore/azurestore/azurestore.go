@@ -579,7 +579,19 @@ func (s *Store) promote(ctx context.Context, key, versionID string) error {
 func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part, metadata map[string]string, ifMatchETag string) (*objstore.Object, error) {
 	bb := s.blob(key)
 	ids := make([]string, len(parts))
+	stream := objstore.IsStream(parts)
 	for i, p := range parts {
+		if stream {
+			// A stream of unknown length may end before its last part.
+			_, ok, err := objstore.PartSize(p)
+			if err != nil {
+				return nil, fmt.Errorf("put parts %s: %w", key, err)
+			}
+			if !ok {
+				ids = ids[:i]
+				break
+			}
+		}
 		ids[i] = base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("icbfs-part-%06d", i)))
 		if p.Body != nil {
 			if _, err := bb.StageBlock(ctx, ids[i], nopSeekCloser{p.Body}, nil); err != nil {

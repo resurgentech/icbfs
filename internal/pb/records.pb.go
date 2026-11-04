@@ -266,6 +266,7 @@ type OriginRecord struct {
 	Version       string                 `protobuf:"bytes,4,opt,name=version,proto3" json:"version,omitempty"`             // the source version last copied
 	Path          string                 `protobuf:"bytes,5,opt,name=path,proto3" json:"path,omitempty"`                   // where the item was last known to be
 	Layout        uint32                 `protobuf:"varint,6,opt,name=layout,proto3" json:"layout,omitempty"`
+	Alias         bool                   `protobuf:"varint,7,opt,name=alias,proto3" json:"alias,omitempty"` // the source item is folded into item_id's, not its origin
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -342,6 +343,13 @@ func (x *OriginRecord) GetLayout() uint32 {
 	return 0
 }
 
+func (x *OriginRecord) GetAlias() bool {
+	if x != nil {
+		return x.Alias
+	}
+	return false
+}
+
 var File_spec_proto_icbfs_v1_records_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_records_proto_rawDesc = "" +
@@ -374,14 +382,15 @@ const file_spec_proto_icbfs_v1_records_proto_rawDesc = "" +
 	"created_by\x18\x04 \x01(\tR\tcreatedBy\x129\n" +
 	"\n" +
 	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x12\x16\n" +
-	"\x06layout\x18\x06 \x01(\rR\x06layout\"\x93\x01\n" +
+	"\x06layout\x18\x06 \x01(\rR\x06layout\"\xa9\x01\n" +
 	"\fOriginRecord\x12\x14\n" +
 	"\x05drive\x18\x01 \x01(\tR\x05drive\x12\x0e\n" +
 	"\x02id\x18\x02 \x01(\tR\x02id\x12\x17\n" +
 	"\aitem_id\x18\x03 \x01(\tR\x06itemId\x12\x18\n" +
 	"\aversion\x18\x04 \x01(\tR\aversion\x12\x12\n" +
 	"\x04path\x18\x05 \x01(\tR\x04path\x12\x16\n" +
-	"\x06layout\x18\x06 \x01(\rR\x06layoutB+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
+	"\x06layout\x18\x06 \x01(\rR\x06layout\x12\x14\n" +
+	"\x05alias\x18\a \x01(\bR\x05aliasB+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
 
 var (
 	file_spec_proto_icbfs_v1_records_proto_rawDescOnce sync.Once

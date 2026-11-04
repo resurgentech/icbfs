@@ -29,6 +29,7 @@ func Run(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	t.Run("PutCutOffIsLostRaceOnlyIfChanged", func(t *testing.T) { putCutOffIsLostRaceOnlyIfChanged(t, newStore) })
 	t.Run("PutPartsCopiesAndUploadsUnderIfMatch", func(t *testing.T) { putPartsCopiesAndUploadsUnderIfMatch(t, newStore) })
 	t.Run("PutPartsFromStream", func(t *testing.T) { putPartsFromStream(t, newStore) })
+	t.Run("PutPartsFromStreamOfUnknownLength", func(t *testing.T) { putPartsFromStreamOfUnknownLength(t, newStore) })
 	t.Run("PutPartsCopiesFromAnotherKey", func(t *testing.T) { putPartsCopiesFromAnotherKey(t, newStore) })
 	t.Run("PutPartsCopyFromMissingIsNotFound", func(t *testing.T) { putPartsCopyFromMissingIsNotFound(t, newStore) })
 	t.Run("HistoryIsNewestFirstWithTimestamps", func(t *testing.T) { historyIsNewestFirstWithTimestamps(t, newStore) })
@@ -640,6 +641,67 @@ func putPartsFromStream(t *testing.T, newStore func(*testing.T) objstore.Store) 
 	}
 	if head, err := store.Head(ctx, "stream"); err != nil || head.ETag != v1.ETag {
 		t.Fatalf("object after a short stream: %v, %v; want unchanged %s", head, err, v1.ETag)
+	}
+}
+
+// putPartsFromStreamOfUnknownLength: parts from a reader whose length
+// isn't known, only its most (objstore.StreamPartsUpTo), go up in order
+// until it ends: short of a part, at a part's end, empty, or at the
+// most; a reader longer than the most, or one that fails, fails the
+// write with nothing written.
+func putPartsFromStreamOfUnknownLength(t *testing.T, newStore func(*testing.T) objstore.Store) {
+	store := newStore(t)
+	ctx := context.Background()
+	const mib = 1 << 20
+	part := max(store.PartLimits().Min, 5*mib)
+	data := make([]byte, 3*part)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+	var v *objstore.Object
+	for _, tc := range []struct {
+		name      string
+		size, max int64
+	}{
+		{"short of a part", 2*part + 1234, 10 * part},
+		{"at a part's end", 2 * part, 10 * part},
+		{"one small part", 1234, 10 * part},
+		{"empty", 0, 10 * part},
+		{"at the most", 3 * part, 3 * part},
+		{"at the most, not a part's end", 2*part + 7, 2*part + 7},
+	} {
+		obj, err := store.PutParts(ctx, "unknown", objstore.StreamPartsUpTo(bytes.NewReader(data[:tc.size]), tc.max, part), map[string]string{"k": "v"}, "")
+		if err != nil {
+			t.Fatalf("%s: PutParts: %v", tc.name, err)
+		}
+		body, got, err := store.Get(ctx, "unknown")
+		if err != nil {
+			t.Fatalf("%s: get: %v", tc.name, err)
+		}
+		content, _ := io.ReadAll(body)
+		body.Close()
+		if !bytes.Equal(content, data[:tc.size]) || got.Size != tc.size || got.ETag != obj.ETag || got.Metadata["k"] != "v" {
+			t.Fatalf("%s: assembled %d bytes (want %d), etag %s (want %s), metadata %v, content equal %v",
+				tc.name, got.Size, tc.size, got.ETag, obj.ETag, got.Metadata, bytes.Equal(content, data[:tc.size]))
+		}
+		v = obj
+	}
+
+	if _, err := store.PutParts(ctx, "unknown", objstore.StreamPartsUpTo(bytes.NewReader(data), 3*part-1, part), nil, v.ETag); err == nil {
+		t.Fatal("a stream longer than its most assembled, want an error")
+	}
+	failing := io.MultiReader(bytes.NewReader(data[:part+10]), &failingReader{})
+	if _, err := store.PutParts(ctx, "unknown", objstore.StreamPartsUpTo(failing, 10*part, part), nil, v.ETag); err == nil {
+		t.Fatal("a failing stream assembled, want an error")
+	}
+	if _, err := store.PutParts(ctx, "unknown", objstore.StreamPartsUpTo(bytes.NewReader(data), 10*part, part), nil, `"stale-etag"`); !objstore.IsPreconditionFailed(err) {
+		t.Fatalf("a stream with a stale If-Match: %v, want precondition failed", err)
+	}
+	if head, err := store.Head(ctx, "unknown"); err != nil || head.ETag != v.ETag {
+		t.Fatalf("object after the failed streams: %v, %v; want unchanged %s", head, err, v.ETag)
+	}
+	if h, err := store.History(ctx, "unknown"); err != nil || len(h) != 6 {
+		t.Fatalf("history: %d entries, %v; want the 6 written", len(h), err)
 	}
 }
 

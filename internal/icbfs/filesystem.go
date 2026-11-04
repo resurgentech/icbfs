@@ -1417,6 +1417,18 @@ func (f *Filesystem) CreateWith(ctx context.Context, dirKey, name string, mode, 
 	}, nil)
 }
 
+// CreateWithStream is CreateWith with the content sent from body as it
+// arrives (WriteStream, with size as there, UnknownSize included): the
+// content object is written first, so a body that falls short or fails
+// writes nothing, not even the name. info's Checksums, if they're the
+// caller's own, are read once the body has gone by, which is when the
+// caller who sums it as it goes knows them.
+func (f *Filesystem) CreateWithStream(ctx context.Context, dirKey, name string, mode, uid, gid uint32, body io.Reader, size int64, sddl []byte, info ItemInfo) (string, Attr, error) {
+	return f.createWith(ctx, dirKey, name, mode, uid, gid, sddl, info, func(ctx context.Context, key string) (*objstore.Object, error) {
+		return f.WriteStream(ctx, key, body, size, "")
+	}, nil)
+}
+
 // createWith is CreateWith with the content's write, put, given the new
 // key (CreateWithRef's writes a stub), and edit, if not nil, recording
 // more in .metadata about the content version put wrote.
@@ -2383,15 +2395,29 @@ func (f *Filesystem) WriteFile(ctx context.Context, key string, data []byte, ifM
 	return f.store.Put(ctx, key, bytes.NewReader(data), nil, ifMatch)
 }
 
+// UnknownSize is WriteStream's size for a body whose length isn't known.
+const UnknownSize int64 = -1
+
 // WriteStream is WriteFile from a body of a known length, as it arrives:
 // nothing spooled. A body that fits one part is read into memory and put;
 // a larger one goes up in parts straight from the body, one part in memory
 // at a time (objstore.StreamParts). A body shorter or longer than size
 // fails the write, which then writes nothing. size past the max file size
 // is ErrFileTooLarge before a byte is read.
+//
+// With size UnknownSize, the body goes up in parts as it arrives until it
+// ends, whatever its length (objstore.StreamPartsUpTo), one part in
+// memory at a time; one longer than the max file size fails the write.
+// So does a body whose Read fails, even at what would have been its end:
+// the upload is aborted and nothing is written, which is how a caller
+// that learns only at the end that the write shouldn't be (a hash it
+// sees go by) stops it.
 func (f *Filesystem) WriteStream(ctx context.Context, key string, body io.Reader, size int64, ifMatch string) (*objstore.Object, error) {
 	if err := f.checkWritable(); err != nil {
 		return nil, err
+	}
+	if size == UnknownSize {
+		return f.store.PutParts(ctx, key, objstore.StreamPartsUpTo(body, f.maxFileSize, f.partSize()), nil, ifMatch)
 	}
 	if size < 0 {
 		return nil, ErrInvalidArgument

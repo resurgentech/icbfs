@@ -445,6 +445,10 @@ type Item struct {
 	Created     time.Time `json:"created,omitempty"`
 	Target      string    `json:"target,omitempty"` // a symlink's
 	Origin      *Origin   `json:"origin,omitempty"`
+	// Alias is the source id the item was found by (OriginFinder, a
+	// Mirror's lookups), when that id is one of its origin's Aliases
+	// rather than the origin itself.
+	Alias string `json:"alias,omitempty"`
 	// Checksums are a file's current content's, when computed.
 	Checksums *Checksums `json:"checksums,omitempty"`
 	// App, Mode and WindowsAttrs are the item's app data, permission bits
@@ -572,6 +576,24 @@ type Origin struct {
 	Version string    `json:"version,omitempty"`
 	Path    string    `json:"path,omitempty"`
 	Copied  time.Time `json:"copied"`
+	// Aliases are the other items of the same source drive this item also
+	// holds (a Mirror's fold, SourceItem.FoldInto): each with the same
+	// name in the same folder there as ID, and the same bytes. In the
+	// order they were folded.
+	Aliases []Alias `json:"aliases,omitempty"`
+}
+
+// Alias is one source item folded into another's item (Origin.Aliases):
+// its id, the version and path it had there when last applied, and the
+// content's SHA-256 and size then.
+type Alias struct {
+	ID      string    `json:"id"`
+	Version string    `json:"version,omitempty"`
+	Path    string    `json:"path,omitempty"`
+	Created time.Time `json:"created,omitempty"` // its creation at the source, if known: the oldest alias takes over from a removed origin
+	Copied  time.Time `json:"copied"`
+	SHA256  string    `json:"sha256,omitempty"`
+	Size    int64     `json:"size,omitempty"`
 }
 
 // Errors drives return; the HTTP layer maps each to a status and code.

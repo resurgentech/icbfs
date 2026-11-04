@@ -79,7 +79,7 @@ with its four-hex-digit ID, so one prefix listing finds all of it.
 | `<id>-trash-<inverted time>-<entry>` | one trash entry |
 | `<id>-trashby-<uuid>` | the key of the item's newest trash entry, so a trashed item's entry is one read |
 | `<id>-name-<name>` | a named version |
-| `<id>-origin-<hash>` | the item copied from one source item (an item in another document store, say): its id, the source version, where it was last seen |
+| `<id>-origin-<hash>` | the item copied from one source item (an item in another document store, say): its id, the source version, where it was last seen; or, marked an alias, the item another source item is folded into (a mirror's fold, below) |
 | `<id>-<uuid>.version` | the dates of the item's versions (a mirror's, written in its source's time): in a filesystem written in a source's time, every version of its content and `.metadata`; elsewhere, only items a change under a source time touched (see Source time) |
 | `<id>-app-<tool>.<name>` | an object a tool keeps beside the filesystem, not about any item: a mirror's table of the ids its app keys use |
 | `<id>-past` | empty; written again whenever the filesystem's past changes (a purge, a change made under a source time), telling history caches to drop what they kept (see Past views) |
@@ -314,8 +314,11 @@ uploads only what changed, but the result is still one object.
   `STATUS_FILE_TOO_LARGE` on Windows.
 
 **A file made whole is two writes.** A mount creates a file empty and
-writes it at close. The drive library has the content in hand (up to 64 MiB;
-past that it writes as a mount does): `CreateWith` writes the content
+writes it at close. The drive library has the content in hand (up to 2 MiB;
+past that, up to 100 MiB, it spools to a temporary file and writes as a
+mount does; past that, it streams the content to a multipart upload as
+it arrives, and creates the file only once the upload is complete,
+with `CreateWithStream`, so a body that fails partway leaves nothing): `CreateWith` writes the content
 object once, with it, and `.metadata` once, with what the write records
 (times, app data, mode, checksums), then the directory entry. A new version
 is the content, then one `.metadata` write (`SetInfoWith`, which a
@@ -334,6 +337,50 @@ checksums are the target's, recorded by the stub's writer. Any target
 the drive or the filesystem refuses (`ErrRefTarget`, `ErrRefChecksum`,
 `ErrRefToRef`) is the library's `ErrRefUnavailable`, and nothing is
 written; the caller writes the bytes.
+
+**A mirror writes known bytes as stubs.** `drive.Mirror` keeps a hash
+map in memory: SHA-256 → a version (item id, version id, size) holding
+those bytes, fed by every write it makes and every file it reads back,
+and a source's own hash (kind and value) → SHA-256 for hashes it has
+computed. Before writing a version it reads the source's body to its end
+into a spool (`drive.Spool`, the same one a drive write of unknown
+length reads into: memory up to 2 MiB, else a temporary file up to
+100 MiB), taking the SHA-256 on the way. Past 100 MiB the bytes go
+through to the drive's own streamed write as they arrive, hashed on the
+way; a hash the map has, known at the end, fails the read there, so the
+drive aborts the upload and writes nothing, and the stub is written
+instead. Bytes equal to the item's own current version
+are a stub of it (an identical consecutive version: the source's event
+stays in the history, at its time); bytes the map has are a stub of that
+version; anything else is the bytes, `WriteFrom` the spool. A source hash
+the map has, at the same size, is a stub without a download. A stub the
+drive refuses drops the entry and the bytes are written, so a stale map
+costs an upload, never a wrong file. The map is the connector's to keep
+(`HashStore`) and can be rebuilt from the drive (`RebuildHashes`: every
+version of the source's items with a recorded SHA-256); of several
+versions with one content it keeps the least by item id and version, so
+a rebuild gives the map the writes built.
+
+**A mirror folds same-named twins.** A source that lets two items have
+the same name in one folder (Clio) says so (`SourceItem.FoldInto`, the
+older one's id). When the drive holds that one live, as its origin, with
+the same SHA-256 and size (from the source's hash, else the spool), the
+newer is folded into its item: its id joins the item's
+`Origin.Aliases` (with its version, source path, creation time and the
+bytes' SHA-256 and size), and, on icbfs, gets an origin record marked an
+alias, naming that item. Nothing else is written. `FindByOrigin` of an
+alias's id answers with that item, `Item.Alias` set to the id; an alias
+record whose item is trashed or no longer lists it is not found. The
+item's `SetOrigin` keeps the records in step: it writes one per alias
+(never over a record naming another item) and deletes those of ids the
+new origin no longer claims that still name the item. A fold holds
+while the name, folder and bytes agree; when an alias's `FoldInto` goes
+or changes, its new version has other bytes, or the item's bytes change,
+it's dropped from the item and given its own, by bytes or by a stub of a
+version the drive has. When the origin is removed at the source while it
+has aliases, the oldest alias (created first there) becomes the item's
+origin, its record rewritten; the item stays where it is, and the rest
+stay aliases.
 
 **Open files are edited in a local scratch file, not in memory.** Opening a
 file copies it from a shared on-disk read cache into a private scratch

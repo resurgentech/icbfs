@@ -26,6 +26,9 @@ type OriginRecord struct {
 	ItemID  string `json:"itemId"`  // the item here (its key)
 	Version string `json:"version"` // the source version last copied
 	Path    string `json:"path"`    // where the item was last known to be, filesystem-relative
+	// Alias: the source item is folded into ItemID's (one of its origin's
+	// aliases, drive.Origin.Aliases), not the origin of it.
+	Alias bool `json:"alias,omitempty"`
 }
 
 func (f *Filesystem) originKey(sourceDrive, sourceID string) string {

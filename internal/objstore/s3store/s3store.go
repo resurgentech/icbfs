@@ -140,14 +140,33 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 	// Parts from a stream share one buffer and are filled in order, so
 	// they go up one at a time; the loop starts them in order.
 	conc := partConcurrency
-	if objstore.IsStream(parts) {
+	stream := objstore.IsStream(parts)
+	if stream {
 		conc = 1
 	}
 	sem := make(chan struct{}, conc)
 	var wg sync.WaitGroup
+	sent := len(parts)
 	for i, p := range parts {
-		wg.Add(1)
 		sem <- struct{}{}
+		if stream {
+			// The part before is up (one at a time): this one is
+			// filled, and a stream of unknown length may have ended.
+			if pctx.Err() != nil {
+				<-sem
+				sent = i
+				break
+			}
+			n, ok, err := objstore.PartSize(p)
+			if err != nil || !ok {
+				errs[i] = err
+				<-sem
+				sent = i
+				break
+			}
+			p.Size = n
+		}
+		wg.Add(1)
 		go func(i int, p objstore.Part) {
 			defer wg.Done()
 			defer func() { <-sem }()
@@ -193,7 +212,7 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 
 	in := &s3.CompleteMultipartUploadInput{
 		Bucket: aws.String(s.bucket), Key: aws.String(s.k(key)), UploadId: up.UploadId,
-		MultipartUpload: &types.CompletedMultipartUpload{Parts: completed},
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: completed[:sent]},
 	}
 	if ifMatch != "" {
 		in.IfMatch = aws.String(ifMatch)

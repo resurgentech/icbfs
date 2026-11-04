@@ -113,8 +113,17 @@ turns out shorter or longer than its size fails the write, which then
 writes nothing; another write landing first fails a streamed write
 rather than retrying it, as the body can't be sent twice. Checksums the
 caller gives are checked once the body has gone by, and a mismatch
-erases the version written. Without a size (0), the body is read first:
-into memory up to 64 MiB, past that into a temporary file. A drive that
+erases the version written. Without a size (0), the body goes by tiers
+(`drive.NewSpool`, which a mirror uses too: a `Spool` with the body's
+size, MD5 and SHA-256, and any other hashes the caller feeds it): read
+first into memory up to 2 MiB, or into a temporary file in `CacheDir`
+up to 100 MiB; past that, what was read and then the rest go to the
+store in parts as they arrive, one part in memory at a time, hashed on
+the way. Such a write's checksums are checked at the body's end, before
+the upload completes, so a mismatch writes nothing; a body that fails
+partway writes nothing either (the upload is aborted; a new file isn't
+made at all); and, like a streamed write, it isn't retried when another
+write lands first. A drive that
 is a `FileWriter` also takes content the caller holds open:
 `WriteFrom(ctx, path, content io.ReaderAt, size, cond, opts)` reads parts
 from it at offsets as they go up, reads one again if it is retried, and
@@ -291,6 +300,9 @@ n, err := m.Undo(ctx, passID)                              // a bad pass, undone
 | it, another version | a new version (`updated`) |
 | it, at another path | moves it (`moved`), then writes only if the version differs |
 | it, in the trash | restores it, history and all (`restored`), then as above |
+| nothing, and `FoldInto` names a live item with the same bytes | folds it into that item (`folded`), and moves the item to `FoldPath` if set (`moved`) |
+| it, folded into another's item, and the fold holds | records a new version (`folded`), moves to `FoldPath` (`moved`), or nothing (`unchanged`) |
+| it, folded, and the fold doesn't hold | drops the alias (`unfolded`), then as for nothing |
 
 `m.InSourceTime()` makes the mirror write the source's history in the
 source's time (`WithSourceTime`): an item is created at its `Created` time
@@ -312,10 +324,64 @@ written. That needs a drive that's an `InfoSetter`; on one that's only a
 and origin in one write.
 
 - `Open` is called only when the bytes are needed: never for a move, a
-  restore of the version held, an item already up to date, or a new
-  file whose path is taken. A new file is written on the condition that
-  its path is free (`IfNoneMatch`), which the drive checks before it
-  reads the content; the mirror looks at the path only if it's taken.
+  restore of the version held, an item already up to date, a new
+  file whose path is taken, or a source hash the mirror knows (below).
+  A new file is written on the condition that its path is free
+  (`IfNoneMatch`), which the drive checks before it reads the content:
+  the mirror opens the source at the drive's first read of the body, and
+  looks at the path only if it's taken.
+- **Bytes the drive already holds are a stub, not a second upload.**
+  Before it writes a version, the mirror reads the source's body to its
+  end (a `Spool`: in memory up to 2 MiB, else a temporary file up to
+  100 MiB), its SHA-256 taken on the way, then writes, in this order:
+  1. the same size and SHA-256 as the item's own current version: a
+     stub at that version (`WriteOptions.SameAs`). An identical
+     consecutive version still records the source's new version, at its
+     time;
+  2. the same as a version in the mirror's hash map (a twin, elsewhere):
+     a stub at that version;
+  3. else the bytes: served to the drive's read from the spool when it's
+     in memory; from its file, a second write under the same condition,
+     by `WriteFrom` on a drive that's a `FileWriter`, else by `Write`.
+
+  A stub, too, is a second write: the body the drive first reads stops
+  its write once the spool shows the bytes are known.
+
+  A body past 100 MiB isn't held: the drive is served it as it arrives,
+  for its own write of unknown length (on icbfs, a multipart upload),
+  and the mirror hashes it on the way. Its hash is known only at its
+  end: one the item or the map has fails the drive's read there, in
+  place of the end, so the upload is aborted and nothing of it is
+  written (no version, no `.metadata` change, no new file); the stub is
+  written instead. A drive that keeps no references then reads the
+  source again. (`drive.SpoolInMemory` and `drive.SpoolInFile` are the
+  mirror's thresholds.)
+
+  A stub the drive refuses (`ErrRefUnavailable`, `ErrForbidden`: the
+  version erased since, say) drops the map entry and writes the bytes.
+  The spool goes with every stub as its body, so a drive that keeps no
+  references writes the bytes. Empty content is always written.
+- **The hash map** (`m.Hashes()`, a `HashMap`) is SHA-256 → `HashEntry{ID,
+  Version, Size}`, one version per content (of several, the least by item
+  id, then version), and a source's own hash (`Hash{Kind, Value}`) →
+  SHA-256. Every write the mirror makes, and every file it reads back
+  (found, restored, moved, adopted, `Known`), is added by its recorded
+  checksum. `m.RebuildHashes(ctx)` rebuilds it from a listing of the
+  drive's live files with this source's origin, every version with a
+  recorded SHA-256 (none recorded: skipped, not computed), keeping the
+  source hashes whose SHA-256 is still there. A daemon keeps it between
+  runs with `m.WithHashStore(s)`, `m.LoadHashes(ctx)` and
+  `m.SaveHashes(ctx)`; a `HashStore` is `LoadHashes(ctx) ([]byte, error)`
+  (nil: none kept) and `SaveHashes(ctx, data) error`. A kept map that
+  isn't one is `ErrInvalid`, and the map is left empty to rebuild.
+- **A source's own hash.** `SourceItem.Hash` and `SourceItem.Size` are the
+  source's hash of the content and its size, if its listing gives them.
+  One the map has, at that size, is a stub without opening the source;
+  if the drive refuses it, the source is opened and the bytes go as
+  above. The mirror computes a source's kind of hash as it spools (md5,
+  sha1 and sha256 in hex it knows; `m.HashKind(kind, newHash, encode)`
+  teaches it another) and records what it computed, never the source's
+  word alone.
 - The trash is the undo. An item the source deletes and brings back with
   the same id (a recycle bin, a folder shared again, a listing that came
   back short) is restored, not copied again; and `Undo` restores
@@ -326,6 +392,33 @@ and origin in one write.
   the path that carries the source item's origin but has no origin record.
 - Two items claiming one source item (a copy made twice): the newest
   claim is the one the mirror works on.
+- **Folding.** A source that lets two items share a name in one folder
+  says so with `SourceItem.FoldInto`: the id of the older item with the
+  same name (case and all) in the same folder. If the drive holds that
+  item live, as its origin, with the same SHA-256 and size (the source's
+  hash when the map knows it, else the bytes, spooled), `Apply` folds the
+  newer into its item: an `Alias{ID, Version, Path, Created, Copied,
+  SHA256, Size}` is added to its `Origin.Aliases` (on icbfs, with an
+  origin record marked an alias), and nothing else is written. The
+  `Applied.Item` is that item. `SourceItem.FoldPath`, if set, is where a
+  folded item belongs: the item is moved there, once, its history and
+  origin as they are; without it, it stays where it is. The origin's own
+  `Apply` keeps the item's aliases, and with a `FoldPath` keeps it there.
+  - `Known`, and on icbfs `FindByOrigin`, of an alias's id give the item
+    with `Item.Alias` set to the id asked; any other drive is searched
+    for it in `Origin.Aliases`, after the items whose origin it is.
+  - A fold holds while the name, folder and bytes agree. An `Apply` of an
+    alias whose `FoldInto` is gone or names another item, whose new
+    version's bytes differ, or whose item's bytes have changed, drops the
+    alias and its record (`unfolded`) and makes it an item of its own at
+    its own path (`created`): a stub of a version the drive has, else the
+    bytes (an alias's own unchanged version needs no download).
+  - `Remove` of an alias drops only the alias. `Remove` of an item's
+    origin while it has aliases hands the item to the oldest of them
+    (`Alias.Created`, the earliest; none given, after those that have
+    one; then the order folded): its id, version and path become the
+    origin's, and the rest stay aliases. The item isn't trashed, and keeps
+    its name and its history; `Undo` doesn't bring the old origin back.
 - On icbfs, finding a source item is a lookup (`OriginFinder`: an origin
   record per item, and a pointer from each trashed item to its entry);
   any other backend is searched, a listing of the drive and its trash.
