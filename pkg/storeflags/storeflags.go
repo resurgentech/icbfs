@@ -53,7 +53,7 @@ import (
 // (Check), the store (Open), the connection for a log line (String, no
 // secrets) and whose it is (Identity: the history cache is one per
 // store and identity, so a person's past isn't a machine's). The
-// command packages (pkg/clicmd, pkg/winfspcmd) take one, so a host with
+// commands take one (cmd/icbfs, pkg/clicmd, pkg/winfspcmd), so a host with
 // a way of its own to reach a store, a credential it holds, say, builds
 // the same commands around it. Default is this module's: the flags
 // above.

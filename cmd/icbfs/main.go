@@ -42,7 +42,9 @@ func main() {
 	}
 
 	fset := flag.NewFlagSet("mount", flag.ExitOnError)
-	conn := storeflags.Add(fset)
+	sf := &storeflags.Flags{Config: &pkgicbfs.StoreConfig{}}
+	sf.AddFlags(fset)
+	conn := sf.Config
 	fsName := fset.String("fs", "default", "filesystem name")
 	logSocket := fset.String("log-socket", "", "mount a drive (-drive) through the icbfs-logd daemon on this Unix socket, logging reads, writes, deletes and directory listings: the server says how to reach the store and which filesystem and directory the drive is (the store flags and -fs are then not used), and whether this machine may only read it; the mount fails without the answer")
 	driveID := fset.String("drive", "", "with -log-socket: the drive to mount (the server's id for it)")
@@ -101,14 +103,14 @@ func main() {
 		if err != nil {
 			log.Fatalf("drive %q: %v", *driveID, err)
 		}
-		*conn = creds
+		*conn, sf.TokenCommand = creds, "" // the server's credentials, as it says
 		*fsName, driveRoot, driveReadOnly = m.Filesystem, strings.TrimSuffix(m.Root, "/"), m.ReadOnly
 	}
 
-	if err := storeflags.Check(conn); err != nil {
+	if err := sf.Check(); err != nil {
 		log.Fatal(err)
 	}
-	store, err := pkgicbfs.Open(*conn)
+	store, err := sf.Open(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -123,7 +125,7 @@ func main() {
 			log.Fatal("-as-of mounts the past read-only; -notify doesn't apply")
 		}
 		*locking = false // nothing can be written, so there's nothing to lock
-		hist, err := history.Open(ctx, store, &storeflags.Flags{Config: conn})
+		hist, err := history.Open(ctx, store, sf)
 		if err != nil {
 			log.Fatal(err)
 		}
