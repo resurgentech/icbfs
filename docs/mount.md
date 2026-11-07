@@ -36,6 +36,25 @@ versioning on:
 Prefer the variables for the keys: a flag's value is visible to other
 users in the process list.
 
+### A file instead of the flags
+
+`-config FILE` takes the connection from a JSON file, `{"store":
+{...}}` as icbfs-sync's settings file has it ([sync.md](sync.md)): the
+store's `kind`, and under `s3` or `azure` the same members as the
+flags, `endpoint`, `region`, `bucket`, `accessKey` and `secretKey`, or
+`account`, `container`, `key` and `endpoint`. Other members of the
+file are ignored, so a program's own settings file serves. `-config -`
+reads it from standard input instead, for a program that starts the
+mount and holds the keys itself: they are then on no command line and
+in no environment.
+
+```
+icbfs mount -fs docs -read-only -as-of 2026-11-05T14:02 -config - /mnt/docs < keys.json
+```
+
+The file replaces the store flags and variables; a store flag given
+after it overrides that one member.
+
 ### A token command instead of the key
 
 An Azure store can be opened with tokens for a signed-in identity

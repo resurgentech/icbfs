@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
 )
 
 func TestEnvironmentThenFlags(t *testing.T) {
@@ -124,5 +127,70 @@ func TestAzureTokenCommand(t *testing.T) {
 	}
 	if _, err := f.Open(context.Background()); err == nil || !strings.Contains(err.Error(), "starting") {
 		t.Fatalf("Open with a command that doesn't start = %v", err)
+	}
+}
+
+// TestConfig: -config takes the connection from a JSON file, or from
+// standard input for "-", in place of the flags and the environment;
+// a store flag after it overrides a field; a file without a store, or
+// too large, is refused.
+func TestConfig(t *testing.T) {
+	t.Setenv("ICBFS_STORE", "s3")
+	t.Setenv("ICBFS_ACCESS_KEY", "env-access")
+	t.Setenv("ICBFS_SECRET_KEY", "env-secret")
+	dir := t.TempDir()
+	file := filepath.Join(dir, "keys.json")
+	const keys = `{"store": {"kind": "azure", "azure": {"account": "acct", "container": "docs", "key": "k"}}, "pairs": []}`
+	if err := os.WriteFile(file, []byte(keys), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parse := func(args ...string) (*pkgicbfs.StoreConfig, error) {
+		fset := flag.NewFlagSet("t", flag.ContinueOnError)
+		fset.SetOutput(io.Discard)
+		c := Add(fset)
+		return c, fset.Parse(args)
+	}
+	c, err := parse("-config", file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Kind != "azure" || c.Azure.Account != "acct" || c.Azure.Container != "docs" || c.Azure.Key != "k" || c.S3.AccessKey != "" {
+		t.Fatalf("from a file: %+v; want the file's store and nothing of the environment's", c)
+	}
+	if err := Check(c); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := parse("-config", file, "-azure-container", "other"); err != nil || c.Azure.Container != "other" || c.Azure.Key != "k" {
+		t.Fatalf("a flag after it: %+v, %v", c, err)
+	}
+
+	stdin, err := os.Open(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	was := os.Stdin
+	os.Stdin = stdin
+	defer func() { os.Stdin = was }()
+	if c, err := parse("-config", "-"); err != nil || c.Kind != "azure" || c.Azure.Key != "k" {
+		t.Fatalf("from standard input: %+v, %v", c, err)
+	}
+
+	noStore := filepath.Join(dir, "nostore.json")
+	if err := os.WriteFile(noStore, []byte(`{"pairs": []}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parse("-config", noStore); err == nil || !strings.Contains(err.Error(), `no "store"`) {
+		t.Fatalf("no store: %v", err)
+	}
+	if _, err := parse("-config", filepath.Join(dir, "missing.json")); err == nil {
+		t.Fatal("a missing file parsed")
+	}
+	big := filepath.Join(dir, "big.json")
+	if err := os.WriteFile(big, append([]byte(keys), make([]byte, maxConfig)...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parse("-config", big); err == nil || !strings.Contains(err.Error(), "too large") {
+		t.Fatalf("too large: %v", err)
 	}
 }

@@ -23,13 +23,22 @@
 // (pkg/tokencmd is the protocol):
 //
 //	-azure-token-command $ICBFS_AZURE_TOKEN_COMMAND
+//
+// Or, instead of the flags and variables, a JSON file with the
+// connection, {"store": {...}} as icbfs-sync's settings file has it, or
+// that file on standard input, for a program that starts the command
+// and holds the keys itself:
+//
+//	-config FILE, or -config -
 package storeflags
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"time"
@@ -139,6 +148,41 @@ func add(fset *flag.FlagSet, c *pkgicbfs.StoreConfig) {
 	fset.StringVar(&c.Azure.Container, "azure-container", env("ICBFS_AZURE_CONTAINER", "icbfs"), "Azure: container ($ICBFS_AZURE_CONTAINER)")
 	fset.StringVar(&c.Azure.Key, "azure-key", env("ICBFS_AZURE_KEY", ""), "Azure: the account's key ($ICBFS_AZURE_KEY)")
 	fset.StringVar(&c.Azure.Endpoint, "azure-endpoint", env("ICBFS_AZURE_ENDPOINT", ""), "Azure: blob service URL, if not https://ACCOUNT.blob.core.windows.net/ ($ICBFS_AZURE_ENDPOINT)")
+	fset.Func("config", "instead of the store flags and variables: a JSON file with the connection, {\"store\": {...}} as icbfs-sync's settings file has it (docs/sync.md), or - for that on standard input, so the keys are on no command line and in no environment. It replaces them all: give it before any store flag meant to override it", func(path string) error { return readConfig(path, c) })
+}
+
+// maxConfig bounds what -config reads: a connection is a few hundred
+// bytes.
+const maxConfig = 1 << 20
+
+// readConfig reads the store's connection from the JSON file at path, or
+// from standard input for "-", into c, replacing what it had. Its errors
+// never quote the input, which holds the store's keys.
+func readConfig(path string, c *pkgicbfs.StoreConfig) error {
+	var data []byte
+	var err error
+	if path == "-" {
+		data, err = io.ReadAll(io.LimitReader(os.Stdin, maxConfig+1))
+	} else {
+		data, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return err
+	}
+	if len(data) > maxConfig {
+		return errors.New("too large")
+	}
+	var cfg struct {
+		Store *pkgicbfs.StoreConfig `json:"store"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return err
+	}
+	if cfg.Store == nil {
+		return errors.New(`no "store"`)
+	}
+	*c = *cfg.Store
+	return nil
 }
 
 // ErrNoKeys is Check's answer when the store's credentials are missing.
