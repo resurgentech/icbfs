@@ -140,15 +140,21 @@ func (c *Credential) Close() error {
 // ask sends one request and reads one reply, starting (or restarting)
 // the command as needed. Called with mu held.
 func (c *Credential) ask(ctx context.Context, scopes []string, interactive bool) (azcore.AccessToken, error) {
+	if err := ctx.Err(); err != nil {
+		// Nothing is asked under a context that's already over: a
+		// bounded ask with no time left gets its error, not whatever
+		// the command answers meanwhile.
+		return azcore.AccessToken{}, fmt.Errorf("token command: %w", err)
+	}
 	req := Request{Version: Version, Scopes: scopes, Interactive: interactive}
 	reply, err := c.exchange(ctx, req)
-	if err != nil {
-		// A dead command gets one restart.
+	if err != nil && ctx.Err() == nil {
+		// A dead command gets one restart; a wait ctx ended doesn't.
 		c.stop()
 		reply, err = c.exchange(ctx, req)
-		if err != nil {
-			return azcore.AccessToken{}, fmt.Errorf("token command: %w", err)
-		}
+	}
+	if err != nil {
+		return azcore.AccessToken{}, fmt.Errorf("token command: %w", err)
 	}
 	if reply.Version != Version {
 		return azcore.AccessToken{}, fmt.Errorf("token command: its reply is protocol version %d, this is version %d", reply.Version, Version)
