@@ -48,6 +48,7 @@ func Main(args []string, newStore func() storeflags.Store) int {
 	conn := newStore()
 	conn.AddFlags(fset)
 	fsName := fset.String("fs", "default", "filesystem name")
+	readOnly := fset.Bool("read-only", false, "mount the live filesystem read-only: Windows refuses writes, and this mount records no access times")
 	asOf := fset.String("as-of", "", "mount read-only as the filesystem was at this time: a date (2006-01-02, meaning the end of that day), a date-time (2006-01-02T15:04:05) in local time, or RFC 3339 with a zone; or a version name (icbfs-cli names). Fails if the filesystem didn't exist yet then")
 	caseInsensitive := fset.Bool("case-insensitive", true, "look names up case-insensitively, as NTFS does; names are always stored as given")
 	history := storeflags.AddHistory(fset)
@@ -139,6 +140,9 @@ func Main(args []string, newStore func() storeflags.Store) int {
 	default:
 		return fail("-atime %q: hourly, relatime, strict or noatime", *atime)
 	}
+	if *readOnly {
+		fsys.SetAtime(icbfs.AtimeNever, false) // a read-only mount records nothing
+	}
 	var attrs uint32
 	if view != nil {
 		if err := fsys.BootstrapReadOnly(ctx); err != nil {
@@ -149,6 +153,9 @@ func Main(args []string, newStore func() storeflags.Store) int {
 		// Mounts never create a filesystem: icbfs-cli fs create, or the
 		// drive API, does.
 		return fail("filesystem %q: %v", *fsName, err)
+	}
+	if *readOnly {
+		attrs |= winfsp.FspFSAttributeReadOnlyVolume
 	}
 
 	// The metadata cache. WinFsp keeps no names of its own (every open
@@ -183,8 +190,8 @@ func Main(args []string, newStore func() storeflags.Store) int {
 		// the kernel report normalized names: "\FILE0" for a file created
 		// as "\file0" (winfsp-tests' getfileinfo_test).
 		winfsp.CasePreserveNames(true),
-		// A read-only volume for an as-of mount, so Windows itself
-		// refuses writes before they reach the driver.
+		// A read-only volume for -read-only or an as-of mount, so
+		// Windows itself refuses writes before they reach the driver.
 		winfsp.Attributes(attrs),
 		winfsp.FileInfoTimeout(fileInfoTimeout),
 	)
@@ -193,9 +200,12 @@ func Main(args []string, newStore func() storeflags.Store) int {
 	}
 	defer server.Unmount()
 
-	if view != nil {
+	switch {
+	case view != nil:
 		log.Printf("icbfs %q mounted read-only at %s as of %s (%s)", *fsName, mountpoint, view.At().Format(time.RFC3339Nano), conn)
-	} else {
+	case *readOnly:
+		log.Printf("icbfs %q mounted read-only at %s (%s)", *fsName, mountpoint, conn)
+	default:
 		log.Printf("icbfs %q mounted at %s (%s)", *fsName, mountpoint, conn)
 	}
 	log.Println(winfspAttribution)

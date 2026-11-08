@@ -104,6 +104,7 @@ the example of one.
 | flag | default | meaning |
 |---|---|---|
 | `-fs` | `default` | the filesystem to mount |
+| `-read-only` | | mount the live filesystem read-only. The operating system refuses writes, and the mount records no access times. Other machines' changes still show, which is the difference from `-as-of`. |
 | `-as-of` | | mount read-only as the filesystem was at a past time or named version (below) |
 | `-cache-dir` | a new temp directory | where open files and the read cache are kept |
 | `-cache-size` | 512 MiB | the read cache's limit |
@@ -183,7 +184,6 @@ Linux-only flags:
 | `-locking=false` | refuse `flock`/`fcntl` (ENOSYS), and ignore locks others hold. By default they're locks shared with every other mount and with programs using the drive library (see [architecture.md](architecture.md#locking)), which costs a read of the file's `.lock` object per flush. |
 | `-meta-cache D` | how long the kernel trusts names and attributes (above): `5s` by default, a day for `-as-of`, `0` for not at all |
 | `-notify` | MinIO change notifications: a lock wait retries as soon as the lock changes |
-| `-read-only` | mount read-only |
 | `-dev`, `-suid` | honour device nodes, and setuid and setgid bits on executables (as root). Off by default, as on every FUSE mount: anyone who can write the filesystem, from any machine, could plant a device node or a setuid binary. |
 | `-noexec` | don't allow executing files from the mount |
 | `-atime MODE` | when reads record access times: `relatime` (the default, as Linux's: when the recorded one is no newer than the last change, or a day old), `strict` (every read) or `noatime` (never) |
@@ -233,6 +233,7 @@ unmount.
 
 | flag | default | meaning |
 |---|---|---|
+| `-read-only` | off | mount the live filesystem read-only. Windows refuses writes, and this mount records no access times. |
 | `-case-insensitive` | `true` | look names up case-insensitively, as NTFS does. Names are always stored as given. |
 | `-atime MODE` | `hourly` | when reads and folder listings record access times: `hourly` (when the recorded one is over an hour old, as NTFS does when it keeps access times at all), `relatime`, `strict` (every read and listing: a store write each) or `noatime` (never, as most Windows machines since 1803, which turn access times off on volumes over 128 GB). `-nodiratime` leaves folders' alone. |
 | `-meta-cache D` | `5s` (for `-as-of`, file and folder details without limit, names a day) | how long names and file and folder details are trusted, as on Linux (above): another machine's renames, creates, deletes and attribute changes can take this long to show in a listing or a file's properties; an open still reads its name and content from the store. `0` trusts nothing. |
