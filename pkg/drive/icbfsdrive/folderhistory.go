@@ -257,12 +257,23 @@ func (d *Drive) repairLateFolder(ctx context.Context, dirKey string, at time.Tim
 	added, removed := diffEntries(states[len(states)-1].Entries, current)
 	apply := func(entries []block.Entry) []block.Entry {
 		out := []block.Entry{}
+		have := map[string]bool{}
 		for _, e := range entries {
 			if _, gone := removed[e.Name]; !gone {
 				out = append(out, e)
+				have[e.Name] = true
 			}
 		}
-		return append(out, added...)
+		// A later state may already list a name the late create also
+		// adds: that state kept the previous occupant. Appending again
+		// is the same name twice, which the directory refuses. The
+		// occupant stays; states that lack the name gain it.
+		for _, a := range added {
+			if !have[a.Name] {
+				out = append(out, a)
+			}
+		}
+		return out
 	}
 	var fixed []icbfs.DirState
 	var before []block.Entry
