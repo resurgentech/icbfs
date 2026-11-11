@@ -286,6 +286,7 @@ msiexec /i icbfs-X.Y.Z-x64.msi ACCOUNT=mystorage CONTAINER=icbfs FILESYSTEM=defa
 | `CONTAINER` | `icbfs` | the container |
 | `FILESYSTEM` | `default` | the filesystem in it |
 | `DRIVELETTER` | `I` | the drive |
+| `READONLY` | none | `1` mounts it read-only (`-read-only`, above); `0` on an upgrade turns that off again |
 
 They are kept in the registry, so a repair or an upgrade without them
 keeps what was given before. A silent install (`/qn`) needs an
@@ -293,7 +294,8 @@ administrator's prompt; a double-clicked one asks.
 
 **The sign-in task**, `icbfs mount`, runs `icbfs-winfsp -store azure
 -azure-account ACCOUNT -azure-container CONTAINER -fs FILESYSTEM
-DRIVELETTER:` when any member of Users signs in, as that user, in
+DRIVELETTER:` (with `-read-only` before the drive when `READONLY=1`)
+when any member of Users signs in, as that user, in
 their own session, with no time limit. It runs as the user because the
 drive is theirs (a drive letter is visible only in the session that
 mounted it) and because a token command may have to sign them in. It
@@ -322,7 +324,8 @@ fails at sign-in says why there.
 is the contract for a package that needs icbfs installed first:
 `InstallDir` (REG_SZ, the install folder, with its trailing backslash)
 is there exactly while icbfs is installed, with `Version` and the
-settings above (`Account`, `Container`, `Filesystem`, `DriveLetter`)
+settings above (`Account`, `Container`, `Filesystem`, `DriveLetter`,
+`ReadOnly`)
 beside it. Uninstalling removes the key, the task and the files, and
 leaves WinFsp.
 

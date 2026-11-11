@@ -90,3 +90,14 @@ if (Test-Path HKLM:\SOFTWARE\resurgentech\icbfs) { throw 'the registry key is st
 if (Get-ScheduledTask -TaskName 'icbfs mount' -ErrorAction SilentlyContinue) { throw 'the task is still there' }
 if (Test-Path 'C:\Program Files\icbfs') { throw 'the install folder is still there' }
 "gone: the files, the task and the registry key"
+
+"--- READONLY=1, kept by a repair without it"
+Run-Msiexec "/i `"$Msi`" ACCOUNT=example READONLY=1"
+$key = Get-ItemProperty HKLM:\SOFTWARE\resurgentech\icbfs
+Check 'ReadOnly' $key.ReadOnly '1'
+$ro = '-store azure -azure-account "example" -azure-container "icbfs" -fs "default" -read-only I:'
+Check 'read-only task arguments' (Get-ScheduledTask -TaskName 'icbfs mount').Actions[0].Arguments $ro
+Run-Msiexec "/fa `"$Msi`""
+Check 'read-only task arguments after repair' (Get-ScheduledTask -TaskName 'icbfs mount').Actions[0].Arguments $ro
+Run-Msiexec "/x `"$Msi`""
+if (Get-ScheduledTask -TaskName 'icbfs mount' -ErrorAction SilentlyContinue) { throw 'the read-only task is still there' }

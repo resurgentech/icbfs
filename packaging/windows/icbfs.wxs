@@ -35,14 +35,16 @@
 
     <!-- The settings, as installer properties (msiexec /i icbfs.msi
          ACCOUNT=... ): an Azure storage account, its container, the
-         filesystem in it, and the drive letter. They are kept in the
-         registry, so a repair or an upgrade without them keeps the
-         ones given before. Without ACCOUNT nothing is mounted at
-         sign-in, and the task isn't registered. -->
+         filesystem in it, the drive letter, and READONLY=1 for a
+         read-only mount. They are kept in the registry, so a repair or
+         an upgrade without them keeps the ones given before. Without
+         ACCOUNT nothing is mounted at sign-in, and the task isn't
+         registered. -->
     <Property Id="ACCOUNT" Secure="yes" />
     <Property Id="CONTAINER" Secure="yes" />
     <Property Id="FILESYSTEM" Secure="yes" />
     <Property Id="DRIVELETTER" Secure="yes" />
+    <Property Id="READONLY" Secure="yes" />
     <Property Id="SAVED_ACCOUNT">
       <RegistrySearch Root="HKLM" Key="SOFTWARE\resurgentech\icbfs" Name="Account" Type="raw" />
     </Property>
@@ -55,10 +57,14 @@
     <Property Id="SAVED_DRIVELETTER">
       <RegistrySearch Root="HKLM" Key="SOFTWARE\resurgentech\icbfs" Name="DriveLetter" Type="raw" />
     </Property>
+    <Property Id="SAVED_READONLY">
+      <RegistrySearch Root="HKLM" Key="SOFTWARE\resurgentech\icbfs" Name="ReadOnly" Type="raw" />
+    </Property>
     <SetProperty Id="ACCOUNT" Value="[SAVED_ACCOUNT]" After="AppSearch" Condition="NOT ACCOUNT AND SAVED_ACCOUNT" />
     <SetProperty Id="CONTAINER" Value="[SAVED_CONTAINER]" After="AppSearch" Condition="NOT CONTAINER AND SAVED_CONTAINER" />
     <SetProperty Id="FILESYSTEM" Value="[SAVED_FILESYSTEM]" After="AppSearch" Condition="NOT FILESYSTEM AND SAVED_FILESYSTEM" />
     <SetProperty Id="DRIVELETTER" Value="[SAVED_DRIVELETTER]" After="AppSearch" Condition="NOT DRIVELETTER AND SAVED_DRIVELETTER" />
+    <SetProperty Id="READONLY" Value="[SAVED_READONLY]" After="AppSearch" Condition="NOT READONLY AND SAVED_READONLY" />
     <!-- The defaults, once the saved values have had their chance. -->
     <SetProperty Id="CONTAINER" Action="DefaultCONTAINER" Value="icbfs" After="AppSearch" Condition="NOT CONTAINER AND NOT SAVED_CONTAINER" />
     <SetProperty Id="FILESYSTEM" Action="DefaultFILESYSTEM" Value="default" After="AppSearch" Condition="NOT FILESYSTEM AND NOT SAVED_FILESYSTEM" />
@@ -107,6 +113,7 @@
           <RegistryValue Name="Container" Type="string" Value="[CONTAINER]" />
           <RegistryValue Name="Filesystem" Type="string" Value="[FILESYSTEM]" />
           <RegistryValue Name="DriveLetter" Type="string" Value="[DRIVELETTER]" />
+          <RegistryValue Name="ReadOnly" Type="string" Value="[READONLY]" />
         </RegistryKey>
       </Component>
     </ComponentGroup>
@@ -116,7 +123,11 @@
          go. Deferred, as the machine, without a window (WixQuietExec).
          The command lines are the custom actions' data. -->
     <SetProperty Id="RegisterTask" Sequence="execute" Before="RegisterTask"
-                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]mount-task.ps1&quot; -Register -Exe &quot;[INSTALLFOLDER]icbfs-winfsp.exe&quot; -Account &quot;[ACCOUNT]&quot; -Container &quot;[CONTAINER]&quot; -Filesystem &quot;[FILESYSTEM]&quot; -DriveLetter &quot;[DRIVELETTER]&quot;" />
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]mount-task.ps1&quot; -Register -Exe &quot;[INSTALLFOLDER]icbfs-winfsp.exe&quot; -Account &quot;[ACCOUNT]&quot; -Container &quot;[CONTAINER]&quot; -Filesystem &quot;[FILESYSTEM]&quot; -DriveLetter &quot;[DRIVELETTER]&quot; [READONLYSWITCH]" />
+    <!-- A switch, not -ReadOnly "": Windows PowerShell's -File drops an
+         empty argument and then misreads the line. -->
+    <SetProperty Id="READONLYSWITCH" Value="-ReadOnly" Sequence="execute" Before="SetRegisterTask"
+                 Condition="READONLY=&quot;1&quot;" />
     <SetProperty Id="UnregisterTask" Sequence="execute" Before="UnregisterTask"
                  Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]mount-task.ps1&quot; -Unregister" />
     <SetProperty Id="RollbackRegisterTask" Sequence="execute" Before="RollbackRegisterTask"

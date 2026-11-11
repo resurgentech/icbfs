@@ -9,10 +9,11 @@ This package installed, under this folder:
 
 and, when an account was given at install (msiexec /i icbfs.msi
 ACCOUNT=...), a scheduled task, "icbfs mount", that mounts the drive
-when a user signs in. The task runs as the signing-in user, in their
-own session. It needs the user's credential for the storage account:
-ICBFS_AZURE_KEY in their environment, or a token command the machine
-provides (ICBFS_AZURE_TOKEN_COMMAND). The package holds no key. The
+when a user signs in, read-only when READONLY=1 was given. The task
+runs as the signing-in user, in their own session. It needs the user's
+credential for the storage account: ICBFS_AZURE_KEY in their
+environment, or a token command the machine provides
+(ICBFS_AZURE_TOKEN_COMMAND). The package holds no key. The
 mount's log is %LOCALAPPDATA%\icbfs\icbfs-winfsp.log.
 
 WinFsp, the file system driver icbfs-winfsp uses, is installed

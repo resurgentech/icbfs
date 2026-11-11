@@ -3,7 +3,7 @@
 # installer runs this as the machine, from the install folder;
 # docs/mount.md, "The Windows package", says what the task does.
 #
-#   mount-task.ps1 -Register -Exe 'C:\Program Files\icbfs\icbfs-winfsp.exe' -Account ACCOUNT [-Container icbfs] [-Filesystem default] [-DriveLetter I]
+#   mount-task.ps1 -Register -Exe 'C:\Program Files\icbfs\icbfs-winfsp.exe' -Account ACCOUNT [-Container icbfs] [-Filesystem default] [-DriveLetter I] [-ReadOnly]
 #   mount-task.ps1 -Unregister
 #
 # The task runs in the signing-in user's own session (the drive is
@@ -19,7 +19,8 @@ param(
   [string]$Account,
   [string]$Container = 'icbfs',
   [string]$Filesystem = 'default',
-  [string]$DriveLetter = 'I'
+  [string]$DriveLetter = 'I',
+  [switch]$ReadOnly
 )
 $ErrorActionPreference = 'Stop'
 $name = 'icbfs mount'
@@ -42,7 +43,8 @@ if ($letter -notmatch '^[A-Za-z]$') {
   exit 2
 }
 
-$arguments = "-store azure -azure-account `"$Account`" -azure-container `"$Container`" -fs `"$Filesystem`" ${letter}:"
+$ro = if ($ReadOnly) { ' -read-only' } else { '' }
+$arguments = "-store azure -azure-account `"$Account`" -azure-container `"$Container`" -fs `"$Filesystem`"$ro ${letter}:"
 $action = New-ScheduledTaskAction -Execute $Exe -Argument $arguments
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $principal = New-ScheduledTaskPrincipal -GroupId 'BUILTIN\Users' -RunLevel Limited
@@ -51,5 +53,5 @@ $principal = New-ScheduledTaskPrincipal -GroupId 'BUILTIN\Users' -RunLevel Limit
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) `
   -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances Parallel -StartWhenAvailable
 Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Principal $principal -Settings $settings `
-  -Description "Mounts the icbfs filesystem '$Filesystem' (account $Account, container $Container) as drive ${letter}: at sign-in. Installed by icbfs; removed with it." `
+  -Description "Mounts the icbfs filesystem '$Filesystem' (account $Account, container $Container) as drive ${letter}:$(if ($ReadOnly) { ', read-only,' }) at sign-in. Installed by icbfs; removed with it." `
   -Force | Out-Null
