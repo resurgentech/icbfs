@@ -780,6 +780,9 @@ func (d *Drive) Move(ctx context.Context, from drive.ItemRef, to string, replace
 	}
 	d.changed(parentNode(src))
 	d.changed(parent)
+	// Origin records still name the old path; this keeps FindByOrigin
+	// from searching the whole tree for the item after the move.
+	d.idPaths.moved(src.key, src.path, joinPath(parent.path, name), src.typ == icbfs.TypeDir)
 	return d.statItem(ctx, joinPath(parent.path, name))
 }
 

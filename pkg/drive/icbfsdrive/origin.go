@@ -114,7 +114,18 @@ func (d *Drive) FindByOrigin(ctx context.Context, originDrive, originID string) 
 		it.Alias = originID
 		return it, nil, nil
 	}
-	if p, ok := d.drivePath(rec.Path); ok {
+	recPath, recOK := d.drivePath(rec.Path)
+	if recOK {
+		if n, err := d.resolvePath(ctx, d.fs, recPath); err == nil && n.key == rec.ItemID {
+			if err := d.check(ctx, n, needRead); err != nil {
+				return drive.Item{}, nil, err
+			}
+			return found(d.item(ctx, n, true))
+		}
+	}
+	// Where this drive last saw the item, if it moved it since: no search,
+	// and no look in the trash first.
+	if p, ok := d.idPaths.get(rec.ItemID); ok && !(recOK && p == recPath) {
 		if n, err := d.resolvePath(ctx, d.fs, p); err == nil && n.key == rec.ItemID {
 			if err := d.check(ctx, n, needRead); err != nil {
 				return drive.Item{}, nil, err

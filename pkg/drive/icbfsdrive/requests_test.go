@@ -276,3 +276,56 @@ func TestRequestsPerOperation(t *testing.T) {
 		})
 	}
 }
+
+// TestFindByOriginAfterMove: an item moved through the drive is found by
+// its origin without a search of the tree, though its origin record
+// still names where it was (a mirror's fold renames an item its members'
+// records were written for). The lookup costs the same in a tree of a
+// few folders as in one of twenty more: a file moved, and a file whose
+// folder moved.
+func TestFindByOriginAfterMove(t *testing.T) {
+	store := &requestCounter{Store: miniotest.Store(t), n: map[string]int{}}
+	d := newDriveWith(t, store, icbfs.Settings{Name: "moved", Size: 1 << 30, RootMode: 0o777}, Config{})
+	ctx := system()
+	setOrigin := func(p, id string) {
+		t.Helper()
+		if err := d.SetOrigin(ctx, drive.ByPath(p), drive.Origin{Drive: srcDrive, ID: id, Version: "1"}); err != nil {
+			t.Fatalf("set origin %s: %v", p, err)
+		}
+	}
+	move := func(from, to string) {
+		t.Helper()
+		if _, err := d.Move(ctx, drive.ByPath(from), to, false); err != nil {
+			t.Fatalf("move %s: %v", from, err)
+		}
+	}
+	lookup := func(id, want string) int {
+		t.Helper()
+		store.take()
+		it, _, err := d.FindByOrigin(ctx, srcDrive, id)
+		if err != nil || it.Path != want {
+			t.Fatalf("FindByOrigin(%s): %q, %v; want %q", id, it.Path, err, want)
+		}
+		n, _ := store.take()
+		return n
+	}
+	round := func(r int) (file, inFolder int) {
+		write(t, ctx, d, fmt.Sprintf("/in%d/f.txt", r), "f", drive.Condition{})
+		setOrigin(fmt.Sprintf("/in%d/f.txt", r), fmt.Sprintf("f%d", r))
+		write(t, ctx, d, fmt.Sprintf("/out%d/keep.txt", r), "k", drive.Condition{})
+		move(fmt.Sprintf("/in%d/f.txt", r), fmt.Sprintf("/out%d/f.txt", r))
+		write(t, ctx, d, fmt.Sprintf("/dir%d/g.txt", r), "g", drive.Condition{})
+		setOrigin(fmt.Sprintf("/dir%d/g.txt", r), fmt.Sprintf("g%d", r))
+		move(fmt.Sprintf("/dir%d", r), fmt.Sprintf("/moved%d", r))
+		return lookup(fmt.Sprintf("f%d", r), fmt.Sprintf("/out%d/f.txt", r)),
+			lookup(fmt.Sprintf("g%d", r), fmt.Sprintf("/moved%d/g.txt", r))
+	}
+	file0, folder0 := round(0)
+	for j := range 20 {
+		write(t, ctx, d, fmt.Sprintf("/pad%02d/x.txt", j), "x", drive.Condition{})
+	}
+	file1, folder1 := round(1)
+	if file1 != file0 || folder1 != folder0 {
+		t.Errorf("found after a move: a file in %d requests, then %d with 20 more folders; a file whose folder moved in %d, then %d", file0, file1, folder0, folder1)
+	}
+}

@@ -504,8 +504,24 @@ func (c *idPathCache) get(id string) (string, bool) {
 func (c *idPathCache) put(id, p string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.m == nil || len(c.m) > 100000 {
+	if c.m == nil || len(c.m) > 500000 {
 		c.m = map[string]string{}
 	}
 	c.m[id] = p
+}
+
+// moved notes that id went from one path to another, and so did what it
+// held: a directory's remembered descendants move with it.
+func (c *idPathCache) moved(id, from, to string, dir bool) {
+	c.put(id, to)
+	if !dir {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k, p := range c.m {
+		if rest, ok := strings.CutPrefix(p, from+"/"); ok {
+			c.m[k] = joinPath(to, rest)
+		}
+	}
 }
