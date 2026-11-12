@@ -220,8 +220,8 @@ WinFsp supports Windows 7 through 11 on x86, x64 and ARM64. icbfs is
 tested on Windows Server 2025 and Windows 11, x64. The ARM64 package is
 checked on the x64 test VM (`just package-test`, `packaging/windows/package-test.sh X.Y.Z arm64`)
 only to the extent that Windows refuses to install it there and its two
-commands are ARM64 executables; installing and running it is checked on
-an ARM64 machine, by the same script.
+commands are ARM64 executables. Installing and running it is checked by
+the same script on an ARM64 machine, and that has not been done yet.
 
 ### Mount
 
