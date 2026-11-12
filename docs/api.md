@@ -611,7 +611,10 @@ defer d.Close()
 
 - `pkg/icbfs` opens a store (`Open`, or `OpenS3` and `OpenAzure`; an
   Azure container with a token credential the host holds rather than the
-  account's key, `OpenAzureWithCredential`) and administers its
+  account's key, `OpenAzureWithCredential`; either kind with an
+  `*http.Client` of the host's own sending every request,
+  `OpenWith(c, Options{HTTPClient: ...})`, for a host that decides which
+  addresses its process may connect to) and administers its
   filesystems: `CreateFilesystem`, `ListFilesystems`,
   `DescribeFilesystem` (with the bytes used), `Resize`, `Archive` and
   `Prune` (archived filesystems only). `DefaultSettings(name)` is a

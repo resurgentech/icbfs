@@ -7,6 +7,7 @@ package icbfs
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -69,11 +70,28 @@ const (
 
 // Open opens c's store.
 func Open(c StoreConfig) (Store, error) {
+	return OpenWith(c, Options{})
+}
+
+// Options are a host application's own choices for a store it opens.
+type Options struct {
+	// HTTPClient sends every request to the store, of either kind, instead
+	// of the SDK's own client: a host that decides which addresses its
+	// process may connect to gives one whose dialer checks. Nil is the
+	// SDK's own.
+	HTTPClient *http.Client
+}
+
+// OpenWith opens c's store as Open does, with o.
+func OpenWith(c StoreConfig, o Options) (Store, error) {
 	switch c.Kind {
 	case "", KindS3:
-		return OpenS3(c.S3), nil
+		return openS3(c.S3, o), nil
 	case KindAzure:
-		return OpenAzure(c.Azure)
+		if o.HTTPClient == nil {
+			return OpenAzure(c.Azure)
+		}
+		return azurestore.NewWithTransport(c.Azure.ServiceURL(), c.Azure.Account, c.Azure.Key, c.Azure.Container, o.HTTPClient)
 	}
 	return nil, fmt.Errorf("store kind %q: %s or %s", c.Kind, KindS3, KindAzure)
 }
@@ -95,17 +113,24 @@ func OpenAzureWithCredential(c Azure, cred azcore.TokenCredential) (Store, error
 
 // OpenS3 opens a bucket over the S3 API.
 func OpenS3(c S3) Store {
+	return openS3(c, Options{})
+}
+
+func openS3(c S3, o Options) Store {
 	region := c.Region
 	if region == "" {
 		region = "us-east-1"
 	}
-	client := s3.New(s3.Options{
+	opts := s3.Options{
 		Region:       region,
 		BaseEndpoint: aws.String(c.Endpoint),
 		UsePathStyle: true,
 		Credentials:  awscreds.NewStaticCredentialsProvider(c.AccessKey, c.SecretKey, ""),
-	})
-	return s3store.New(client, c.Bucket)
+	}
+	if o.HTTPClient != nil {
+		opts.HTTPClient = o.HTTPClient
+	}
+	return s3store.New(s3.New(opts), c.Bucket)
 }
 
 // CreateFilesystem creates a filesystem with every setting given.
