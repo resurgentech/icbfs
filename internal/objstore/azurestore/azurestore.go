@@ -72,11 +72,21 @@ const (
 // serviceURL (https://ACCOUNT.blob.core.windows.net/, or Azurite's
 // http://HOST:PORT/ACCOUNT/), with the account's shared key.
 func New(serviceURL, account, key, containerName string) (*Store, error) {
+	return NewWithTransport(serviceURL, account, key, containerName, nil)
+}
+
+// NewWithTransport is New with every request sent by transport (an
+// *http.Client, say) instead of the SDK's own; nil is the SDK's own.
+func NewWithTransport(serviceURL, account, key, containerName string, transport policy.Transporter) (*Store, error) {
 	cred, err := azblob.NewSharedKeyCredential(account, key)
 	if err != nil {
 		return nil, err
 	}
-	svc, err := azblob.NewClientWithSharedKeyCredential(serviceURL, cred, nil)
+	var opts *azblob.ClientOptions
+	if transport != nil {
+		opts = &azblob.ClientOptions{ClientOptions: azcore.ClientOptions{Transport: transport}}
+	}
+	svc, err := azblob.NewClientWithSharedKeyCredential(serviceURL, cred, opts)
 	if err != nil {
 		return nil, err
 	}
