@@ -217,7 +217,11 @@ own tools (`winfsp-tests`, `launchctl`) need it. If you add it, restart any
 service that should see the change, such as `sshd`.
 
 WinFsp supports Windows 7 through 11 on x86, x64 and ARM64. icbfs is
-tested on Windows Server 2025 and Windows 11, x64.
+tested on Windows Server 2025 and Windows 11, x64. The ARM64 package is
+checked on the x64 test VM (`just package-test`, `packaging/windows/package-test.sh X.Y.Z arm64`)
+only to the extent that Windows refuses to install it there and its two
+commands are ARM64 executables; installing and running it is checked on
+an ARM64 machine, by the same script.
 
 ### Mount
 
@@ -346,6 +350,9 @@ as the Windows machine:
 just package 0.1.1     # this working tree as 0.1.1, unsigned, into dist/icbfs-0.1.1-{x64,arm64}.msi
 just package           # HEAD's tag vX.Y.Z, from a clean checkout of it
 just package-test      # installs, checks, repairs and uninstalls dist/icbfs-X.Y.Z-x64.msi on the VM
+packaging/windows/package-test.sh X.Y.Z arm64
+                       # on an x64 VM: the ARM64 MSI is refused (1633), installs nothing, its commands are ARM64 PEs;
+                       # on an ARM64 VM: the full check, as for x64
 ```
 
 `ICBFS_CODESIGN_PFX` (a PFX file; `ICBFS_CODESIGN_PASSWORD` its
