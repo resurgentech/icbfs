@@ -88,6 +88,30 @@ a stub holding no bytes, and streams the bytes only when the drive
 answers `ErrRefUnavailable`; between drives it streams them. **Diff** is the library's own too: `drive.Diff(ctx, d, item, from,
 to) (string, error)`, a unified diff of two versions of a text file.
 
+**Walking a tree** a folder at a time: `drive.Walk(ctx, d, dir,
+WalkOptions{At, Depth, Sort}, fn)` calls `fn(folder ItemRef, items
+[]Item)` for `dir` and then for each folder below it, `Depth` levels
+down (0, the default, is all; 1 is `dir`'s own items), a folder before
+the folders in it, with that folder's items sorted as `List` sorts
+(`Sort`: name, modified or size), and none for an empty folder. An
+error from `fn` stops the walk and `Walk` returns it. Items, `At` and
+permissions are `List`'s: a folder the profile may not list is an item
+in its parent's but gets no call, and `dir` itself is `ErrForbidden`.
+A drive that is a `drive.Walker` (`Walk(ctx, dir, opts, fn)`; the icbfs
+drive is one) holds one folder at a time: what it built for a folder,
+the items and what it read to make them, is released before it lists
+the next, so a tree of any size is walked in the memory its largest
+folder needs. The icbfs drive goes depth first, into a folder's folders
+in the order its items are sorted, and keeps nothing of a folder
+waiting its turn but its key, its path and, on a primary-Windows
+filesystem, the security descriptor its items inherit. For any other
+drive `drive.Walk` falls back to one `List` of the whole depth (a page
+at a time) and hands `fn` its items grouped by folder, folders in path
+order: the same items, but the whole tree in memory at once, and a
+folder the profile may not list given as an empty one. `fn` may keep
+the items it is given; the walk doesn't. On icbfs, `List` with a depth
+is that walk, its items then sorted together and paged.
+
 `WriteOptions.ModTime`, `WriteOptions.Created` and `WriteOptions.Origin`
 set a file's modified and creation times at its source and where it was
 copied from in the same write, instead of a `SetTimes` and a `SetOrigin`
@@ -664,6 +688,8 @@ the profile may not see are left out of listings.
   dir, symlink), size, content type, current version (time and ID),
   modified, changed and created times, checksums when computed, and
   whether anyone has a draft of it.
+- `drive.Walk` gives a tree's items a folder at a time, in the memory of
+  its largest folder on a `drive.Walker` (above, "Walking a tree").
 - `Stat` is one item, with every path to it (hard links), its parent,
   its owner, and the actor's effective rights on it: read, write,
   delete, change permissions.

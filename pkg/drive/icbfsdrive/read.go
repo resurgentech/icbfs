@@ -1,102 +1,37 @@
 package icbfsdrive
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/resurgentech/icbfs/internal/acl"
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/pkg/drive"
 )
 
-// List lists a directory, Depth levels down, sorted, a page at a time.
+// List lists a directory, Depth levels down, sorted, a page at a time:
+// the items Walk gives, sorted together.
 func (d *Drive) List(ctx context.Context, ref drive.ItemRef, opts drive.ListOptions) (drive.Page, error) {
-	fsys, err := d.at(ctx, opts.At)
-	if err != nil {
-		return drive.Page{}, err
-	}
-	dir, err := d.resolve(ctx, fsys, ref)
-	if err != nil {
-		return drive.Page{}, err
-	}
-	if dir.typ != icbfs.TypeDir {
-		return drive.Page{}, drive.ErrNotDir
-	}
 	depth := opts.Depth
 	if depth < 1 {
 		depth = 1
 	}
-	var nodes []*node
-	var walk func(dir *node, level int) error
-	walk = func(dir *node, level int) error {
-		if ok, err := d.allowed(ctx, dir, needRead); err != nil {
-			return err
-		} else if !ok {
-			if level == 1 {
-				return fmt.Errorf("%s: %w", dir.path, drive.ErrForbidden)
-			}
-			return nil // a subdirectory the profile can't list: left out
-		}
-		entries, err := fsys.ReadDir(ctx, dir.key)
-		if err != nil {
-			return mapErr(err)
-		}
-		children := make([]*node, len(entries))
-		chain := append(append([]ancestor(nil), dir.chain...), ancestor{key: dir.key, path: dir.path, attr: dir.attr})
-		var wg sync.WaitGroup
-		sem := make(chan struct{}, 16)
-		for i, e := range entries {
-			if !visible(e.Type) {
-				continue
-			}
-			wg.Add(1)
-			sem <- struct{}{}
-			go func(i int, name, key string, typ icbfs.EntryType) {
-				defer wg.Done()
-				defer func() { <-sem }()
-				a, err := fsys.Stat(ctx, key, typ)
-				if err != nil {
-					return
-				}
-				children[i] = &node{fsys: fsys, key: key, typ: typ, name: name, path: joinPath(dir.path, name), attr: a, chain: chain}
-			}(i, e.Name, e.UUID, e.Type)
-		}
-		wg.Wait()
-		for _, c := range children {
-			if c == nil {
-				continue
-			}
-			nodes = append(nodes, c)
-			if c.typ == icbfs.TypeDir && level < depth {
-				if err := walk(c, level+1); err != nil {
-					return err
-				}
-			}
-		}
+	var items []drive.Item
+	err := d.walk(ctx, ref, drive.WalkOptions{At: opts.At, Depth: depth}, false, func(_ drive.ItemRef, its []drive.Item) error {
+		items = append(items, its...)
 		return nil
-	}
-	if err := walk(dir, 1); err != nil {
+	})
+	if err != nil {
 		return drive.Page{}, err
 	}
-
-	items := make([]drive.Item, len(nodes))
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 16)
-	for i, n := range nodes {
-		wg.Add(1)
-		sem <- struct{}{}
-		go func(i int, n *node) {
-			defer wg.Done()
-			defer func() { <-sem }()
-			items[i] = d.item(ctx, n, true)
-		}(i, n)
-	}
-	wg.Wait()
 	sortItems(items, opts.Sort)
 
 	start := 0
@@ -118,6 +53,167 @@ func (d *Drive) List(ctx context.Context, ref drive.ItemRef, opts drive.ListOpti
 		page.Items = []drive.Item{}
 	}
 	return page, nil
+}
+
+var _ drive.Walker = (*Drive)(nil)
+
+// Walk walks the tree at ref one folder at a time (drive.Walker): depth
+// first, a folder's items to fn and then each folder in it, in the
+// order its items are sorted. What it built for a folder is gone before
+// it lists the next: a folder waiting its turn is a key, a path, and
+// on a primary-Windows drive the security descriptor its items would
+// inherit.
+func (d *Drive) Walk(ctx context.Context, ref drive.ItemRef, opts drive.WalkOptions, fn drive.WalkFunc) error {
+	return d.walk(ctx, ref, opts, true, fn)
+}
+
+// walkDir is a folder waiting its turn in a walk: what listing it and
+// checking its items need, and none of its attributes but the security
+// descriptor an item in it with none of its own takes (sdOf): its own,
+// or its nearest ancestor's (nil on a primary-POSIX drive, where an
+// item's own attributes decide).
+type walkDir struct {
+	key, path string
+	level     int // 1 for the folder walked
+	inherit   []byte
+}
+
+// walk is Walk; sortEach sorts each folder's items for fn (List sorts
+// them all together instead).
+func (d *Drive) walk(ctx context.Context, ref drive.ItemRef, opts drive.WalkOptions, sortEach bool, fn drive.WalkFunc) error {
+	fsys, err := d.at(ctx, opts.At)
+	if err != nil {
+		return err
+	}
+	dir, err := d.resolve(ctx, fsys, ref)
+	if err != nil {
+		return err
+	}
+	if dir.typ != icbfs.TypeDir {
+		return drive.ErrNotDir
+	}
+	if ok, err := d.allowed(ctx, dir, needRead); err != nil {
+		return err
+	} else if !ok {
+		return fmt.Errorf("%s: %w", dir.path, drive.ErrForbidden)
+	}
+	depth := opts.Depth
+	if depth < 1 {
+		depth = math.MaxInt
+	}
+	stack := []walkDir{{key: dir.key, path: dir.path, level: 1, inherit: d.inheritedSDDL(dir)}}
+	dir = nil
+	for len(stack) > 0 {
+		f := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		items, subs, err := d.walkFolder(ctx, fsys, f, f.level < depth)
+		if err != nil {
+			return err
+		}
+		if sortEach {
+			sortItems(items, opts.Sort)
+		}
+		next := make([]walkDir, 0, len(subs))
+		for _, it := range items {
+			if s, ok := subs[it.ID]; ok {
+				next = append(next, s)
+			}
+		}
+		subs = nil
+		if err := fn(drive.ItemRef{ID: f.key, Path: f.path}, items); err != nil {
+			return err
+		}
+		for i := len(next) - 1; i >= 0; i-- {
+			stack = append(stack, next[i])
+		}
+	}
+	return nil
+}
+
+// walkFolder is folder f's items, built 16 at a time, and when descend,
+// the folders in it the profile may list, by key. Its items' nodes
+// share one parent: f's key and path, and for the permission checks
+// only the descriptor they'd inherit; none carries its ancestors'
+// attributes, and all are gone when it returns.
+func (d *Drive) walkFolder(ctx context.Context, fsys *icbfs.Filesystem, f walkDir, descend bool) ([]drive.Item, map[string]walkDir, error) {
+	entries, err := fsys.ReadDir(ctx, f.key)
+	if err != nil {
+		return nil, nil, mapErr(err)
+	}
+	parent := []ancestor{{key: f.key, path: f.path, attr: icbfs.Attr{WindowsSDDL: f.inherit}}}
+	items := make([]drive.Item, len(entries))
+	built := make([]bool, len(entries))
+	subs := make([]*walkDir, len(entries))
+	errs := make([]error, len(entries))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 16)
+	for i, e := range entries {
+		if !visible(e.Type) {
+			continue
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, name, key string, typ icbfs.EntryType) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			a, err := fsys.Stat(ctx, key, typ)
+			if err != nil {
+				return
+			}
+			n := &node{fsys: fsys, key: key, typ: typ, name: name, path: joinPath(f.path, name), attr: a, chain: parent}
+			items[i], built[i] = d.item(ctx, n, true), true
+			if descend && typ == icbfs.TypeDir {
+				ok, err := d.allowed(ctx, n, needRead)
+				switch {
+				case err != nil:
+					errs[i] = err
+				case ok: // one the profile can't list is left out
+					subs[i] = &walkDir{key: key, path: n.path, level: f.level + 1, inherit: d.inheritedSDDL(n)}
+				}
+			}
+		}(i, e.Name, e.UUID, e.Type)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	out := items[:0]
+	next := map[string]walkDir{}
+	for i := range items {
+		if !built[i] {
+			continue
+		}
+		out = append(out, items[i])
+		if subs[i] != nil {
+			next[subs[i].key] = *subs[i]
+		}
+	}
+	clear(items[len(out):])
+	return out, next, nil
+}
+
+// inheritedSDDL is the security descriptor an item in directory n with
+// none of its own takes, as sdOf finds it: n's own, or its nearest
+// ancestor's, the first that parses. nil on a primary-POSIX drive.
+func (d *Drive) inheritedSDDL(n *node) []byte {
+	if !d.windows {
+		return nil
+	}
+	if sddl, ok := n.attr.WindowsACL(); ok {
+		if _, err := acl.Parse(string(sddl)); err == nil {
+			return bytes.Clone(sddl)
+		}
+	}
+	for i := len(n.chain) - 1; i >= 0; i-- {
+		if sddl, ok := n.chain[i].attr.WindowsACL(); ok {
+			if _, err := acl.Parse(string(sddl)); err == nil {
+				return bytes.Clone(sddl)
+			}
+		}
+	}
+	return nil
 }
 
 func sortItems(items []drive.Item, by string) {

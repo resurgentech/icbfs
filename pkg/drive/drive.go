@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 )
@@ -416,6 +417,117 @@ type ListOptions struct {
 	Limit  int    // at most this many entries (0: all)
 	Cursor string // a previous Page's Next
 	Sort   string // "name" (default), "modified", "size"
+}
+
+// WalkOptions for Walk.
+type WalkOptions struct {
+	At At
+	// Depth is how many levels below the folder walked to go: 1 is its
+	// own items only, 2 its subfolders' too; 0 (the default) is all.
+	Depth int
+	// Sort orders each folder's items, as ListOptions.Sort orders a
+	// listing: "name" (default), "modified", "size".
+	Sort string
+}
+
+// WalkFunc is given one folder (its id and path) and the items in it,
+// sorted, in a Walk. An error stops the walk, and Walk returns it.
+type WalkFunc func(dir ItemRef, items []Item) error
+
+// Walker is a drive that walks a tree one folder at a time: fn is given
+// each folder's items, finished, a folder before the folders in it, and
+// the walk holds no more than one folder's items at a time; what it
+// built for a folder is released before it builds the next, so a tree
+// of any size is walked in the memory of its largest folder. Items and
+// permissions are as List's: a folder the profile may not list is left
+// out (it's an item in its parent's, but fn isn't called for it), and
+// the folder walked itself is ErrForbidden; At is as List's. Call it
+// through the package function Walk, which falls back to List for a
+// drive that isn't one. fn may keep the items it's given.
+type Walker interface {
+	Walk(ctx context.Context, dir ItemRef, opts WalkOptions, fn WalkFunc) error
+}
+
+// Walk walks the tree at dir on d one folder at a time (Walker): fn is
+// called for dir and then for each folder below it, to opts.Depth, a
+// folder before the folders in it, with that folder's items (none for
+// an empty folder). A drive that isn't a Walker is listed whole, in one
+// List to the depth asked for (a page at a time), and its items are
+// handed to fn grouped by folder: the same calls, in an order that also
+// puts a folder before the folders in it, but with the whole tree in
+// memory at once, and with a folder the profile may not list given as
+// an empty one (a List doesn't tell the two apart).
+func Walk(ctx context.Context, d Drive, dir ItemRef, opts WalkOptions, fn WalkFunc) error {
+	if w, ok := d.(Walker); ok {
+		return w.Walk(ctx, dir, opts, fn)
+	}
+	top, err := d.Stat(ctx, dir, At{Time: opts.At.Time, Name: opts.At.Name})
+	if err != nil {
+		return err
+	}
+	if top.Type != TypeDir {
+		return ErrNotDir
+	}
+	depth := opts.Depth
+	if depth < 1 {
+		depth = 1 << 30
+	}
+	var items []Item
+	cursor := ""
+	for {
+		page, err := d.List(ctx, dir, ListOptions{At: opts.At, Depth: depth, Cursor: cursor, Sort: opts.Sort})
+		if err != nil {
+			return err
+		}
+		items = append(items, page.Items...)
+		if page.Next == "" || len(page.Items) == 0 {
+			break
+		}
+		cursor = page.Next
+	}
+	topPath := walkPath(top.Path)
+	levels := func(p string) int { // how far below the top p is: 1 for its own items
+		rest := strings.TrimPrefix(strings.TrimPrefix(p, topPath), "/")
+		return strings.Count(rest, "/") + 1
+	}
+	var folders []ItemRef
+	groups := map[string][]Item{}
+	for _, it := range items {
+		p := walkPath(it.Path)
+		parent := p[:strings.LastIndex(p, "/")]
+		if parent == "" {
+			parent = "/"
+		}
+		groups[parent] = append(groups[parent], it)
+		if it.Type == TypeDir && levels(p) < depth {
+			folders = append(folders, ItemRef{ID: it.ID, Path: p})
+		}
+	}
+	items = nil
+	// By path, whatever the items' sort: a folder's path sorts before
+	// the paths in it.
+	sort.SliceStable(folders, func(i, j int) bool {
+		a, b := strings.ToLower(folders[i].Path), strings.ToLower(folders[j].Path)
+		return a < b || a == b && folders[i].Path < folders[j].Path
+	})
+	folders = append([]ItemRef{{ID: top.ID, Path: topPath}}, folders...)
+	for _, f := range folders {
+		group := groups[f.Path]
+		delete(groups, f.Path)
+		if group == nil {
+			group = []Item{}
+		}
+		if err := fn(f, group); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// walkPath is p as "/a/b" ("/" for the top).
+func walkPath(p string) string {
+	p = "/" + strings.Trim(p, "/")
+	return p
 }
 
 // Page is one page of a listing.
