@@ -37,9 +37,10 @@ test *args:
 test-short *args:
     go test -short {{args}} ./...
 
+# The -timeout is explicit because Go cuts a test package at 10 minutes by default, and internal/icbfs takes 5 on a quiet machine.
 # The Go tests CI runs, with the race detector
 test-ci:
-    go test -race ./...
+    go test -race -timeout 25m ./...
 
 # The Go tests that run on Windows (no Docker there)
 test-windows:

@@ -12,7 +12,9 @@ jobs:
   linux:
     name: Linux (vet, build, tests with MinIO and FUSE)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Longer than test-ci's 25-minute go test -timeout plus the rest of
+    # the job, so a stuck test is cut by Go, which names it.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
