@@ -1,6 +1,7 @@
 package icbfsdrive
 
 import (
+	"container/list"
 	"context"
 	"hash/maphash"
 	"io"
@@ -11,9 +12,19 @@ import (
 	"github.com/resurgentech/icbfs/internal/objstore"
 )
 
-// maxCachedDirs bounds the directory cache: past it, an entry goes for
-// each one added.
-const maxCachedDirs = 50000
+// DefaultDirCacheBytes is Config.DirCacheBytes's default: 4 MiB by
+// icbfs.Attr.HeldSize, which measured at 0.6 of the heap a cached
+// folder holds, so up to about 7 MiB of heap. T80-1 measured 4 to 11 KB
+// of heap a cached folder (its block's entries, its .metadata, both
+// objects' descriptions), so it holds the 600 to 1,000 folders a mount
+// or a daemon last walked. A path's ancestors, read at every step of
+// every resolve, are the most recently used and stay. A rebuild of a
+// mirror's map, which reads each file's path from the root, holds that
+// much at most, where with no bound in bytes it held every folder of
+// the tree (6.2 MiB at 1,500 folders; 30 to 65 MB predicted at the
+// full-size mirror's 4,694), against T80's 100 MB for a whole first
+// pass.
+const DefaultDirCacheBytes = 4 << 20
 
 // dirCache remembers directories as a walk down a path last read them:
 // their attributes, which hold the block and .metadata they came from.
@@ -21,27 +32,46 @@ const maxCachedDirs = 50000
 // or at once when it's 0, it's revalidated (icbfs Revalidate: two
 // conditional reads, no bodies if nothing changed).
 //
+// It's bounded by bytes (maxBytes, by icbfs.Attr.HeldSize): past it,
+// the least recently used go, but never the one just put, which a walk
+// is about to use. A directory evicted is read again when it's next
+// needed; what a caller holds of it stays usable (an Attr is a value).
+//
 // Every write through the drive's store drops what it wrote (dropOnWrite),
 // so the drive sees its own changes at once, whatever TrustFor says. A
 // read can't put back what a write it overlapped dropped: each write
 // bumps a generation for its key's bucket, and a read caches its result
 // only if its bucket's generation hasn't moved since it began.
 type dirCache struct {
-	trust time.Duration
-	seed  maphash.Seed
+	trust    time.Duration
+	maxBytes int64
+	seed     maphash.Seed
 
 	mu    sync.Mutex
-	nodes map[string]cachedDir
+	nodes map[string]*list.Element // of *cachedDir, most recently used at the front
+	lru   list.List
+	bytes int64
 	gens  [64]uint64
 }
 
+// cachedDirSelf is a cachedDir's own bytes besides its Attr's
+// HeldSize: its key, its list element and its map slot.
+const cachedDirSelf = 160
+
 type cachedDir struct {
+	key     string
 	attr    icbfs.Attr
 	checked time.Time
+	size    int64
 }
 
-func newDirCache(trust time.Duration) *dirCache {
-	return &dirCache{trust: trust, seed: maphash.MakeSeed(), nodes: map[string]cachedDir{}}
+// newDirCache is a cache trusting what it read for trust, of at most
+// maxBytes (0: DefaultDirCacheBytes).
+func newDirCache(trust time.Duration, maxBytes int64) *dirCache {
+	if maxBytes <= 0 {
+		maxBytes = DefaultDirCacheBytes
+	}
+	return &dirCache{trust: trust, maxBytes: maxBytes, seed: maphash.MakeSeed(), nodes: map[string]*list.Element{}}
 }
 
 func (c *dirCache) bucket(key string) int {
@@ -55,28 +85,43 @@ func (c *dirCache) gen(key string) uint64 {
 	return c.gens[c.bucket(key)]
 }
 
+// get is key's directory, if it's held, now the most recently used.
 func (c *dirCache) get(key string) (cachedDir, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	d, ok := c.nodes[key]
-	return d, ok
+	el, ok := c.nodes[key]
+	if !ok {
+		return cachedDir{}, false
+	}
+	c.lru.MoveToFront(el)
+	return *el.Value.(*cachedDir), true
 }
 
 // put keeps attr as key's, checked at checked, unless a write to its
-// bucket happened since gen.
+// bucket happened since gen; then drops the least recently used others
+// until the cache is within its bound.
 func (c *dirCache) put(key string, attr icbfs.Attr, checked time.Time, gen uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.gens[c.bucket(key)] != gen {
 		return
 	}
-	if _, ok := c.nodes[key]; !ok && len(c.nodes) >= maxCachedDirs {
-		for k := range c.nodes {
-			delete(c.nodes, k)
-			break
-		}
+	c.remove(key)
+	d := &cachedDir{key: key, attr: attr, checked: checked, size: attr.HeldSize() + cachedDirSelf}
+	c.nodes[key] = c.lru.PushFront(d)
+	c.bytes += d.size
+	for c.bytes > c.maxBytes && c.lru.Len() > 1 {
+		c.remove(c.lru.Back().Value.(*cachedDir).key)
 	}
-	c.nodes[key] = cachedDir{attr: attr, checked: checked}
+}
+
+// remove forgets key, if it's held. c.mu is held.
+func (c *dirCache) remove(key string) {
+	if el, ok := c.nodes[key]; ok {
+		c.bytes -= el.Value.(*cachedDir).size
+		c.lru.Remove(el)
+		delete(c.nodes, key)
+	}
 }
 
 // drop forgets key, and keeps a read that overlapped the write from
@@ -85,7 +130,15 @@ func (c *dirCache) drop(key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.gens[c.bucket(key)]++
-	delete(c.nodes, key)
+	c.remove(key)
+}
+
+// stats is how many directories the cache holds, and their bytes as
+// HeldSize estimates them.
+func (c *dirCache) stats() (n int, bytes int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.nodes), c.bytes
 }
 
 func (c *dirCache) dropAll() {
@@ -95,6 +148,8 @@ func (c *dirCache) dropAll() {
 		c.gens[i]++
 	}
 	clear(c.nodes)
+	c.lru.Init()
+	c.bytes = 0
 }
 
 // dirAttr is directory key's attributes for a walk, holding its block:

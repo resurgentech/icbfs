@@ -1150,6 +1150,105 @@ type heldBlock struct {
 	metaObj *objstore.Object
 }
 
+// HeldSize estimates the bytes a's memory takes, the directory block
+// and .metadata it holds (StatStep) included: for a cache bounded by
+// bytes. It counts as Go allocates: each string's and byte slice's
+// bytes rounded up to an allocation size class, each map's groups of
+// eight slots, each slice's capacity. It's an estimate; what a cached
+// directory frees when it goes was measured at about this (T80-2's
+// TestDirCacheBound).
+func (a Attr) HeldSize() int64 {
+	const attrSelf = 448 // the Attr itself: its times, headers, fields
+	n := int64(attrSelf)
+	n += mapSize(len(a.Xattrs), a.Xattrs != nil, strHeader+sliceHeader)
+	for k, v := range a.Xattrs {
+		n += allocSize(len(k)) + allocSize(cap(v))
+	}
+	n += mapSize(len(a.App), a.App != nil, strHeader+sliceHeader)
+	for k, v := range a.App {
+		n += allocSize(len(k)) + allocSize(cap(v))
+	}
+	n += mapSize(len(a.Checksums), a.Checksums != nil, strHeader+2*sliceHeader)
+	for k, v := range a.Checksums {
+		n += allocSize(len(k)) + allocSize(cap(v.MD5)) + allocSize(cap(v.SHA256))
+	}
+	n += mapSize(len(a.Refs), a.Refs != nil, strHeader+2*strHeader+8)
+	for k, v := range a.Refs {
+		n += allocSize(len(k)) + allocSize(len(v.Key)) + allocSize(len(v.VersionID))
+	}
+	n += mapSize(len(a.Streams), a.Streams != nil, strHeader+8)
+	for k := range a.Streams {
+		n += allocSize(len(k))
+	}
+	for _, b := range [][]byte{a.WindowsSDDL, a.Reparse, a.PosixACLAccess, a.PosixACLDefault} {
+		n += allocSize(cap(b))
+	}
+	n += objectSize(&a.content) - objectSelf + allocSize(len(a.contentETag))
+	if h := a.held; h != nil {
+		n += 64 + allocSize(len(h.key)) + allocSize(cap(h.meta)) + objectSize(h.obj) + objectSize(h.metaObj)
+		if b := h.blk; b != nil {
+			const entrySelf, childSelf = 2*strHeader + 8, 2 * strHeader
+			n += 96 + allocSize(len(b.HighKey)) + allocSize(len(b.Right))
+			n += allocSize(cap(b.Entries)*entrySelf) + allocSize(cap(b.Children)*childSelf)
+			for _, e := range b.Entries {
+				n += allocSize(len(e.Name)) + allocSize(len(e.UUID))
+			}
+			for _, c := range b.Children {
+				n += allocSize(len(c.MinKey)) + allocSize(len(c.UUID))
+			}
+		}
+	}
+	return n
+}
+
+const (
+	strHeader   = 16
+	sliceHeader = 24
+	objectSelf  = 144 // an objstore.Object's own fields
+)
+
+// objectSize is HeldSize's estimate for an object's description, itself
+// included.
+func objectSize(o *objstore.Object) int64 {
+	if o == nil {
+		return 0
+	}
+	n := int64(objectSelf) + allocSize(len(o.Key)) + allocSize(len(o.VersionID)) + allocSize(len(o.ETag))
+	n += mapSize(len(o.Metadata), o.Metadata != nil, 2*strHeader)
+	for k, v := range o.Metadata {
+		n += allocSize(len(k)) + allocSize(len(v))
+	}
+	return n
+}
+
+// mapSize is a map's own memory with n entries of slot bytes each: its
+// header and its groups of eight slots and their control word.
+func mapSize(n int, made bool, slot int) int64 {
+	if !made {
+		return 0
+	}
+	groups := (n + 7) / 8
+	return 48 + int64(groups)*(8+8*int64(slot))
+}
+
+// allocSize is n bytes as Go allocates them: rounded up to a size class
+// (16-byte steps to 128 bytes, then about an eighth), 0 for none.
+func allocSize(n int) int64 {
+	switch {
+	case n <= 0:
+		return 0
+	case n <= 8:
+		return 8
+	case n <= 128:
+		return int64(n+15) &^ 15
+	}
+	step := int64(1)
+	for step*8 < int64(n) {
+		step *= 2
+	}
+	return (int64(n) + step - 1) / step * step
+}
+
 type heldBlockKey struct{}
 
 // withHeld is ctx with dir's block for readBlock, if it holds dirKey's.

@@ -385,27 +385,43 @@ and origin in one write.
   version erased since, say) drops the map entry and writes the bytes.
   The spool goes with every stub as its body, so a drive that keeps no
   references writes the bytes. Empty content is always written.
-- **The hash map** (`m.Hashes()`, a `HashMap`) is SHA-256 → `HashEntry{ID,
-  Version, Size}`, one version per content (of several, the least by item
-  id, then version), and a source's own hash (`Hash{Kind, Value}`) →
-  SHA-256. Every write the mirror makes, and every file it reads back
-  (found, restored, moved, adopted, `Known`), is added by its recorded
-  checksum. `m.RebuildHashes(ctx)` rebuilds it from the drive's live
+- **The hash map** (the content map: `m.ContentMap()`, a `ContentMap`) is
+  SHA-256 → `HashEntry{ID, Version, Size}`, one version per content (of
+  several, the least by item id, then version), and a source's own hash
+  (`Hash{Kind, Value}`) → SHA-256. Every write the mirror makes, and
+  every file it reads back (found, restored, moved, adopted, `Known`), is
+  added by its recorded checksum. A `ContentMap` answers for one content
+  at a time and never gives the whole map, so it can live on disk:
+  `Lookup(ctx, sha)`, `LookupSource(ctx, hash)`, `Add(ctx, sha, entry)`,
+  `AddSource(ctx, hash, sha)`, `Drop(ctx, sha, entry)` (only if it's
+  still that entry), `Count(ctx)` and `Rebuild(ctx)`, each with an error
+  that is the map's own (its store failing), and the mirror fails the
+  write that met it. SHA-256s are compared in lowercase. By default the
+  mirror's map is a `HashMap` in memory (`m.Hashes()`;
+  `HashMap.ContentMap()` is it as a `ContentMap`, `HashMap.Len()` its
+  count); `m.WithContentMap(c)`, before the mirror's first use, gives it
+  another, and `m.Hashes()` is then nil.
+  `m.RebuildHashes(ctx)` rebuilds the map from the drive's live
   files with this source's origin, every version with a recorded SHA-256
   (none recorded: skipped, not computed), keeping the source hashes
   whose SHA-256 is still there. It walks the drive a folder at a time
   (`drive.Walk`), asking for a folder's files' versions 8 at a time, all
-  read before the next folder: it holds one folder's items besides the
-  map it builds, which is the same whatever order the versions come in.
+  read before the next folder, and streams each version into the map's
+  `Rebuild` (a `ContentMapRebuild`: `Add`, never two at once, then
+  `Commit`, or `Abandon`), so it holds one folder's items and no map of
+  its own; the map is the same whatever order the versions come in. The
+  map is as it was until the commit, which replaces it; a `HashMap`'s
+  rebuild holds the new map beside the old until then.
   Cancelling `ctx` stops it between items with `context.Cause(ctx)`; on
-  any error the mirror's map is left as it was.
+  any error the rebuild is abandoned and the mirror's map is as it was.
   `m.OnRebuildProgress(func(items, files int))` has it report as it goes,
   so a daemon can show the rebuild is moving: `items` walked so far
   (files and folders), `files` of the source's whose versions have been
   read; called on the goroutine that called `RebuildHashes`, never two
-  at once, after each folder and every 256 files within one. A daemon keeps it between
-  runs with `m.WithHashStore(s)`, `m.LoadHashes(ctx)` and
-  `m.SaveHashes(ctx)`; a `HashStore` is `LoadHashes(ctx) ([]byte, error)`
+  at once, after each folder and every 256 files within one. A daemon
+  with the `HashMap` keeps it between runs with `m.WithHashStore(s)`,
+  `m.LoadHashes(ctx)` and `m.SaveHashes(ctx)` (`ErrInvalid` with another
+  `ContentMap`); a `HashStore` is `LoadHashes(ctx) ([]byte, error)`
   (nil: none kept) and `SaveHashes(ctx, data) error`. A kept map that
   isn't one is `ErrInvalid`, and the map is left empty to rebuild.
 - **A source's own hash.** `SourceItem.Hash` and `SourceItem.Size` are the
@@ -676,8 +692,16 @@ defer d.Close()
   the default, each folder on the way is checked, two conditional reads
   with no bodies when it hasn't changed. The drive's own changes are seen
   at once either way; changes made elsewhere (a mount, another drive),
-  after at most `TrustFor`. `Filesystem` returns the drive's icbfs
-  filesystem.
+  after at most `TrustFor`. `DirCacheBytes` bounds the folders it keeps
+  so, by an estimate of their bytes (each folder's first directory block
+  and `.metadata`); past it the least recently used go, and a folder
+  read again later is read from the store. The default (0) is 4 MiB
+  by that estimate (`icbfsdrive.DefaultDirCacheBytes`), up to about 7
+  MiB of heap (the estimate measured at 0.6 of it): at 4 to 11 KB a
+  folder, the 600 to 1,000 folders last walked, a path's ancestors
+  always among them; with no bound in bytes a walk of every file (a mirror's
+  `RebuildHashes`) kept every folder of the tree. `Filesystem` returns
+  the drive's icbfs filesystem.
 - `icbfsdrive.OpenSideStore(ctx, store, name)` opens a side store,
   creating its filesystem the first time.
 - `pkg/icbfstest` is for tests of programs built on icbfs: `Store(t)` is
@@ -730,6 +754,13 @@ file's last name goes or a directory is removed. An entry holds the ID,
 name, original path, when, by whom, the last version and size, and the
 item's origin (where it had been copied from, as on an item) if it had
 one. Nothing expires: an entry stays until the item is purged.
+
+- `DeletedAt` is when the item was deleted: under `WithSourceTime`, the
+  source's time. `Stored` is when the entry was written, by the store's
+  clock (the entry record's Last-Modified, to the second), whatever
+  `DeletedAt` says, in a listing and in a lookup by origin alike: what a
+  mirror that dates its removals in source time can compare with its own
+  sync point. The stored record is as before; `Stored` is read with it.
 
 - `Trash` lists deleted items, newest first, optionally only those from
   under a directory. A trashed item's versions and content can be read

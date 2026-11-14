@@ -633,6 +633,12 @@ type TrashEntry struct {
 	Path      string    `json:"path,omitempty"` // where it was, drive-relative, when known
 	Type      string    `json:"type"`
 	DeletedAt time.Time `json:"deletedAt"`
+	// Stored is when the entry was written, by the store's clock (its
+	// record's Last-Modified, to the second), whatever DeletedAt says: a
+	// removal a mirror dated in its source's time (WithSourceTime) is
+	// dated by the source, and Stored says when the mirror made it. Zero
+	// when the backend doesn't know.
+	Stored    time.Time `json:"stored,omitzero"`
 	DeletedBy string    `json:"deletedBy,omitempty"`
 	Size      int64     `json:"size"`
 	Version   string    `json:"version,omitempty"`
