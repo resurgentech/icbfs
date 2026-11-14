@@ -114,6 +114,10 @@ winfsp-tests target="icbfs-ci" *args:
 sync-test *args:
     test/windows/run-sync-test.sh {{args}}
 
+# What a Windows mount does with names Windows can't hold, on the Windows VM (prints a table; asserts nothing yet)
+names-test *args:
+    test/windows/run-names-test.sh {{args}}
+
 # The small VMs the multi-machine tests add to the Linux VM (default 2)
 multi-vms n="2":
     test/multi/create-vms.sh {{n}}

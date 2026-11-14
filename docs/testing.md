@@ -269,6 +269,13 @@ case-sensitive.
 - **Two Windows mounts as two machines** (`test/windows/run-consistency.sh`):
   what one changes, an open on the other sees at once, and the other's
   listings within `-meta-cache`.
+- **Names Windows can't hold** (`test/windows/run-names-test.sh`, `just
+  names-test`): a primary-POSIX filesystem holding `< > : " | ? * \`,
+  control characters, a trailing dot or space, `CON`, `NUL.txt`, `com1`
+  and `LPT¹`, made through the core, then listed, opened, renamed and
+  deleted through a WinFsp mount (plain, `\\?\` and NT paths; `dir`,
+  `Get-ChildItem` and Explorer's Shell namespace), with a primary-Windows
+  mount as the control. It prints a table and asserts nothing yet.
 - **Timings on Windows** (`test/windows/run-bench.sh`): what Explorer and
   Office do to a mount (listing many files, opening small ones, a deep
   path, an Office-style save, copying a folder in) and the mount's peak
