@@ -37,9 +37,12 @@ type Mirror struct {
 	d           Drive
 	source      string
 	sourceTimes bool
-	hashes      *HashMap
-	hashStore   HashStore
-	kinds       map[string]hashKind
+	// contents is the content map the mirror uses; hashes is the same
+	// map when it's the in-memory one (the default), else nil.
+	contents  ContentMap
+	hashes    *HashMap
+	hashStore HashStore
+	kinds     map[string]hashKind
 	// rebuildProgress is OnRebuildProgress's hook.
 	rebuildProgress func(items, files int)
 }
@@ -56,7 +59,8 @@ type hashKind struct {
 // OriginFinder finds items by origin in a lookup; any other is searched
 // (a listing of the whole drive and its trash per lookup).
 func NewMirror(d Drive, source string) *Mirror {
-	return &Mirror{d: d, source: source, hashes: NewHashMap(), kinds: map[string]hashKind{
+	h := NewHashMap()
+	return &Mirror{d: d, source: source, contents: h.ContentMap(), hashes: h, kinds: map[string]hashKind{
 		"md5":    {new: md5.New},
 		"sha1":   {new: sha1.New},
 		"sha256": {new: sha256.New},
@@ -191,7 +195,9 @@ func (m *Mirror) Known(ctx context.Context, sourceID string) (item Item, trashed
 	if err != nil {
 		return Item{}, nil, false, err
 	}
-	m.noteItem(item, "")
+	if err := m.noteItem(ctx, item, ""); err != nil {
+		return Item{}, nil, false, err
+	}
 	return item, trashed, true, nil
 }
 
@@ -336,7 +342,9 @@ func (m *Mirror) apply(ctx context.Context, src SourceItem, o Origin, item Item,
 		item = moved
 		done = append(done, Moved)
 	}
-	m.noteItem(item, "")
+	if err := m.noteItem(ctx, item, ""); err != nil {
+		return Applied{}, err
+	}
 
 	if src.Type == TypeDir || item.Origin != nil && item.Origin.Version == o.Version {
 		// Nothing to write but what the item's record lacks: its times,
@@ -394,7 +402,11 @@ func (m *Mirror) measure(ctx context.Context, src SourceItem, c *content) error 
 	if c.sha != "" {
 		return nil
 	}
-	if sha, e, ok := m.sourceHit(src); ok {
+	sha, e, ok, err := m.sourceHit(ctx, src)
+	if err != nil {
+		return err
+	}
+	if ok {
 		c.sha, c.size = sha, e.Size
 		return nil
 	}
@@ -406,8 +418,9 @@ func (m *Mirror) measure(ctx context.Context, src SourceItem, c *content) error 
 	if err != nil {
 		return err
 	}
-	c.sha, c.size, c.sp = done(), sp.Size(), sp
-	return nil
+	c.size, c.sp = sp.Size(), sp
+	c.sha, err = done()
+	return err
 }
 
 // spoolSource reads src's content into a Spool, with SpoolOptions'
@@ -416,7 +429,7 @@ func (m *Mirror) measure(ctx context.Context, src SourceItem, c *content) error 
 // is its SHA-256 (hex), and records what the source's own kind of hash
 // of it is in it. closeSrc closes the source, which a streamed spool
 // still reads from.
-func (m *Mirror) spoolSource(ctx context.Context, src SourceItem, inFile int64) (sp *Spool, done func() string, closeSrc func() error, err error) {
+func (m *Mirror) spoolSource(ctx context.Context, src SourceItem, inFile int64) (sp *Spool, done func() (string, error), closeSrc func() error, err error) {
 	var kind *hashKind
 	var kh hash.Hash
 	opts := SpoolOptions{InFile: inFile}
@@ -428,16 +441,18 @@ func (m *Mirror) spoolSource(ctx context.Context, src SourceItem, inFile int64) 
 	if sp, err = NewSpool(body, opts); err != nil {
 		return nil, nil, body.Close, err
 	}
-	done = func() string {
+	done = func() (string, error) {
 		sha := hex.EncodeToString(sp.SHA256)
 		if kind != nil {
 			value := hex.EncodeToString(kh.Sum(nil))
 			if kind.encode != nil {
 				value = kind.encode(kh.Sum(nil))
 			}
-			m.hashes.AddSource(Hash{Kind: src.Hash.Kind, Value: value}, sha)
+			if err := m.contents.AddSource(ctx, Hash{Kind: src.Hash.Kind, Value: value}, sha); err != nil {
+				return "", fmt.Errorf("the content map: %w", err)
+			}
 		}
-		return sha
+		return sha, nil
 	}
 	return sp, done, body.Close, nil
 }
@@ -694,10 +709,15 @@ func (m *Mirror) write(ctx context.Context, src SourceItem, o Origin, cond Condi
 	// A source hash the map knows, or a SHA-256 known for the content
 	// (an alias's, unfolded): no download. The source is opened only if
 	// the drive reads the body (one that keeps no references).
-	sha, e, ok := m.sourceHit(src)
+	sha, e, ok, err := m.sourceHit(ctx, src)
+	if err != nil {
+		return Item{}, err
+	}
 	if !ok && c.sha != "" && c.sp == nil {
 		sha = c.sha
-		e, ok = m.hashes.Lookup(sha)
+		if e, ok, err = m.lookup(ctx, sha); err != nil {
+			return Item{}, err
+		}
 		ok = ok && e.Size == c.size && c.size > 0
 	}
 	if ok {
@@ -713,7 +733,9 @@ func (m *Mirror) write(ctx context.Context, src SourceItem, o Origin, cond Condi
 		if err == nil || !refused(err) {
 			return it, err
 		}
-		m.hashes.Drop(sha, e)
+		if err := m.drop(ctx, sha, e); err != nil {
+			return Item{}, err
+		}
 	}
 
 	// Else the bytes. The drive is given a body that reads the source
@@ -734,8 +756,7 @@ func (m *Mirror) write(ctx context.Context, src SourceItem, o Origin, cond Condi
 		if err != nil {
 			return Item{}, err
 		}
-		m.noteItem(it, pb.sha)
-		return it, nil
+		return it, m.noteItem(ctx, it, pb.sha)
 	}
 	sp := pb.sp
 	if sp.Streamed() {
@@ -747,19 +768,22 @@ func (m *Mirror) write(ctx context.Context, src SourceItem, o Origin, cond Condi
 		if err == nil || !refused(err) {
 			return it, err
 		}
-		m.hashes.Drop(pb.sha, *pb.stub)
+		if err := m.drop(ctx, pb.sha, *pb.stub); err != nil {
+			return Item{}, err
+		}
 		if it, err = m.d.Write(ctx, src.Path, &openOnRead{ctx: ctx, src: src}, cond, opts); err != nil {
 			return Item{}, err
 		}
-		m.noteItem(it, pb.sha)
-		return it, nil
+		return it, m.noteItem(ctx, it, pb.sha)
 	}
 	if pb.stub != nil {
 		it, err := m.writeRef(ctx, src.Path, sp.Reader(), sp.Size(), cond, opts, pb.sha, *pb.stub)
 		if err == nil || !refused(err) {
 			return it, err
 		}
-		m.hashes.Drop(pb.sha, *pb.stub)
+		if err := m.drop(ctx, pb.sha, *pb.stub); err != nil {
+			return Item{}, err
+		}
 	}
 	if fw, ok := m.d.(FileWriter); ok && sp.File() != nil {
 		it, err = fw.WriteFrom(ctx, src.Path, sp, sp.Size(), cond, opts)
@@ -772,8 +796,7 @@ func (m *Mirror) write(ctx context.Context, src SourceItem, o Origin, cond Condi
 	if err != nil {
 		return Item{}, err
 	}
-	m.noteItem(it, pb.sha)
-	return it, nil
+	return it, m.noteItem(ctx, it, pb.sha)
 }
 
 // errDecided stops a write whose body turned out to be better written
@@ -827,8 +850,16 @@ func (p *probe) spool() error {
 	p.sp = sp
 	if sp.Streamed() {
 		p.r = sp.Stream(func() error {
-			p.sha = done()
-			if p.decide() {
+			sha, err := done()
+			if err != nil {
+				return err
+			}
+			p.sha = sha
+			stub, err := p.decide()
+			if err != nil {
+				return err
+			}
+			if stub {
 				p.stopped = true
 				return errDecided
 			}
@@ -836,8 +867,14 @@ func (p *probe) spool() error {
 		})
 		return nil
 	}
-	p.sha = done()
-	if p.decide() || sp.File() != nil {
+	if p.sha, err = done(); err != nil {
+		return err
+	}
+	stub, err := p.decide()
+	if err != nil {
+		return err
+	}
+	if stub || sp.File() != nil {
 		p.stopped = true
 		return errDecided
 	}
@@ -847,17 +884,20 @@ func (p *probe) spool() error {
 
 // decide notes the version the spooled bytes are a stub of, if there's
 // one, and reports whether there is.
-func (p *probe) decide() bool {
+func (p *probe) decide() (bool, error) {
 	size := p.sp.Size()
 	e, ok := current(p.cur, p.sha, size)
 	if !ok {
-		e, ok = p.m.hashes.Lookup(p.sha)
+		var err error
+		if e, ok, err = p.m.lookup(p.ctx, p.sha); err != nil {
+			return false, err
+		}
 		ok = ok && e.Size == size
 	}
 	if ok && size > 0 { // nothing is cheaper than a stub of nothing
 		p.stub = &e
 	}
-	return p.stub != nil
+	return p.stub != nil, nil
 }
 
 func (p *probe) Close() error {
@@ -876,8 +916,7 @@ func (m *Mirror) writeRef(ctx context.Context, p string, body io.Reader, size in
 	if err != nil {
 		return Item{}, err
 	}
-	m.noteItem(it, sha)
-	return it, nil
+	return it, m.noteItem(ctx, it, sha)
 }
 
 // refused is whether a stub's write was refused for its target: one the
@@ -898,28 +937,53 @@ func current(cur *Item, sha string, size int64) (HashEntry, bool) {
 
 // sourceHit is the SHA-256 and version the map has for src's own hash,
 // at src's size.
-func (m *Mirror) sourceHit(src SourceItem) (string, HashEntry, bool) {
+func (m *Mirror) sourceHit(ctx context.Context, src SourceItem) (string, HashEntry, bool, error) {
 	if src.Hash.Kind == "" || src.Hash.Value == "" || src.Size <= 0 {
-		return "", HashEntry{}, false
+		return "", HashEntry{}, false, nil
 	}
-	sha, e, ok := m.hashes.LookupSource(src.Hash)
+	sha, e, ok, err := m.contents.LookupSource(ctx, src.Hash)
+	if err != nil {
+		return "", HashEntry{}, false, fmt.Errorf("the content map: %w", err)
+	}
 	if !ok || e.Size != src.Size {
-		return "", HashEntry{}, false
+		return "", HashEntry{}, false, nil
 	}
-	return sha, e, true
+	return sha, e, true, nil
+}
+
+// lookup is the version the map has for content with SHA-256 sha.
+func (m *Mirror) lookup(ctx context.Context, sha string) (HashEntry, bool, error) {
+	e, ok, err := m.contents.Lookup(ctx, sha)
+	if err != nil {
+		return HashEntry{}, false, fmt.Errorf("the content map: %w", err)
+	}
+	return e, ok, nil
+}
+
+// drop forgets sha's version e in the map: one the drive refused to
+// reference.
+func (m *Mirror) drop(ctx context.Context, sha string, e HashEntry) error {
+	if err := m.contents.Drop(ctx, sha, e); err != nil {
+		return fmt.Errorf("the content map: %w", err)
+	}
+	return nil
 }
 
 // noteItem records a file the mirror wrote or read back in the map: its
 // current version, by its recorded SHA-256 (else sha, the one the
-// mirror computed for what it wrote).
-func (m *Mirror) noteItem(it Item, sha string) {
+// mirror computed for what it wrote). A map that fails to record it is
+// the error; the drive holds the item all the same.
+func (m *Mirror) noteItem(ctx context.Context, it Item, sha string) error {
 	if it.Type != "" && it.Type != TypeFile || it.Version == nil {
-		return
+		return nil
 	}
 	if it.Checksums != nil && it.Checksums.SHA256 != "" {
 		sha = it.Checksums.SHA256
 	}
-	m.hashes.Add(sha, HashEntry{ID: it.ID, Version: it.Version.ID, Size: it.Size})
+	if err := m.contents.Add(ctx, sha, HashEntry{ID: it.ID, Version: it.Version.ID, Size: it.Size}); err != nil {
+		return fmt.Errorf("the content map: %w", err)
+	}
+	return nil
 }
 
 // openOnRead is a source item's content, opened at the first Read.
@@ -1166,11 +1230,58 @@ func (e HashEntry) less(o HashEntry) bool {
 	return e.Version < o.Version
 }
 
-// A HashMap is what a mirror knows of the content on its drive: a
-// version holding each SHA-256 it has seen, and what the source's own
-// hashes are in SHA-256. The mirror writes a stub of that version for a
-// source item with the same content, not its bytes again. It's safe for
-// concurrent use.
+// A ContentMap is what a mirror knows of the content on its drive: a
+// version holding each SHA-256 it has seen (a HashEntry), and what the
+// source's own hashes (Hash) are in SHA-256. The mirror writes a stub of
+// that version for a source item with the same content, not its bytes
+// again. A HashMap in memory is one (HashMap.ContentMap, the default);
+// a daemon may keep it elsewhere, a table on disk say (WithContentMap).
+//
+// Every method answers for one content, so an implementation need hold
+// none of it in memory; none gives the whole map. SHA-256s are hex, in
+// either case: the map compares them in lowercase. A ContentMap is safe
+// for concurrent use. An error is the map's own (its store failing); the
+// mirror fails the operation that met it.
+type ContentMap interface {
+	// Lookup is the version held for content with SHA-256 sha.
+	Lookup(ctx context.Context, sha string) (e HashEntry, ok bool, err error)
+	// LookupSource is the SHA-256 the source hash s was seen to be, and
+	// the version held for it: not ok if either is unknown.
+	LookupSource(ctx context.Context, s Hash) (sha string, e HashEntry, ok bool, err error)
+	// Add records that e holds content with SHA-256 sha. Of two versions
+	// with the same content the map holds the lesser (by item id, then
+	// version), whichever came first. An empty sha, e.ID or e.Version
+	// records nothing.
+	Add(ctx context.Context, sha string, e HashEntry) error
+	// AddSource records that the source hash s is content with SHA-256
+	// sha. An empty s.Kind, s.Value or sha records nothing.
+	AddSource(ctx context.Context, s Hash, sha string) error
+	// Drop forgets sha's version if it's still e: one the drive can't
+	// reference any more (erased, say).
+	Drop(ctx context.Context, sha string, e HashEntry) error
+	// Count is how many contents (SHA-256s) the map holds.
+	Count(ctx context.Context) (int, error)
+	// Rebuild starts replacing the whole map (RebuildHashes): the map
+	// stays as it is, for lookups and adds, until the rebuild is
+	// committed.
+	Rebuild(ctx context.Context) (ContentMapRebuild, error)
+}
+
+// A ContentMapRebuild is a ContentMap's replacement under way
+// (ContentMap.Rebuild): what's added, the lesser version of each content
+// as Add keeps it, replaces the map's versions at Commit, which keeps
+// the source hashes whose SHA-256 is still there and forgets the rest.
+// Abandon, or a failed Commit, leaves the map as it was. Its methods are
+// called by one goroutine at a time; Abandon after Commit does nothing,
+// so a caller may defer it.
+type ContentMapRebuild interface {
+	Add(ctx context.Context, sha string, e HashEntry) error
+	Commit(ctx context.Context) error
+	Abandon()
+}
+
+// A HashMap is a ContentMap in memory (HashMap.ContentMap), kept between
+// runs whole, as JSON (HashStore). It's safe for concurrent use.
 type HashMap struct {
 	mu     sync.Mutex
 	sha    map[string]HashEntry // by SHA-256, lowercase hex
@@ -1246,6 +1357,86 @@ func (h *HashMap) set(sha map[string]HashEntry, source map[Hash]string) {
 	h.sha, h.source = sha, source
 }
 
+// Len is how many contents (SHA-256s) the map holds.
+func (h *HashMap) Len() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.sha)
+}
+
+// ContentMap is h as a ContentMap: the same map, never failing.
+func (h *HashMap) ContentMap() ContentMap { return memContents{h} }
+
+// memContents is a HashMap as a ContentMap.
+type memContents struct{ h *HashMap }
+
+func (c memContents) Lookup(_ context.Context, sha string) (HashEntry, bool, error) {
+	e, ok := c.h.Lookup(sha)
+	return e, ok, nil
+}
+
+func (c memContents) LookupSource(_ context.Context, s Hash) (string, HashEntry, bool, error) {
+	sha, e, ok := c.h.LookupSource(s)
+	return sha, e, ok, nil
+}
+
+func (c memContents) Add(_ context.Context, sha string, e HashEntry) error {
+	c.h.Add(sha, e)
+	return nil
+}
+
+func (c memContents) AddSource(_ context.Context, s Hash, sha string) error {
+	c.h.AddSource(s, sha)
+	return nil
+}
+
+func (c memContents) Drop(_ context.Context, sha string, e HashEntry) error {
+	c.h.Drop(sha, e)
+	return nil
+}
+
+func (c memContents) Count(context.Context) (int, error) { return c.h.Len(), nil }
+
+// Rebuild builds the new versions in a map of their own beside h's, as
+// a map in memory must to leave h as it was until the commit.
+func (c memContents) Rebuild(context.Context) (ContentMapRebuild, error) {
+	return &memRebuild{h: c.h, next: NewHashMap()}, nil
+}
+
+// memRebuild is a HashMap's rebuild: next is the versions so far, nil
+// once committed or abandoned.
+type memRebuild struct {
+	h    *HashMap
+	next *HashMap
+}
+
+func (r *memRebuild) Add(_ context.Context, sha string, e HashEntry) error {
+	if r.next == nil {
+		return fmt.Errorf("a rebuild that's over: %w", ErrInvalid)
+	}
+	r.next.Add(sha, e)
+	return nil
+}
+
+func (r *memRebuild) Commit(context.Context) error {
+	if r.next == nil {
+		return fmt.Errorf("a rebuild that's over: %w", ErrInvalid)
+	}
+	sha := r.next.sha
+	r.next = nil
+	r.h.mu.Lock()
+	defer r.h.mu.Unlock()
+	for s, v := range r.h.source {
+		if _, ok := sha[v]; !ok {
+			delete(r.h.source, s)
+		}
+	}
+	r.h.sha = sha
+	return nil
+}
+
+func (r *memRebuild) Abandon() { r.next = nil }
+
 // Entries is a copy of the map by SHA-256.
 func (h *HashMap) Entries() map[string]HashEntry {
 	h.mu.Lock()
@@ -1319,8 +1510,30 @@ type HashStore interface {
 	SaveHashes(ctx context.Context, data []byte) error
 }
 
-// Hashes is the mirror's hash map.
+// Hashes is the mirror's hash map in memory: nil if the mirror was given
+// another ContentMap (WithContentMap).
 func (m *Mirror) Hashes() *HashMap { return m.hashes }
+
+// ContentMap is the content map the mirror uses: its HashMap's unless it
+// was given another (WithContentMap).
+func (m *Mirror) ContentMap() ContentMap { return m.contents }
+
+// WithContentMap makes the mirror use c for what it knows of the
+// content on its drive, in place of the HashMap in memory it starts
+// with: Hashes is then nil (unless c is a HashMap's ContentMap, when
+// it's that HashMap), and LoadHashes and SaveHashes, which keep a
+// HashMap, are ErrInvalid. Call it before the mirror's first use.
+func (m *Mirror) WithContentMap(c ContentMap) *Mirror {
+	m.contents, m.hashes = c, nil
+	if mc, ok := c.(memContents); ok {
+		m.hashes = mc.h
+	}
+	return m
+}
+
+// errNoHashMap is LoadHashes's and SaveHashes's answer for a mirror
+// whose content map isn't a HashMap.
+var errNoHashMap = fmt.Errorf("the mirror's content map isn't kept as a hash map: %w", ErrInvalid)
 
 // WithHashStore makes the mirror load and save its hash map in s
 // (LoadHashes, SaveHashes).
@@ -1334,6 +1547,9 @@ func (m *Mirror) WithHashStore(s HashStore) *Mirror {
 // map is left empty: a connector sets it aside and rebuilds
 // (RebuildHashes).
 func (m *Mirror) LoadHashes(ctx context.Context) error {
+	if m.hashes == nil {
+		return errNoHashMap
+	}
 	if m.hashStore == nil {
 		return fmt.Errorf("no hash store: %w", ErrInvalid)
 	}
@@ -1354,6 +1570,9 @@ func (m *Mirror) LoadHashes(ctx context.Context) error {
 
 // SaveHashes gives the HashStore the hash map as it is now.
 func (m *Mirror) SaveHashes(ctx context.Context) error {
+	if m.hashes == nil {
+		return errNoHashMap
+	}
 	if m.hashStore == nil {
 		return fmt.Errorf("no hash store: %w", ErrInvalid)
 	}
@@ -1383,18 +1602,26 @@ const (
 	rebuildProgressEvery = 256
 )
 
-// RebuildHashes rebuilds the hash map from the drive: every version of
-// every live file copied from the source, by the SHA-256 recorded for it.
-// A version with none recorded is skipped, not computed. What the
+// RebuildHashes rebuilds the content map from the drive: every version
+// of every live file copied from the source, by the SHA-256 recorded for
+// it. A version with none recorded is skipped, not computed. What the
 // source's hashes are is kept for the SHA-256s still there: the drive
 // doesn't know them. It walks the drive a folder at a time (Walk),
 // asking for a folder's files' versions 8 at once (rebuildVersions),
-// all read before the next folder, so it holds one folder besides the map
-// it builds. The map is the same whatever order the versions come in
-// (HashMap.Add keeps the least). Cancelling ctx stops it between items
-// with ctx's cause; on any error the map is left as it was.
+// all read before the next folder, and gives each version to the map's
+// rebuild as it's read (ContentMap.Rebuild), one at a time, committing
+// it after the walk: it holds one folder, and no map of its own (a
+// HashMap's rebuild holds the new map beside the old until the commit).
+// The map is the same whatever order the versions come in (Add keeps
+// the least). Cancelling ctx stops it between items with ctx's cause;
+// on any error the rebuild is abandoned, the map as it was.
 func (m *Mirror) RebuildHashes(ctx context.Context) error {
-	h := NewHashMap()
+	r, err := m.contents.Rebuild(ctx)
+	if err != nil {
+		return fmt.Errorf("the content map: %w", err)
+	}
+	defer r.Abandon()
+	add := &rebuildAdder{r: r}
 	items := 0
 	var files atomic.Int64
 	progress := func() {
@@ -1402,8 +1629,8 @@ func (m *Mirror) RebuildHashes(ctx context.Context) error {
 			m.rebuildProgress(items, int(files.Load()))
 		}
 	}
-	err := Walk(ctx, m.d, ByPath("/"), WalkOptions{}, func(_ ItemRef, its []Item) error {
-		if err := m.rebuildFolder(ctx, h, its, &items, &files, progress); err != nil {
+	err = Walk(ctx, m.d, ByPath("/"), WalkOptions{}, func(_ ItemRef, its []Item) error {
+		if err := m.rebuildFolder(ctx, add, its, &items, &files, progress); err != nil {
 			return err
 		}
 		progress()
@@ -1415,22 +1642,35 @@ func (m *Mirror) RebuildHashes(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for s, sha := range m.hashes.SourceEntries() {
-		if _, ok := h.sha[sha]; ok {
-			h.source[s] = sha
-		}
+	if err := r.Commit(ctx); err != nil {
+		return fmt.Errorf("the content map: %w", err)
 	}
-	m.hashes.set(h.sha, h.source)
 	return nil
 }
 
-// rebuildFolder adds one folder's items to h (RebuildHashes): the
+// rebuildAdder gives a rebuild its versions one at a time, from the
+// goroutines that read them (rebuildFolder).
+type rebuildAdder struct {
+	mu sync.Mutex
+	r  ContentMapRebuild
+}
+
+func (a *rebuildAdder) add(ctx context.Context, sha string, e HashEntry) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := a.r.Add(ctx, sha, e); err != nil {
+		return fmt.Errorf("the content map: %w", err)
+	}
+	return nil
+}
+
+// rebuildFolder adds one folder's items to a rebuild (RebuildHashes): the
 // source's files' versions, rebuildVersions at once, all read before it
 // returns. items counts the items seen, files the files read. Of the
 // files whose versions fail (other than ErrNotFound: gone since the
 // walk), the first in the folder's order is the error, and no more are
 // started once one has failed or ctx is done.
-func (m *Mirror) rebuildFolder(ctx context.Context, h *HashMap, its []Item, items *int, files *atomic.Int64, progress func()) error {
+func (m *Mirror) rebuildFolder(ctx context.Context, add *rebuildAdder, its []Item, items *int, files *atomic.Int64, progress func()) error {
 	errs := make([]error, len(its))
 	var failed atomic.Bool
 	var wg sync.WaitGroup
@@ -1465,7 +1705,11 @@ func (m *Mirror) rebuildFolder(ctx context.Context, h *HashMap, its []Item, item
 			}
 			for _, v := range vs {
 				if v.Checksums != nil && v.Checksums.SHA256 != "" {
-					h.Add(v.Checksums.SHA256, HashEntry{ID: it.ID, Version: v.ID, Size: v.Size})
+					if err := add.add(ctx, v.Checksums.SHA256, HashEntry{ID: it.ID, Version: v.ID, Size: v.Size}); err != nil {
+						errs[i] = err
+						failed.Store(true)
+						return
+					}
 				}
 			}
 		})
