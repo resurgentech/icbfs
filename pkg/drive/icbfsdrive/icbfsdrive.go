@@ -48,6 +48,11 @@ type Config struct {
 	// when nothing changed). Changes made through this drive are seen at
 	// once either way; changes made elsewhere, after at most TrustFor.
 	TrustFor time.Duration
+	// DirCacheBytes bounds the directories the drive keeps (TrustFor's
+	// cache), by an estimate of their bytes (icbfs.Attr.HeldSize): past
+	// it, the least recently used go. 0 is the default,
+	// DefaultDirCacheBytes.
+	DirCacheBytes int64
 	// NoLocking turns locks off for this drive, as a mount's
 	// -locking=false does: Lock is refused, and Write, Move and Delete
 	// look for no one's locks, which saves a read of the file's lock
@@ -76,7 +81,7 @@ var _ drive.Drive = (*Drive)(nil)
 
 // New attaches to the filesystem and finds the drive's root directory.
 func New(ctx context.Context, cfg Config) (*Drive, error) {
-	dirs := newDirCache(cfg.TrustFor)
+	dirs := newDirCache(cfg.TrustFor, cfg.DirCacheBytes)
 	fsys := icbfs.New(&dropOnWrite{Store: cfg.Store, dirs: dirs}, cfg.Filesystem)
 	if err := fsys.Attach(ctx); err != nil {
 		return nil, mapErr(err)

@@ -692,8 +692,16 @@ defer d.Close()
   the default, each folder on the way is checked, two conditional reads
   with no bodies when it hasn't changed. The drive's own changes are seen
   at once either way; changes made elsewhere (a mount, another drive),
-  after at most `TrustFor`. `Filesystem` returns the drive's icbfs
-  filesystem.
+  after at most `TrustFor`. `DirCacheBytes` bounds the folders it keeps
+  so, by an estimate of their bytes (each folder's first directory block
+  and `.metadata`); past it the least recently used go, and a folder
+  read again later is read from the store. The default (0) is 4 MiB
+  by that estimate (`icbfsdrive.DefaultDirCacheBytes`), up to about 7
+  MiB of heap (the estimate measured at 0.6 of it): at 4 to 11 KB a
+  folder, the 600 to 1,000 folders last walked, a path's ancestors
+  always among them; with no bound in bytes a walk of every file (a mirror's
+  `RebuildHashes`) kept every folder of the tree. `Filesystem` returns
+  the drive's icbfs filesystem.
 - `icbfsdrive.OpenSideStore(ctx, store, name)` opens a side store,
   creating its filesystem the first time.
 - `pkg/icbfstest` is for tests of programs built on icbfs: `Store(t)` is
