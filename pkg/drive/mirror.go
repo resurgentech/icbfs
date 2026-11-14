@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -39,6 +40,8 @@ type Mirror struct {
 	hashes      *HashMap
 	hashStore   HashStore
 	kinds       map[string]hashKind
+	// rebuildProgress is OnRebuildProgress's hook.
+	rebuildProgress func(items, files int)
 }
 
 // hashKind is how the mirror computes a source's kind of hash: the hash,
@@ -1361,39 +1364,56 @@ func (m *Mirror) SaveHashes(ctx context.Context) error {
 	return m.hashStore.SaveHashes(ctx, data)
 }
 
+// OnRebuildProgress has RebuildHashes call fn as it goes, so a daemon can
+// show the rebuild is moving: items is how many items the walk has given
+// so far (files and folders), files how many of the source's files have
+// had their versions read. fn is called on the goroutine that called
+// RebuildHashes, never two at once: after each folder, and every 256
+// files started within one (rebuildProgressEvery). nil calls nothing.
+func (m *Mirror) OnRebuildProgress(fn func(items, files int)) *Mirror {
+	m.rebuildProgress = fn
+	return m
+}
+
+// rebuildVersions is how many files' versions RebuildHashes asks for at
+// once; rebuildProgressEvery how many files started within a folder
+// between calls of its progress hook.
+const (
+	rebuildVersions      = 8
+	rebuildProgressEvery = 256
+)
+
 // RebuildHashes rebuilds the hash map from the drive: every version of
 // every live file copied from the source, by the SHA-256 recorded for it.
 // A version with none recorded is skipped, not computed. What the
 // source's hashes are is kept for the SHA-256s still there: the drive
-// doesn't know them.
+// doesn't know them. It walks the drive a folder at a time (Walk),
+// asking for a folder's files' versions 8 at once (rebuildVersions),
+// all read before the next folder, so it holds one folder besides the map
+// it builds. The map is the same whatever order the versions come in
+// (HashMap.Add keeps the least). Cancelling ctx stops it between items
+// with ctx's cause; on any error the map is left as it was.
 func (m *Mirror) RebuildHashes(ctx context.Context) error {
 	h := NewHashMap()
-	for cursor := ""; ; {
-		page, err := m.d.List(ctx, ByPath("/"), ListOptions{Depth: 1 << 30, Cursor: cursor})
-		if err != nil {
+	items := 0
+	var files atomic.Int64
+	progress := func() {
+		if m.rebuildProgress != nil {
+			m.rebuildProgress(items, int(files.Load()))
+		}
+	}
+	err := Walk(ctx, m.d, ByPath("/"), WalkOptions{}, func(_ ItemRef, its []Item) error {
+		if err := m.rebuildFolder(ctx, h, its, &items, &files, progress); err != nil {
 			return err
 		}
-		for _, it := range page.Items {
-			if it.Type != TypeFile || it.Origin == nil || it.Origin.Drive != m.source {
-				continue
-			}
-			vs, err := m.d.Versions(ctx, ItemRef{ID: it.ID, Path: it.Path})
-			if errors.Is(err, ErrNotFound) {
-				continue // gone since the listing
-			}
-			if err != nil {
-				return fmt.Errorf("versions of %s: %w", it.Path, err)
-			}
-			for _, v := range vs {
-				if v.Checksums != nil && v.Checksums.SHA256 != "" {
-					h.Add(v.Checksums.SHA256, HashEntry{ID: it.ID, Version: v.ID, Size: v.Size})
-				}
-			}
-		}
-		if page.Next == "" {
-			break
-		}
-		cursor = page.Next
+		progress()
+		return nil
+	})
+	if ctx.Err() != nil {
+		return context.Cause(ctx)
+	}
+	if err != nil {
+		return err
 	}
 	for s, sha := range m.hashes.SourceEntries() {
 		if _, ok := h.sha[sha]; ok {
@@ -1401,5 +1421,66 @@ func (m *Mirror) RebuildHashes(ctx context.Context) error {
 		}
 	}
 	m.hashes.set(h.sha, h.source)
+	return nil
+}
+
+// rebuildFolder adds one folder's items to h (RebuildHashes): the
+// source's files' versions, rebuildVersions at once, all read before it
+// returns. items counts the items seen, files the files read. Of the
+// files whose versions fail (other than ErrNotFound: gone since the
+// walk), the first in the folder's order is the error, and no more are
+// started once one has failed or ctx is done.
+func (m *Mirror) rebuildFolder(ctx context.Context, h *HashMap, its []Item, items *int, files *atomic.Int64, progress func()) error {
+	errs := make([]error, len(its))
+	var failed atomic.Bool
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, rebuildVersions)
+	started := 0
+	for i, it := range its {
+		if ctx.Err() != nil || failed.Load() {
+			break
+		}
+		*items++
+		if it.Type != TypeFile || it.Origin == nil || it.Origin.Drive != m.source {
+			continue
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Go(func() {
+			defer func() { <-sem }()
+			vs, err := m.d.Versions(ctx, ItemRef{ID: it.ID, Path: it.Path})
+			files.Add(1)
+			if errors.Is(err, ErrNotFound) {
+				return // gone since the walk
+			}
+			if err != nil {
+				errs[i] = fmt.Errorf("versions of %s: %w", it.Path, err)
+				failed.Store(true)
+				return
+			}
+			for _, v := range vs {
+				if v.Checksums != nil && v.Checksums.SHA256 != "" {
+					h.Add(v.Checksums.SHA256, HashEntry{ID: it.ID, Version: v.ID, Size: v.Size})
+				}
+			}
+		})
+		if started++; started%rebuildProgressEvery == 0 {
+			progress()
+		}
+	}
+	wg.Wait()
+	if ctx.Err() != nil {
+		return context.Cause(ctx)
+	}
+	for _, err := range errs {
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
