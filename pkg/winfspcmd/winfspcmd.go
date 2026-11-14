@@ -181,7 +181,10 @@ func Main(args []string, newStore func() storeflags.Store) int {
 	// winfsp.CaseSensitive and winfspserver.Root's caseInsensitive must
 	// agree; see Root's doc comment.
 	server, err := winfsp.Mount(
-		winfspserver.Root(fsys, *caseInsensitive, winfspserver.WithMetaCache(nameCache)),
+		winfspserver.Root(fsys, *caseInsensitive, winfspserver.WithMetaCache(nameCache),
+			// A primary-POSIX filesystem can hold names Windows can't:
+			// show them as substitutes. A primary-Windows one can't.
+			winfspserver.WithWindowsNames(!fsys.PrimaryWindows())),
 		mountpoint,
 		winfsp.FileSystemName("icbfs"),
 		winfsp.CaseSensitive(!*caseInsensitive),

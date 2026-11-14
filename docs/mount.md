@@ -375,6 +375,60 @@ over SSH's standard input and is never written there.
   them: WinFsp has no hard-link callback.
 - The four file times, each settable, creation time included.
 
+### Names Windows can't hold
+
+A **primary-POSIX** filesystem stores any name POSIX allows, so it can
+hold `a:b`, `a\b`, `a?.txt`, a name ending in a dot or a space, or a
+control character, none of which Windows can open by path. A Windows
+mount of one shows each as a substitute and takes the substitute back.
+Nothing stored changes: Linux mounts, the API, trash and history see and
+record the name as stored.
+
+The rule is Cygwin's ("Forbidden characters in filenames", in its user
+guide):
+
+- Each of `< > : " | ? *` and the control characters 0x01 to 0x1F is shown
+  as that character plus 0xF000 (in the Unicode private-use area): `:` is
+  U+F03A, `?` is U+F03F, a tab is U+F009.
+- A backslash is shown as U+F05C. Cygwin leaves it alone, as a path
+  separator; here a name can hold one, so it is mapped.
+- A last character that is a space or a dot is shown as U+F020 or U+F02E
+  (only the last: `a..` shows as `a.` followed by U+F02E).
+- A stored name that already holds one of those code points, or U+F000,
+  is shown with U+F000 in front of it (a stored U+F000 as U+F000 U+F000),
+  so that every stored name is listed, none is hidden, and no two show as
+  one: `a:b` and a name holding a literal U+F03A are two entries with two
+  different shown names. A name typed in Windows with U+F000 followed by
+  anything but one of those code points, or last, is refused as an invalid
+  name. Private-use code points outside the set pass through.
+
+Names typed in Windows go the other way: `a` U+F03A `b` is stored as
+`a:b`. This applies to open, create, rename (both names), delete, security
+queries and symlink targets. The case-insensitive lookup is unchanged
+(the mapped characters have no case), and a shown name is never longer, in
+UTF-16 units, than its stored name is in bytes, so the 255-byte limit is as
+before. Stream names (`file:stream`) are not translated.
+
+**Device names** (`CON`, `NUL.txt`, `com1`, `LPT¹`) are left as they are:
+on a primary-POSIX mount they were found to open, read, rename and delete
+by an ordinary path, as files and as folders (T163), so there is nothing to
+substitute. Four caveats, from that test:
+
+1. PowerShell's cmdlets (`Test-Path`, `Get-Content`, `Get-Item`) cannot
+   reach these names. That is PowerShell and .NET path handling, not the
+   mount.
+2. The Windows Shell's `ParseName`, looking a name up, returns nothing for
+   `CON`, `com1` and `LPT¹`. It finds `NUL.txt`. The Shell's listing shows
+   all four.
+3. Only Windows 11 LTSC 2024 (build 26100) was run. Windows Server 2025 or
+   another build may differ.
+4. The "Explorer view" was the Shell namespace used over SSH, with no
+   desktop session. Nobody double-clicked in a real Explorer window.
+
+A mount of a **primary-Windows** filesystem translates nothing: the core
+already refuses these names there. Linux mounts and the drive API show
+stored names too.
+
 ### Copying onto a Windows mount
 
 Copies keep what they would onto NTFS (tested: see

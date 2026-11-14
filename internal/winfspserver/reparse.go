@@ -120,7 +120,7 @@ func (d *driver) GetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 		if err != nil {
 			return 0, toWinError(err)
 		}
-		return fillReparseBuffer(buffer, target)
+		return fillReparseBuffer(buffer, d.res().target(target))
 	}
 	attr, err := d.fsys.Stat(ctx(), h.key, h.typ)
 	if err != nil {
@@ -153,7 +153,7 @@ func (d *driver) GetReparsePointByName(fs *winfsp.FileSystemRef, name string, is
 	if err != nil {
 		return 0, toWinError(err)
 	}
-	return fillReparseBuffer(buffer, target)
+	return fillReparseBuffer(buffer, d.res().target(target))
 }
 
 // copyReparseBuffer copies a non-symlink reparse point's stored bytes to
@@ -200,8 +200,17 @@ func (d *driver) SetReparsePoint(fs *winfsp.FileSystemRef, file uintptr, name st
 	if err != nil {
 		return err
 	}
-	dir, base := splitParent(name)
+	// The target is stored with each name turned back (winStoredTarget).
+	target, err = d.res().storedTarget(target)
+	if err != nil {
+		return toWinError(err)
+	}
+	dir, shownBase := splitParent(name)
 	parent, err := resolvePath(ctx(), d.res(), dir)
+	if err != nil {
+		return toWinError(err)
+	}
+	base, err := d.res().stored(shownBase)
 	if err != nil {
 		return toWinError(err)
 	}

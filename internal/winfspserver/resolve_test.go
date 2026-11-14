@@ -298,3 +298,88 @@ func TestSplitStream(t *testing.T) {
 		}
 	}
 }
+
+// TestResolvePathWinNames: with winNames, a folder holding both `a:b` and a
+// name with a literal U+F03A lists two different shown names, and each
+// shown name resolves to its own item, exactly and case-insensitively; a
+// bad U+F000 sequence is icbfs.ErrInvalidName; a symlink's relative target
+// is followed through its shown form (T164).
+func TestResolvePathWinNames(t *testing.T) {
+	fsys := newTestFilesystem(t)
+	ctx := context.Background()
+
+	dir, _, err := fsys.Mkdir(ctx, fsys.RootKey(), "d", 0755, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := []string{"a:b", "ab", "Mix?Case", "dot.", "tab\tx", `back\slash`}
+	keys := map[string]string{}
+	for _, n := range stored {
+		k, _, _, err := fsys.Create(ctx, dir, n, 0644, 0, 0)
+		if err != nil {
+			t.Fatalf("create %q: %v", n, err)
+		}
+		keys[n] = k
+	}
+	_, _, err = fsys.Symlink(ctx, dir, "lnk", "a:b", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res := resolver{fsys: fsys, ci: true, winNames: true}
+	entries, err := fsys.ReadDir(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]string{}
+	for _, e := range entries {
+		sh := res.shown(e.Name)
+		if prev, dup := seen[sh]; dup {
+			t.Errorf("%q and %q both show as %q", prev, e.Name, sh)
+		}
+		seen[sh] = e.Name
+	}
+
+	for _, n := range stored {
+		shown := `\d\` + winShown(n)
+		got, err := resolvePath(ctx, res, shown)
+		if err != nil {
+			t.Fatalf("resolvePath(%q) for %q: %v", shown, n, err)
+		}
+		if got.Key != keys[n] {
+			t.Errorf("resolvePath(%q) found %q, want the item stored as %q", shown, got.Key, n)
+		}
+		if got.Path != shown {
+			t.Errorf("Path = %q, want the shown name %q", got.Path, shown)
+		}
+	}
+	// Folded lookup of a translated name finds the same item as the exact one.
+	exact, err := resolvePath(ctx, res, "\\d\\MixCase")
+	folded, err2 := resolvePath(ctx, res, "\\D\\MIXCASE")
+	if err != nil || err2 != nil || exact.Key != folded.Key || folded.Path != "\\d\\MixCase" {
+		t.Errorf("exact %v/%v, folded %v/%v (path %q)", exact.Key, err, folded.Key, err2, folded.Path)
+	}
+	// Without the translation the shown name is not there.
+	if _, err := resolvePath(ctx, resolver{fsys: fsys, ci: true}, "\\d\\ab"); err != nil {
+		t.Errorf("untranslated: the literal U+F03A name must resolve to itself: %v", err)
+	}
+	if _, err := resolvePath(ctx, resolver{fsys: fsys, ci: true}, `\d\dot`+""); !errors.Is(err, icbfs.ErrNotFound) {
+		t.Errorf("untranslated lookup of a shown trailing dot = %v, want ErrNotFound", err)
+	}
+	// A bad U+F000 sequence.
+	if _, err := resolvePath(ctx, res, "\\d\\bad"); !errors.Is(err, icbfs.ErrInvalidName) {
+		t.Errorf("bad marker = %v, want ErrInvalidName", err)
+	}
+	// The symlink's stored target `a:b` is followed through its shown form.
+	got, err := resolvePathFollow(ctx, res, `\d\lnk`)
+	if err != nil || got.Key != keys["a:b"] {
+		t.Errorf("resolvePathFollow(lnk) = %v, %v, want a:b's item", got.Key, err)
+	}
+	if got.Path != `\d\lnk` {
+		t.Errorf("followed Path = %q", got.Path)
+	}
+	// hasIntermediateSymlink sees a link partway along a translated path.
+	if hasIntermediateSymlink(ctx, res, `\d\lnk\x`) != true {
+		t.Error("hasIntermediateSymlink(d\\lnk\\x) = false")
+	}
+}

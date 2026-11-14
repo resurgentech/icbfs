@@ -6,12 +6,14 @@
 //	namesfixture -fs NAME [store flags]
 //
 // It makes two trees, A and B, each holding one file per name, and a
-// folder F holding one folder per name. The names are the ones in
-// Names; run-names-test.ps1 builds the same list.
+// folder F holding one folder per name, and in A a symlink "lnk" to the
+// colon name `a:b`. The names are the ones in Names; run-names-test.ps1
+// builds the same list.
 package main
 
 import (
 	"context"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"os"
@@ -46,6 +48,7 @@ func Names() []Name {
 		{"LPT1-sup", "LPT¹"},
 		{"holds-F03A", "ab"},
 		{"colons255", strings.Repeat(":", 255)},
+		{"case", "Mix:Case"},
 	}
 }
 
@@ -54,6 +57,7 @@ func main() {
 	sf := storeflags.Default()
 	sf.AddFlags(fset)
 	fsName := fset.String("fs", "", "the filesystem (created already, without -primary-windows)")
+	list := fset.String("list", "", "print what is stored under this /-separated path, and exit")
 	fset.Parse(os.Args[1:])
 	if *fsName == "" {
 		fmt.Fprintln(os.Stderr, "-fs is required")
@@ -68,6 +72,10 @@ func main() {
 	if err := f.Attach(ctx); err != nil {
 		die(err)
 	}
+	if *list != "" {
+		listStored(ctx, f, *list)
+		return
+	}
 	if f.PrimaryWindows() {
 		die(fmt.Errorf("%s is primary-Windows; this needs a primary-POSIX filesystem", *fsName))
 	}
@@ -80,6 +88,11 @@ func main() {
 		if err != nil {
 			die(err)
 		}
+		if tree == "A" {
+			if _, _, err := f.Symlink(ctx, dir, "lnk", "a:b", 0, 0); err != nil {
+				die(fmt.Errorf("symlink A/lnk: %w", err))
+			}
+		}
 		for _, n := range Names() {
 			content := []byte("file " + tree + " " + n.ID)
 			if _, _, err := f.CreateWith(ctx, dir, n.Name, 0644, 0, 0, content, nil, icbfs.ItemInfo{}); err != nil {
@@ -91,6 +104,40 @@ func main() {
 		}
 	}
 	fmt.Printf("namesfixture: %d names x (file, folder) x trees A, B in %s\n", len(Names()), *fsName)
+}
+
+// listStored prints the entries of the directory at path.
+func listStored(ctx context.Context, f *icbfs.Filesystem, path string) {
+	key := f.RootKey()
+	for _, part := range strings.Split(strings.Trim(path, "/"), "/") {
+		if part == "" {
+			continue
+		}
+		e, _, err := f.Lookup(ctx, key, part)
+		if err != nil {
+			die(fmt.Errorf("lookup %q: %w", part, err))
+		}
+		key = e.UUID
+	}
+	entries, err := f.ReadDir(ctx, key)
+	if err != nil {
+		die(err)
+	}
+	for _, e := range entries {
+		kind, target := "file", ""
+		switch e.Type {
+		case icbfs.TypeDir:
+			kind = "dir"
+		case icbfs.TypeSymlink:
+			kind = "symlink"
+			t, err := f.Readlink(ctx, e.UUID)
+			if err != nil {
+				die(err)
+			}
+			target = hex.EncodeToString([]byte(t))
+		}
+		fmt.Printf("%s\t%s\t%s\n", hex.EncodeToString([]byte(e.Name)), kind, target)
+	}
 }
 
 func die(err error) {

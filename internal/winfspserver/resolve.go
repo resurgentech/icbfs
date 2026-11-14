@@ -26,8 +26,9 @@ type resolved struct {
 	Attr icbfs.Attr
 
 	// Path is the requested path with each component in its stored case, as
-	// WinFsp's NormalizedName wants (setNormalizedName). For
-	// resolvePathFollow it's still the requested path, not the target's.
+	// WinFsp's NormalizedName wants (setNormalizedName), and shown as the
+	// mount shows names (winNames). For resolvePathFollow it's still the
+	// requested path, not the target's.
 	Path string
 }
 
@@ -48,9 +49,16 @@ type resolved struct {
 // primary mode only decides the cost, since a primary-Windows filesystem's
 // directories are sorted case-insensitively and icbfs.Filesystem.LookupFold
 // can seek.
+//
+// With res.winNames, path holds shown names: each component is turned into
+// its stored name before the lookup (winStored), a name that can't be one
+// is icbfs.ErrInvalidName, and Path comes back shown (winShown).
 func resolvePath(ctx context.Context, res resolver, path string) (resolved, error) {
 	key := res.fsys.RootKey()
-	segments := splitPath(path)
+	segments, err := res.segments(path)
+	if err != nil {
+		return resolved{}, fmt.Errorf("resolve %q: %w", path, err)
+	}
 
 	if len(segments) == 0 {
 		// The root's own attributes, cached like a name's (under no
@@ -64,7 +72,6 @@ func resolvePath(ctx context.Context, res resolver, path string) (resolved, erro
 			return namecache.Value{Found: true, Entry: block.Entry{UUID: key, Type: icbfs.TypeDir}, Attr: attr}, nil
 		}
 		var v namecache.Value
-		var err error
 		if res.freshLast {
 			v, err = load()
 		} else {
@@ -89,7 +96,7 @@ func resolvePath(ctx context.Context, res resolver, path string) (resolved, erro
 		}
 		key, typ, attr = entry.UUID, entry.Type, a
 		stored.WriteString(`\`)
-		stored.WriteString(entry.Name)
+		stored.WriteString(res.shown(entry.Name))
 	}
 	return resolved{Key: key, Type: typ, Attr: attr, Path: stored.String()}, nil
 }
@@ -101,7 +108,10 @@ func resolvePath(ctx context.Context, res resolver, path string) (resolved, erro
 // GetReparsePointByName, handles relative targets and "." and "..", and
 // reissues the open (winfsp-tests' reparse_symlink_relative_test).
 func hasIntermediateSymlink(ctx context.Context, res resolver, path string) bool {
-	segments := splitPath(path)
+	segments, err := res.segments(path)
+	if err != nil {
+		return false
+	}
 	key := res.fsys.RootKey()
 	for _, name := range segments[:max(len(segments)-1, 0)] {
 		entry, _, err := res.lookup(ctx, key, name, false)
@@ -125,12 +135,62 @@ func hasIntermediateSymlink(ctx context.Context, res resolver, path string) bool
 // cache (nil or disabled: every lookup asks the store). freshLast makes a
 // path's last component always come from the store, as an open's must
 // (close-to-open): the name may have gone, or lead elsewhere, since it
-// was cached.
+// was cached. winNames: the paths it is given hold shown names, not stored
+// ones (winname.go), as on a mount of a primary-POSIX filesystem.
 type resolver struct {
 	fsys      *icbfs.Filesystem
 	ci        bool
 	names     *namecache.Cache
 	freshLast bool
+	winNames  bool
+}
+
+// segments splits a WinFsp path into its components as stored.
+func (res resolver) segments(path string) ([]string, error) {
+	segs := splitPath(path)
+	if !res.winNames {
+		return segs, nil
+	}
+	for i, s := range segs {
+		st, err := winStored(s)
+		if err != nil {
+			return nil, err
+		}
+		segs[i] = st
+	}
+	return segs, nil
+}
+
+// shown is a stored name as the mount shows it.
+func (res resolver) shown(stored string) string {
+	if !res.winNames {
+		return stored
+	}
+	return winShown(stored)
+}
+
+// stored is the stored name a name given by Windows stands for.
+func (res resolver) stored(shown string) (string, error) {
+	if !res.winNames {
+		return shown, nil
+	}
+	return winStored(shown)
+}
+
+// target is a stored symlink target as the mount shows it.
+func (res resolver) target(stored string) string {
+	if !res.winNames {
+		return stored
+	}
+	return winShownTarget(stored)
+}
+
+// storedTarget is a symlink target given by Windows, as stored.
+func (res resolver) storedTarget(shown string) (string, error) {
+	if !res.winNames {
+		return shown, nil
+	}
+	return winStoredTarget(shown)
 }
 
 // lookup is lookupCaseAware through the name cache; fresh skips the cache
@@ -206,7 +266,7 @@ func resolvePathFollow(ctx context.Context, res resolver, path string) (resolved
 		if err != nil {
 			return resolved{}, err
 		}
-		next := resolveSymlinkTarget(dir, target)
+		next := resolveSymlinkTarget(dir, res.target(target))
 		r, err = resolvePath(ctx, res, next)
 		if err != nil {
 			return resolved{}, err
@@ -224,6 +284,9 @@ func resolvePathFollow(ctx context.Context, res resolver, path string) (resolved
 //     drive), leaving `\sub\file`;
 //   - a target starting with `\` is already a volume path;
 //   - anything else is relative to dir.
+//
+// target is as shown (winShownTarget) on a mount that translates names, so
+// a colon left in it is the drive's.
 func resolveSymlinkTarget(dir, target string) string {
 	target = strings.TrimPrefix(target, ntPathPrefix)
 	if idx := strings.Index(target, ":"); idx >= 0 {

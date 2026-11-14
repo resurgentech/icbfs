@@ -275,7 +275,13 @@ case-sensitive.
   and `LPT¹`, made through the core, then listed, opened, renamed and
   deleted through a WinFsp mount (plain, `\\?\` and NT paths; `dir`,
   `Get-ChildItem` and Explorer's Shell namespace), with a primary-Windows
-  mount as the control. It prints a table and asserts nothing yet.
+  mount as the control. Since T164 it asserts, for each name, that it is
+  listed by its shown name (Cygwin's mapping: the character plus 0xF000),
+  opens, reads, renames (to a plain name and to another forbidden one) and
+  deletes, and that what is stored, read through the core, is the raw name;
+  that names created in Windows with a substitute are stored raw; and that a
+  primary-Windows mount translates nothing. It prints `RESULT done` only if
+  every check passed (443 checks, 2026-11-13, Windows 11 LTSC 2024).
 - **Timings on Windows** (`test/windows/run-bench.sh`): what Explorer and
   Office do to a mount (listing many files, opening small ones, a deep
   path, an Office-style save, copying a folder in) and the mount's peak

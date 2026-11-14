@@ -82,7 +82,7 @@ func (d *driver) ReadDirectory(fs *winfsp.FileSystemRef, file uintptr, pattern s
 		listed = append(listed, v)
 		var info winfsp.FSP_FSCTL_FILE_INFO
 		d.fillFileInfo(&info, e.UUID, e.Type, v.Attr)
-		if ok, err := fill(e.Name, &info); err != nil || !ok {
+		if ok, err := fill(d.res().shown(e.Name), &info); err != nil || !ok {
 			return err
 		}
 	}

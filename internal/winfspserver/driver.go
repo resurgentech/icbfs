@@ -31,6 +31,7 @@ type driver struct {
 	fsys            *icbfs.Filesystem
 	caseInsensitive bool
 	names           *namecache.Cache // nil: no name cache (see WithMetaCache)
+	winNames        bool             // names are translated (see WithWindowsNames)
 
 	mu      sync.Mutex
 	handles map[uintptr]*fileHandle
@@ -121,6 +122,17 @@ type Option func(*driver)
 // it holds about what was touched in the last moment, far less.
 const nameCacheBytes = 32 << 20
 
+// WithWindowsNames turns on the translation of names Windows can't hold
+// (winname.go): a stored name is shown as its substitute in listings, in
+// the names an open reports and in symlink targets read, and a substitute
+// is turned back to the stored name on its way in (Open, Create, Rename,
+// delete, security queries, reparse calls, symlink targets written).
+// winfspcmd turns it on for a primary-POSIX filesystem and off for a
+// primary-Windows one, whose core already refuses those names.
+func WithWindowsNames(on bool) Option {
+	return func(d *driver) { d.winNames = on }
+}
+
 // WithMetaCache keeps a name cache (internal/namecache) for ttl, the
 // mount's -meta-cache: what a directory's names lead to, with their
 // attributes, so an open doesn't walk the whole path from the store again.
@@ -140,7 +152,7 @@ func WithMetaCache(ttl time.Duration) Option {
 // res is how the driver looks names up; resFresh the same with a path's
 // last component always from the store.
 func (d *driver) res() resolver {
-	return resolver{fsys: d.fsys, ci: d.caseInsensitive, names: d.names}
+	return resolver{fsys: d.fsys, ci: d.caseInsensitive, names: d.names, winNames: d.winNames}
 }
 
 func (d *driver) resFresh() resolver {
@@ -350,8 +362,14 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 	if stream != "" {
 		return d.createStream(path, stream, allocationSize, info)
 	}
-	dir, base := splitParent(name)
+	dir, shownBase := splitParent(name)
 	parent, err := resolvePath(ctx(), d.res(), dir)
+	if err != nil {
+		return 0, toWinError(err)
+	}
+	// The stored name; a name that can't be one (a bad U+F000 sequence) is
+	// refused here, before anything is made.
+	base, err := d.res().stored(shownBase)
 	if err != nil {
 		return 0, toWinError(err)
 	}
@@ -380,7 +398,7 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 			}
 		}
 		d.fillFileInfo(info, newUUID, icbfs.TypeDir, attr)
-		setNormalizedName(info, joinPath(parent.Path, base))
+		setNormalizedName(info, joinPath(parent.Path, d.res().shown(base)))
 		return d.newHandle(&fileHandle{key: newUUID, typ: icbfs.TypeDir, path: name}), nil
 	}
 
@@ -408,7 +426,7 @@ func (d *driver) Create(fs *winfsp.FileSystemRef, name string, createOptions, gr
 		d.setAlloc(newUUID, allocationSize)
 	}
 	d.fillFileInfo(info, newUUID, icbfs.TypeFile, attr)
-	setNormalizedName(info, joinPath(parent.Path, base))
+	setNormalizedName(info, joinPath(parent.Path, d.res().shown(base)))
 	return id, nil
 }
 
@@ -504,10 +522,15 @@ func (d *driver) Cleanup(fs *winfsp.FileSystemRef, file uintptr, name string, cl
 	if err != nil {
 		return
 	}
+	base, err = d.res().stored(base)
+	if err != nil {
+		return
+	}
 	// The kernel can pass a name in different case from the stored one (see
 	// realStoredName).
 	base = realStoredName(ctx(), d.res(), parent.Key, base)
-	dctx := icbfs.WithDeleteInfo(ctx(), icbfs.DeleteInfo{Path: strings.ReplaceAll(name, `\`, "/")})
+	// Trash and history record the stored name, not the shown one.
+	dctx := icbfs.WithDeleteInfo(ctx(), icbfs.DeleteInfo{Path: strings.ReplaceAll(d.storedPath(name), `\`, "/")})
 	if h.typ == icbfs.TypeDir {
 		_ = d.fsys.Rmdir(dctx, parent.Key, base)
 	} else {
@@ -515,6 +538,18 @@ func (d *driver) Cleanup(fs *winfsp.FileSystemRef, file uintptr, name string, cl
 	}
 	d.names.Forget(parent.Key, base)
 	d.names.ForgetItem(h.key)
+}
+
+// storedPath is a shown path as stored, for the trash and history; a path
+// that can't be turned back is given as it is.
+func (d *driver) storedPath(shown string) string {
+	if !d.winNames {
+		return shown
+	}
+	if p, err := winStoredPath(shown); err == nil {
+		return p
+	}
+	return shown
 }
 
 // changedItem drops what the name cache holds for h's item (its owner's,
@@ -608,15 +643,25 @@ func (d *driver) Rename(fs *winfsp.FileSystemRef, file uintptr, source, target s
 		h.mu.Unlock()
 		return nil
 	}
-	oldDir, oldBase := splitParent(source)
+	oldDir, oldShown := splitParent(source)
 	oldParent, err := resolvePath(ctx(), d.res(), oldDir)
+	if err != nil {
+		return toWinError(err)
+	}
+	// Both ends are turned back to stored names: a rename to a name
+	// holding a substitute stores the raw character.
+	oldBase, err := d.res().stored(oldShown)
 	if err != nil {
 		return toWinError(err)
 	}
 	oldBase = realStoredName(ctx(), d.res(), oldParent.Key, oldBase)
 
-	newDir, newBase := splitParent(target)
+	newDir, newShown := splitParent(target)
 	newParent, err := resolvePath(ctx(), d.res(), newDir)
+	if err != nil {
+		return toWinError(err)
+	}
+	newBase, err := d.res().stored(newShown)
 	if err != nil {
 		return toWinError(err)
 	}

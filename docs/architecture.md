@@ -1011,12 +1011,30 @@ derived when a mount needs them.
   - An item with no descriptor of its own takes its nearest ancestor's.
   - New items inherit as Windows would give them: OI, CI, NP and IO flags,
     and CREATOR OWNER.
-- **Reserved names.** A primary-Windows filesystem refuses names Windows
-  can't hold: `< > : " / \ | ? *`, a trailing space or period, and `CON`,
-  `AUX`, `COM1` and the like.
+- **Reserved names.**
+  - A primary-Windows filesystem refuses names Windows can't hold:
+    `< > : " / \ | ? *`, a trailing space or period, and `CON`, `AUX`,
+    `COM1` and the like.
+  - A primary-POSIX filesystem stores them. Its Windows mount shows each
+    forbidden character as itself plus U+F000 (`:` as U+F03A), a trailing
+    space or dot as U+F020 or U+F02E, and a backslash as U+F05C, and turns
+    them back on the way in; the code is `internal/winfspserver/winname.go`.
+    A stored name that already holds one of those code points, or U+F000,
+    is shown with U+F000 before it, so the mapping is one to one: no name
+    is hidden and no two show as one. Stored names, Linux mounts and the
+    API are unchanged. Device names (`CON`, `NUL.txt`, `com1`, `LPT¹`) are
+    not mapped: T163 found them openable on a plain path. The caveats
+    (PowerShell cmdlets cannot reach them; Shell `ParseName` by name returns
+    null for `CON`, `com1` and `LPT¹`; only Windows 11 LTSC 2024 build 26100
+    was run; no real Explorer double-click was tested) are in
+    [mount.md](mount.md#names-windows-cant-hold).
 - **Name length.** A name is at most 255, counted the way the primary side
   counts it: bytes on primary-POSIX, UTF-16 code units on primary-Windows.
-  This is enforced in the core, on lookups too.
+  This is enforced in the core, on lookups too. On a Windows mount of a
+  primary-POSIX filesystem a shown name is never longer, in UTF-16 units,
+  than its stored name is in bytes (an escaped code point is three bytes
+  stored and two units shown), and a substitute turned back is one byte, so
+  the limit is as before.
 - **Attribute bits** (ReadOnly, Hidden, System, Archive) are stored on
   primary-Windows filesystems. On primary-POSIX ones, only ReadOnly is
   derived, from the mode.
@@ -1028,6 +1046,9 @@ derived when a mount needs them.
     because directories are sorted case-insensitively.
   - On primary-POSIX filesystems, a case-insensitive lookup with no exact
     match reads the whole directory.
+  - A Windows mount of a primary-POSIX filesystem turns shown names into
+    stored ones before the lookup; the mapped characters and their
+    substitutes have no case, so the fold is the same.
 - **Times.** Creation time comes from the UUIDv7 key; any of the four times
   can be set explicitly.
 - **Symlinks** appear as reparse points. Other reparse tags are not

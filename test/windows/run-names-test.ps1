@@ -3,12 +3,16 @@ param($Endpoint,$Bucket,$AccessKey,$SecretKey,
   [string]$Cli="C:\icbfs-test\icbfs-cli.exe",
   [string]$Fixture="C:\icbfs-test\namesfixture.exe",
   [string]$Out="C:\icbfs-test\names-result.txt")
-# VM side of run-names-test.sh: what a WinFsp mount does today with names
-# Windows can't hold, on a primary-POSIX filesystem (the fixture put them
-# there through the core), and on a primary-Windows one (the control).
-# It asserts nothing about the outcomes: it prints a table, one row per
-# name and kind, and ends with "RESULT done" if it ran to the end.
-# ASCII only: the names are built with [char] codes.
+# VM side of run-names-test.sh (T164): what a WinFsp mount of a primary-POSIX
+# filesystem does with names Windows can't hold. The fixture put the names
+# there through the core, stored exactly as given (`a:b`, `a.`, tab...). The
+# mount must show each as its substitute (Cygwin's rule: the character plus
+# 0xF000, a trailing space or dot as U+F020 or U+F02E, a stored substitute
+# escaped with U+F000), and accept the substitute back. Every check prints
+# PASS or FAIL; the script ends with "RESULT done" only if all passed, else
+# "RESULT fail=N". Device names (CON, NUL.txt, com1, LPT-superscript-1) are
+# left as they are: T163 found they open. A primary-Windows mount is the
+# control: it must not translate. ASCII only: names are built with [char].
 $ErrorActionPreference = "Continue"
 $store = @("-endpoint",$Endpoint,"-bucket",$Bucket,"-access-key",$AccessKey,"-secret-key",$SecretKey)
 $drive = "M:"
@@ -29,6 +33,9 @@ public static class W {
   [StructLayout(LayoutKind.Sequential)] struct IOSB { public IntPtr Status; public IntPtr Info; }
   [DllImport("ntdll.dll")] static extern int NtCreateFile(out SafeFileHandle h, uint access, ref OA oa, out IOSB iosb, IntPtr alloc, uint attrs, uint share, uint disp, uint opts, IntPtr ea, uint ealen);
 
+  // A path of 240 characters or more goes by \\?\ (MAX_PATH): the 255-unit
+  // names are then opened by that path, not the plain one.
+  static string L(string p) { return (p.Length >= 240 && !p.StartsWith(@"\\?\") && !p.StartsWith(@"\??\")) ? @"\\?\" + p : p; }
   static string Err(int e) { return "W" + e + " " + new Win32Exception(e).Message; }
   static string Status(int st) {
     string n;
@@ -58,14 +65,14 @@ public static class W {
   }
   // Open an existing file or folder by a Win32 path.
   public static string Open(string path, bool dir) {
-    SafeFileHandle h = CreateFileW(path, 0x80000000u, 7, IntPtr.Zero, 3, dir ? 0x02000000u : 0x80u, IntPtr.Zero);
+    SafeFileHandle h = CreateFileW(L(path), 0x80000000u, 7, IntPtr.Zero, 3, dir ? 0x02000000u : 0x80u, IntPtr.Zero);
     if (h.IsInvalid) return Err(Marshal.GetLastWin32Error());
     using (h) { return Read(h, dir); }
   }
   // Create a new file or folder by a Win32 path.
   public static string Create(string path, bool dir) {
-    if (dir) return CreateDirectoryW(path, IntPtr.Zero) ? "OK" : Err(Marshal.GetLastWin32Error());
-    SafeFileHandle h = CreateFileW(path, 0x40000000u, 7, IntPtr.Zero, 1, 0x80u, IntPtr.Zero);
+    if (dir) return CreateDirectoryW(L(path), IntPtr.Zero) ? "OK" : Err(Marshal.GetLastWin32Error());
+    SafeFileHandle h = CreateFileW(L(path), 0x40000000u, 7, IntPtr.Zero, 1, 0x80u, IntPtr.Zero);
     if (h.IsInvalid) return Err(Marshal.GetLastWin32Error());
     h.Dispose(); return "OK";
   }
@@ -84,9 +91,18 @@ public static class W {
     if (st < 0) return Status(st);
     using (h) { return create ? "OK created" : Read(h, dir); }
   }
-  public static string Move(string a, string b) { return MoveFileExW(a, b, 0) ? "OK" : Err(Marshal.GetLastWin32Error()); }
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern uint GetFinalPathNameByHandleW(SafeFileHandle h, StringBuilder b, uint n, uint f);
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] static extern byte CreateSymbolicLinkW(string l, string t, uint f);
+  // The name the mount reports for an opened path (the normalized name).
+  public static string Final(string path) {
+    SafeFileHandle h = CreateFileW(L(path), 0x80000000u, 7, IntPtr.Zero, 3, 0x02000080u, IntPtr.Zero);
+    if (h.IsInvalid) return "ERR " + Err(Marshal.GetLastWin32Error());
+    using (h) { StringBuilder sb = new StringBuilder(1024); uint n = GetFinalPathNameByHandleW(h, sb, 1024, 4); return n == 0 ? "ERR " + Err(Marshal.GetLastWin32Error()) : sb.ToString(); }
+  }
+  public static string Symlink(string link, string target) { return CreateSymbolicLinkW(link, target, 2) != 0 ? "OK" : Err(Marshal.GetLastWin32Error()); }
+  public static string Move(string a, string b) { return MoveFileExW(L(a), L(b), 0) ? "OK" : Err(Marshal.GetLastWin32Error()); }
   public static string Delete(string p, bool dir) {
-    bool ok = dir ? RemoveDirectoryW(p) : DeleteFileW(p);
+    bool ok = dir ? RemoveDirectoryW(L(p)) : DeleteFileW(L(p));
     return ok ? "OK" : Err(Marshal.GetLastWin32Error());
   }
 }
@@ -98,7 +114,7 @@ $names = @(
   @('pipe','a|b'), @('qmark','a?b'), @('star','a*b'), @('backslash','a\b'),
   @('tab',"a$([char]9)b"), @('ctl01',"a$([char]1)b"), @('trailing-dot','a.'), @('trailing-space','a '),
   @('CON','CON'), @('NUL.txt','NUL.txt'), @('com1','com1'), @('LPT1-sup',"LPT$([char]0xB9)"),
-  @('holds-F03A',"a$([char]0xF03A)b"), @('colons255',(':' * 255)))
+  @('holds-F03A',"a$([char]0xF03A)b"), @('colons255',(':' * 255)), @('case','Mix:Case'))
 
 function Esc([string]$s) {
   $sb = New-Object Text.StringBuilder
@@ -167,6 +183,42 @@ function Extras($list, $expected) {
   return @($list | Where-Object { -not ($expected -ccontains $_) })
 }
 
+$script:fail = 0
+function Check([bool]$ok, [string]$what, [string]$detail = "") {
+  if ($ok) { Say ("PASS " + $what) } else { $script:fail++; Say ("FAIL " + $what + $(if ($detail) { " :: " + $detail } else { "" })) }
+}
+
+# The mapping, written out again here (not shared with the Go code): the
+# shown form of a stored name.
+$forbidden = [char[]]'<>:"|?*\'
+function ShownName([string]$s) {
+  $sb = New-Object Text.StringBuilder
+  $cs = $s.ToCharArray()
+  for ($i = 0; $i -lt $cs.Length; $i++) {
+    $c = $cs[$i]; $n = [int]$c
+    $inSet = (($n -ge 0xF000 -and $n -le 0xF020) -or (@(0xF022,0xF02A,0xF02E,0xF03A,0xF03C,0xF03E,0xF03F,0xF05C,0xF07C) -contains $n))
+    if ($inSet) { [void]$sb.Append([char]0xF000); [void]$sb.Append($c) }
+    elseif (($n -ge 1 -and $n -le 31) -or ($forbidden -contains $c)) { [void]$sb.Append([char]($n + 0xF000)) }
+    elseif ($i -eq $cs.Length - 1 -and $c -eq ' ') { [void]$sb.Append([char]0xF020) }
+    elseif ($i -eq $cs.Length - 1 -and $c -eq '.') { [void]$sb.Append([char]0xF02E) }
+    else { [void]$sb.Append($c) }
+  }
+  return $sb.ToString()
+}
+function Hex([string]$s) { return ([BitConverter]::ToString([Text.Encoding]::UTF8.GetBytes($s))).Replace('-','').ToLower() }
+# What is stored under a directory, through the core: "hexname|kind|hextarget".
+function Stored([string]$fsName, [string]$dir) {
+  $o = & $Fixture @store -fs $fsName -list $dir 2>&1
+  $r = @()
+  foreach ($l in @($o)) {
+    $p = ([string]$l) -split "`t"
+    if ($p.Count -ge 3) { $r += ($p[0] + "|" + $p[1] + "|" + $p[2]) } else { $r += ("ERROR " + $l) }
+  }
+  return ,$r
+}
+function HasStored($list, [string]$name, [string]$kind) { return ($list -contains ((Hex $name) + "|" + $kind + "|")) }
+function SameSet($a, $b) { return ((@($a | Sort-Object) -join ",") -ceq (@($b | Sort-Object) -join ",")) }
+
 # --- the primary-POSIX mount ------------------------------------------------
 Stop-Fs
 $fs = "names-" + (Get-Random)
@@ -174,109 +226,161 @@ $fs = "names-" + (Get-Random)
 & $Fixture @store -fs $fs
 Say "# primary-POSIX filesystem $fs, mounted case-insensitively (the default) on $drive"
 if (-not (Mount-Fs $fs)) { Say "MOUNT-FAILED"; Get-Content C:\Windows\Temp\names-err.log; Say "RESULT fail=1"; exit 1 }
-Say "## fsutil fsinfo volumeinfo $drive"
-fsutil fsinfo volumeinfo $drive | ForEach-Object { Say $_ }
 
-$allNames = @($names | ForEach-Object { $_[1] })
+$shown = @{}
+foreach ($n in $names) { $shown[$n[0]] = ShownName $n[1] }
+$shownAll = @($names | ForEach-Object { $shown[$_[0]] })
 $dirs = @{ file = "$drive\A"; folder = "$drive\A\F" }
-$expectedIn = @{ file = ($allNames + @("F")); folder = $allNames }
-$lists = @{}
+
+# 1. Listing: exactly the shown names, by cmd and by the Shell; none raw.
+Say ""
+Say "## listing"
 foreach ($k in "file","folder") {
   $d = $dirs[$k]
-  $lists["$k-gci"] = List-Gci $d
-  $lists["$k-cmd"] = List-Cmd $d
-  $lists["$k-shell"] = List-Shell $d
-  foreach ($m in "gci","cmd","shell") {
-    $x = Extras $lists["$k-$m"] $expectedIn[$k]
-    Say ("LISTING $k $m in $d : " + $lists["$k-$m"].Count + " entries; not a stored name: " + (($x | ForEach-Object { if ($_ -like 'ERROR*') { Cell $_ } else { Esc $_ } }) -join ', '))
-    Say ("  entries: " + (($lists["$k-$m"] | ForEach-Object { if ($_ -like 'ERROR*') { Cell $_ } else { Esc $_ } }) -join ', '))
-  }
+  $expect = if ($k -eq "file") { $shownAll + @("F","lnk") } else { $shownAll }
+  $cmdl = List-Cmd $d
+  $extra = @($cmdl | Where-Object { -not ($expect -ccontains $_) })
+  $missing = @($expect | Where-Object { -not ($cmdl -ccontains $_) })
+  Check (($extra.Count -eq 0) -and ($missing.Count -eq 0)) "$k listing by cmd dir is exactly the shown names" ("extra: " + (($extra | ForEach-Object { Esc $_ }) -join ', ') + " missing: " + (($missing | ForEach-Object { Esc $_ }) -join ', '))
+  $shl = List-Shell $d
+  foreach ($n in $names) { Check (Listed $shl $shown[$n[0]]) ("$k " + $n[0] + " is in the Shell listing") ("shell entries: " + (($shl | ForEach-Object { Esc $_ }) -join ', ')) }
 }
+Check ($shown['colon'] -cne $shown['holds-F03A']) "a:b and the name holding a literal U+F03A show as two different names"
 
-# Device names, other ways in, before the table below renames anything.
+# 2. Open and read by the shown name; the name an open reports; case.
 Say ""
-Say "## Device names: PowerShell, cmd and the Shell on the tree A files"
-foreach ($id in "CON","NUL.txt","com1","LPT1-sup") {
-  $nm = ($names | Where-Object { $_[0] -eq $id })[1]
-  $p = "$drive\A\$nm"
-  $tp = try { Test-Path -LiteralPath $p } catch { "ERROR " + $_.Exception.Message }
-  $gc = try { (Get-Content -LiteralPath $p -ErrorAction Stop -Raw) } catch { "ERROR " + $_.Exception.Message }
-  $psi = New-Object Diagnostics.ProcessStartInfo "cmd.exe", ('/c type "' + $p + '"')
-  $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.RedirectStandardInput = $true; $psi.UseShellExecute = $false
-  $pr = [Diagnostics.Process]::Start($psi); $pr.StandardInput.Close()
-  if ($pr.WaitForExit(10000)) { $ty = ($pr.StandardOutput.ReadToEnd() + " " + $pr.StandardError.ReadToEnd()).Trim() + " (exit " + $pr.ExitCode + ")" } else { $pr.Kill(); $ty = "TIMED OUT, killed" }
-  $sp2 = Shell-Parse "$drive\A" $nm
-  # The item Explorer's own listing gives for it: its path, size and whether that path opens.
-  $via = "no item in the Shell listing"
-  try {
-    foreach ($it in $script:shell.NameSpace("$drive\A").Items()) {
-      if ((Split-Path -Leaf $it.Path) -ceq $nm) { $via = "item path=" + (Esc $it.Path) + " size=" + $it.Size + " open=" + [W]::Open($it.Path, $false) }
-    }
-  } catch { $via = "ERROR " + $_.Exception.Message }
-  Say ("DEVICE " + $id + " (" + (Esc $nm) + "): Test-Path=" + $tp + " | Get-Content=" + (Cell "$gc") + " | cmd type=" + (Cell $ty) + " | Shell ParseName=" + (Cell $sp2) + " | Shell Items() " + (Cell $via))
-}
-
-Say ""
-Say "## Table (tree A: list, open, rename; tree B: delete)"
-Say "| kind | id | name | Get-ChildItem | Get-Item | cmd dir | Shell list | Shell ParseName | open plain | open \\?\ | open NT \??\ | rename plain | rename \\?\ | rename result seen | delete plain | delete \\?\ | delete result seen |"
-Say "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+Say "## open"
 foreach ($k in "file","folder") {
   $isDir = ($k -eq "folder")
-  $dA = $dirs[$k]
-  $dB = $dA -replace '^M:\\A','M:\B'
   foreach ($n in $names) {
-    $id = $n[0]; $nm = $n[1]
-    $gci = ListedYN $lists["$k-gci"] $nm; $cmdl = ListedYN $lists["$k-cmd"] $nm; $shl = ListedYN $lists["$k-shell"] $nm
-    $gi = GetItem "$dA\$nm"
-    $sp = Shell-Parse $dA $nm
-    $p = "$dA\$nm"
-    $oPlain = [W]::Open($p, $isDir)
-    $oExt = [W]::Open("\\?\$p", $isDir)
-    $oNt = [W]::Nt("\??\$p", $isDir, $false)
-    # rename (tree A) to a plain name, plain path first, then \\?\.
-    $new = "r-$id"
-    $rPlain = [W]::Move($p, "$dA\$new")
-    $rExt = "(not tried)"
-    if ($rPlain -ne "OK") { $rExt = [W]::Move("\\?\$p", "\\?\$dA\$new") }
-    $after = List-Cmd $dA
-    $seen = "new=" + (YN (Listed $after $new)) + " old gone=" + (YN (-not (Listed $after $nm)))
-    # delete (tree B).
-    $q = "$dB\$nm"
-    $dPlain = [W]::Delete($q, $isDir)
-    $dExt = "(not tried)"
-    if ($dPlain -ne "OK") { $dExt = [W]::Delete("\\?\$q", $isDir) }
-    $afterB = List-Cmd $dB
-    $seenB = "old gone=" + (YN (-not (Listed $afterB $nm)))
-    Say ("| $k | $id | " + (Esc $nm) + " | $gci | " + (Cell $gi) + " | $cmdl | $shl | " + (Cell $sp) + " | " + (Cell $oPlain) + " | " + (Cell $oExt) + " | " + (Cell $oNt) + " | " + (Cell $rPlain) + " | " + (Cell $rExt) + " | $seen | " + (Cell $dPlain) + " | " + (Cell $dExt) + " | $seenB |")
+    $id = $n[0]; $p = $dirs[$k] + "\" + $shown[$id]
+    $want = if ($isDir) { "OK dir" } else { "OK read 'file A $id'" }
+    $r = [W]::Open($p, $isDir)
+    Check ($r -ceq $want) "$k $id opens and reads by its shown name" $r
+    $r2 = [W]::Open("\\?\$p", $isDir)
+    Check ($r2 -ceq $want) "$k $id opens by its shown name, \\?\ path" $r2
+    $r3 = [W]::Nt("\??\$p", $isDir, $false)
+    Check ($r3 -ceq $want) "$k $id opens by its shown name, NT path" $r3
   }
 }
+$lower = "$drive\A\" + $shown['case'].ToLower()
+$exact = "$drive\A\" + $shown['case']
+Check (([W]::Open($lower, $false)) -ceq "OK read 'file A case'") "a folded (lower-case) open of a translated name finds the same file"
+Check (([W]::Open($exact, $false)) -ceq "OK read 'file A case'") "an exact-case open of the translated name finds it"
+$fin = [W]::Final($lower)
+Check ($fin.EndsWith("\A\" + $shown['case'], [StringComparison]::Ordinal)) "the name an open reports is the shown name in its stored case" (Esc $fin)
+$fin = [W]::Final("$drive\A\" + $shown['colon'])
+Check ($fin.EndsWith("\A\" + $shown['colon'], [StringComparison]::Ordinal)) "the name an open of a:b reports is the shown name" (Esc $fin)
+# A bad marker (U+F000 then anything outside the set) is refused.
+$bad = "$drive\A\bad" + [char]0xF000 + "x"
+$rb = [W]::Open($bad, $false)
+Check ($rb -like 'W123*') "an open of a bad U+F000 sequence is refused" $rb
+# A symlink stored with a raw colon target is read, and followed, by its shown target.
+$rl = [W]::Open("$drive\A\lnk", $false)
+Check ($rl -ceq "OK read 'file A colon'") "a symlink to a:b opens through its translated target" $rl
+
+# 3. Rename: to a plain name, then to another forbidden one (stored raw).
+Say ""
+Say "## rename"
+foreach ($k in "file","folder") {
+  $isDir = ($k -eq "folder"); $d = $dirs[$k]
+  foreach ($n in $names) {
+    $id = $n[0]; $old = $d + "\" + $shown[$id]
+    $plain = "r-$id"
+    $r = [W]::Move($old, "$d\$plain")
+    Check ($r -ceq "OK") "$k $id renames to a plain name" $r
+    $after = List-Cmd $d
+    Check (($after -ccontains $plain) -and -not ($after -ccontains $shown[$id])) "$k $id : the new name is listed and the old one is gone"
+    $tgtShown = "x" + $id + [char]0xF03A + "y"
+    $r = [W]::Move("$d\$plain", "$d\$tgtShown")
+    Check ($r -ceq "OK") "$k $id renames to another forbidden name" $r
+    $want = if ($isDir) { "OK dir" } else { "OK read 'file A $id'" }
+    $ro = [W]::Open("$d\$tgtShown", $isDir)
+    Check ($ro -ceq $want) "$k $id opens by the new shown name" $ro
+  }
+}
+$expA = @($names | ForEach-Object { Hex ("x" + $_[0] + ":y") })
+$stA = Stored $fs "/A"
+$gotA = @($stA | Where-Object { $_ -like '*|file|' } | ForEach-Object { ($_ -split '\|')[0] })
+Check (SameSet $gotA $expA) "A: every renamed file is stored with the raw colon" ($stA -join ';')
+$stAF = Stored $fs "/A/F"
+$gotAF = @($stAF | ForEach-Object { ($_ -split '\|')[0] })
+Check (SameSet $gotAF $expA) "A/F: every renamed folder is stored with the raw colon" ($stAF -join ';')
+
+# 4. Delete, by the shown name, in tree B.
+Say ""
+Say "## delete"
+foreach ($k in "file","folder") {
+  $isDir = ($k -eq "folder")
+  $dB = ($dirs[$k] -replace '^M:\\A','M:\B')
+  foreach ($n in $names) {
+    $id = $n[0]; $q = $dB + "\" + $shown[$id]
+    $r = [W]::Delete($q, $isDir)
+    Check ($r -ceq "OK") "$k $id deletes by its shown name" $r
+    $left = @(List-Cmd $dB | Where-Object { $_ -ceq $shown[$id] })
+    Check ($left.Count -eq 0) "$k $id is gone from the listing"
+  }
+}
+$stB = Stored $fs "/B"
+Check (SameSet @($stB | ForEach-Object { ($_ -split '\|')[0] }) @((Hex "F"))) "B: every file is deleted from the store" ($stB -join ';')
+$stBF = Stored $fs "/B/F"
+Check ($stBF.Count -eq 0) "B/F: every folder is deleted from the store" ($stBF -join ';')
+
+# 5. Created in Windows with a substitute: stored with the raw character.
+Say ""
+Say "## create"
+New-Item -ItemType Directory "$drive\C" | Out-Null
+$cn = @(
+  @(("a" + [char]0xF03A + "b"), "a:b", "file"),
+  @(("d" + [char]0xF03F + "e"), "d?e", "dir"),
+  @(("t" + [char]0xF02E), "t.", "file"),
+  @(("s" + [char]0xF020), "s ", "file"),
+  @(("q" + [char]0xF000 + [char]0xF03A + "z"), ("q" + [char]0xF03A + "z"), "file"),
+  @(("w" + [char]0xF05C + "v"), 'w\v', "file"),
+  @(("c" + [char]0xF009 + "d"), ("c" + [char]9 + "d"), "file"))
+foreach ($c in $cn) {
+  $r = [W]::Create("$drive\C\" + $c[0], ($c[2] -eq "dir"))
+  Check ($r -ceq "OK") ("create " + $c[2] + " " + (Esc $c[1]) + " by its shown name") $r
+}
+$r = [W]::Symlink("$drive\C\sl", ("t" + [char]0xF03A + "u"))
+Check ($r -ceq "OK") "create a symlink whose target holds U+F03A" $r
+$stC = Stored $fs "/C"
+foreach ($c in $cn) { Check (HasStored $stC $c[1] $c[2]) ("stored as " + (Esc $c[1]) + " (" + $c[2] + ")") ($stC -join ';') }
+$wantLink = (Hex "sl") + "|symlink|" + (Hex "t:u")
+Check ($stC -contains $wantLink) "the symlink target is stored with the raw colon" ($stC -join ';')
+$lc = List-Cmd "$drive\C"
+Check (($lc -ccontains ("a" + [char]0xF03A + "b")) -and ($lc -ccontains ("q" + [char]0xF000 + [char]0xF03A + "z"))) "a created a:b and the literal-U+F03A name list as two names"
+$bad = "$drive\C\bad" + [char]0xF000
+$r = [W]::Create($bad, $false)
+Check ($r -like 'W123*') "a create with a bad U+F000 sequence is refused" $r
+$r = [W]::Create("$drive\C\" + ([string][char]0xF03A * 256), $false)
+Check ($r -notlike 'OK*') "a 256-unit name is refused" $r
+$r = [W]::Create("$drive\C\" + ([string][char]0xF03A * 255), $false)
+Check ($r -ceq "OK") "a 255-unit name full of U+F03A is created" $r
+Check (HasStored (Stored $fs "/C") (':' * 255) "file") "it is stored as 255 colons"
+$rd = [W]::Delete("$drive\C\t" + [char]0xF02E, $false)
+Check ($rd -ceq "OK") "a trailing-dot name deletes by its shown name" $rd
+Check (-not (HasStored (Stored $fs "/C") "t." "file")) "and is gone from the store"
 
 Stop-Fs
 
-# --- the primary-Windows control ---------------------------------------------
+# --- the primary-Windows control: no translation -----------------------------
 Say ""
+Say "## primary-Windows control"
 $fs2 = "names-pw-" + (Get-Random)
 & $Cli fs create @store -fs $fs2 -primary-windows *> C:\Windows\Temp\names-create2.log
-Say "# primary-Windows filesystem $fs2 on ${drive}: the same names made three ways (P1 plain path, P2 \\?\ path, P3 NT path \??\)"
 if (-not (Mount-Fs $fs2)) { Say "MOUNT-FAILED (primary-Windows)"; Get-Content C:\Windows\Temp\names-err.log; Say "RESULT fail=1"; exit 1 }
-Say "## fsutil fsinfo volumeinfo $drive (primary-Windows)"
-fsutil fsinfo volumeinfo $drive | ForEach-Object { Say $_ }
-foreach ($t in "P1","P2","P3") { New-Item -ItemType Directory "$drive\$t" | Out-Null; New-Item -ItemType Directory "$drive\$t\F" | Out-Null }
-Say "| kind | id | name | P1 plain create | P2 \\?\ create | P3 NT create |"
-Say "|---|---|---|---|---|---|"
-foreach ($k in "file","folder") {
-  $isDir = ($k -eq "folder")
-  foreach ($n in $names) {
-    $id = $n[0]; $nm = $n[1]
-    $sub = if ($isDir) { "\F" } else { "" }
-    $c1 = [W]::Create("$drive\P1$sub\$nm", $isDir)
-    $c2 = [W]::Create("\\?\$drive\P2$sub\$nm", $isDir)
-    $c3 = [W]::Nt("\??\$drive\P3$sub\$nm", $isDir, $true)
-    Say ("| $k | $id | " + (Esc $nm) + " | " + (Cell $c1) + " | " + (Cell $c2) + " | " + (Cell $c3) + " |")
-  }
+$pw = @(("a" + [char]0xF03A + "b"), ("m" + [char]0xF000 + [char]0xF03A + "n"))
+foreach ($nm in $pw) {
+  $r = [W]::Create("$drive\$nm", $false)
+  Check ($r -ceq "OK") ("primary-Windows: create " + (Esc $nm)) $r
 }
-foreach ($t in "P1","P2","P3") {
-  Say ("PRIMARY-WINDOWS entries that did get made in $t : " + ((List-Gci "$drive\$t" | ForEach-Object { Esc $_ }) -join ', ') + " ; in $t\F : " + ((List-Gci "$drive\$t\F" | ForEach-Object { Esc $_ }) -join ', '))
-}
+$lp = List-Cmd "$drive\"
+foreach ($nm in $pw) { Check ($lp -ccontains $nm) ("primary-Windows: " + (Esc $nm) + " is listed as typed, not translated") }
+$stP = Stored $fs2 "/"
+foreach ($nm in $pw) { Check (HasStored $stP $nm "file") ("primary-Windows: " + (Esc $nm) + " is stored as typed") ($stP -join ';') }
+$r = [W]::Create("\\?\$drive\bad<name", $false)
+Check ($r -notlike 'OK*') "primary-Windows: a raw < name is still refused" $r
 Stop-Fs
-Say "RESULT done"
+
+if ($script:fail -eq 0) { Say "RESULT done" } else { Say ("RESULT fail=" + $script:fail); exit 1 }

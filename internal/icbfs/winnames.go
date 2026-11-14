@@ -2,9 +2,11 @@ package icbfs
 
 import "strings"
 
-// windowsReservedChars are the characters Win32 forbids in a name. `/` and
-// `\` can't reach this check (callers pass one component), but are listed
-// for completeness.
+// windowsReservedChars are the characters Win32 forbids in a name. `/` can't
+// reach this check (callers pass one component), but is listed for
+// completeness. A `\` can be in a primary-POSIX name (made by a Linux mount
+// or the API; this check applies only on primary-Windows); a Windows mount
+// of such a filesystem shows it as U+F05C (internal/winfspserver/winname.go).
 const windowsReservedChars = `<>:"/\|?*`
 
 // windowsReservedBaseNames are reserved regardless of extension — a
