@@ -390,10 +390,20 @@ and origin in one write.
   id, then version), and a source's own hash (`Hash{Kind, Value}`) →
   SHA-256. Every write the mirror makes, and every file it reads back
   (found, restored, moved, adopted, `Known`), is added by its recorded
-  checksum. `m.RebuildHashes(ctx)` rebuilds it from a listing of the
-  drive's live files with this source's origin, every version with a
-  recorded SHA-256 (none recorded: skipped, not computed), keeping the
-  source hashes whose SHA-256 is still there. A daemon keeps it between
+  checksum. `m.RebuildHashes(ctx)` rebuilds it from the drive's live
+  files with this source's origin, every version with a recorded SHA-256
+  (none recorded: skipped, not computed), keeping the source hashes
+  whose SHA-256 is still there. It walks the drive a folder at a time
+  (`drive.Walk`), asking for a folder's files' versions 8 at a time, all
+  read before the next folder: it holds one folder's items besides the
+  map it builds, which is the same whatever order the versions come in.
+  Cancelling `ctx` stops it between items with `context.Cause(ctx)`; on
+  any error the mirror's map is left as it was.
+  `m.OnRebuildProgress(func(items, files int))` has it report as it goes,
+  so a daemon can show the rebuild is moving: `items` walked so far
+  (files and folders), `files` of the source's whose versions have been
+  read; called on the goroutine that called `RebuildHashes`, never two
+  at once, after each folder and every 256 files within one. A daemon keeps it between
   runs with `m.WithHashStore(s)`, `m.LoadHashes(ctx)` and
   `m.SaveHashes(ctx)`; a `HashStore` is `LoadHashes(ctx) ([]byte, error)`
   (nil: none kept) and `SaveHashes(ctx, data) error`. A kept map that

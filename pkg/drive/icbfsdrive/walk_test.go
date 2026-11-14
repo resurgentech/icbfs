@@ -1,7 +1,12 @@
 package icbfsdrive
 
 import (
+	"bytes"
+	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
@@ -271,7 +276,7 @@ func TestWalkWindows(t *testing.T) {
 	}
 }
 
-// The tree TestWalkMemory walks: 300 folders down to 8 levels (items 9
+// The tree TestTreeMemory walks: 300 folders down to 8 levels (items 9
 // deep), 30,000 items, one folder of 2,000, paths of 130 bytes on
 // average.
 const (
@@ -279,16 +284,52 @@ const (
 	treeChainLen  = 8
 	treeExtraDirs = 300 - treeChains*treeChainLen // more folders at the top
 	treeItems     = 30000
+	treeFiles     = treeItems - 300
 	treeBig       = 2000
 	treeDirName   = 15 // bytes in a folder's name
 	treeFileName  = 58 // bytes in a file's name
 )
 
-// buildTree makes TestWalkMemory's tree straight on the filesystem: the
-// folders, then their files, 32 creates at once: a folder's one after
-// another (creates in one folder contend for its block), but the big
-// folder's in 8 runs of names of their own.
-func buildTree(t *testing.T, d *Drive) (avgPath float64) {
+// tree is what buildTree made.
+type tree struct {
+	avgPath  float64
+	versions int             // the files' versions, all told
+	shas     []string        // the distinct SHA-256s of their contents, hex
+	two      map[string]bool // the paths of the files with a second version
+}
+
+// treeSecond: file number g has a second version, 3 in 100 of them.
+func treeSecond(g int) bool { r := g % 100; return r == 12 || r == 45 || r == 78 }
+
+// treeContent is the content of the tree's version j: file number j's
+// first version for j < treeFiles, and the second versions after, in the
+// order of their files. 2 in 5 are a copy of another's: of the first
+// version of a file numbered 2 mod 5, spread over the tree.
+func treeContent(j int) []byte {
+	if j%5 < 2 {
+		t := (j * 7919) % treeFiles
+		if j = t - t%5 + 2; j >= treeFiles {
+			j -= 5
+		}
+	}
+	return fmt.Appendf(nil, "content %d\n", j)
+}
+
+// treeOrigin is file number g's origin at version v, as a Mirror of
+// srcDrive records it.
+func treeOrigin(g, v int, p string) drive.Origin {
+	return drive.Origin{Drive: srcDrive, ID: fmt.Sprintf("src-%06d", g), Version: fmt.Sprint(v), Path: "/src" + p,
+		Copied: time.Date(2026, 1, 15, 9, 30, 0, 0, time.UTC)}
+}
+
+// buildTree makes TestTreeMemory's tree: the folders and the files'
+// first versions straight on the filesystem, 32 creates at once (a
+// folder's one after another: creates in one folder contend for its
+// block; the big folder's in 8 runs of names of their own), each file
+// with its content, its checksums and its origin in the create, as the
+// drive's own write records them; then the second versions through the
+// drive's Write, 32 at once.
+func buildTree(t *testing.T, d *Drive) tree {
 	t.Helper()
 	ctx := context.Background()
 	fs := d.Filesystem()
@@ -366,34 +407,71 @@ func buildTree(t *testing.T, d *Drive) (avgPath float64) {
 	// A job is files [from, to) of one folder, named with a prefix:
 	// one job a folder, and the big folder in 8, each with its own
 	// prefix, so they land in different blocks of it once it splits.
+	// Its files are numbered from num on.
 	type job struct {
 		dr       *dir
 		prefix   byte
 		from, to int
+		num      int
 	}
 	var jobs []job
+	num := 0
 	const bigJobs = 8
 	for j := 0; j < bigJobs; j++ {
-		jobs = append(jobs, job{big, byte('a' + j), j * big.files / bigJobs, (j + 1) * big.files / bigJobs})
+		jb := job{big, byte('a' + j), j * big.files / bigJobs, (j + 1) * big.files / bigJobs, num}
+		jobs = append(jobs, jb)
+		num += jb.to - jb.from
 	}
 	for _, dr := range dirs {
 		if dr != big {
-			jobs = append(jobs, job{dr, 'f', 0, dr.files})
+			jobs = append(jobs, job{dr, 'f', 0, dr.files, num})
+			num += dr.files
+		}
+	}
+	if num != treeFiles {
+		t.Fatalf("numbered %d files, want %d", num, treeFiles)
+	}
+	type second struct {
+		g    int
+		path string
+	}
+	var seconds []second
+	for _, jb := range jobs {
+		for f := jb.from; f < jb.to; f++ {
+			if g := jb.num + f - jb.from; treeSecond(g) {
+				seconds = append(seconds, second{g, jb.dr.path + "/" + pad(fmt.Sprintf("%c%05d-", jb.prefix, f), treeFileName)})
+			}
 		}
 	}
 	began := time.Now()
 	work := make(chan job)
 	var mu sync.Mutex
 	var failed error
+	fail := func(err error) {
+		mu.Lock()
+		failed = cmp.Or(failed, err)
+		mu.Unlock()
+	}
 	for w := 0; w < 32; w++ {
 		wg.Go(func() {
 			for jb := range work {
 				for f := jb.from; f < jb.to; f++ {
+					g := jb.num + f - jb.from
 					name := pad(fmt.Sprintf("%c%05d-", jb.prefix, f), treeFileName)
-					if _, _, err := fs.CreateWith(ctx, jb.dr.key, name, 0o644, 0, 0, []byte("x"), nil, icbfs.ItemInfo{}); err != nil {
-						mu.Lock()
-						failed = fmt.Errorf("%s/%s: %w", jb.dr.path, name, err)
-						mu.Unlock()
+					data := treeContent(g)
+					sums, err := icbfs.ChecksumsOf(bytes.NewReader(data))
+					if err != nil {
+						fail(err)
+						break
+					}
+					origin, err := json.Marshal(treeOrigin(g, 1, jb.dr.path+"/"+name))
+					if err != nil {
+						fail(err)
+						break
+					}
+					info := icbfs.ItemInfo{App: map[string][]byte{icbfs.AppDriveOrigin: origin}, Checksums: &sums}
+					if _, _, err := fs.CreateWith(ctx, jb.dr.key, name, 0o644, 0, 0, data, nil, info); err != nil {
+						fail(fmt.Errorf("%s/%s: %w", jb.dr.path, name, err))
 						break
 					}
 				}
@@ -408,8 +486,43 @@ func buildTree(t *testing.T, d *Drive) (avgPath float64) {
 	if failed != nil {
 		t.Fatal(failed)
 	}
-	t.Logf("every file in %v", time.Since(began).Round(time.Millisecond))
-	return float64(total) / float64(count)
+	firsts := time.Since(began).Round(time.Millisecond)
+	began = time.Now()
+	todo := make(chan int)
+	for w := 0; w < 32; w++ {
+		wg.Go(func() {
+			for k := range todo {
+				s := seconds[k]
+				o := treeOrigin(s.g, 2, s.path)
+				if _, err := d.Write(system(), s.path, bytes.NewReader(treeContent(treeFiles+k)), drive.Condition{}, drive.WriteOptions{Origin: &o}); err != nil {
+					fail(fmt.Errorf("%s's second version: %w", s.path, err))
+				}
+			}
+		})
+	}
+	for k := range seconds {
+		todo <- k
+	}
+	close(todo)
+	wg.Wait()
+	if failed != nil {
+		t.Fatal(failed)
+	}
+	t.Logf("every file's first version in %v, %d second versions in %v", firsts, len(seconds), time.Since(began).Round(time.Millisecond))
+
+	out := tree{avgPath: float64(total) / float64(count), versions: treeFiles + len(seconds), two: make(map[string]bool, len(seconds))}
+	for _, s := range seconds {
+		out.two[s.path] = true
+	}
+	distinct := map[string]bool{}
+	for j := 0; j < out.versions; j++ {
+		sum := sha256.Sum256(treeContent(j))
+		distinct[hex.EncodeToString(sum[:])] = true
+	}
+	for sha := range distinct {
+		out.shas = append(out.shas, sha)
+	}
+	return out
 }
 
 // heapInUse is the heap in use after a collection: what's live, not
@@ -427,30 +540,48 @@ func heapInUse() uint64 {
 // store client's buffers, a collection's partly used spans). A folder's
 // finished items measured about 1.6 KiB each (2,000 items: 3.2 MiB over
 // the heap before), the whole tree's about 1.1 KiB each (30,000: 33.6
-// MiB): so 2 KiB an item and 4 MiB leave a walk room, and a walk that
-// held even a third of the tree no room.
+// MiB) on a tree of plain files. This tree's files each carry an origin
+// and checksums, as a mirror's do, and its walk measured 7.0 MiB over the
+// heap before (3.5 KiB an item of the largest folder, the base included).
+// So 3 KiB an item and 4 MiB leave a walk room, and a walk that held
+// even a third of the tree no room.
 const (
-	walkPerItem = 2 << 10
+	walkPerItem = 3 << 10
 	walkBase    = 4 << 20
 )
 
-// TestWalkMemory: a walk of 30,000 items holds one folder at a time.
-// The heap in use, sampled in fn, stays under a bound set by the largest
-// folder (2,000 items), not the tree, and is no higher in the last third
-// of the walk than in the first.
-func TestWalkMemory(t *testing.T) {
+// rebuildInFlight is what a rebuild may hold besides a walk's share: its
+// eight Versions calls at once, with their answers and the store
+// client's connections for them. Measured at about 2 MiB.
+const rebuildInFlight = 4 << 20
+
+func mib[T int64 | uint64](n T) string { return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20)) }
+
+// TestTreeMemory builds a tree of 30,000 items once, on one drive, for
+// the tests of what a pass over all of it holds: a walk (walkMemory) and
+// a mirror's rebuild of its hash map (rebuildMemory).
+func TestTreeMemory(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds a tree of 30,000 items")
 	}
 	store := miniotest.Store(t)
-	d := newDrive(t, store, icbfs.Settings{Name: "walkmem", Size: 1 << 40, RootMode: 0o777}, "")
+	d := newDrive(t, store, icbfs.Settings{Name: "treemem", Size: 1 << 40, RootMode: 0o777}, "")
 	start := time.Now()
-	avg := buildTree(t, d)
-	t.Logf("built %d items in 300 folders, paths %.1f bytes on average, in %v", treeItems, avg, time.Since(start).Round(time.Second))
-	if avg < 120 || avg > 140 {
-		t.Fatalf("paths %.1f bytes on average, want about 130", avg)
+	tr := buildTree(t, d)
+	t.Logf("built %d items in 300 folders, %d versions of %d contents, paths %.1f bytes on average, in %v",
+		treeItems, tr.versions, len(tr.shas), tr.avgPath, time.Since(start).Round(time.Second))
+	if tr.avgPath < 120 || tr.avgPath > 140 {
+		t.Fatalf("paths %.1f bytes on average, want about 130", tr.avgPath)
 	}
+	t.Run("walk", func(t *testing.T) { walkMemory(t, d) })
+	t.Run("rebuild hashes", func(t *testing.T) { rebuildMemory(t, d, tr) })
+}
 
+// walkMemory: a walk of 30,000 items holds one folder at a time. The
+// heap in use, sampled in fn, stays under a bound set by the largest
+// folder (2,000 items), not the tree, and is no higher in the last third
+// of the walk than in the first.
+func walkMemory(t *testing.T, d *Drive) {
 	type sample struct {
 		seen int // items walked before
 		heap uint64
@@ -458,7 +589,7 @@ func TestWalkMemory(t *testing.T) {
 	var samples []sample
 	seen, largest, folders := 0, 0, 0
 	base := heapInUse()
-	start = time.Now()
+	start := time.Now()
 	err := drive.Walk(system(), d, drive.ByPath("/"), drive.WalkOptions{}, func(dir drive.ItemRef, items []drive.Item) error {
 		samples = append(samples, sample{seen, heapInUse()})
 		seen += len(items)
@@ -483,9 +614,8 @@ func TestWalkMemory(t *testing.T) {
 			last = max(last, s.heap)
 		}
 	}
-	mib := func(n uint64) string { return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20)) }
 	t.Logf("walked in %v; heap in use before %s, peak %s (bound %s: %s + %s + %d KiB x %d items), first third %s, last third %s",
-		time.Since(start).Round(time.Second), mib(base), mib(peak), mib(bound), mib(base), mib(walkBase), walkPerItem>>10, largest, mib(first), mib(last))
+		time.Since(start).Round(time.Second), mib(base), mib(peak), mib(bound), mib(base), mib(uint64(walkBase)), walkPerItem>>10, largest, mib(first), mib(last))
 	if peak > bound {
 		t.Errorf("heap in use reached %s in the walk, over the bound %s", mib(peak), mib(bound))
 	}
