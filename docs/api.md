@@ -755,6 +755,13 @@ name, original path, when, by whom, the last version and size, and the
 item's origin (where it had been copied from, as on an item) if it had
 one. Nothing expires: an entry stays until the item is purged.
 
+- `DeletedAt` is when the item was deleted: under `WithSourceTime`, the
+  source's time. `Stored` is when the entry was written, by the store's
+  clock (the entry record's Last-Modified, to the second), whatever
+  `DeletedAt` says, in a listing and in a lookup by origin alike: what a
+  mirror that dates its removals in source time can compare with its own
+  sync point. The stored record is as before; `Stored` is read with it.
+
 - `Trash` lists deleted items, newest first, optionally only those from
   under a directory. A trashed item's versions and content can be read
   before restoring it.

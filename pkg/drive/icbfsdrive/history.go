@@ -110,7 +110,7 @@ func (d *Drive) DeleteName(ctx context.Context, name string) error {
 
 func (d *Drive) toTrash(e icbfs.TrashEntry) (drive.TrashEntry, bool) {
 	out := drive.TrashEntry{ID: e.EntryID, ItemID: e.ItemID, Name: e.Name, Type: typeName(e.Type),
-		DeletedAt: e.DeletedAt, DeletedBy: e.DeletedBy, Size: e.Size, Version: e.Version, Batch: e.Batch, Pass: e.Pass}
+		DeletedAt: e.DeletedAt, Stored: e.Stored, DeletedBy: e.DeletedBy, Size: e.Size, Version: e.Version, Batch: e.Batch, Pass: e.Pass}
 	if len(e.Origin) > 0 {
 		out.Origin = decodeOrigin(e.Origin)
 	}

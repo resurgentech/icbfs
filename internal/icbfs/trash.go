@@ -42,6 +42,11 @@ type TrashEntry struct {
 	// Pass is the sync pass that removed it, when one did (DeleteInfo.Pass),
 	// so a whole pass's removals can be found and undone.
 	Pass string `json:"pass,omitempty"`
+	// Stored is when the entry's record was written, by the store's
+	// clock (its Last-Modified as a read of it gives it, to the second):
+	// DeletedAt may be a declared time (a mirror's source's). Not part of
+	// the record; read with it.
+	Stored time.Time `json:"stored,omitzero"`
 }
 
 // DeleteInfo is what the core can't know about a delete: who made it,
@@ -283,7 +288,7 @@ func underPath(p, prefix string) bool {
 }
 
 func (f *Filesystem) readTrash(ctx context.Context, key string) (TrashEntry, error) {
-	body, _, err := f.store.Get(ctx, key)
+	body, obj, err := f.store.Get(ctx, key)
 	if err != nil {
 		return TrashEntry{}, mapNotFound(err)
 	}
@@ -292,7 +297,11 @@ func (f *Filesystem) readTrash(ctx context.Context, key string) (TrashEntry, err
 	if err != nil {
 		return TrashEntry{}, err
 	}
-	return decodeTrashEntry(data)
+	e, err := decodeTrashEntry(data)
+	if err == nil && obj != nil {
+		e.Stored = obj.LastModified.UTC()
+	}
+	return e, err
 }
 
 // trashEntry finds an entry by its id, with its key.
