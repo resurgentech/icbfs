@@ -489,18 +489,76 @@ func (s *Store) Undelete(ctx context.Context, key string) error {
 	return s.Erase(ctx, key, history[0].VersionID)
 }
 
-// EraseAll erases every version and delete marker under prefix.
+// EraseAll erases every version and delete marker under prefix, a listing
+// page at a time: it holds one page, however many there are.
+//
+// Each page is listed from the start of the prefix, not continued from the
+// last page's markers: what the last page held is erased, so the start is
+// where what's left begins, and no listing has to begin at an entry that
+// is gone (S3 documents its markers as a place to start, not what happens
+// when the entry they name has been erased). It costs no more requests: one
+// listing a page, as before. An entry the page before erased that is
+// listed again means an erase did nothing, an error rather than a loop.
+// Cut part way, it leaves the entries it hadn't reached; run again, it
+// erases them.
 func (s *Store) EraseAll(ctx context.Context, prefix string) error {
-	history, err := s.HistoryUnder(ctx, prefix)
-	if err != nil {
-		return err
-	}
-	for _, v := range history {
-		if err := s.Erase(ctx, v.Key, v.VersionID); err != nil && !objstore.IsNotFound(err) {
-			return err
+	var erased map[[2]string]struct{} // the page before, erased
+	for {
+		page, more, err := s.firstVersions(ctx, prefix)
+		if err != nil {
+			return s3Error(fmt.Errorf("erase all under %q: %w", prefix, err))
+		}
+		for _, v := range page {
+			if _, again := erased[v]; again {
+				return fmt.Errorf("erase all under %q: %s version %s is still listed after it was erased", prefix, v[0], v[1])
+			}
+		}
+		erased = make(map[[2]string]struct{}, len(page))
+		for _, v := range page {
+			if err := s.Erase(ctx, strings.TrimPrefix(v[0], s.keyPrefix), v[1]); err != nil && !objstore.IsNotFound(err) {
+				return err
+			}
+			erased[v] = struct{}{}
+		}
+		if !more {
+			return nil
 		}
 	}
-	return nil
+}
+
+// firstVersions is the first page of versions and delete markers under
+// prefix, each as its stored key and version ID, and whether more follow.
+// A page S3 sends empty but truncated is followed by its markers: nothing
+// has been erased since it was listed.
+func (s *Store) firstVersions(ctx context.Context, prefix string) ([][2]string, bool, error) {
+	var keyMarker, versionMarker *string
+	for {
+		out, err := s.client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+			Bucket:          aws.String(s.bucket),
+			Prefix:          aws.String(s.k(prefix)),
+			KeyMarker:       keyMarker,
+			VersionIdMarker: versionMarker,
+			MaxKeys:         aws.Int32(objstore.HistoryPageSize),
+		})
+		if err != nil {
+			return nil, false, err
+		}
+		page := make([][2]string, 0, len(out.Versions)+len(out.DeleteMarkers))
+		for _, v := range out.Versions {
+			page = append(page, [2]string{aws.ToString(v.Key), aws.ToString(v.VersionId)})
+		}
+		for _, m := range out.DeleteMarkers {
+			page = append(page, [2]string{aws.ToString(m.Key), aws.ToString(m.VersionId)})
+		}
+		more := aws.ToBool(out.IsTruncated)
+		if len(page) > 0 || !more {
+			return page, more, nil
+		}
+		if out.NextKeyMarker == nil && out.NextVersionIdMarker == nil {
+			return nil, false, errors.New("an empty page, truncated, with nowhere to continue")
+		}
+		keyMarker, versionMarker = out.NextKeyMarker, out.NextVersionIdMarker
+	}
 }
 
 // PartLimits are S3's multipart limits (MinIO's are the same).

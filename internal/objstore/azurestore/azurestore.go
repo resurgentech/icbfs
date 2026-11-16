@@ -502,44 +502,88 @@ func (s *Store) Erase(ctx context.Context, key, versionID string) error {
 	return nil
 }
 
-// EraseAll ends every current blob under prefix, which makes it a previous
-// version, then deletes every version.
+// EraseAll erases every version under prefix, a listing page at a time: it
+// holds one page, however many there are. In each page it ends the current
+// blobs first, which makes each a previous version (Azure deletes only
+// previous versions by ID), then deletes every version the page lists.
+// A blob whose older versions are on one page and whose current version
+// is on a later one loses the older ones first, then the current one,
+// ended and deleted in its own page.
+//
+// Each page is listed from the start of the prefix, not continued from the
+// last page's marker, which names a place among entries now erased: what's
+// left begins at the start. It costs one listing a page, as before. An
+// entry the page before erased that is listed again means a delete did
+// nothing, an error rather than a loop. Cut part way, it leaves what it
+// hadn't reached (a blob ended but its versions not yet deleted reads as
+// deleted); run again, it erases the rest.
 func (s *Store) EraseAll(ctx context.Context, prefix string) error {
-	type entry struct{ name, version string }
-	var current, versions []entry
+	var erased map[[2]string]struct{} // the page before, erased
+	for {
+		page, more, err := s.firstVersions(ctx, prefix)
+		if err != nil {
+			return azureErr("erase all", prefix, err)
+		}
+		for _, e := range page {
+			if _, again := erased[e.id]; again {
+				return fmt.Errorf("erase all under %q: %s version %s is still listed after it was erased", prefix, e.id[0], e.id[1])
+			}
+		}
+		for _, e := range page {
+			if !e.current {
+				continue
+			}
+			if _, err := s.client.NewBlobClient(e.id[0]).Delete(ctx, nil); err != nil && !bloberror.HasCode(err, bloberror.BlobNotFound) {
+				return azureErr("erase all", e.id[0], err)
+			}
+		}
+		erased = make(map[[2]string]struct{}, len(page))
+		for _, e := range page {
+			c, err := s.client.NewBlobClient(e.id[0]).WithVersionID(e.id[1])
+			if err != nil {
+				return err
+			}
+			if _, err := c.Delete(ctx, nil); err != nil && !bloberror.HasCode(err, bloberror.BlobNotFound) {
+				return azureErr("erase all", e.id[0], err)
+			}
+			erased[e.id] = struct{}{}
+		}
+		if !more {
+			return nil
+		}
+	}
+}
+
+// listedVersion is a version as EraseAll lists it: its stored name and
+// version ID, and whether it is the blob's current version.
+type listedVersion struct {
+	id      [2]string
+	current bool
+}
+
+// firstVersions is the first page of versions under prefix and whether
+// more follow. A page Azure sends empty with a marker (it may) is followed
+// by its marker: nothing has been erased since it was listed.
+func (s *Store) firstVersions(ctx context.Context, prefix string) ([]listedVersion, bool, error) {
 	pager := s.client.NewListBlobsFlatPager(&container.ListBlobsFlatOptions{
 		Prefix:     to.Ptr(s.k(prefix)),
 		Include:    container.ListBlobsInclude{Versions: true},
 		MaxResults: to.Ptr(objstore.HistoryPageSize),
 	})
 	for pager.More() {
-		page, err := pager.NextPage(ctx)
+		resp, err := pager.NextPage(ctx)
 		if err != nil {
-			return azureErr("erase all", prefix, err)
+			return nil, false, err
 		}
-		for _, b := range page.Segment.BlobItems {
-			e := entry{deref(b.Name), deref(b.VersionID)}
-			if deref(b.IsCurrentVersion) {
-				current = append(current, e)
-			}
-			versions = append(versions, e)
+		page := make([]listedVersion, 0, len(resp.Segment.BlobItems))
+		for _, b := range resp.Segment.BlobItems {
+			page = append(page, listedVersion{[2]string{deref(b.Name), deref(b.VersionID)}, deref(b.IsCurrentVersion)})
 		}
-	}
-	for _, e := range current {
-		if _, err := s.client.NewBlobClient(e.name).Delete(ctx, nil); err != nil && !bloberror.HasCode(err, bloberror.BlobNotFound) {
-			return azureErr("erase all", e.name, err)
+		if len(page) > 0 {
+			return page, pager.More(), nil
 		}
 	}
-	for _, e := range versions {
-		c, err := s.client.NewBlobClient(e.name).WithVersionID(e.version)
-		if err != nil {
-			return err
-		}
-		if _, err := c.Delete(ctx, nil); err != nil && !bloberror.HasCode(err, bloberror.BlobNotFound) {
-			return azureErr("erase all", e.name, err)
-		}
-	}
-	return nil
+	return nil, false, nil
 }
 
 // PartLimits are Azure's block limits: up to 4000 MiB a block, 50,000

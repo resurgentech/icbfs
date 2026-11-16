@@ -37,6 +37,7 @@ func Run(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	t.Run("DeleteAndUndelete", func(t *testing.T) { deleteAndUndelete(t, newStore) })
 	t.Run("Erase", func(t *testing.T) { erase(t, newStore) })
 	t.Run("EraseAll", func(t *testing.T) { eraseAll(t, newStore) })
+	t.Run("EraseAllAcrossPages", func(t *testing.T) { eraseAllAcrossPages(t, newStore) })
 	t.Run("List", func(t *testing.T) { list(t, newStore) })
 	t.Run("ListPagesMatchesList", func(t *testing.T) { listPagesMatchesList(t, newStore) })
 	t.Run("ServerTimeIsTheStoresClock", func(t *testing.T) { serverTimeIsTheStoresClock(t, newStore) })
@@ -213,6 +214,36 @@ func eraseAll(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	}
 	if got, err := read(t, store, "q"); got != "keep" || err != nil {
 		t.Fatalf("q after erasing p/: %q, %v", got, err)
+	}
+}
+
+// eraseAllAcrossPages: EraseAll at two entries a page, so a key's
+// versions span pages (its current version on a later page than its
+// older ones, as Azure lists them), still erases every key under the
+// prefix, history and all, and nothing outside it.
+func eraseAllAcrossPages(t *testing.T, newStore func(*testing.T) objstore.Store) {
+	store := newStore(t)
+	ctx := context.Background()
+	defer func(n int32) { objstore.HistoryPageSize = n }(objstore.HistoryPageSize)
+	objstore.HistoryPageSize = 2
+	for _, kv := range [][2]string{{"p/a", "1"}, {"p/a", "2"}, {"p/a", "3"}, {"p/b", "1"}, {"p/b", "2"}, {"p/c", "1"}, {"q", "keep"}, {"pq", "keep"}} {
+		if _, err := store.Put(ctx, kv[0], strings.NewReader(kv[1]), nil, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Delete(ctx, "p/b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EraseAll(ctx, "p/"); err != nil {
+		t.Fatalf("erase all: %v", err)
+	}
+	if h, err := store.HistoryUnder(ctx, "p/"); err != nil || len(h) != 0 {
+		t.Fatalf("history under p/ after erase all: %+v, %v; want none", h, err)
+	}
+	for _, k := range []string{"q", "pq"} {
+		if got, err := read(t, store, k); got != "keep" || err != nil {
+			t.Fatalf("%s after erasing p/: %q, %v", k, got, err)
+		}
 	}
 }
 

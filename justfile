@@ -67,8 +67,12 @@ tidy-check:
 generate:
     PATH="$PATH:$(go env GOPATH)/bin" protoc --go_out=. --go_opt=module=github.com/resurgentech/icbfs spec/proto/icbfs/v1/*.proto
 
+# EraseAll at 100,000 entries against fakes of S3 and Azure, holding one page: alone, after test-ci, so its load does not slow the timing tests
+test-erase-full:
+    ICBFS_ERASE_FULL=1 go test -race -count=1 -run 'TestEraseAllHoldsOnePage' ./internal/objstore/s3store ./internal/objstore/azurestore
+
 # What CI checks
-ci: fmt-check tidy-check vet build test-ci
+ci: fmt-check tidy-check vet build test-ci test-erase-full
 
 # Tag HEAD as VERSION (vX.Y.Z, new; tree clean, on origin/main, CI green) and build bin/; the tag's push is printed, not done
 release VERSION:
