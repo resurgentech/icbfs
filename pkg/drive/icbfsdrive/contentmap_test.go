@@ -115,6 +115,15 @@ func (v *versionsCounter) Versions(ctx context.Context, ref drive.ItemRef) ([]dr
 	return v.Drive.Versions(ctx, ref)
 }
 
+// VersionsOf is the drive's, counted with Versions: the rebuild reads by
+// key on a KeyVersioner (interloc T82-9d).
+func (v *versionsCounter) VersionsOf(ctx context.Context, it drive.Item) ([]drive.Version, error) {
+	v.mu.Lock()
+	v.calls++
+	v.mu.Unlock()
+	return v.Drive.VersionsOf(ctx, it)
+}
+
 func (v *versionsCounter) n() int {
 	v.mu.Lock()
 	defer v.mu.Unlock()

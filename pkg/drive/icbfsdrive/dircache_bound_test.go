@@ -230,6 +230,14 @@ func TestDirCacheRequests(t *testing.T) {
 // listing (tens of milliseconds on MinIO).
 type statVersions struct{ *Drive }
 
+// VersionsOf is its Versions, the file found by its path: the rebuild
+// reads by key on a KeyVersioner (interloc T82-9d), which fills the
+// cache with no more than the walk's folders; what is bounded here is a
+// cache that resolving paths fills too.
+func (s statVersions) VersionsOf(ctx context.Context, it drive.Item) ([]drive.Version, error) {
+	return s.Versions(ctx, drive.ItemRef{ID: it.ID, Path: it.Path})
+}
+
 func (s statVersions) Versions(ctx context.Context, ref drive.ItemRef) ([]drive.Version, error) {
 	it, err := s.Drive.Stat(ctx, ref, drive.At{})
 	if err != nil || it.Version == nil {

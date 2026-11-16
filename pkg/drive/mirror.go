@@ -1587,16 +1587,17 @@ func (m *Mirror) SaveHashes(ctx context.Context) error {
 // show the rebuild is moving: items is how many items the walk has given
 // so far (files and folders), files how many of the source's files have
 // had their versions read. fn is called on the goroutine that called
-// RebuildHashes, never two at once: after each folder, and every 256
-// files started within one (rebuildProgressEvery). nil calls nothing.
+// RebuildHashes, never two at once: after each folder the walk gives,
+// every 256 files handed to be read (rebuildProgressEvery), and once
+// more when all are read and the rebuild succeeds. nil calls nothing.
 func (m *Mirror) OnRebuildProgress(fn func(items, files int)) *Mirror {
 	m.rebuildProgress = fn
 	return m
 }
 
-// rebuildVersions is how many files' versions RebuildHashes asks for at
-// once; rebuildProgressEvery how many files started within a folder
-// between calls of its progress hook.
+// rebuildVersions is how many files' versions RebuildHashes reads at
+// once, whatever folders they are in; rebuildProgressEvery how many
+// files handed to be read between calls of its progress hook.
 const (
 	rebuildVersions      = 8
 	rebuildProgressEvery = 256
@@ -1607,14 +1608,19 @@ const (
 // it. A version with none recorded is skipped, not computed. What the
 // source's hashes are is kept for the SHA-256s still there: the drive
 // doesn't know them. It walks the drive a folder at a time (Walk),
-// asking for a folder's files' versions 8 at once (rebuildVersions),
-// all read before the next folder, and gives each version to the map's
-// rebuild as it's read (ContentMap.Rebuild), one at a time, committing
-// it after the walk: it holds one folder, and no map of its own (a
-// HashMap's rebuild holds the new map beside the old until the commit).
-// The map is the same whatever order the versions come in (Add keeps
-// the least). Cancelling ctx stops it between items with ctx's cause;
-// on any error the rebuild is abandoned, the map as it was.
+// handing each of the source's files to 8 readers (rebuildVersions)
+// through a queue of 8: the walk goes on to the next folder while they
+// read, so no folder waits for another's last file. A reader reads a
+// file's versions by its key (KeyVersioner.VersionsOf) on a drive that
+// can, else by Versions, and gives each version to the map's rebuild as
+// it's read (ContentMap.Rebuild), one at a time, committing it after
+// the walk: it holds one folder, the queue and the 8 being read, and no
+// map of its own (a HashMap's rebuild holds the new map beside the old
+// until the commit). The map is the same whatever order the versions
+// come in (Add keeps the least). Cancelling ctx stops it between items
+// with ctx's cause; the first error of a file's versions (other than
+// ErrNotFound: gone since the walk) or of the walk stops the rest; on
+// any error the rebuild is abandoned, the map as it was.
 func (m *Mirror) RebuildHashes(ctx context.Context) error {
 	r, err := m.contents.Rebuild(ctx)
 	if err != nil {
@@ -1622,34 +1628,111 @@ func (m *Mirror) RebuildHashes(ctx context.Context) error {
 	}
 	defer r.Abandon()
 	add := &rebuildAdder{r: r}
-	items := 0
+	rctx, stop := context.WithCancelCause(ctx)
+	defer stop(nil)
+	var (
+		mu    sync.Mutex
+		first error
+	)
+	fail := func(err error) {
+		mu.Lock()
+		if first == nil {
+			first = err
+		}
+		mu.Unlock()
+		stop(err)
+	}
 	var files atomic.Int64
+	queue := make(chan Item, rebuildVersions)
+	var wg sync.WaitGroup
+	for range rebuildVersions {
+		wg.Go(func() {
+			for it := range queue {
+				if rctx.Err() != nil {
+					continue // stopped: the rest are drained unread
+				}
+				if err := m.rebuildFile(rctx, add, it); err != nil {
+					fail(err)
+				}
+				files.Add(1)
+			}
+		})
+	}
+	items, handed := 0, 0
 	progress := func() {
 		if m.rebuildProgress != nil {
 			m.rebuildProgress(items, int(files.Load()))
 		}
 	}
-	err = Walk(ctx, m.d, ByPath("/"), WalkOptions{}, func(_ ItemRef, its []Item) error {
-		if err := m.rebuildFolder(ctx, add, its, &items, &files, progress); err != nil {
-			return err
+	err = Walk(rctx, m.d, ByPath("/"), WalkOptions{}, func(_ ItemRef, its []Item) error {
+		for _, it := range its {
+			if rctx.Err() != nil {
+				return context.Cause(rctx)
+			}
+			items++
+			if it.Type != TypeFile || it.Origin == nil || it.Origin.Drive != m.source {
+				continue
+			}
+			// What a reader needs, not the item's attributes and app data.
+			select {
+			case queue <- Item{ID: it.ID, Name: it.Name, Path: it.Path, Type: it.Type}:
+			case <-rctx.Done():
+				return context.Cause(rctx)
+			}
+			if handed++; handed%rebuildProgressEvery == 0 {
+				progress()
+			}
 		}
 		progress()
 		return nil
 	})
+	if err != nil {
+		fail(err)
+	}
+	close(queue)
+	wg.Wait()
 	if ctx.Err() != nil {
 		return context.Cause(ctx)
 	}
-	if err != nil {
-		return err
+	if first != nil {
+		return first
 	}
+	progress()
 	if err := r.Commit(ctx); err != nil {
 		return fmt.Errorf("the content map: %w", err)
 	}
 	return nil
 }
 
+// rebuildFile adds a file's versions to a rebuild (RebuildHashes): by its
+// key on a KeyVersioner, else by Versions. A file gone since the walk
+// adds nothing.
+func (m *Mirror) rebuildFile(ctx context.Context, add *rebuildAdder, it Item) error {
+	var vs []Version
+	var err error
+	if kv, ok := m.d.(KeyVersioner); ok {
+		vs, err = kv.VersionsOf(ctx, it)
+	} else {
+		vs, err = m.d.Versions(ctx, ItemRef{ID: it.ID, Path: it.Path})
+	}
+	if errors.Is(err, ErrNotFound) {
+		return nil // gone since the walk
+	}
+	if err != nil {
+		return fmt.Errorf("versions of %s: %w", it.Path, err)
+	}
+	for _, v := range vs {
+		if v.Checksums != nil && v.Checksums.SHA256 != "" {
+			if err := add.add(ctx, v.Checksums.SHA256, HashEntry{ID: it.ID, Version: v.ID, Size: v.Size}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // rebuildAdder gives a rebuild its versions one at a time, from the
-// goroutines that read them (rebuildFolder).
+// goroutines that read them (RebuildHashes' readers).
 type rebuildAdder struct {
 	mu sync.Mutex
 	r  ContentMapRebuild
@@ -1660,71 +1743,6 @@ func (a *rebuildAdder) add(ctx context.Context, sha string, e HashEntry) error {
 	defer a.mu.Unlock()
 	if err := a.r.Add(ctx, sha, e); err != nil {
 		return fmt.Errorf("the content map: %w", err)
-	}
-	return nil
-}
-
-// rebuildFolder adds one folder's items to a rebuild (RebuildHashes): the
-// source's files' versions, rebuildVersions at once, all read before it
-// returns. items counts the items seen, files the files read. Of the
-// files whose versions fail (other than ErrNotFound: gone since the
-// walk), the first in the folder's order is the error, and no more are
-// started once one has failed or ctx is done.
-func (m *Mirror) rebuildFolder(ctx context.Context, add *rebuildAdder, its []Item, items *int, files *atomic.Int64, progress func()) error {
-	errs := make([]error, len(its))
-	var failed atomic.Bool
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, rebuildVersions)
-	started := 0
-	for i, it := range its {
-		if ctx.Err() != nil || failed.Load() {
-			break
-		}
-		*items++
-		if it.Type != TypeFile || it.Origin == nil || it.Origin.Drive != m.source {
-			continue
-		}
-		select {
-		case sem <- struct{}{}:
-		case <-ctx.Done():
-		}
-		if ctx.Err() != nil {
-			break
-		}
-		wg.Go(func() {
-			defer func() { <-sem }()
-			vs, err := m.d.Versions(ctx, ItemRef{ID: it.ID, Path: it.Path})
-			files.Add(1)
-			if errors.Is(err, ErrNotFound) {
-				return // gone since the walk
-			}
-			if err != nil {
-				errs[i] = fmt.Errorf("versions of %s: %w", it.Path, err)
-				failed.Store(true)
-				return
-			}
-			for _, v := range vs {
-				if v.Checksums != nil && v.Checksums.SHA256 != "" {
-					if err := add.add(ctx, v.Checksums.SHA256, HashEntry{ID: it.ID, Version: v.ID, Size: v.Size}); err != nil {
-						errs[i] = err
-						failed.Store(true)
-						return
-					}
-				}
-			}
-		})
-		if started++; started%rebuildProgressEvery == 0 {
-			progress()
-		}
-	}
-	wg.Wait()
-	if ctx.Err() != nil {
-		return context.Cause(ctx)
-	}
-	for _, err := range errs {
-		if err != nil {
-			return err
-		}
 	}
 	return nil
 }
