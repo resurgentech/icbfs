@@ -71,19 +71,32 @@ func TestDirCacheLRU(t *testing.T) {
 const dirCacheBound = 256 << 10
 
 // dirCacheMargin is what the heap a dropped cache frees may be over the
-// bound by: the bound again. HeldSize is an estimate, under what Go
-// holds for a cached folder: measured at 0.6 of it (87 folders cached,
-// 261,088 bytes by HeldSize, 434,176 bytes of heap freed by dropping
-// them, -race, on a runner), the rest the store client's and the
-// allocator's that HeldSize doesn't see. Unbounded, the same rebuild's
-// cache freed 753,664 bytes (all 300 folders), over bound and margin.
+// bound by: the bound again. HeldSize is an estimate of what Go holds
+// for a cached folder. Measured in heap in use it was under it, at 0.6
+// (87 folders cached, 261,088 bytes by HeldSize, 434,176 bytes of heap
+// in use freed by dropping them, -race, on a runner); in live bytes it
+// is over it (225,000 bytes freed, -race, a workstation, interloc
+// T82-9d). Unbounded, the same rebuild's cache freed 753,664 bytes in
+// use, and 779,760 live (all 300 folders), over bound and margin.
 const dirCacheMargin = dirCacheBound
+
+// heapLive is the bytes of the heap's live objects, after a collection.
+func heapLive() uint64 {
+	runtime.GC()
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return m.HeapAlloc
+}
 
 // TestDirCacheBound (interloc T80-2, the rebuild's growth): after a
 // mirror's RebuildHashes over 300 folders three wide x 5 files, the
 // drive's directory cache holds no more than its bound by HeldSize, and
-// dropping it frees no more heap in use (after a collection) than the
-// bound and dirCacheMargin. T80-1 found the cache, bounded only at
+// dropping it frees no more live heap (after a collection) than the
+// bound and dirCacheMargin. Live bytes, not heap in use: what in use
+// frees is whole spans, which depends on what else was allocated beside
+// the cache's folders; since the rebuild reads 8 files across folders
+// (interloc T82-9d) it freed 600 KiB to 1 MiB in use for the same 87
+// folders and about 280,000 bytes live, as before. T80-1 found the cache, bounded only at
 // 50,000 folders, holding every folder after a rebuild: 4 to 11 KB
 // each, 6.2 MiB at 1,500 folders.
 func TestDirCacheBound(t *testing.T) {
@@ -157,13 +170,13 @@ func TestDirCacheBound(t *testing.T) {
 	if err := m.RebuildHashes(ctx); err != nil {
 		t.Fatal(err)
 	}
-	withCache := heapInUse()
+	withCache, liveWith := heapInUse(), heapLive()
 	n, est := d.dirs.stats()
 	d.dirs.dropAll()
-	without := heapInUse()
-	freed := int64(withCache) - int64(without)
-	t.Logf("after a rebuild over %d folders x %d files: %d directories cached, %d bytes by HeldSize (bound %d); heap in use before %s, with the cache %s, without %s: the cache held %d bytes (%.0f a folder cached)",
-		folders, files, n, est, dirCacheBound, mib(before), mib(withCache), mib(without), freed, float64(freed)/float64(max(n, 1)))
+	without, liveWithout := heapInUse(), heapLive()
+	freed := int64(liveWith) - int64(liveWithout)
+	t.Logf("after a rebuild over %d folders x %d files: %d directories cached, %d bytes by HeldSize (bound %d); heap in use before %s, with the cache %s, without %s (%d bytes); the cache held %d bytes live (%.0f a folder cached)",
+		folders, files, n, est, dirCacheBound, mib(before), mib(withCache), mib(without), int64(withCache)-int64(without), freed, float64(freed)/float64(max(n, 1)))
 	if entries := m.Hashes().Len(); entries != folders*files {
 		t.Fatalf("the map has %d entries, want %d", entries, folders*files)
 	}
