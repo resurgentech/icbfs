@@ -25,6 +25,11 @@ import (
 // Store is a versioned bucket.
 type Store = objstore.Store
 
+// Object is one entry a Store returns (a version, a deletion, a listed
+// key): named here so a host can wrap a Store, to count or limit what
+// it is asked.
+type Object = objstore.Object
+
 // Settings, Info and NamedVersion are the engine's.
 type (
 	Settings     = core.Settings
@@ -151,7 +156,21 @@ func ListFilesystems(ctx context.Context, store Store) ([]Info, error) {
 	return core.ListFilesystems(ctx, store)
 }
 
-// DescribeFilesystem is one filesystem's settings, with its disk usage.
+// FilesystemInfo is one filesystem's settings (its ID, size, creation
+// date, format and the rest), read from the bucket's master block alone:
+// nothing under the filesystem is listed, so it costs the same for a
+// filesystem of any size. A filesystem made before its master entry
+// recorded a creation date has a zero Created. ErrNotFound if there is
+// no filesystem called name.
+func FilesystemInfo(ctx context.Context, store Store, name string) (Info, error) {
+	return core.DescribeFilesystem(ctx, store, name)
+}
+
+// DescribeFilesystem is one filesystem's settings, with its disk usage:
+// the usage lists every current object the filesystem owns (one listing
+// request per thousand objects, summed a page at a time), so it takes
+// time in proportion to the filesystem's size. A caller that needs only
+// the settings uses FilesystemInfo.
 func DescribeFilesystem(ctx context.Context, store Store, name string) (Info, int64, error) {
 	info, err := core.DescribeFilesystem(ctx, store, name)
 	if err != nil {

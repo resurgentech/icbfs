@@ -407,14 +407,18 @@ func (f *Filesystem) DiskUsage(ctx context.Context) (int64, error) {
 	return f.diskUsage(ctx)
 }
 
+// diskUsage sums the listing a page at a time (objstore.ListEach): a
+// filesystem of any size costs one page of memory, not its whole listing.
 func (f *Filesystem) diskUsage(ctx context.Context) (int64, error) {
-	objs, err := f.store.List(ctx, f.prefix())
+	var total int64
+	err := objstore.ListEach(ctx, f.store, f.prefix(), func(page []objstore.Object) error {
+		for _, o := range page {
+			total += o.Size
+		}
+		return nil
+	})
 	if err != nil {
 		return 0, err
-	}
-	var total int64
-	for _, o := range objs {
-		total += o.Size
 	}
 	return total, nil
 }

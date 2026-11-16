@@ -197,7 +197,8 @@ func ListFilesystems(ctx context.Context, store objstore.Store) ([]Info, error) 
 	return out, nil
 }
 
-// DescribeFilesystem is one filesystem's Info.
+// DescribeFilesystem is one filesystem's Info, read from the master block
+// alone: nothing under the filesystem is listed.
 func DescribeFilesystem(ctx context.Context, store objstore.Store, name string) (Info, error) {
 	all, err := ListFilesystems(ctx, store)
 	if err != nil {

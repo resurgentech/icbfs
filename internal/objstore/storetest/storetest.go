@@ -38,6 +38,7 @@ func Run(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	t.Run("Erase", func(t *testing.T) { erase(t, newStore) })
 	t.Run("EraseAll", func(t *testing.T) { eraseAll(t, newStore) })
 	t.Run("List", func(t *testing.T) { list(t, newStore) })
+	t.Run("ListPagesMatchesList", func(t *testing.T) { listPagesMatchesList(t, newStore) })
 	t.Run("ServerTimeIsTheStoresClock", func(t *testing.T) { serverTimeIsTheStoresClock(t, newStore) })
 	t.Run("AsOf", func(t *testing.T) { asOf(t, newStore) })
 	t.Run("HistoryCacheLastsForItsTTL", func(t *testing.T) { historyCacheLastsForItsTTL(t, newStore) })
@@ -231,6 +232,66 @@ func list(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	got, err := store.List(ctx, "p/")
 	if err != nil || len(got) != 1 || got[0].Key != "p/a" || got[0].Size != 5 {
 		t.Fatalf("list p/: %+v, %v; want p/a, 5 bytes", got, err)
+	}
+}
+
+// listPagesMatchesList: a store lists by prefix a page at a time
+// (objstore.PageLister), no page longer than HistoryPageSize, and the
+// pages together are what List returns, deleted keys and keys outside
+// the prefix left out alike.
+func listPagesMatchesList(t *testing.T, newStore func(*testing.T) objstore.Store) {
+	store := newStore(t)
+	ctx := context.Background()
+	defer func(n int32) { objstore.HistoryPageSize = n }(objstore.HistoryPageSize)
+	objstore.HistoryPageSize = 2
+	for i := 0; i < 5; i++ {
+		if _, err := store.Put(ctx, fmt.Sprintf("p/%d", i), strings.NewReader(strings.Repeat("x", i+1)), nil, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, k := range []string{"p/gone", "pq"} {
+		if _, err := store.Put(ctx, k, strings.NewReader("y"), nil, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Delete(ctx, "p/gone"); err != nil {
+		t.Fatal(err)
+	}
+	pl, ok := store.(objstore.PageLister)
+	if !ok {
+		t.Fatalf("%T lists only all at once: want objstore.PageLister", store)
+	}
+	var paged []objstore.Object
+	pages := 0
+	if err := pl.ListPages(ctx, "p/", func(p []objstore.Object) error {
+		pages++
+		if len(p) > int(objstore.HistoryPageSize) {
+			t.Errorf("a page of %d, want at most %d", len(p), objstore.HistoryPageSize)
+		}
+		paged = append(paged, p...)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	all, err := store.List(ctx, "p/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pages < 3 {
+		t.Fatalf("%d pages for 5 keys at 2 a page, want at least 3", pages)
+	}
+	if len(all) != 5 || len(paged) != len(all) {
+		t.Fatalf("List %d keys, pages %d; want 5 each", len(all), len(paged))
+	}
+	for i := range all {
+		if all[i].Key != paged[i].Key || all[i].Size != paged[i].Size {
+			t.Fatalf("entry %d: List %+v, pages %+v", i, all[i], paged[i])
+		}
+	}
+	stop := errors.New("stop")
+	pages = 0
+	if err := pl.ListPages(ctx, "p/", func([]objstore.Object) error { pages++; return stop }); !errors.Is(err, stop) || pages != 1 {
+		t.Fatalf("fn's error: %v after %d pages, want it back after 1", err, pages)
 	}
 }
 

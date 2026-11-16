@@ -173,3 +173,27 @@ type Store interface {
 // HistoryPageSize is how many entries a history or list request asks for
 // at a time (a var so tests can make pages small).
 var HistoryPageSize int32 = 1000
+
+// PageLister is a Store that lists by prefix a page at a time: ListPages
+// calls fn with each page of what List returns, in order, no page longer
+// than HistoryPageSize, and stops at fn's first error, returning it. A
+// caller that only folds the listing (a sum) holds one page, not all of
+// it. S3Store and AzureStore have it; a wrapper of a Store does not
+// unless it says so.
+type PageLister interface {
+	ListPages(ctx context.Context, prefix string, fn func([]Object) error) error
+}
+
+// ListEach is List a page at a time when s is a PageLister, and List's
+// whole answer as one page when it is not. fn may keep the slice it is
+// given.
+func ListEach(ctx context.Context, s Store, prefix string, fn func([]Object) error) error {
+	if pl, ok := s.(PageLister); ok {
+		return pl.ListPages(ctx, prefix, fn)
+	}
+	objs, err := s.List(ctx, prefix)
+	if err != nil || len(objs) == 0 {
+		return err
+	}
+	return fn(objs)
+}

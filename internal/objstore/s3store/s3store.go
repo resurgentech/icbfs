@@ -512,24 +512,44 @@ func (s *Store) PartLimits() objstore.PartLimits {
 // via ListObjectsV2's ContinuationToken.
 func (s *Store) List(ctx context.Context, prefix string) ([]objstore.Object, error) {
 	var all []objstore.Object
+	err := s.ListPages(ctx, prefix, func(page []objstore.Object) error {
+		all = append(all, page...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return all, nil
+}
+
+// ListPages is List a page (one ListObjectsV2 request, HistoryPageSize
+// keys) at a time (objstore.PageLister).
+func (s *Store) ListPages(ctx context.Context, prefix string, fn func([]objstore.Object) error) error {
 	var token *string
 	for {
 		out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket:            aws.String(s.bucket),
 			Prefix:            aws.String(s.k(prefix)),
 			ContinuationToken: token,
+			MaxKeys:           aws.Int32(objstore.HistoryPageSize),
 		})
 		if err != nil {
-			return nil, s3Error(fmt.Errorf("list by prefix %q: %w", prefix, err))
+			return s3Error(fmt.Errorf("list by prefix %q: %w", prefix, err))
 		}
-		for _, o := range out.Contents {
-			all = append(all, objstore.Object{
-				Key:  strings.TrimPrefix(aws.ToString(o.Key), s.keyPrefix),
-				Size: aws.ToInt64(o.Size),
-			})
+		if len(out.Contents) > 0 {
+			page := make([]objstore.Object, 0, len(out.Contents))
+			for _, o := range out.Contents {
+				page = append(page, objstore.Object{
+					Key:  strings.TrimPrefix(aws.ToString(o.Key), s.keyPrefix),
+					Size: aws.ToInt64(o.Size),
+				})
+			}
+			if err := fn(page); err != nil {
+				return err
+			}
 		}
 		if !aws.ToBool(out.IsTruncated) {
-			return all, nil
+			return nil
 		}
 		token = out.NextContinuationToken
 	}

@@ -642,15 +642,30 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 
 func (s *Store) List(ctx context.Context, prefix string) ([]objstore.Object, error) {
 	var out []objstore.Object
+	err := s.ListPages(ctx, prefix, func(page []objstore.Object) error {
+		out = append(out, page...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ListPages is List a page (one listing request, HistoryPageSize blobs,
+// markers left out) at a time (objstore.PageLister).
+func (s *Store) ListPages(ctx context.Context, prefix string, fn func([]objstore.Object) error) error {
 	pager := s.client.NewListBlobsFlatPager(&container.ListBlobsFlatOptions{
-		Prefix:  to.Ptr(s.k(prefix)),
-		Include: container.ListBlobsInclude{Metadata: true},
+		Prefix:     to.Ptr(s.k(prefix)),
+		Include:    container.ListBlobsInclude{Metadata: true},
+		MaxResults: to.Ptr(objstore.HistoryPageSize),
 	})
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
-			return nil, azureErr("list", prefix, err)
+			return azureErr("list", prefix, err)
 		}
+		var objs []objstore.Object
 		for _, b := range page.Segment.BlobItems {
 			if isMarker(b.Metadata) {
 				continue
@@ -659,10 +674,15 @@ func (s *Store) List(ctx context.Context, prefix string) ([]objstore.Object, err
 			if b.Properties != nil {
 				o.Size = deref(b.Properties.ContentLength)
 			}
-			out = append(out, o)
+			objs = append(objs, o)
+		}
+		if len(objs) > 0 {
+			if err := fn(objs); err != nil {
+				return err
+			}
 		}
 	}
-	return out, nil
+	return nil
 }
 
 func (s *Store) ServerTime(ctx context.Context) (time.Time, error) {
