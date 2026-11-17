@@ -140,6 +140,10 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 	// Parts from a stream share one buffer and are filled in order, so
 	// they go up one at a time; the loop starts them in order.
 	conc := partConcurrency
+	if allCopies(parts) {
+		// T82-10: copies on the store's side carry no bytes of ours.
+		conc = objstore.CopyConcurrency
+	}
 	stream := objstore.IsStream(parts)
 	if stream {
 		conc = 1
@@ -223,6 +227,16 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 		return nil, s3Error(fmt.Errorf("put parts %s: %w", key, err))
 	}
 	return s.headVersion(ctx, key, out.VersionId)
+}
+
+// allCopies: every part is copied on the store's side (no Body).
+func allCopies(parts []objstore.Part) bool {
+	for _, p := range parts {
+		if p.Body != nil {
+			return false
+		}
+	}
+	return len(parts) > 0
 }
 
 // firstRealError returns the first error in errs that isn't just a part

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -634,6 +635,7 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 	bb := s.blob(key)
 	ids := make([]string, len(parts))
 	stream := objstore.IsStream(parts)
+	var copies []int // the parts copied on the store's side, staged after the loop
 	for i, p := range parts {
 		if stream {
 			// A stream of unknown length may end before its last part.
@@ -653,26 +655,13 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 			}
 			continue
 		}
-		from := key
-		if p.CopyKey != "" {
-			from = p.CopyKey
-		}
-		src, auth, err := s.source(ctx, from, p.CopyVersion)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := bb.StageBlockFromURL(ctx, ids[i], src, &blockblob.StageBlockFromURLOptions{
-			Range:                   blob.HTTPRange{Offset: p.CopyOffset, Count: p.Size},
-			CopySourceAuthorization: auth,
-		}); err != nil {
-			// A missing source comes back as CannotVerifyCopySource, not
-			// BlobNotFound; a Head of it says which it was. Staged blocks
-			// are never committed, so nothing is written.
-			if _, herr := s.HeadVersion(ctx, from, p.CopyVersion); objstore.IsNotFound(herr) {
-				return nil, fmt.Errorf("put parts %s: copy from %s version %s: %w (%v)", key, from, p.CopyVersion, objstore.ErrNotFound, err)
-			}
-			return nil, azureErr("put parts", key, err)
-		}
+		copies = append(copies, i)
+	}
+	// T82-10: the copies, objstore.CopyConcurrency at once (a block's place
+	// in the blob is its place in the list committed, not when it was
+	// staged). The first failure stops the rest; nothing is committed.
+	if err := s.stageCopies(ctx, bb, key, parts, ids, copies); err != nil {
+		return nil, err
 	}
 	resp, err := bb.CommitBlockList(ctx, ids, &blockblob.CommitBlockListOptions{
 		Metadata:         toAzureMeta(metadata),
@@ -682,6 +671,75 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 		return nil, azureErr("put parts", key, err)
 	}
 	return s.HeadVersion(ctx, key, deref(resp.VersionID))
+}
+
+// stageCopies stages the copied parts of a PutParts (parts[i] for i in
+// which), objstore.CopyConcurrency at once.
+func (s *Store) stageCopies(ctx context.Context, bb *blockblob.Client, key string, parts []objstore.Part, ids []string, which []int) error {
+	if len(which) == 0 {
+		return nil
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errs := make([]error, len(which))
+	sem := make(chan struct{}, objstore.CopyConcurrency)
+	var wg sync.WaitGroup
+	for j, i := range which {
+		sem <- struct{}{}
+		if cctx.Err() != nil {
+			<-sem
+			break
+		}
+		wg.Add(1)
+		go func(j, i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			p := parts[i]
+			from := key
+			if p.CopyKey != "" {
+				from = p.CopyKey
+			}
+			src, auth, err := s.source(cctx, from, p.CopyVersion)
+			if err == nil {
+				_, err = bb.StageBlockFromURL(cctx, ids[i], src, &blockblob.StageBlockFromURLOptions{
+					Range:                   blob.HTTPRange{Offset: p.CopyOffset, Count: p.Size},
+					CopySourceAuthorization: auth,
+				})
+				if err != nil {
+					// A missing source comes back as CannotVerifyCopySource, not
+					// BlobNotFound; a Head of it says which it was. Staged blocks
+					// are never committed, so nothing is written.
+					if _, herr := s.HeadVersion(ctx, from, p.CopyVersion); objstore.IsNotFound(herr) {
+						err = fmt.Errorf("put parts %s: copy from %s version %s: %w (%v)", key, from, p.CopyVersion, objstore.ErrNotFound, err)
+					} else {
+						err = azureErr("put parts", key, err)
+					}
+				}
+			}
+			if err != nil {
+				errs[j] = err
+				cancel()
+			}
+		}(j, i)
+	}
+	wg.Wait()
+	var cancelled error
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, context.Canceled) && ctx.Err() == nil {
+			if cancelled == nil {
+				cancelled = err
+			}
+			continue
+		}
+		return err
+	}
+	if cancelled != nil {
+		return cancelled
+	}
+	return ctx.Err()
 }
 
 func (s *Store) List(ctx context.Context, prefix string) ([]objstore.Object, error) {

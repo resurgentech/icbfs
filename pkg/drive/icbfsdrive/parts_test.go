@@ -134,11 +134,39 @@ func TestUploadInParts(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("no change event for the completed upload")
 	}
+	// The upload stays until its caller drops it: its result recorded
+	// (what a complete asked again is told), its parts erased out of the
+	// request, then all of it.
+	if v, m := uploadsLeft(t, store, d, srv); v != 4 || m != 0 {
+		t.Fatalf("after complete: %d versions staged (want the record and 3 parts), %d unfinished multipart uploads", v, m)
+	}
+	if _, _, err := d.UploadResult(ctx, id); !errors.Is(err, drive.ErrNotFound) {
+		t.Fatalf("a result before FinishUpload: %v", err)
+	}
+	if err := d.FinishUpload(ctx, id, []byte(`{"version":"v1"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if r, at, err := d.UploadResult(ctx, id); err != nil || string(r) != `{"version":"v1"}` || at.IsZero() {
+		t.Fatalf("result %q %v %v", r, at, err)
+	}
+	if err := d.DropUploadParts(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if v, m := uploadsLeft(t, store, d, srv); v != 2 || m != 0 {
+		t.Fatalf("after the parts' erase: %d versions (want the record and the result), %d multipart uploads", v, m)
+	}
+	var listed []drive.UploadEntry
+	if err := d.Uploads(ctx, func(e drive.UploadEntry) error { listed = append(listed, e); return nil }); err != nil || len(listed) != 1 || !listed[0].Done || !listed[0].Record || listed[0].Parts != 0 {
+		t.Fatalf("listed %+v %v", listed, err)
+	}
+	if err := d.DropUpload(ctx, id); err != nil {
+		t.Fatal(err)
+	}
 	if v, m := uploadsLeft(t, store, d, srv); v != 0 || m != 0 {
-		t.Fatalf("after complete: %d versions of staged objects, %d unfinished multipart uploads", v, m)
+		t.Fatalf("after the drop: %d versions, %d multipart uploads", v, m)
 	}
 	if _, _, err := d.UploadRecord(ctx, id); !errors.Is(err, drive.ErrNotFound) {
-		t.Fatalf("the upload after complete: %v", err)
+		t.Fatalf("the upload after its drop: %v", err)
 	}
 
 	// A second upload of the path, one part, completes after it: the last
@@ -285,6 +313,19 @@ func TestUploadDropAndInvisible(t *testing.T) {
 	}
 	if _, err := d.CompleteUpload(ctx, id, "/x", 2, drive.Condition{}, drive.WriteOptions{}); !errors.Is(err, drive.ErrNotFound) {
 		t.Fatalf("complete after drop: %v", err)
+	}
+	// DropUploads (a fork's end): every upload of the filesystem goes.
+	for _, other := range []string{"upload-hidden-0002", "upload-hidden-0003"} {
+		if err := d.StartUpload(ctx, other, nil); err != nil {
+			t.Fatal(err)
+		}
+		stage(t, ctx, d, other, data[:10])
+	}
+	if err := d.DropUploads(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if v, m := uploadsLeft(t, store, d, srv); v != 0 || m != 0 {
+		t.Fatalf("after DropUploads: %d versions, %d multipart uploads", v, m)
 	}
 }
 

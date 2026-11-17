@@ -91,14 +91,33 @@ func (d *Drive) CompleteUpload(ctx context.Context, id, p string, parts int, con
 	if err != nil {
 		return drive.Item{}, uploadErr(err)
 	}
-	it, err := d.write(ctx, p, writeSource{upload: &src}, cond, opts)
-	if err != nil {
-		return drive.Item{}, err
+	return d.write(ctx, p, writeSource{upload: &src}, cond, opts)
+}
+
+func (d *Drive) FinishUpload(ctx context.Context, id string, result []byte) error {
+	if d.cfg.ReadOnly {
+		return errDriveReadOnly
 	}
-	// The file is written: the parts go. A failure here leaves them to
-	// the caller's sweep (Uploads), which finds the upload again.
-	_ = d.fs.DropUpload(context.WithoutCancel(ctx), id)
-	return it, nil
+	return uploadErr(d.fs.FinishUpload(ctx, id, result))
+}
+
+func (d *Drive) UploadResult(ctx context.Context, id string) ([]byte, time.Time, error) {
+	r, t, err := d.fs.UploadResult(ctx, id)
+	return r, t, uploadErr(err)
+}
+
+func (d *Drive) DropUploadParts(ctx context.Context, id string) error {
+	if d.cfg.ReadOnly {
+		return errDriveReadOnly
+	}
+	return uploadErr(d.fs.DropUploadParts(ctx, id))
+}
+
+func (d *Drive) DropUploads(ctx context.Context) error {
+	if d.cfg.ReadOnly {
+		return errDriveReadOnly
+	}
+	return uploadErr(d.fs.DropUploads(ctx))
 }
 
 func (d *Drive) DropUpload(ctx context.Context, id string) error {
@@ -110,6 +129,6 @@ func (d *Drive) DropUpload(ctx context.Context, id string) error {
 
 func (d *Drive) Uploads(ctx context.Context, fn func(drive.UploadEntry) error) error {
 	return uploadErr(d.fs.ListUploads(ctx, func(e icbfs.UploadEntry) error {
-		return fn(drive.UploadEntry{ID: e.ID, Record: e.Record, Parts: e.Parts})
+		return fn(drive.UploadEntry{ID: e.ID, Record: e.Record, Done: e.Done, Parts: e.Parts})
 	}))
 }

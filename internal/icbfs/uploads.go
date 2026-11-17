@@ -259,7 +259,10 @@ const uploadHeads = 8
 
 // UploadSources are upload id's parts 1 to count, which must be all its
 // parts, each but the last whole, as the parts of a PutParts that copies
-// them: one Head each, uploadHeads at a time.
+// them: one Head each, uploadHeads at a time. What it holds is the result:
+// each part's key, size and version (about 170 bytes a part), and the
+// last part's checksum state; a Head's answer is dropped as soon as those
+// are taken from it (T82-10 review R4).
 func (f *Filesystem) UploadSources(ctx context.Context, id string, count int) (UploadSource, error) {
 	if err := CheckUploadID(id); err != nil {
 		return UploadSource{}, err
@@ -271,46 +274,68 @@ func (f *Filesystem) UploadSources(ctx context.Context, id string, count int) (U
 	if _, err := f.store.Head(ctx, uploadRecordKey(dir)); err != nil {
 		return UploadSource{}, fmt.Errorf("upload %s: %w", id, mapNotFound(err))
 	}
-	objs := make([]*objstore.Object, count+1)
-	errs := make([]error, count+1)
+	src := UploadSource{Parts: make([]objstore.Part, count)}
+	var lastMeta map[string]string
+	hctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var mu sync.Mutex
+	var first error
+	fail := func(err error) {
+		mu.Lock()
+		if first == nil {
+			first = err
+		}
+		mu.Unlock()
+		cancel()
+	}
 	sem := make(chan struct{}, uploadHeads)
 	var wg sync.WaitGroup
-	for n := 1; n <= count+1; n++ {
+	for n := 1; n <= count && hctx.Err() == nil; n++ {
 		sem <- struct{}{}
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			objs[n-1], errs[n-1] = f.store.Head(ctx, uploadPartKey(dir, n))
+			key := uploadPartKey(dir, n)
+			o, err := f.store.Head(hctx, key)
+			switch {
+			case objstore.IsNotFound(err):
+				fail(fmt.Errorf("upload %s has no part %d: %w", id, n, ErrUploadParts))
+				return
+			case err != nil:
+				fail(err)
+				return
+			case n < count && o.Size != UploadPartSize:
+				fail(fmt.Errorf("upload %s: part %d is %d bytes, not %d: %w", id, n, o.Size, UploadPartSize, ErrUploadParts))
+				return
+			}
+			// Only what the copy needs is kept: the part's own slot.
+			src.Parts[n-1] = objstore.Part{Size: o.Size, CopyKey: key, CopyVersion: o.VersionID}
+			if n == count {
+				lastMeta = o.Metadata
+			}
 		}(n)
 	}
 	wg.Wait()
-	if errs[count] == nil {
+	if first != nil {
+		return UploadSource{}, first
+	}
+	if err := ctx.Err(); err != nil {
+		return UploadSource{}, err
+	}
+	if _, err := f.store.Head(ctx, uploadPartKey(dir, count+1)); err == nil {
 		return UploadSource{}, fmt.Errorf("upload %s has more than %d parts: %w", id, count, ErrUploadParts)
+	} else if !objstore.IsNotFound(err) {
+		return UploadSource{}, err
 	}
-	if !objstore.IsNotFound(errs[count]) {
-		return UploadSource{}, errs[count]
-	}
-	src := UploadSource{Parts: make([]objstore.Part, count)}
-	for i := 0; i < count; i++ {
-		if objstore.IsNotFound(errs[i]) {
-			return UploadSource{}, fmt.Errorf("upload %s has no part %d: %w", id, i+1, ErrUploadParts)
-		}
-		if errs[i] != nil {
-			return UploadSource{}, errs[i]
-		}
-		o := objs[i]
-		if i < count-1 && o.Size != UploadPartSize {
-			return UploadSource{}, fmt.Errorf("upload %s: part %d is %d bytes, not %d: %w", id, i+1, o.Size, UploadPartSize, ErrUploadParts)
-		}
-		src.Parts[i] = objstore.Part{Size: o.Size, CopyKey: uploadPartKey(dir, i+1), CopyVersion: o.VersionID}
-		src.Size += o.Size
+	for _, p := range src.Parts {
+		src.Size += p.Size
 	}
 	if src.Size > f.maxFileSize {
 		return UploadSource{}, ErrFileTooLarge
 	}
 	sum := NewChecksummer()
-	if err := sum.restore(objs[count-1].Metadata); err != nil {
+	if err := sum.restore(lastMeta); err != nil {
 		return UploadSource{}, fmt.Errorf("upload %s part %d: %w", id, count, err)
 	}
 	src.Sums = sum.Sum()
@@ -329,6 +354,55 @@ func (f *Filesystem) WriteUpload(ctx context.Context, key string, src UploadSour
 	return f.store.PutParts(ctx, key, src.Parts, nil, ifMatch)
 }
 
+func uploadDoneKey(dir string) string { return dir + "done" }
+
+// FinishUpload records that upload id has been written, with the caller's
+// result (at most MaxUploadRecord bytes): what a complete asked again
+// after a lost answer is told, until the upload is dropped.
+func (f *Filesystem) FinishUpload(ctx context.Context, id string, result []byte) error {
+	if err := CheckUploadID(id); err != nil {
+		return err
+	}
+	if len(result) > MaxUploadRecord {
+		return fmt.Errorf("upload result of %d bytes, over %d: %w", len(result), MaxUploadRecord, ErrInvalidArgument)
+	}
+	_, err := f.store.Put(ctx, uploadDoneKey(f.uploadDir(id)), strings.NewReader(string(result)), nil, "")
+	return err
+}
+
+// UploadResult is what FinishUpload recorded of upload id, and when;
+// ErrNotFound if it was not finished.
+func (f *Filesystem) UploadResult(ctx context.Context, id string) ([]byte, time.Time, error) {
+	if err := CheckUploadID(id); err != nil {
+		return nil, time.Time{}, err
+	}
+	body, obj, err := f.store.Get(ctx, uploadDoneKey(f.uploadDir(id)))
+	if err != nil {
+		return nil, time.Time{}, mapNotFound(err)
+	}
+	defer body.Close()
+	data, err := io.ReadAll(io.LimitReader(body, MaxUploadRecord+1))
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	return data, obj.LastModified, nil
+}
+
+// DropUploadParts erases upload id's parts, every version, and keeps its
+// record and result: what a finished upload no longer needs.
+func (f *Filesystem) DropUploadParts(ctx context.Context, id string) error {
+	if err := CheckUploadID(id); err != nil {
+		return err
+	}
+	return f.store.EraseAll(ctx, f.uploadDir(id)+"p")
+}
+
+// DropUploads erases every upload of the filesystem, every version: what
+// the filesystem's end (a fork deleted) leaves of them, as Prune does.
+func (f *Filesystem) DropUploads(ctx context.Context) error {
+	return f.store.EraseAll(ctx, f.uploadPrefix())
+}
+
 // DropUpload erases upload id: its record and parts, every version (the
 // bucket keeps versions: a delete would leave them).
 func (f *Filesystem) DropUpload(ctx context.Context, id string) error {
@@ -343,6 +417,7 @@ func (f *Filesystem) DropUpload(ctx context.Context, id string) error {
 type UploadEntry struct {
 	ID     string
 	Record bool
+	Done   bool // FinishUpload recorded its result
 	Parts  int
 }
 
@@ -368,6 +443,8 @@ func (f *Filesystem) ListUploads(ctx context.Context, fn func(UploadEntry) error
 			}
 			if rest == "record" {
 				cur.Record = true
+			} else if rest == "done" {
+				cur.Done = true
 			} else if strings.HasPrefix(rest, "p") {
 				cur.Parts++
 			}

@@ -37,12 +37,23 @@ type PartWriter interface {
 	UploadState(ctx context.Context, id string) (UploadState, error)
 	// CompleteUpload writes path's content from upload id's parts 1 to
 	// parts, exactly as Write would from the same bytes (condition,
-	// permissions, locks, checksums, events), then erases the upload.
-	// Parts not as named (one missing, more, a size wrong) is
-	// ErrUploadParts, and nothing is written.
+	// permissions, locks, checksums, events). The upload stays: the
+	// caller records the result (FinishUpload) and erases the parts
+	// (DropUploadParts) when it chooses, out of the request. Parts not as
+	// named (one missing, more, a size wrong) is ErrUploadParts, and
+	// nothing is written.
 	CompleteUpload(ctx context.Context, id, path string, parts int, cond Condition, opts WriteOptions) (Item, error)
+	// FinishUpload records the caller's result of upload id (at most 16
+	// KiB), and UploadResult reads it back (ErrNotFound: not finished).
+	FinishUpload(ctx context.Context, id string, result []byte) error
+	UploadResult(ctx context.Context, id string) (result []byte, finished time.Time, err error)
+	// DropUploadParts erases upload id's parts, every version, keeping its
+	// record and result.
+	DropUploadParts(ctx context.Context, id string) error
 	// DropUpload erases upload id, every version of every object of it.
 	DropUpload(ctx context.Context, id string) error
+	// DropUploads erases every upload of the drive's filesystem.
+	DropUploads(ctx context.Context) error
 	// Uploads calls fn with each upload of the drive's filesystem, a page
 	// of the store's listing at a time.
 	Uploads(ctx context.Context, fn func(UploadEntry) error) error
@@ -61,6 +72,7 @@ type UploadState struct {
 type UploadEntry struct {
 	ID     string
 	Record bool
+	Done   bool // finished: its result recorded (FinishUpload)
 	Parts  int
 }
 
