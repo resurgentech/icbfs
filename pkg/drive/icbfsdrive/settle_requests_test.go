@@ -149,9 +149,17 @@ const (
 
 func measureSettle(t *testing.T, states int) settleCase {
 	t.Helper()
+	return measureSettleOf(t, miniotest.Store(t), states, settleLate, false)
+}
+
+// measureSettleOf is measureSettle with late changes, on store: dated
+// between the folder's third-last and second-last states, or, spread,
+// one in every state's hour from the third on.
+func measureSettleOf(t *testing.T, raw objstore.Store, states, lateN int, spread bool) settleCase {
+	t.Helper()
 	ctx := system()
-	store := &seqStore{Store: miniotest.Store(t)}
-	name := fmt.Sprintf("settle%d", states)
+	store := &seqStore{Store: raw}
+	name := fmt.Sprintf("settle%d-%d-%v", states, lateN, spread)
 	d := newDriveWith(t, store, icbfs.Settings{Name: name, Size: 1 << 30, RootMode: 0o777, Created: year(2015), DirBlockEntries: 100},
 		Config{DeferLateFolders: true})
 
@@ -183,15 +191,18 @@ func measureSettle(t *testing.T, states int) settleCase {
 
 	late := &drive.LateChanges{}
 	lctx := drive.WithLateChanges(ctx, late)
-	for k := 0; k < settleLate; k++ {
-		when := stateAt(states - 3).Add(time.Duration(k+1) * time.Minute)
+	for k := 0; k < lateN; k++ {
+		when := stateAt(states - 3).Add(time.Duration(k+1) * time.Second)
+		if spread {
+			when = stateAt(2 + k*(states-4)/lateN).Add(time.Minute)
+		}
 		if _, err := d.Write(drive.WithSourceTime(lctx, when), fmt.Sprintf("/dir/late%02d", k), strings.NewReader("late"), drive.Condition{}, drive.WriteOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	changes := late.Take()
-	if len(changes) != settleLate {
-		t.Fatalf("%d late changes, want %d", len(changes), settleLate)
+	if len(changes) != lateN {
+		t.Fatalf("%d late changes, want %d", len(changes), lateN)
 	}
 	// Quiet: no past-changed mark still put off.
 	time.Sleep(pastMarkEvery + 100*time.Millisecond)
@@ -244,11 +255,13 @@ func measureSettle(t *testing.T, states int) settleCase {
 
 	// The folder is right: each late file from its time, the present as
 	// it was (the last state's entries and the late files).
-	if got := strings.Count(names(t, d, "/dir", stateAt(states-3).Add(15*time.Minute+30*time.Second)), "late"); got != 15 {
-		t.Errorf("%d states: late files fifteen and a half minutes into the late creates: %d, want 15", states, got)
+	if !spread {
+		if got := strings.Count(names(t, d, "/dir", stateAt(states-3).Add(15*time.Second+500*time.Millisecond)), "late"); got != min(15, lateN) {
+			t.Errorf("%d states: late files fifteen and a half seconds into the late creates: %d, want %d", states, got, min(15, lateN))
+		}
 	}
-	if got := strings.Split(names(t, d, "/dir", time.Now()), ","); len(got) != settleEntries+settleLate {
-		t.Errorf("%d states: the folder now has %d entries, want %d", states, len(got), settleEntries+settleLate)
+	if got := strings.Split(names(t, d, "/dir", time.Now()), ","); len(got) != settleEntries+lateN {
+		t.Errorf("%d states: the folder now has %d entries, want %d", states, len(got), settleEntries+lateN)
 	}
 	return c
 }
@@ -288,6 +301,26 @@ func TestSettleRequestsBoundedByLaterStates(t *testing.T) {
 	}
 	for _, c := range []settleCase{small, large} {
 		checkWindow(t, c)
+	}
+}
+
+// TestSettleGateTable measures a settle's requests and heap against the
+// folder's states and the late changes queued (the round-3 review's
+// table: 20, 200 and 2,000 states; 30 and 500 changes; 500 spread over
+// the history). Long: run when T83_GATE is set (the lab).
+func TestSettleGateTable(t *testing.T) {
+	if !envSet("T83_GATE") {
+		t.Skip("T83_GATE unset: the gate's table runs on the lab")
+	}
+	bucket := newBuckets(t)
+	for _, c := range []struct {
+		states, late int
+		spread       bool
+	}{{20, 30, false}, {200, 30, false}, {2000, 30, false}, {20, 500, false}, {200, 500, false}, {200, 500, true}} {
+		m := measureSettleOf(t, bucket(t), c.states, c.late, c.spread)
+		t.Logf("GATE states %d, late changes %d (spread %v): %d requests, %d states written, peak heap over before %s; %s",
+			c.states, c.late, c.spread, m.requests, m.written, kib(m.peak), summarize(m.seq))
+		checkWindow(t, m)
 	}
 }
 

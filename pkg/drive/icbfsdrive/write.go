@@ -938,8 +938,14 @@ func (d *Drive) begin(ctx context.Context) (context.Context, func(*error), error
 	// somewhere to report them) may make one; anyone else's is refused
 	// before the folder is written, and what the change wrote before that
 	// (a new file's content) is undone.
+	// A deferring drive's caller's late change is written into its
+	// folder's present, dated at the folder's newest state, and reported
+	// (reportLateFolders): a folder is never written behind its newest
+	// state.
 	if !d.cfg.DeferLateFolders || drive.LateChangesFrom(ctx) == nil {
 		ctx = icbfs.RefuseLateChanges(ctx)
+	} else {
+		ctx = icbfs.WithPresentDating(ctx)
 	}
 	return ctx, func(errp *error) {
 		var refused *icbfs.LateChangeError

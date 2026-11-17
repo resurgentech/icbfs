@@ -112,20 +112,19 @@ func TestSettleReadsAFreshCache(t *testing.T) {
 }
 
 // TestDeferredPastAtTheLateDate pins what a view of the past shows while
-// a late change is deferred, as built: KNOWN, the owner's to decide
-// (review finding 4), not a promise. A deferred late write at 2021 into
-// a folder of a@2020, b@2022, c@2024 leaves the folder's root version
-// it wrote (the whole present, with x) dated 2021: a view of mid-2021
-// shows the folder's whole present, b and c included, until the settle.
-// Views of the folder's other states show them as they were.
+// a late change is deferred (the owner, 2026-11-17: "Yeah, that's
+// fine"): a deferred late write at 2021 into a folder of a@2020, b@2022,
+// c@2024 is written into the present dated 2024: views before 2024 show
+// the folder as it was, without x; from 2024 on, with it. Every view is a
+// state the folder had.
 func TestDeferredPastAtTheLateDate(t *testing.T) {
 	d, changes := cutCase(t, miniotest.Store(t), "deferredpast", Config{DeferLateFolders: true})
 	pastIs(t, d, map[int]string{
 		2020: "a.txt",
-		2021: "a.txt,b.txt,c.txt,x.txt", // KNOWN: the present, at the late date
+		2021: "a.txt",
 		2022: "a.txt,b.txt",
 		2023: "a.txt,b.txt",
-		2024: "a.txt,b.txt,c.txt",
+		2024: "a.txt,b.txt,c.txt,x.txt",
 	})
 	if _, err := d.SettleFolder(system(), changes, drive.SettleOptions{}); err != nil {
 		t.Fatal(err)
@@ -258,7 +257,8 @@ func TestSettleRemoveOfOneItem(t *testing.T) {
 		t.Fatalf("b written anew is the same item")
 	}
 	folder := folderID(t, d, "/dir")
-	rm := []drive.LateChange{{Folder: folder, At: year(2021), Op: drive.LateRemove, Name: "b.txt", Item: b1.ID, Type: drive.TypeFile}}
+	// As a late removal written into the present at 2023 would report it.
+	rm := []drive.LateChange{{Folder: folder, At: year(2021), Until: year(2023), Op: drive.LateRemove, Name: "b.txt", Item: b1.ID, Type: drive.TypeFile}}
 	if _, err := d.SettleFolder(ctx, rm, drive.SettleOptions{}); err != nil {
 		t.Fatal(err)
 	}

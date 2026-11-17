@@ -7,11 +7,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"math"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -40,6 +38,8 @@ import (
 //	                and .metadata once made
 //	settle_blocks:  the blocks below the root the read states reached, the latest time
 //	                of a state that reached each, and whether the present does
+//	settle_read:    settle_entries as the states were read, before any change was played:
+//	                what the settle's proof (SettleDir) checks each generated state against
 var settleSchema = []string{
 	`CREATE TABLE IF NOT EXISTS settle_runs (
 		run     TEXT PRIMARY KEY,
@@ -73,10 +73,19 @@ var settleSchema = []string{
 		present INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (run, key)
 	)`,
+	`CREATE TABLE IF NOT EXISTS settle_read (
+		run     TEXT NOT NULL,
+		name    TEXT NOT NULL,
+		item    TEXT NOT NULL,
+		type    INTEGER NOT NULL,
+		from_at INTEGER NOT NULL,
+		to_at   INTEGER
+	)`,
+	`CREATE INDEX IF NOT EXISTS settle_read_from ON settle_read (run, from_at)`,
 }
 
 // settleTables is the tables holding a run's rows.
-var settleTables = []string{"settle_entries", "settle_states", "settle_blocks", "settle_runs"}
+var settleTables = []string{"settle_entries", "settle_read", "settle_states", "settle_blocks", "settle_runs"}
 
 // settleRunsKeptFor is how long a run's rows are kept if its settle
 // never ends them (its process killed): far longer than a settle takes.
@@ -216,19 +225,25 @@ func (t *SettleTable) ReadState(ctx context.Context, at time.Time, entries []Set
 	if err := rows.Err(); err != nil {
 		return false, err
 	}
+	// The states are all read before any change is played: settle_entries
+	// and settle_read are the same until then, and settle_read stays so.
 	for _, e := range entries {
 		if open[e] {
 			delete(open, e) // still there
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO settle_entries VALUES (?, ?, ?, ?, ?, NULL)`, t.run, e.Name, e.Item, e.Type, nanos(at)); err != nil {
-			return false, err
+		for _, table := range []string{"settle_entries", "settle_read"} {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO `+table+` VALUES (?, ?, ?, ?, ?, NULL)`, t.run, e.Name, e.Item, e.Type, nanos(at)); err != nil {
+				return false, err
+			}
 		}
 	}
 	for e := range open { // gone
-		if _, err := tx.ExecContext(ctx, `UPDATE settle_entries SET to_at = ? WHERE run = ? AND name = ? AND item = ? AND type = ? AND to_at IS NULL`,
-			nanos(at), t.run, e.Name, e.Item, e.Type); err != nil {
-			return false, err
+		for _, table := range []string{"settle_entries", "settle_read"} {
+			if _, err := tx.ExecContext(ctx, `UPDATE `+table+` SET to_at = ? WHERE run = ? AND name = ? AND item = ? AND type = ? AND to_at IS NULL`,
+				nanos(at), t.run, e.Name, e.Item, e.Type); err != nil {
+				return false, err
+			}
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO settle_states (run, at, sum, read) VALUES (?, ?, ?, 1)`, t.run, nanos(at), sum); err != nil {
@@ -322,10 +337,15 @@ func (t *SettleTable) lifetimes(ctx context.Context, tx *sql.Tx, name string, at
 	return out, rows.Err()
 }
 
-// Add plays a late add: from at on, e's name names e's item wherever no
-// lifetime of the name covers (an occupant then keeps it). Played again,
-// it changes nothing.
-func (t *SettleTable) Add(ctx context.Context, at time.Time, e SettleEntry) error {
+// Add plays a late add into the states in [at, until): there, e's name
+// names e's item wherever no lifetime of the name covers (an occupant
+// then keeps it). The states from until on are not touched: the late
+// write put the change into them itself (it was written into the
+// directory's present, dated until). Played again, it changes nothing.
+func (t *SettleTable) Add(ctx context.Context, at, until time.Time, e SettleEntry) error {
+	if !until.After(at) {
+		return fmt.Errorf("an add at %s until %s: until must be after at", at.Format(time.RFC3339Nano), until.Format(time.RFC3339Nano))
+	}
 	tx, err := t.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -336,17 +356,20 @@ func (t *SettleTable) Add(ctx context.Context, at time.Time, e SettleEntry) erro
 		return err
 	}
 	insert := func(from, to int64) error {
-		var end any
-		if to >= 0 {
-			end = to
+		if to <= from {
+			return nil
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO settle_entries VALUES (?, ?, ?, ?, ?, ?)`, t.run, e.Name, e.Item, e.Type, from, end)
+		_, err := tx.ExecContext(ctx, `INSERT INTO settle_entries VALUES (?, ?, ?, ?, ?, ?)`, t.run, e.Name, e.Item, e.Type, from, to)
 		return err
 	}
+	end := nanos(until)
 	cursor := nanos(at)
 	for _, l := range ls {
+		if cursor >= end {
+			break
+		}
 		if l.from > cursor {
-			if err := insert(cursor, l.from); err != nil {
+			if err := insert(cursor, min(l.from, end)); err != nil {
 				return err
 			}
 		}
@@ -355,16 +378,20 @@ func (t *SettleTable) Add(ctx context.Context, at time.Time, e SettleEntry) erro
 		}
 		cursor = max(cursor, l.to)
 	}
-	if err := insert(cursor, -1); err != nil {
+	if err := insert(cursor, end); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-// Remove plays a late removal: name's lifetimes naming item from at on
-// end at at (and go, if they start at or after it). A lifetime of the
-// name naming another item (a later occupant) is not this removal's.
-func (t *SettleTable) Remove(ctx context.Context, at time.Time, name, item string) error {
+// Remove plays a late removal into the states in [at, until): there,
+// name's lifetimes naming item end (a lifetime that goes on past until
+// keeps [until, its end) as its own). A lifetime of the name naming
+// another item (another occupant) is not this removal's.
+func (t *SettleTable) Remove(ctx context.Context, at, until time.Time, name, item string) error {
+	if !until.After(at) {
+		return fmt.Errorf("a removal at %s until %s: until must be after at", at.Format(time.RFC3339Nano), until.Format(time.RFC3339Nano))
+	}
 	tx, err := t.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -374,14 +401,25 @@ func (t *SettleTable) Remove(ctx context.Context, at time.Time, name, item strin
 	if err != nil {
 		return err
 	}
+	a, u := nanos(at), nanos(until)
 	for _, l := range ls {
-		if l.item != item {
+		if l.item != item || l.from >= u {
 			continue
 		}
-		if l.from >= nanos(at) {
+		if l.to < 0 || l.to > u {
+			// It goes on past until: [until, its end) stays.
+			var end any
+			if l.to >= 0 {
+				end = l.to
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO settle_entries SELECT run, name, item, type, ?, ? FROM settle_entries WHERE rowid = ?`, u, end, l.id); err != nil {
+				return err
+			}
+		}
+		if l.from >= a {
 			_, err = tx.ExecContext(ctx, `DELETE FROM settle_entries WHERE rowid = ?`, l.id)
 		} else {
-			_, err = tx.ExecContext(ctx, `UPDATE settle_entries SET to_at = ? WHERE rowid = ?`, nanos(at), l.id)
+			_, err = tx.ExecContext(ctx, `UPDATE settle_entries SET to_at = ? WHERE rowid = ?`, a, l.id)
 		}
 		if err != nil {
 			return err
@@ -433,6 +471,27 @@ func (t *SettleTable) EntriesAt(ctx context.Context, at time.Time) ([]SettleEntr
 	return out, rows.Err()
 }
 
+// ReadEntriesAt is the state at at as the states were read, before any
+// change was played: the entries of the latest state read at or before
+// at.
+func (t *SettleTable) ReadEntriesAt(ctx context.Context, at time.Time) ([]SettleEntry, error) {
+	rows, err := t.db.QueryContext(ctx, `SELECT name, item, type FROM settle_read
+		WHERE run = ? AND from_at <= ? AND (to_at IS NULL OR to_at > ?)`, t.run, nanos(at), nanos(at))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SettleEntry
+	for rows.Next() {
+		var e SettleEntry
+		if err := rows.Scan(&e.Name, &e.Item, &e.Type); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // SetNewKeys records the keys minted for the blocks below the root of the
 // state at at.
 func (t *SettleTable) SetNewKeys(ctx context.Context, at time.Time, keys []string) error {
@@ -455,70 +514,30 @@ func (t *SettleTable) Encoded(ctx context.Context, at time.Time) (root, meta []b
 
 // --- The history cache, for a settle and for the writer it serves ---
 
-// WithoutLate is a cache sharing c's database whose histories leave out
-// what is not a state (NotStates): versions shadowed by a newer one dated
-// alike, and late versions, stored after a version of the same key dated
-// later (by the item's .version table). A settle reads a directory's
-// states through it, so that a block a late write left (the directory as
-// it is now, dated at the change) isn't taken for the state at its date.
-// upTo, if it names a key, leaves out that key's versions stored after
-// the version it names (a cut settle's, SettleDir's record). It is closed
-// with c, never itself. It takes the store to stand still while it's
-// used: what it leaves out of a key is found once.
-func (c *HistoryCache) WithoutLate(upTo map[string]string) *HistoryCache {
+// UpTo is a cache sharing c's database whose history of each key upTo
+// names leaves out the versions stored after the version it names: a
+// rerun of a cut settle reads the directory's states as they were when
+// the cut settle began (SettleDir's record, V0), without the versions
+// the cut settle wrote after it. Nothing else is left out: no version is
+// judged by its date against the others (a view takes, of the versions
+// dated alike, the newest stored, as any view does). It is closed with c,
+// never itself.
+func (c *HistoryCache) UpTo(upTo map[string]string) *HistoryCache {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return &HistoryCache{store: c.store, db: c.db, ttl: c.ttl, offset: c.offset, offsetAt: c.offsetAt,
-		withoutLate: &lateFilter{late: map[string]map[string]bool{}, upTo: upTo}}
+		upTo: upTo}
 }
 
-// lateFilter is a WithoutLate cache's: each key's versions left out, by
-// key, and the version after which a key's versions are left out.
-type lateFilter struct {
-	mu   sync.Mutex
-	late map[string]map[string]bool
-	upTo map[string]string
-}
-
-// dropLate is list without what is not a state: versions stored after
-// the filter's upTo version of key, and NotStates.
-func (c *HistoryCache) dropLate(ctx context.Context, key string, list []Object, at time.Time) ([]Object, error) {
-	if len(list) == 0 {
-		return list, nil
-	}
-	f := c.withoutLate
-	if id, ok := f.upTo[key]; ok {
+// dropAfter is list without the versions stored after the upTo version
+// of key, if the cache names one.
+func (c *HistoryCache) dropAfter(key string, list []Object) []Object {
+	if id, ok := c.upTo[key]; ok {
 		if i := VersionIndex(list, id); i > 0 {
-			list = list[i:]
+			return list[i:]
 		}
 	}
-	f.mu.Lock()
-	late, ok := f.late[key]
-	f.mu.Unlock()
-	if !ok {
-		dates, err := c.currentDates(ctx, BaseKey(key), at)
-		if err != nil {
-			return nil, err
-		}
-		shadowed, lateIDs := NotStates(list, dates)
-		late = lateIDs
-		for id := range shadowed {
-			late[id] = true
-		}
-		f.mu.Lock()
-		f.late[key] = late
-		f.mu.Unlock()
-	}
-	if len(late) == 0 {
-		return list, nil
-	}
-	out := make([]Object, 0, len(list))
-	for _, o := range list {
-		if !late[o.VersionID] {
-			out = append(out, o)
-		}
-	}
-	return out, nil
+	return list
 }
 
 // VersionIndex is the place of version id in history (newest stored
@@ -577,29 +596,6 @@ func NotStates(history []Object, dates Dates) (shadowed, late map[string]bool) {
 		}
 		late = next
 	}
-}
-
-// currentDates is base's .version table as it is now, through the cache,
-// as an AsOf view reads it.
-func (c *HistoryCache) currentDates(ctx context.Context, base string, at time.Time) (Dates, error) {
-	vkey := base + VersionSuffix
-	history, err := c.fullHistory(ctx, vkey, at)
-	if err != nil || len(history) == 0 || history[0].Deleted {
-		return Dates{}, err
-	}
-	body, _, err := c.getVersion(CacheContent(ctx), vkey, history[0].VersionID)
-	if IsNotFound(err) {
-		return Dates{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer body.Close()
-	data, err := io.ReadAll(body)
-	if err != nil {
-		return nil, err
-	}
-	return decodeDates(data)
 }
 
 // FreshHistory is key's history from the store, newest first, kept in

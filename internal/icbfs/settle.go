@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/resurgentech/icbfs/internal/block"
@@ -17,14 +18,31 @@ import (
 // written once, with every change in place, instead of the whole history
 // once per change (ReplaceDirHistory).
 //
+// A late change never wrote the directory behind its newest state: it was
+// written into the directory's present, dated at that state, Until
+// (lateDating), so every one of the directory's objects holds its
+// versions in the order of their dates and every view of the past is a
+// state the directory really had. What a settle has left to do is put
+// each change into the states in [At, Until), and only those.
+//
 //   - Build: the state just before the earliest change and every later
-//     state are read (SettleInput.StateAt, through the history cache,
-//     what is not a state left out: objstore.NotStates), one at a time,
-//     into the working table as entry lifetimes (objstore.SettleTable).
-//     The requests are the later states' blocks', whatever the
-//     directory's whole history.
-//   - Play: each change, oldest first, is an insert or an end of a
-//     lifetime in the table. No request.
+//     state are read (SettleInput.StateAt, through the history cache),
+//     one at a time, into the working table as entry lifetimes
+//     (objstore.SettleTable), a copy kept as read. The requests are the
+//     later states' blocks', whatever the directory's whole history.
+//     Nothing is left out but what a cut settle wrote (its record) and
+//     versions shadowed by a newer one dated alike (as every view does);
+//     nothing is judged late by its date. A root block stored behind a
+//     later-dated one (a directory written outside this rule) is refused.
+//   - Play: each change, by At and then in the order given, is an insert
+//     or an end of a lifetime in the table, within [At, Until). No
+//     request.
+//   - Proof, before anything is written: every state from the earliest
+//     change on must be the state read there with exactly the changes
+//     whose [At, Until) holds it, played in order; and the last state
+//     must be the directory's present. Anything else is refused
+//     (ErrSettleRefused) with nothing written: a settle never puts in what
+//     no change says, and never backdates.
 //   - Record: before anything is written, the caller is handed the
 //     settle's record (SettleInput.Record): the directory's present (the
 //     versions of its root block and .metadata, V0), the keys of the new
@@ -36,8 +54,12 @@ import (
 //     below a root first, under new keys no reader looks at; then each
 //     state's .metadata and root block back to back, oldest first, two
 //     requests a state and nothing between (the window in which a reader
-//     of the present sees the directory as of an earlier state); then the
-//     new versions dated in the directory's .version (the commit).
+//     of the present sees the directory as of an earlier state), each put
+//     conditional on the version before it (the first on the version the
+//     settle read); then the new versions dated in the directory's
+//     .version (the commit). A conditional put that finds another
+//     writer's version stops the settle (ErrSettleStopped): nothing is
+//     erased.
 //   - Erase, in this order: any version of the root or .metadata stored
 //     after V0 that is not one of the new states (a cut settle's, or one
 //     a lost answer left); V0 itself (its .metadata, then its root); the
@@ -48,17 +70,31 @@ import (
 // From the window on, the settle doesn't stop with its caller's context,
 // and a store error is tried again (settleTries) before it gives up.
 //
-// A settle cut short is finished by settling again with its changes and
-// its record (SettleInput.Cut). While V0 is in the store, nothing the
-// settle erases from the old states has been erased (V0 goes first), so
-// the old states are whole: every root and .metadata version stored
-// after V0 is the cut settle's, the present is V0, and the settle runs
-// again from it. Once V0 is gone, the cut settle had committed, and the
-// states in the store are its: the settle reads them as they are, writes
-// nothing, and does the erases left (what is shadowed by a new state, the
-// recorded blocks no state reaches). Without a record every version
-// stored is a state.
-
+// Exclusion is the caller's: from the record to Done nothing but the
+// settle writes the directory (a daemon's lock on the folder, held for
+// its every write and for a settle). A settle cut short is finished by
+// settling again with its changes and its record (SettleInput.Cut), and
+// what the rerun takes for the cut settle's own leftovers follows from
+// that rule and from the one above:
+//
+//   - V0 was the directory's newest stored root and .metadata version
+//     when the record was handed out, and, versions being stored in date
+//     order, its newest dated too: the present.
+//   - While V0 is in the store, nothing the cut settle erases from the old
+//     states has been erased (V0 goes first after the commit), so the old
+//     states are whole; and every root and .metadata version stored
+//     after V0 was stored between the record and the cut, by the only
+//     writer of the directory then: the cut settle's window (its puts, a
+//     put whose answer was lost). Those are its leftovers; the present is
+//     V0, and the settle runs again from it.
+//   - Once V0 is gone, the cut settle had committed (only its erase phase,
+//     after the commit, erases V0), and the states in the store are its:
+//     the settle reads them as they are, writes nothing, and does the
+//     erases left.
+//
+// Without a record every stored version is a state. A writer that breaks
+// the exclusion is undefined behaviour; what the conditional window does
+// about one is in SettleInput.
 // settleTries is how many times a write-out request is made before the
 // settle gives up.
 const settleTries = 3
@@ -66,6 +102,21 @@ const settleTries = 3
 // settleRetryWait is the wait before a write-out request's next try,
 // times the tries so far (a variable for the tests).
 var settleRetryWait = 200 * time.Millisecond
+
+// ErrSettleRefused is a settle that found it could not put the changes
+// into the directory's past without writing a state the directory never
+// had: the states it read plus the changes don't give the present, a
+// state it would write isn't the state read there with exactly the
+// changes that cover it, a state would hold a name twice, or the
+// directory's root block has versions stored behind later-dated ones.
+// Nothing was written.
+var ErrSettleRefused = errors.New("the settle is refused, and nothing was written: the states read and the changes don't give the folder's states")
+
+// ErrSettleStopped is a settle whose conditional window found a version
+// of the directory's root block or .metadata that it didn't write (a
+// writer the caller's exclusion didn't hold off): it stopped there and
+// erased nothing.
+var ErrSettleStopped = errors.New("the settle stopped: the folder was written by another writer during its write-out; nothing was erased")
 
 // maxSettleAhead is how far past this machine's clock a change may be.
 const maxSettleAhead = time.Second
@@ -90,7 +141,18 @@ type SettleInput struct {
 	// finished: the record can go.
 	Done func(SettleRecord) error
 	// Cut, if set, is the record of a settle of this directory that was
-	// cut short, as Record was handed it.
+	// cut short, as Record was handed it. The directory is settled by its
+	// key whether or not anything leads to it. If none of its root block
+	// and .metadata is stored (purged), the record's new blocks go and Done
+	// is told.
+	//
+	// A writer outside the exclusion: one whose version lands before the
+	// window's first put stops the settle there (ErrSettleStopped) with
+	// nothing of the window written; the settle then erases its own new
+	// blocks and, if it was not given Cut, tells Done, so no rerun takes
+	// the other writer's version for a leftover. One that lands later
+	// stops it with its record held; a rerun with that record takes every
+	// version after V0 for the cut settle's, the other writer's too.
 	Cut *SettleRecord
 	// Forget, if set, is given the keys whose history the settle changed,
 	// once it's done: a cache's to drop.
@@ -136,13 +198,14 @@ func ValidSettleTime(t time.Time) bool {
 }
 
 // SettleDir writes directory dirKey's states from the earliest of changes
-// on, with each change in place: in the state at its time and in every
-// later one (an add where its name is free, the occupant keeping it; a
-// removal of its name and item). Changes are played by time, and those
-// of one time in the order given. The directory as it is now isn't
-// changed: the last state written is it. Changes already settled write
-// nothing. The caller makes no other change to the directory while it
-// runs, nor, if it keeps the record, until it is told the record can go.
+// on, with each change in place: an add or a removal in the states in
+// [At, Until) (an add where its name is free, the occupant keeping it; a
+// removal of its name and item), a touch nowhere. Changes are played by
+// time, and those of one time in the order given. The directory as it is
+// now isn't changed: the last state written is it. Changes already
+// settled write nothing. The caller makes no other change to the
+// directory while it runs, nor, if it keeps the record, until it is told
+// the record can go.
 func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []DirChange, in SettleInput) (_ Settled, err error) {
 	if err := f.checkWritable(); err != nil {
 		return Settled{}, err
@@ -159,6 +222,16 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 		}
 		if !ValidSettleTime(ch.At) {
 			return Settled{}, fmt.Errorf("a change at %s: not a time a change can have: %w", ch.At.Format(time.RFC3339Nano), ErrInvalidArgument)
+		}
+		switch ch.Op {
+		case ChangeAdd, ChangeRemove:
+			if !ValidSettleTime(ch.Until) || !ch.Until.After(ch.At) {
+				return Settled{}, fmt.Errorf("a change at %s until %s: until must be a time after the change's: %w",
+					ch.At.Format(time.RFC3339Nano), ch.Until.Format(time.RFC3339Nano), ErrInvalidArgument)
+			}
+		case ChangeTouch:
+		default:
+			return Settled{}, fmt.Errorf("change %q: %w", ch.Op, ErrInvalidArgument)
 		}
 	}
 	history := in.History
@@ -187,6 +260,16 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 	if err != nil {
 		return Settled{}, err
 	}
+	// The .version record's history too, so views read the dates just read
+	// (a cache shared with another drive may hold an older one).
+	if _, err := history(ctx, dirKey+objstore.VersionSuffix); err != nil {
+		return Settled{}, err
+	}
+	if in.Cut != nil && len(liveOf(rootHist))+len(liveOf(metaHist)) == 0 {
+		// Purged while its settle was cut: nothing of it to finish but the
+		// cut settle's new blocks.
+		return f.settlePurged(ctx, *in.Cut, in.Done)
+	}
 	// The present (V0), and what of the store's versions are the
 	// directory's states.
 	var rec SettleRecord
@@ -212,20 +295,31 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 			rec.Meta = metaHist[0].VersionID
 		}
 	}
+	// Of versions dated alike the newest stored is the state (as every view
+	// takes it); nothing else is left out. A root block version stored
+	// after one dated later was written behind the directory's newest
+	// state, which no writer of this rule does: its views are no state the
+	// directory had, and a settle can't tell which is right.
 	shadowed, late := objstore.NotStates(rootH, dates)
-	ms, ml := objstore.NotStates(metaH, dates)
+	if len(late) > 0 {
+		var ids []string
+		for id := range late {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		return Settled{}, fmt.Errorf("directory %s: its root block has %d version(s) stored behind a later-dated one (%v): %w",
+			dirKey, len(ids), ids, ErrSettleRefused)
+	}
+	ms, _ := objstore.NotStates(metaH, dates)
 	for id := range ms {
 		shadowed[id] = true
-	}
-	for id := range ml {
-		late[id] = true
 	}
 	times := map[time.Time]bool{}
 	var tb time.Time
 	for _, h := range [][]objstore.Object{rootH, metaH} {
 		for i := range h {
 			o := &h[i]
-			if o.Deleted || late[o.VersionID] || shadowed[o.VersionID] {
+			if o.Deleted || shadowed[o.VersionID] {
 				continue
 			}
 			t := dates.Time(o).UTC()
@@ -262,8 +356,7 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 			return Settled{}, err
 		}
 	}
-	// The present, and its blocks: a late write may have split one into a
-	// key no dated state reaches.
+	// The present, and its blocks.
 	present, presentKeys, attr, err := f.settlePresentNow(ctx, dirKey, firstLive(rootH), firstLive(metaH),
 		len(leftovers) == 0)
 	if err != nil {
@@ -275,26 +368,28 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 
 	// --- Play ---
 	for _, ch := range changes {
-		if err := tab.EnsureState(ctx, ch.At); err != nil {
-			return Settled{}, err
-		}
 		switch ch.Op {
-		case ChangeAdd:
-			err = tab.Add(ctx, ch.At, objstore.SettleEntry{Name: ch.Name, Item: ch.Item, Type: int(ch.Type)})
-		case ChangeRemove:
-			err = tab.Remove(ctx, ch.At, ch.Name, ch.Item)
-		case ChangeTouch:
+		case ChangeAdd, ChangeRemove:
 		default:
-			err = fmt.Errorf("change %q: %w", ch.Op, ErrInvalidArgument)
+			continue // a touch names no entry: nothing to put anywhere
+		}
+		for _, at := range []time.Time{ch.At, ch.Until} {
+			if err := tab.EnsureState(ctx, at); err != nil {
+				return Settled{}, err
+			}
+		}
+		if ch.Op == ChangeAdd {
+			err = tab.Add(ctx, ch.At, ch.Until, objstore.SettleEntry{Name: ch.Name, Item: ch.Item, Type: int(ch.Type)})
+		} else {
+			err = tab.Remove(ctx, ch.At, ch.Until, ch.Name, ch.Item)
 		}
 		if err != nil {
 			return Settled{}, err
 		}
 	}
-	// The directory now is the last state. What differs between them that
-	// no change says (a change not recorded) goes in from the earliest
-	// change, as a late write's repair always did.
-	if err := f.settlePresent(ctx, tab, t0, present); err != nil {
+
+	// --- Proof ---
+	if err := f.settleProof(ctx, tab, changes, t0, present); err != nil {
 		return Settled{}, err
 	}
 
@@ -302,22 +397,6 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 	gen, first, err := f.settleStates(ctx, tab, t0, tb)
 	if err != nil {
 		return Settled{}, err
-	}
-	topLate := false
-	for _, o := range []*objstore.Object{firstLive(rootH), firstLive(metaH)} {
-		topLate = topLate || o != nil && late[o.VersionID]
-	}
-	if first < 0 && topLate {
-		// Nothing differs, but the present is a late version (a late
-		// write's): the last state goes on top.
-		if len(gen) == 0 && !tb.IsZero() {
-			if gen, _, err = f.settleStates(ctx, tab, tb, time.Time{}); err != nil {
-				return Settled{}, err
-			}
-		}
-		if len(gen) > 0 {
-			first = len(gen) - 1
-		}
 	}
 	var written []settleState
 	var tw time.Time
@@ -329,7 +408,7 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 
 	// What goes of the root and .metadata: the leftovers, then V0 (the
 	// mark that the old states are no longer whole), then every other
-	// version the new states supersede, late or shadowed.
+	// version the new states supersede or that is shadowed.
 	var v0, superseded []objstore.Object
 	for _, h := range [][]objstore.Object{rootH, metaH} {
 		for i := range h {
@@ -337,7 +416,7 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 			if o.Deleted {
 				continue
 			}
-			if !(late[o.VersionID] || shadowed[o.VersionID] || writes && !dates.Time(o).Before(tw)) {
+			if !(shadowed[o.VersionID] || writes && !dates.Time(o).Before(tw)) {
 				continue
 			}
 			if o.VersionID == rec.Root || o.VersionID == rec.Meta {
@@ -483,39 +562,51 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 
 	// --- The window: each state's .metadata and root block, oldest
 	// first, two requests a state and nothing else (a request tried again
-	// is the same request) ---
+	// is the same request), each conditional on the version before it: the
+	// first on the version the settle read, each next on the one it just
+	// wrote ---
 	win := &objstore.Recorder{}
 	retried := false
-	for _, s := range written {
+	winDates := objstore.Dates{}
+	ours := map[string]bool{}
+	etag := map[string]string{}
+	for key, h := range map[string][]objstore.Object{dirKey: rootHist, meta: metaHist} {
+		if len(h) > 0 && !h[0].Deleted {
+			etag[key] = h[0].ETag
+		}
+	}
+	for i, s := range written {
 		rootData, metaData, err := tab.Encoded(wctx, s.at)
 		if err != nil {
 			return Settled{}, err
 		}
 		sctx := objstore.WithRecorder(objstore.WithDeclaredTime(wctx, s.at), win)
-		var mobj, robj *objstore.Object
-		if err := settleRetry(&retried, func() (err error) {
-			mobj, err = f.store.Put(sctx, meta, bytes.NewReader(metaData), nil, "")
-			return err
-		}); err != nil {
-			return Settled{}, err
+		for j, p := range []struct {
+			key  string
+			pctx context.Context
+			data []byte
+		}{{meta, sctx, metaData}, {dirKey, objstore.AsBlock(sctx, dirKey), rootData}} {
+			obj, err := f.settlePut(p.pctx, p.key, p.data, etag[p.key], &retried)
+			if errors.Is(err, ErrSettleStopped) && i == 0 && j == 0 && in.Cut == nil {
+				// Nothing of the window is written: the settle's own new
+				// blocks go, and the record with them, so the next settle
+				// starts from the present the other writer left.
+				return Settled{Read: read}, f.settleStoppedFirst(wctx, create, rec, in.Done, err)
+			}
+			if err != nil {
+				return Settled{Read: read}, err
+			}
+			etag[p.key] = obj.ETag
+			winDates[obj.VersionID] = s.at
+			ours[obj.VersionID] = true
+			kept = append(kept, put{obj, p.data})
 		}
-		if err := settleRetry(&retried, func() (err error) {
-			robj, err = f.store.Put(objstore.AsBlock(sctx, dirKey), dirKey, bytes.NewReader(rootData), nil, "")
-			return err
-		}); err != nil {
-			return Settled{}, err
-		}
-		kept = append(kept, put{mobj, metaData}, put{robj, rootData})
-	}
-	ours := map[string]bool{}
-	for _, w := range win.Written() {
-		ours[w.VersionID] = true
 	}
 
 	// --- The commit ---
 	if writes {
 		if err := settleRetry(nil, func() error {
-			_, err := objstore.UpdateDates(wctx, f.store, dirKey, win.Dates()[dirKey])
+			_, err := objstore.UpdateDates(wctx, f.store, dirKey, winDates)
 			return err
 		}); err != nil {
 			return Settled{}, err
@@ -699,7 +790,7 @@ func (f *Filesystem) settleStates(ctx context.Context, tab *objstore.SettleTable
 		}
 		sorted, err := f.sortedEntries(fromSettleEntries(entries))
 		if err != nil {
-			return nil, -1, fmt.Errorf("the state at %s: %w", s.At.Format(time.RFC3339Nano), err)
+			return nil, -1, fmt.Errorf("the state at %s: %v: %w", s.At.Format(time.RFC3339Nano), err, ErrSettleRefused)
 		}
 		sum := objstore.SettleSum(entries)
 		if !s.Read && sum == prevSum {
@@ -770,7 +861,7 @@ func (f *Filesystem) settlePresentNow(ctx context.Context, dirKey string, root, 
 // settle's record named (cut). A version goes if no state reaches it
 // from now on: none read at or after its date did (states before tb
 // aren't read, and don't reach a version dated after tb), or, when the
-// settle writes (from tw), it is dated from tw on or late; and a version
+// settle writes (from tw), it is dated from tw on; and a version
 // shadowed by a newer one dated alike, always. A block no state reaches any version of goes whole; one that
 // the directory now doesn't reach gets a deletion on top (after writing,
 // the present reaches only new keys).
@@ -813,7 +904,7 @@ func (f *Filesystem) lowerErasures(ctx context.Context, dirKey string, tab *objs
 		if err != nil {
 			return nil, err
 		}
-		shadowed, late := objstore.NotStates(h, kd)
+		shadowed, _ := objstore.NotStates(h, kd)
 		le := lowerErase{key: k}
 		live := 0
 		for i := range h {
@@ -825,7 +916,7 @@ func (f *Filesystem) lowerErasures(ctx context.Context, dirKey string, tab *objs
 			t := kd.Time(o)
 			gone := shadowed[o.VersionID] ||
 				t.After(tb) && (b.Last.IsZero() || t.After(b.Last)) ||
-				writes && inTable[k] && (late[o.VersionID] || !t.Before(tw))
+				writes && inTable[k] && !t.Before(tw)
 			if gone {
 				le.ids = append(le.ids, o.VersionID)
 				if i == 0 {
@@ -885,15 +976,6 @@ func (f *Filesystem) eraseLower(ctx context.Context, le lowerErase) (int, error)
 	return n, nil
 }
 
-func anyCover(lower []lowerErase) bool {
-	for _, le := range lower {
-		if le.cover {
-			return true
-		}
-	}
-	return false
-}
-
 // eraseGone erases a version, which may be gone already.
 func eraseGone(ctx context.Context, store objstore.Store, key, id string) error {
 	if err := store.Erase(ctx, key, id); err != nil && !objstore.IsNotFound(err) {
@@ -907,8 +989,8 @@ func eraseGone(ctx context.Context, store objstore.Store, key, id string) error 
 func settleRetry(retried *bool, do func() error) error {
 	var err error
 	for try := 1; try <= settleTries; try++ {
-		if err = do(); err == nil {
-			return nil
+		if err = do(); err == nil || errors.Is(err, ErrSettleStopped) {
+			return err
 		}
 		if retried != nil {
 			*retried = true
@@ -920,51 +1002,173 @@ func settleRetry(retried *bool, do func() error) error {
 	return err
 }
 
-// settlePresent plays, at at, what the present has that the last state
-// in tab doesn't, and the other way round: a removal of each entry it
-// lacks or holds otherwise, an add of each entry it has.
-func (f *Filesystem) settlePresent(ctx context.Context, tab *objstore.SettleTable, at time.Time, present []block.Entry) error {
-	states, err := tab.States(ctx, at)
-	if err != nil || len(states) == 0 {
+// settleProof checks, before anything is written, that the table holds
+// what the settle may write and nothing else: every state from t0 on is
+// the state as read there (the latest read at or before it) with exactly
+// the changes whose [At, Until) holds it played in order on it, an add
+// where its name is free, a removal of its name and item; and the last
+// state is the directory's present. It is the table's arithmetic checked
+// by other means, and the rule that a settle never puts into the past
+// what no change says: a difference between the states read plus the
+// changes and the present (a change not queued, a write not by this
+// rule) is ErrSettleRefused.
+func (f *Filesystem) settleProof(ctx context.Context, tab *objstore.SettleTable, changes []DirChange, t0 time.Time, present []block.Entry) error {
+	states, err := tab.States(ctx, t0)
+	if err != nil {
 		return err
+	}
+	for _, s := range states {
+		base, err := tab.ReadEntriesAt(ctx, s.At)
+		if err != nil {
+			return err
+		}
+		want := map[string]objstore.SettleEntry{}
+		for _, e := range base {
+			want[e.Name] = e
+		}
+		for _, ch := range changes {
+			if ch.At.After(s.At) || !ch.Until.After(s.At) {
+				continue // a touch's Until is zero: never
+			}
+			switch ch.Op {
+			case ChangeAdd:
+				if _, taken := want[ch.Name]; !taken {
+					want[ch.Name] = objstore.SettleEntry{Name: ch.Name, Item: ch.Item, Type: int(ch.Type)}
+				}
+			case ChangeRemove:
+				if e, ok := want[ch.Name]; ok && e.Item == ch.Item {
+					delete(want, ch.Name)
+				}
+			}
+		}
+		got, err := tab.EntriesAt(ctx, s.At)
+		if err != nil {
+			return err
+		}
+		if d := settleDiff(got, want); d != "" {
+			return fmt.Errorf("the state at %s would be %s: %w", s.At.Format(time.RFC3339Nano), d, ErrSettleRefused)
+		}
+	}
+	if len(states) == 0 {
+		return nil
 	}
 	last, err := tab.EntriesAt(ctx, states[len(states)-1].At)
 	if err != nil {
 		return err
 	}
-	now := toSettleEntries(present)
-	if objstore.SettleSum(last) == objstore.SettleSum(now) {
-		return nil
+	now := map[string]objstore.SettleEntry{}
+	for _, e := range toSettleEntries(present) {
+		now[e.Name] = e
 	}
-	have := map[string]objstore.SettleEntry{}
-	for _, e := range last {
-		have[e.Name] = e
-	}
-	var added []objstore.SettleEntry
-	nowNames := map[string]bool{}
-	for _, e := range now {
-		nowNames[e.Name] = true
-		if h, ok := have[e.Name]; !ok || h != e {
-			added = append(added, e)
-		}
-	}
-	for name, e := range have {
-		replaced := false
-		for _, a := range added {
-			replaced = replaced || a.Name == name && a != e
-		}
-		if !nowNames[name] || replaced {
-			if err := tab.Remove(ctx, at, name, e.Item); err != nil {
-				return err
-			}
-		}
-	}
-	for _, a := range added {
-		if err := tab.Add(ctx, at, a); err != nil {
-			return err
-		}
+	if d := settleDiff(last, now); d != "" {
+		return fmt.Errorf("the states read and the changes give, as of %s, not the folder's present (it would be %s): %w",
+			states[len(states)-1].At.Format(time.RFC3339Nano), d, ErrSettleRefused)
 	}
 	return nil
+}
+
+// settleDiff says how got differs from want ("" for not at all), in a
+// few names.
+func settleDiff(got []objstore.SettleEntry, want map[string]objstore.SettleEntry) string {
+	var diff []string
+	seen := map[string]bool{}
+	for _, e := range got {
+		if seen[e.Name] {
+			diff = append(diff, fmt.Sprintf("%q twice", e.Name))
+		}
+		seen[e.Name] = true
+		if w, ok := want[e.Name]; !ok {
+			diff = append(diff, fmt.Sprintf("with %q", e.Name))
+		} else if w != e {
+			diff = append(diff, fmt.Sprintf("with %q as item %s, not %s", e.Name, e.Item, w.Item))
+		}
+	}
+	for name := range want {
+		if !seen[name] {
+			diff = append(diff, fmt.Sprintf("without %q", name))
+		}
+	}
+	if len(diff) == 0 {
+		return ""
+	}
+	sort.Strings(diff)
+	if len(diff) > 5 {
+		diff = append(diff[:5], fmt.Sprintf("and %d more", len(diff)-5))
+	}
+	return strings.Join(diff, ", ")
+}
+
+// settlePut is one put of the window: data as key's new version,
+// conditional on ifMatch (the key's current version, as the settle last
+// read or wrote it; none for a key whose newest is a deletion). A
+// precondition that fails because the put was made and its answer lost
+// finds the key's current version holding data, and takes that version
+// for its own; one that finds anything else is another writer's version:
+// ErrSettleStopped, and nothing more is written.
+func (f *Filesystem) settlePut(ctx context.Context, key string, data []byte, ifMatch string, retried *bool) (*objstore.Object, error) {
+	var obj *objstore.Object
+	err := settleRetry(retried, func() error {
+		o, err := f.store.Put(ctx, key, bytes.NewReader(data), nil, ifMatch)
+		if err == nil {
+			obj = o
+			return nil
+		}
+		if !objstore.IsPreconditionFailed(err) {
+			return err
+		}
+		body, cur, gerr := f.store.Get(undeclared(ctx), key)
+		if gerr != nil {
+			return gerr
+		}
+		have, gerr := io.ReadAll(body)
+		body.Close()
+		if gerr != nil {
+			return gerr
+		}
+		if bytes.Equal(have, data) {
+			obj = cur // ours, its answer lost
+			return nil
+		}
+		return fmt.Errorf("%s's current version %s is not the one the settle read or wrote: %w", key, cur.VersionID, ErrSettleStopped)
+	})
+	return obj, err
+}
+
+// settleStoppedFirst ends a settle stopped at its window's first put,
+// with nothing of the window written: its new blocks go (keys only it
+// minted), and its caller is told the record can go, so that no rerun
+// takes the other writer's version for the settle's own. stop is the
+// settle's error.
+func (f *Filesystem) settleStoppedFirst(ctx context.Context, create []string, rec SettleRecord, done func(SettleRecord) error, stop error) error {
+	for _, k := range create {
+		if err := settleRetry(nil, func() error { return f.store.EraseAll(ctx, k) }); err != nil {
+			return errors.Join(stop, err)
+		}
+	}
+	if done != nil {
+		if err := done(rec); err != nil {
+			return errors.Join(stop, err)
+		}
+	}
+	return stop
+}
+
+// settlePurged ends a cut settle of a directory none of whose root block
+// and .metadata is stored any more: the cut settle's new blocks go, and
+// the caller is told the record can go.
+func (f *Filesystem) settlePurged(ctx context.Context, cut SettleRecord, done func(SettleRecord) error) (Settled, error) {
+	wctx := context.WithoutCancel(ctx)
+	for _, k := range cut.Create {
+		if err := settleRetry(nil, func() error { return f.store.EraseAll(wctx, k) }); err != nil {
+			return Settled{}, err
+		}
+	}
+	if done != nil {
+		if err := done(cut); err != nil {
+			return Settled{}, err
+		}
+	}
+	return Settled{}, nil
 }
 
 func toSettleEntries(entries []block.Entry) []objstore.SettleEntry {

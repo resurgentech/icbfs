@@ -4,6 +4,8 @@ package miniotest
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,4 +69,40 @@ func Start(t *testing.T) (objstore.Store, Server) {
 		t.Fatalf("enable bucket versioning: %v", err)
 	}
 	return s3store.New(client, bucket), Server{Endpoint: "http://" + endpoint, AccessKey: container.Username, SecretKey: container.Password, Bucket: bucket}
+}
+
+// Buckets starts one MinIO that lives as long as t and returns a
+// function making a new, empty versioned bucket in it for each call: for
+// a test of many cases, each on a store of its own, without a container
+// each.
+func Buckets(t *testing.T) func(t *testing.T) objstore.Store {
+	t.Helper()
+	_, srv := Start(t)
+	client := s3.New(s3.Options{
+		Region:       "us-east-1",
+		BaseEndpoint: aws.String(srv.Endpoint),
+		UsePathStyle: true,
+		Credentials:  awscreds.NewStaticCredentialsProvider(srv.AccessKey, srv.SecretKey, ""),
+	})
+	var mu sync.Mutex
+	n := 0
+	return func(t *testing.T) objstore.Store {
+		t.Helper()
+		mu.Lock()
+		n++
+		bucket := fmt.Sprintf("case-%d", n)
+		mu.Unlock()
+		ctx := context.Background()
+		testutil.RetryUntilReady(t, 10*time.Second, func() error {
+			_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+			return err
+		})
+		if _, err := client.PutBucketVersioning(ctx, &s3.PutBucketVersioningInput{
+			Bucket:                  aws.String(bucket),
+			VersioningConfiguration: &types.VersioningConfiguration{Status: types.BucketVersioningStatusEnabled},
+		}); err != nil {
+			t.Fatalf("enable bucket versioning: %v", err)
+		}
+		return s3store.New(client, bucket)
+	}
 }

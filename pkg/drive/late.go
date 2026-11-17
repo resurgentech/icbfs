@@ -9,25 +9,38 @@ import (
 )
 
 // A change dated behind a folder's newest state (WithSourceTime) is a late
-// change: the folder's later states should have had it, and don't. Only
-// a caller that queues late changes and settles each folder once, with
-// all of them (a mirror daemon: LateSettler.SettleFolder), has them put
-// into the folder's past: its drive defers late folders (for an icbfs
-// drive, its Config.DeferLateFolders) and reports each write's late
-// changes to the write's context (WithLateChanges). On any other drive,
-// and on a deferring drive under a context with no LateChanges, a write
-// dated behind its folder's newest state is refused before anything is
-// written (ErrLateChange).
+// change: the folder's states from the change's date to its newest state
+// should have had it, and don't. A drive never writes a folder behind its
+// newest state. Only a caller that queues late changes and settles each
+// folder with all of them (a mirror daemon: LateSettler.SettleFolder) may
+// make one: its drive defers late folders (for an icbfs drive, its
+// Config.DeferLateFolders) and reports each write's late changes to the
+// write's context (WithLateChanges). There, a late change to a folder's
+// entries dated D, behind the folder's newest state dated T, is written
+// into the folder's present, dated T (the new item's own content and
+// record keep D), and reported with At = D and Until = T. Until the folder
+// is settled, a view of the folder's past shows it as it was without the
+// change up to T, and with it from T on; every view is a state the folder
+// really had. The settle puts the change into the states in [D, T).
 //
-// The intended caller keeps each change as a row late(dir, at, seq, op,
-// name, item, type) in its own database, written in the transaction that
-// records the item as applied, so a change is never lost between the
-// write and the settle; it settles a folder from its rows when it has
-// applied the folder's items, and deletes the rows once SettleFolder
-// returns nil. A settle of changes already settled writes nothing.
+// On any other drive, and on a deferring drive under a context with no
+// LateChanges, a write dated behind its folder's newest state is refused
+// before anything is written (ErrLateChange).
 //
-// The record of a settle under way is the caller's too
-// (SettleOptions.Record): nothing about it is kept by the drive or in the
+// The intended caller keeps each change as a row late(dir, at, until,
+// seq, op, name, item, type) in its own database, written in the
+// transaction that records the item as applied, so a change is never lost
+// between the write and the settle; it settles a folder from its rows
+// when it chooses (at the end of a pass), and deletes the rows once
+// SettleFolder returns nil. A settle of changes already settled writes
+// nothing.
+//
+// Exclusion is the caller's, and the drive does not enforce it: from the
+// time a settle hands out its record (SettleOptions.Record) to the time
+// it is told the record can go (SettleOptions.Done), nothing but the
+// settle writes the folder (a daemon holds an exclusive lock per folder
+// for every write and for a settle). The record of a settle under way is
+// the caller's too: nothing about it is kept by the drive or in the
 // store. After a crash the caller settles the folder again with its rows
 // and the record (SettleOptions.Cut) before it writes into the folder.
 
@@ -35,7 +48,7 @@ import (
 const (
 	LateAdd    = "add"    // Name now names Item, of Type
 	LateRemove = "remove" // Name named Item, and is now gone
-	LateTouch  = "touch"  // the folder changed at At with no entry changed
+	LateTouch  = "touch"  // the folder changed at At with no entry changed: a settle puts nothing anywhere for it
 )
 
 // ErrLateChange is what a change dated behind its folder's newest state
@@ -52,6 +65,28 @@ var ErrLateChange = fmt.Errorf("this drive does not rewrite a folder's past, so 
 // ErrNotFound.
 var ErrFolderGone = fmt.Errorf("the folder is gone (trashed or purged), and its late changes can't be settled: %w", ErrNotFound)
 
+// ErrSettleRefused is what SettleFolder returns when the folder's states
+// as read and the changes given don't give the folder's states without
+// writing one the folder never had: the states read plus the changes are
+// not the folder's present (a change missing from the rows, or a write
+// into the folder not by these rules), a state would hold a name twice,
+// or the folder was written behind its newest state by a writer not
+// following them. Nothing was written; the rows and any record stay as
+// they were. Settling the same rows again gives the same answer until the
+// rows or the folder change: a caller counts these.
+var ErrSettleRefused = errors.New("the settle is refused, and nothing was written: the folder's states as read and its late changes don't give its present")
+
+// ErrSettleStopped is what SettleFolder returns when, while it wrote the
+// folder's states, it found a version of the folder that it did not
+// write (a writer outside the caller's exclusion): it stopped there and
+// erased nothing. If it stopped before it had written any of the folder's
+// states it released its record (SettleOptions.Done was told) and the
+// rows stay to be settled again; otherwise the record stays, and the
+// folder's present is one of its past states until a rerun with the
+// record, which takes every version after the recorded present for its
+// own (the other writer's too: undefined behaviour).
+var ErrSettleStopped = errors.New("the settle stopped: the folder was written by another writer during the settle; nothing was erased")
+
 // IsLateChange reports whether err is a refused late change.
 func IsLateChange(err error) bool { return errors.Is(err, ErrLateChange) }
 
@@ -66,12 +101,18 @@ func IsLateChange(err error) bool { return errors.Is(err, ErrLateChange) }
 // their changes from 0, and (at, seq) would interleave them.
 type LateChange struct {
 	Folder string    // the folder's item id
-	At     time.Time // the write's source time
-	Seq    int       // its place among the changes that write made to that folder, from 0
-	Op     string    // LateAdd, LateRemove or LateTouch
-	Name   string    // the entry's name (none for LateTouch)
-	Item   string    // the item id the entry names (none for LateTouch)
-	Type   string    // the item's type: TypeFile, TypeDir or TypeSymlink (none for LateTouch)
+	At     time.Time // the write's source time (D)
+	// Until is the date of the folder's newest state when the change was
+	// written (T): the change was written into the folder's present,
+	// dated Until, so the states from Until on have it, and a settle puts
+	// it into the states in [At, Until) and no others. After At; required
+	// for LateAdd and LateRemove, none for LateTouch.
+	Until time.Time
+	Seq   int    // its place among the changes that write made to that folder, from 0
+	Op    string // LateAdd, LateRemove or LateTouch
+	Name  string // the entry's name (none for LateTouch)
+	Item  string // the item id the entry names (none for LateTouch)
+	Type  string // the item's type: TypeFile, TypeDir or TypeSymlink (none for LateTouch)
 }
 
 // LateChanges collects the late changes of the writes made under a
@@ -116,34 +157,35 @@ func LateChangesFrom(ctx context.Context) *LateChanges {
 // LateSettler is a drive that can leave a late write's folder history to
 // be settled later.
 type LateSettler interface {
-	// SettleFolder writes the folder's states from its earliest change on
-	// once, with every change in place: each in the state at its time and
-	// in every later one. All changes name one folder (else ErrInvalid);
-	// an empty list does nothing. The folder as it is now is not changed.
+	// SettleFolder puts each change into the folder's states in [At,
+	// Until), and only those, writing the folder's states from its earliest
+	// change on once. All changes name one folder (else ErrInvalid); an
+	// empty list does nothing. The folder as it is now is not changed.
+	// Changes are played by At, those of one At in the order given.
 	//
-	// Each At is checked: a zero time, one before 1970 or one in the
-	// future is refused (ErrInvalid). The folder must be a directory under
-	// the drive's root, whoever asks; one that is gone (trashed or
-	// purged) gets ErrFolderGone, and nothing is written.
+	// Each At and Until is checked: a zero time, one before 1970 or one in
+	// the future is refused, as is an add or removal whose Until is not
+	// after its At (ErrInvalid). The folder must be a directory under the
+	// drive's root, whoever asks; one that is gone (trashed or purged) gets
+	// ErrFolderGone, and nothing is written, unless Cut is given: a settle
+	// with a record is finished by the folder's id wherever it is, and
+	// never answers ErrFolderGone.
 	//
-	// The caller's rule, which the drive does not enforce: nothing but
-	// the settling caller writes into the folder from the time it is given
-	// the record (SettleOptions.Record) to the time it is told the record
-	// can go (SettleOptions.Done), and none of its own writes either (a
-	// daemon's one worker a folder; its folders' queues settled before it
-	// removes a folder). A write into the folder by anyone else in that
-	// time (a person using a command-line client by hand in the folder
-	// while a settle there was cut) is undone by the settle run again with
-	// the record: every root and .metadata version of the folder newer
-	// than the recorded present is taken for the cut settle's.
+	// Before it writes anything it proves what it will write: each state is
+	// the state it read there plus exactly the changes that cover it, and
+	// the last is the folder's present; anything else is ErrSettleRefused,
+	// with nothing written. A settle runs only when its caller calls it.
 	//
-	// From its window on (its first write of the folder's .metadata or
-	// root block), a settle goes to its end whatever ctx does, trying a
-	// failed request again before it gives up. A settle that gives up
-	// after it handed out its record is finished by settling again with
-	// the same changes and that record (SettleOptions.Cut), in this
-	// process or another, before anything else is written into the
-	// folder.
+	// The caller's rule, which the drive does not enforce: nothing but the
+	// settle writes the folder from Record to Done (see above). From its
+	// window on (its first write of the folder's .metadata or root block),
+	// a settle goes to its end whatever ctx does, trying a failed request
+	// again before it gives up; each of those writes is conditional on the
+	// version before it, and one that finds a version the settle did not
+	// write stops it (ErrSettleStopped). A settle that gives up after it
+	// handed out its record is finished by settling again with the same
+	// changes and that record (SettleOptions.Cut), in this process or
+	// another, before anything else is written into the folder.
 	SettleFolder(ctx context.Context, changes []LateChange, opts SettleOptions) (Settled, error)
 }
 
@@ -160,12 +202,15 @@ type SettleOptions struct {
 	// erased): the record can go. An error from it is SettleFolder's.
 	Done func(SettleRecord) error
 	// Cut, if set, is the record of a settle of this folder that was cut
-	// short (as Record was handed it), passed back: the folder's present
-	// is taken to be the recorded one, every root and .metadata version
-	// newer than it is the cut settle's (whatever the folder's dates
-	// table lists), and the recorded new blocks nothing reaches go. Its
-	// changes must be among this settle's. Without Cut every stored
-	// version is a state.
+	// short (as Record was handed it), passed back: while the recorded
+	// present (Root and Meta) is stored, the folder's present is taken to
+	// be it and every root and .metadata version stored after it is the
+	// cut settle's (under the caller's exclusion, nothing else wrote the
+	// folder since the record); once it is gone the cut settle had
+	// committed, and what it left to erase goes. The recorded new blocks
+	// nothing reaches go. Its changes must be among this settle's; its
+	// Folder must be the changes'. Without Cut every stored version is a
+	// state.
 	Cut *SettleRecord
 	// Path, if set, is the folder's path in the drive, where it is looked
 	// for first. Without it, a folder the drive hasn't found this run is

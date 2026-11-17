@@ -396,21 +396,24 @@ var cutCaseAfter = map[int]string{
 	2025: "a.txt,b.txt,c.txt,d.txt,x.txt",
 }
 
-// TestSettleCutAtEveryRequest: a settle given only a LateTouch at the
-// late write's time (what a crash's recovery queues: it names no entry)
-// is cut at each of its requests in turn: in "cut", that request and
-// every one after fail; in "lost", that request is made and its answer
-// lost (the store took it; the settle saw an error), and every one after
-// fails. The caller settles again with the same touch and the record the
-// cut settle handed it (none if it was cut before it handed one out):
-// in "lost", and at every odd request in "cut", from a new Drive over the
-// same store with an empty history cache (the process restarted). Then
-// it writes into the folder on time. Whatever the cut, the folder ends
-// with the present it had before (x kept), x in the past from 2021, the
-// on-time write in place, nothing newer than the present before but the
-// final states (no root or .metadata version unlisted, shadowed or
-// late), nothing current unreachable, the cut settle's new blocks that
-// nothing reaches gone, and the record released (Done).
+// TestSettleCutAtEveryRequest: a settle of the late write's changes is
+// cut at each of its requests in turn: in "cut", that request and every
+// one after fail; in "lost", that request is made and its answer lost
+// (the store took it; the settle saw an error), and every one after
+// fails. The caller settles again with the same changes and the record
+// the cut settle handed it (none if it was cut before it handed one
+// out): in "lost", and at every odd request in "cut", from a new Drive
+// over the same store with an empty history cache (the process
+// restarted). That rerun is itself cut, at a few of its requests (all of
+// them with T83_CUTTWICE set), from a new Drive, and the third run
+// finishes. Then the caller writes into the folder on time. Whatever the
+// cuts, the folder ends with the present it had before (x kept), x in
+// the past from 2021, the on-time write in place, nothing newer than the
+// present before but the final states (no root or .metadata version
+// unlisted, shadowed or late), nothing current unreachable, the cut
+// settles' new blocks that nothing reaches gone, and the record released
+// (Done). Before the reruns and between them, every view is a state the
+// folder really had.
 func TestSettleCutAtEveryRequest(t *testing.T) {
 	if testing.Short() {
 		t.Skip("one folder per request of a settle")
@@ -420,11 +423,10 @@ func TestSettleCutAtEveryRequest(t *testing.T) {
 
 	// The settle uncut: how many requests it makes, and what it leaves.
 	d, changes := cutCase(t, store, "cutall0", cfg)
-	folder := changes[0].Folder
-	touch := []drive.LateChange{{Folder: folder, At: changes[0].At, Op: drive.LateTouch}}
+	_ = changes[0].Folder
 	store.arm(0, false)
 	k := &keeper{}
-	if _, err := d.SettleFolder(system(), touch, k.opts()); err != nil {
+	if _, err := d.SettleFolder(system(), changes, k.opts()); err != nil {
 		t.Fatal(err)
 	}
 	total, seq := store.disarm()
@@ -438,13 +440,25 @@ func TestSettleCutAtEveryRequest(t *testing.T) {
 	records := rep.Unreachable
 	t.Logf("an uncut settle: %d requests, leaving %d .version records unreachable: %s", total, records, summarize(seq))
 
+	// realView: a view of /dir is the folder as it was (x from 2024 on) or
+	// as it will be (x from 2021 on): states it really had.
+	realView := func(t *testing.T, d *Drive, label string) {
+		t.Helper()
+		for _, y := range []int{2020, 2021, 2022, 2023, 2024} {
+			got := sortedAt(t, d, "/dir", midYear(y))
+			before := map[int]string{2020: "a.txt", 2021: "a.txt", 2022: "a.txt,b.txt", 2023: "a.txt,b.txt", 2024: "a.txt,b.txt,c.txt,x.txt"}[y]
+			if got != before && got != cutCaseAfter[y] {
+				t.Errorf("%s: /dir as of mid-%d is %s: no state it had (%s before, %s after)", label, y, got, before, cutCaseAfter[y])
+			}
+		}
+	}
+	twice := envSet("T83_CUTTWICE")
 	for _, mode := range []string{"cut", "lost"} {
 		for cut := 1; cut <= total+1; cut++ {
 			t.Run(fmt.Sprintf("%s at request %d of %d", mode, cut, total), func(t *testing.T) {
 				name := fmt.Sprintf("%s%d", mode, cut)
 				d, changes := cutCase(t, store, name, cfg)
 				folder := changes[0].Folder
-				touch := []drive.LateChange{{Folder: folder, At: changes[0].At, Op: drive.LateTouch}}
 				ctx := system()
 				before := liveNames(t, d, folder)
 				k := &keeper{}
@@ -453,7 +467,7 @@ func TestSettleCutAtEveryRequest(t *testing.T) {
 				} else {
 					store.arm(cut, false)
 				}
-				_, err := d.SettleFolder(ctx, touch, k.opts())
+				_, err := d.SettleFolder(ctx, changes, k.opts())
 				_, seq := store.disarm()
 				if cut <= total && err == nil {
 					t.Fatalf("cut at request %d (%s), and no error", cut, seq[len(seq)-1])
@@ -461,13 +475,39 @@ func TestSettleCutAtEveryRequest(t *testing.T) {
 				if cut > total && (err != nil || k.held() != nil) {
 					t.Fatalf("not cut: %v, record held %+v", err, k.held())
 				}
-				cutRec := k.held()
+				cutRecs := []*drive.SettleRecord{k.held()}
+				// The rerun, from a new process, itself cut at a request.
+				var seconds []int
+				switch {
+				case twice:
+					for c := 1; c <= total; c++ {
+						seconds = append(seconds, c)
+					}
+				case cut%7 == 3:
+					seconds = []int{1, total / 2, total - 1}
+				}
+				for _, second := range seconds {
+					realView(t, d, "after the first cut")
+					d = newDriveWith(t, store, cutCaseSettings(name), cfg)
+					if mode == "lost" {
+						store.armLost(second)
+					} else {
+						store.arm(second, false)
+					}
+					_, err := d.SettleFolder(ctx, changes, k.opts())
+					store.disarm()
+					cutRecs = append(cutRecs, k.held())
+					if err == nil {
+						break // the rerun had less to do than that
+					}
+				}
+				realView(t, d, "after the cuts")
 				// The caller settles again, with the record it holds.
-				if mode == "lost" || cut%2 == 1 {
+				if mode == "lost" || cut%2 == 1 || len(seconds) > 0 {
 					d = newDriveWith(t, store, cutCaseSettings(name), cfg)
 				}
-				if _, err := d.SettleFolder(ctx, touch, k.opts()); err != nil {
-					t.Fatalf("settled again (record %+v): %v", cutRec, err)
+				if _, err := d.SettleFolder(ctx, changes, k.opts()); err != nil {
+					t.Fatalf("settled again (record %+v): %v", k.held(), err)
 				}
 				if k.held() != nil {
 					t.Errorf("settled again, and the record is held: %+v", k.held())
@@ -475,6 +515,7 @@ func TestSettleCutAtEveryRequest(t *testing.T) {
 				if got := liveNames(t, d, folder); got != before {
 					t.Fatalf("the folder now after the cut and again: %s, want %s as before", got, before)
 				}
+				pastIs(t, d, map[int]string{2020: "a.txt", 2021: "a.txt,x.txt", 2022: "a.txt,b.txt,x.txt", 2023: "a.txt,b.txt,x.txt", 2024: "a.txt,b.txt,c.txt,x.txt"})
 				settleLeftovers(t, d, folder, records)
 				if _, err := d.Write(at(ctx, 2025), "/dir/d.txt", strings.NewReader("d"), drive.Condition{}, drive.WriteOptions{}); err != nil {
 					t.Fatal(err)
@@ -484,14 +525,17 @@ func TestSettleCutAtEveryRequest(t *testing.T) {
 				}
 				pastIs(t, d, cutCaseAfter)
 				settleLeftovers(t, d, folder, records)
-				if cutRec != nil {
-					rep, err := d.fs.Check(context.Background())
-					if err != nil {
-						t.Fatal(err)
+				rep, err := d.fs.Check(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, rec := range cutRecs {
+					if rec == nil {
+						continue
 					}
-					for _, k := range cutRec.Create {
+					for _, k := range rec.Create {
 						if slicesContain(rep.UnreachableListed, k) {
-							t.Errorf("the cut settle's new block %s is left, unreachable", k)
+							t.Errorf("a cut settle's new block %s is left, unreachable", k)
 						}
 					}
 				}

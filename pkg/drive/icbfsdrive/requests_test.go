@@ -177,10 +177,15 @@ var requestCeilings = map[string][4]int{
 	// refuse one dated behind its newest state (T83-1 round 3: one more
 	// request than before, at depth 2 and 3; the top-level folder's 68 and
 	// 66 were measured on a filesystem made now, whose first source-time
-	// write into the root was late and settled inside the write).
+	// write into the root was late and settled inside the write). T83-1
+	// round 4: a change dated within a second of the folder's newest state
+	// (here every write is at one source time) also lists the folder's
+	// root block: a version an undated write left there is dated by the
+	// listing, to the millisecond, and the change must not go behind it
+	// (newestState): one request more at depth 2 and 3.
 	"new top-level folder":  {21, 30, 19, 28},
-	"new folder at depth 2": {27, 34, 19, 26},
-	"new file at depth 3":   {16, 21, 12, 17},
+	"new folder at depth 2": {27, 35, 19, 27},
+	"new file at depth 3":   {16, 22, 12, 18},
 	"the same file again":   {9, 10, 5, 6},
 	// And once more: the file's creation wrote its folder, which the
 	// drive then read again; a pass over unchanged files reads it once.

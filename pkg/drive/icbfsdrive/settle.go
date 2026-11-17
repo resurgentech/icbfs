@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,11 +21,9 @@ var _ drive.LateSettler = (*Drive)(nil)
 // tests.
 var onSettle func(dir string, s drive.Settled)
 
-// SettleFolder writes a folder's states from its earliest late change on,
-// once, with every change in place (drive.LateSettler). changes are the
-// folder's late changes not yet settled, all of them: what the folder
-// now holds that its states don't, and no change says, goes into them
-// from the earliest change, as a late write's own settle does.
+// SettleFolder puts each late change into the folder's states in [At,
+// Until), writing the folder's states from its earliest change on once
+// (drive.LateSettler).
 func (d *Drive) SettleFolder(ctx context.Context, changes []drive.LateChange, opts drive.SettleOptions) (drive.Settled, error) {
 	if len(changes) == 0 {
 		return drive.Settled{}, nil
@@ -37,6 +36,13 @@ func (d *Drive) SettleFolder(ctx context.Context, changes []drive.LateChange, op
 		if !icbfs.ValidSettleTime(c.At) {
 			return drive.Settled{}, fmt.Errorf("late change %d at %s: zero, before 1970 or in the future: %w", i, c.At.Format(time.RFC3339Nano), drive.ErrInvalid)
 		}
+		if c.Op != drive.LateTouch && (!icbfs.ValidSettleTime(c.Until) || !c.Until.After(c.At)) {
+			return drive.Settled{}, fmt.Errorf("late change %d at %s until %s: until must be a time after the change's: %w",
+				i, c.At.Format(time.RFC3339Nano), c.Until.Format(time.RFC3339Nano), drive.ErrInvalid)
+		}
+	}
+	if c := opts.Cut; c != nil && c.Folder != folder {
+		return drive.Settled{}, fmt.Errorf("the record of a settle of folder %q settling %s: %w", c.Folder, folder, drive.ErrInvalid)
 	}
 	if d.cfg.ReadOnly {
 		return drive.Settled{}, errDriveReadOnly
@@ -54,21 +60,31 @@ func (d *Drive) SettleFolder(ctx context.Context, changes []drive.LateChange, op
 	// The folder is a directory under the drive's root, whoever asks
 	// (opts.Path, if given, is where it is looked for first); anyone but
 	// the library's own housekeeping needs its rights to write its
-	// history, as ReplaceFolderHistory does.
+	// history, as ReplaceFolderHistory does. A settle with a record is
+	// finished by the folder's key wherever it is, or isn't: a folder
+	// trashed while its settle was cut still holds the cut settle's
+	// writes, and is finished like any other (only by the library's own
+	// housekeeping, which holds such records).
 	n, err := d.resolveToSettle(ctx, folder, opts.Path)
-	if err != nil {
+	switch {
+	case err == nil:
+		if n.typ != icbfs.TypeDir {
+			return drive.Settled{}, drive.ErrNotDir
+		}
+		if !p.System {
+			if err := d.check(ctx, n, needAddFile); err != nil {
+				return drive.Settled{}, err
+			}
+			if err := d.check(ctx, n, needAddDir); err != nil {
+				return drive.Settled{}, err
+			}
+		}
+	case errors.Is(err, drive.ErrFolderGone) && opts.Cut != nil:
+		if !p.System {
+			return drive.Settled{}, fmt.Errorf("folder %s is not under the drive's root, and only the library's own housekeeping finishes its settle: %w", folder, drive.ErrForbidden)
+		}
+	default:
 		return drive.Settled{}, err
-	}
-	if n.typ != icbfs.TypeDir {
-		return drive.Settled{}, drive.ErrNotDir
-	}
-	if !p.System {
-		if err := d.check(ctx, n, needAddFile); err != nil {
-			return drive.Settled{}, err
-		}
-		if err := d.check(ctx, n, needAddDir); err != nil {
-			return drive.Settled{}, err
-		}
 	}
 	dirChanges := make([]icbfs.DirChange, len(changes))
 	for i, c := range changes {
@@ -79,7 +95,7 @@ func (d *Drive) SettleFolder(ctx context.Context, changes []drive.LateChange, op
 			if !ok || c.Name == "" || c.Item == "" {
 				return drive.Settled{}, fmt.Errorf("late change %d (%s %q, type %q): %w", i, c.Op, c.Name, c.Type, drive.ErrInvalid)
 			}
-			dc.Type = typ
+			dc.Type, dc.Until = typ, c.Until
 			dc.Op = icbfs.ChangeAdd
 			if c.Op == drive.LateRemove {
 				dc.Op = icbfs.ChangeRemove
@@ -93,13 +109,17 @@ func (d *Drive) SettleFolder(ctx context.Context, changes []drive.LateChange, op
 	}
 	var cut *icbfs.SettleRecord
 	if c := opts.Cut; c != nil {
-		if c.Folder != "" && c.Folder != folder {
-			return drive.Settled{}, fmt.Errorf("the record of a settle of folder %s settling %s: %w", c.Folder, folder, drive.ErrInvalid)
-		}
 		cut = &icbfs.SettleRecord{Root: c.Root, Meta: c.Meta, Create: c.Create, Old: c.Old}
 	}
 	s, err := d.settleDir(ctx, folder, dirChanges, opts.Record, opts.Done, cut)
-	if errors.Is(err, icbfs.ErrInvalidArgument) || errors.Is(err, icbfs.ErrExists) {
+	switch {
+	case err == nil:
+		return s, nil
+	case errors.Is(err, icbfs.ErrSettleRefused):
+		return s, fmt.Errorf("%s: %w", strings.TrimSuffix(err.Error(), ": "+icbfs.ErrSettleRefused.Error()), drive.ErrSettleRefused)
+	case errors.Is(err, icbfs.ErrSettleStopped):
+		return s, fmt.Errorf("%s: %w", strings.TrimSuffix(err.Error(), ": "+icbfs.ErrSettleStopped.Error()), drive.ErrSettleStopped)
+	case errors.Is(err, icbfs.ErrInvalidArgument) || errors.Is(err, icbfs.ErrExists):
 		return s, fmt.Errorf("%w (%v)", drive.ErrInvalid, err)
 	}
 	return s, mapErr(err)
@@ -138,7 +158,7 @@ func lateChanges(changes []icbfs.DirChange) []drive.LateChange {
 		case icbfs.ChangeRemove:
 			op = drive.LateRemove
 		}
-		lc := drive.LateChange{Folder: c.Dir, At: c.At, Seq: i, Op: op, Name: c.Name, Item: c.Item}
+		lc := drive.LateChange{Folder: c.Dir, At: c.At, Until: c.Until, Seq: i, Op: op, Name: c.Name, Item: c.Item}
 		if op != drive.LateTouch {
 			lc.Type = typeName(c.Type)
 		}
@@ -189,12 +209,12 @@ func (d *Drive) settleDir(ctx context.Context, dirKey string, changes []icbfs.Di
 		d.settle.view = &swapStore{}
 		d.settle.fsys = icbfs.New(d.settle.view, d.cfg.Filesystem)
 	}
-	var withoutLate *objstore.HistoryCache
+	var upToCache *objstore.HistoryCache
 	stateAt := func(ctx context.Context, t time.Time, upTo map[string]string) ([]block.Entry, []string, error) {
-		if withoutLate == nil {
-			withoutLate = cache.WithoutLate(upTo)
+		if upToCache == nil {
+			upToCache = cache.UpTo(upTo)
 		}
-		asOf, err := objstore.NewAsOf(ctx, withoutLate, t)
+		asOf, err := objstore.NewAsOf(ctx, upToCache, t)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -239,18 +259,19 @@ func (d *Drive) settleDir(ctx context.Context, dirKey string, changes []icbfs.Di
 	return settled, nil
 }
 
-// reportLateFolders reports the directories that a change in a source's
-// time (recorded in rec and changes) changed behind their latest state:
-// a late entry. The block just written holds the directory as it is now,
-// with the change, but dated at the change's time: a view of then can't
-// reach it (the root block of a split directory points elsewhere) and a
-// view of later shows the blocks without it. The directory's states from
-// the change on must be written again with it (SettleFolder): on a drive
-// that defers late folders, the change goes to the context's
-// drive.LateChanges for the caller to settle. Anywhere else such a change
-// is refused before it is written (begin), and one found here was dated
-// behind by another writer meanwhile: an error.
+// reportLateFolders reports the late changes of a write in a source's
+// time: on a drive that defers late folders, the directories it wrote
+// into their present, dated at their newest state (icbfs.WithPresentDating,
+// set by begin), each change with At its own time and Until that state's
+// time, to the context's drive.LateChanges for the caller to settle
+// (SettleFolder). Anywhere else a late change is refused before it is
+// written (begin). A directory the write found written after its time only
+// once it had written it (its .metadata put back on top by RecordDates:
+// another writer dated it later meanwhile, which the caller's exclusion
+// rules out) is an error: the change is in the directory's present, and
+// its past lacks it.
 func (d *Drive) reportLateFolders(ctx context.Context, rec *objstore.Recorder, restored map[string]bool, changes *icbfs.DirChanges) error {
+	presentDated := icbfs.PresentDated(ctx)
 	late := map[string]time.Time{}
 	for _, w := range rec.Written() {
 		if w.Dir == "" {
@@ -260,31 +281,36 @@ func (d *Drive) reportLateFolders(ctx context.Context, rec *objstore.Recorder, r
 			late[w.Dir] = w.At
 		}
 	}
-	dirs := make([]string, 0, len(late))
+	var behind []string
 	for dir := range late {
 		// Every entry change writes the directory's .metadata (its mtime);
 		// one written behind the directory's latest state had its current
-		// .metadata put back on top (RecordDates): that's a late change.
+		// .metadata put back on top (RecordDates).
 		if restored[dir+".metadata"] {
-			dirs = append(dirs, dir)
+			behind = append(behind, dir)
 		}
 	}
-	sort.Strings(dirs)
-	report := drive.LateChangesFrom(ctx)
-	for _, dir := range dirs {
-		chs := changes.For(dir)
-		if len(chs) == 0 {
-			chs = []icbfs.DirChange{{Dir: dir, At: late[dir], Op: icbfs.ChangeTouch}}
-		}
-		if d.cfg.DeferLateFolders && report != nil {
-			report.Add(lateChanges(chs)...)
-			continue
-		}
-		// Refused before it was written (icbfs.RefuseLateChanges), unless
-		// another writer dated the folder later in the meantime.
+	if len(behind) > 0 {
+		sort.Strings(behind)
 		return fmt.Errorf("folder %s was dated after %s by another writer while this change was written; "+
 			"the change is in the folder now, and its past does not show it: %w",
-			dir, late[dir].Format(time.RFC3339Nano), drive.ErrLateChange)
+			behind[0], late[behind[0]].Format(time.RFC3339Nano), drive.ErrLateChange)
+	}
+	report := drive.LateChangesFrom(ctx)
+	if len(presentDated) == 0 || !d.cfg.DeferLateFolders || report == nil {
+		return nil
+	}
+	dirs := make([]string, 0, len(presentDated))
+	for dir := range presentDated {
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+	for _, dir := range dirs {
+		chs := changes.For(dir)
+		for i := range chs {
+			chs[i].Until = presentDated[dir]
+		}
+		report.Add(lateChanges(chs)...)
 	}
 	return nil
 }

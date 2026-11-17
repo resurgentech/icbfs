@@ -99,17 +99,18 @@ func TestSettleTable(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if err := tab.Add(ctx, tm(15), SettleEntry{Name: "c", Item: "C", Type: 1}); err != nil {
+		// Until past every state: into every state from the change on.
+		if err := tab.Add(ctx, tm(15), tm(40), SettleEntry{Name: "c", Item: "C", Type: 1}); err != nil {
 			t.Fatal(err)
 		}
-		if err := tab.Add(ctx, tm(15), SettleEntry{Name: "a", Item: "Z", Type: 1}); err != nil {
+		if err := tab.Add(ctx, tm(15), tm(40), SettleEntry{Name: "a", Item: "Z", Type: 1}); err != nil {
 			t.Fatal(err)
 		}
-		if err := tab.Remove(ctx, tm(25), "b", "B"); err != nil {
+		if err := tab.Remove(ctx, tm(25), tm(40), "b", "B"); err != nil {
 			t.Fatal(err)
 		}
 		// A removal of another item of the name ends nothing.
-		if err := tab.Remove(ctx, tm(15), "a", "Y"); err != nil {
+		if err := tab.Remove(ctx, tm(15), tm(40), "a", "Y"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -152,6 +153,16 @@ func TestSettleTable(t *testing.T) {
 	check("played once")
 	play() // a change played again changes nothing
 	check("played twice")
+	// The states as read are kept as they were.
+	for at, w := range map[time.Time]string{tm(10): "a:A", tm(15): "a:A", tm(20): "a:A,b:B", tm(25): "a:A,b:B", tm(30): "b:B"} {
+		es, err := tab.ReadEntriesAt(ctx, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := entriesString(es); got != w {
+			t.Errorf("read entries at %v: %s, want %s", at.Format("04"), got, w)
+		}
+	}
 
 	// The sum of a read state is its entries', in any order.
 	states, _ := tab.States(ctx, tm(20))
@@ -268,10 +279,67 @@ func (s lateStore) GetVersion(_ context.Context, key, v string) (io.ReadCloser, 
 	return nil, nil, ErrNotFound
 }
 
-// TestHistoryWithoutLate: a cache WithoutLate leaves out of a key's
-// history the versions stored after one dated later, which a plain view
-// shares the database with and still sees.
-func TestHistoryWithoutLate(t *testing.T) {
+// TestSettleTableUntil: a change is played into the states in [at,
+// until) only: an add stops at until (the late write put it into the
+// states from until on itself), and leaves a later removal of the name
+// alone; a removal of a lifetime that goes on past until keeps its part
+// from until on; until must be after at.
+func TestSettleTableUntil(t *testing.T) {
+	ctx := context.Background()
+	c := settleCache(t, clockStore{})
+	tab, err := c.SettleTable(ctx, "d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, x := SettleEntry{Name: "a", Item: "A", Type: 1}, SettleEntry{Name: "x", Item: "X", Type: 1}
+	// Read: a from 10; x, written into the present at 30 by a late write
+	// dated 15, from 30, and removed on time at 40.
+	for _, s := range []struct {
+		at      time.Time
+		entries []SettleEntry
+	}{{tm(10), []SettleEntry{a}}, {tm(20), []SettleEntry{a}}, {tm(30), []SettleEntry{a, x}}, {tm(40), []SettleEntry{a}}} {
+		if _, err := tab.ReadState(ctx, s.at, s.entries); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, at := range []time.Time{tm(15), tm(25)} {
+		if err := tab.EnsureState(ctx, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The late add of x at 15 until 30; a late removal of a at 25 until 30
+	// (a goes on, read, from 30).
+	if err := tab.Add(ctx, tm(15), tm(30), x); err != nil {
+		t.Fatal(err)
+	}
+	if err := tab.Remove(ctx, tm(25), tm(30), "a", "A"); err != nil {
+		t.Fatal(err)
+	}
+	want := map[time.Time]string{
+		tm(10): "a:A", tm(15): "a:A,x:X", tm(20): "a:A,x:X", tm(25): "x:X", tm(30): "a:A,x:X", tm(40): "a:A",
+	}
+	for at, w := range want {
+		es, err := tab.EntriesAt(ctx, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := entriesString(es); got != w {
+			t.Errorf("entries at %v: %s, want %s", at.Format("04"), got, w)
+		}
+	}
+	if err := tab.Add(ctx, tm(15), tm(15), x); err == nil {
+		t.Errorf("an add with until at its time: no error")
+	}
+	if err := tab.Remove(ctx, tm(15), tm(10), "a", "A"); err == nil {
+		t.Errorf("a removal with until before its time: no error")
+	}
+}
+
+// TestHistoryUpTo: a cache UpTo leaves out of a key's history the
+// versions stored after the one it names, and nothing else (a version
+// stored after one dated later stays: a view of its date sees it); a
+// plain view shares the database and sees everything.
+func TestHistoryUpTo(t *testing.T) {
 	ctx := context.Background()
 	data, err := encodeDates(Dates{"v10": tm(10), "v30": tm(30), "late": tm(20)})
 	if err != nil {
@@ -293,20 +361,17 @@ func TestHistoryWithoutLate(t *testing.T) {
 	if got := pick(c); got != "late" {
 		t.Fatalf("a plain view at 25 picked %s, want late", got)
 	}
-	if got := pick(c.WithoutLate(nil)); got != "v10" {
-		t.Fatalf("a view without late versions at 25 picked %s, want v10", got)
-	}
-	if got := pick(c); got != "late" {
-		t.Fatalf("the plain cache after: %s, want late", got)
+	if got := pick(c.UpTo(nil)); got != "late" {
+		t.Fatalf("a view up to nothing at 25 picked %s, want late (nothing inferred)", got)
 	}
 	// Up to v10: v30 and late, stored after it, are left out; at 35 only
 	// v10 is there.
 	at = tm(35)
-	if got := pick(c.WithoutLate(map[string]string{"d": "v10"})); got != "v10" {
+	if got := pick(c.UpTo(map[string]string{"d": "v10"})); got != "v10" {
 		t.Fatalf("a view up to v10 at 35 picked %s, want v10", got)
 	}
-	if got := pick(c.WithoutLate(nil)); got != "v30" {
-		t.Fatalf("a view without late versions at 35 picked %s, want v30", got)
+	if got := pick(c); got != "v30" {
+		t.Fatalf("the plain cache after: %s, want v30", got)
 	}
 }
 

@@ -48,8 +48,9 @@ type HistoryCache struct {
 	offset   time.Duration // the store's clock minus ours
 	offsetAt time.Time     // when offset was measured; zero for never
 
-	// withoutLate, if set: histories leave out late versions (WithoutLate).
-	withoutLate *lateFilter
+	// upTo, if set: histories leave out what was stored after a version
+	// (UpTo).
+	upTo map[string]string
 }
 
 // historyLayout is the database's layout (PRAGMA user_version). A cache
@@ -297,13 +298,13 @@ func (c *HistoryCache) upto(ctx context.Context, at time.Time) (time.Time, error
 }
 
 // history is key's history, newest first, complete at least up to at
-// (without its late versions, for a cache WithoutLate).
+// (without what was stored after a version, for a cache UpTo).
 func (c *HistoryCache) history(ctx context.Context, key string, at time.Time) ([]Object, error) {
 	list, err := c.fullHistory(ctx, key, at)
-	if err != nil || c.withoutLate == nil || strings.HasSuffix(key, VersionSuffix) {
+	if err != nil || c.upTo == nil || strings.HasSuffix(key, VersionSuffix) {
 		return list, err
 	}
-	return c.dropLate(ctx, key, list, at)
+	return c.dropAfter(key, list), nil
 }
 
 func (c *HistoryCache) fullHistory(ctx context.Context, key string, at time.Time) ([]Object, error) {

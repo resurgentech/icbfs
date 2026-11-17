@@ -43,9 +43,10 @@ func midYear(y int) time.Time { return year(y).AddDate(0, 6, 0) }
 
 // TestDeferredLateFolder: on a drive that defers late folders, late
 // writes into a folder report their changes to the context's
-// LateChanges (folder, time, order, kind, name, item, type) and leave
-// the folder's past as it was; SettleFolder then puts each change into
-// the past at its time and after, the present the same throughout; the
+// LateChanges (folder, time, until, order, kind, name, item, type) and
+// are written into the folder's present, dated at its newest state: the
+// past before that state is as it was; SettleFolder then puts each change
+// into the past at its time and after, the present the same throughout; the
 // same changes settled again write nothing. A late write with no
 // LateChanges in its context is refused (nowhere to report it).
 func TestDeferredLateFolder(t *testing.T) {
@@ -79,14 +80,14 @@ func TestDeferredLateFolder(t *testing.T) {
 	}
 	changes := late.Take()
 	want := []drive.LateChange{
-		{Folder: dir.ID, At: year(2021), Seq: 0, Op: drive.LateAdd, Name: "x.txt", Item: x.ID, Type: drive.TypeFile},
-		{Folder: dir.ID, At: year(2023), Seq: 0, Op: drive.LateRemove, Name: "b.txt", Item: ids["/dir/b.txt"], Type: drive.TypeFile},
+		{Folder: dir.ID, At: year(2021), Until: year(2024), Seq: 0, Op: drive.LateAdd, Name: "x.txt", Item: x.ID, Type: drive.TypeFile},
+		{Folder: dir.ID, At: year(2023), Until: year(2024), Seq: 0, Op: drive.LateRemove, Name: "b.txt", Item: ids["/dir/b.txt"], Type: drive.TypeFile},
 	}
 	if len(changes) != len(want) {
 		t.Fatalf("late changes %+v, want %+v", changes, want)
 	}
 	for i := range want {
-		if c := changes[i]; c.Folder != want[i].Folder || !c.At.Equal(want[i].At) || c.Seq != want[i].Seq || c.Op != want[i].Op ||
+		if c := changes[i]; c.Folder != want[i].Folder || !c.At.Equal(want[i].At) || !c.Until.Equal(want[i].Until) || c.Seq != want[i].Seq || c.Op != want[i].Op ||
 			c.Name != want[i].Name || c.Item != want[i].Item || c.Type != want[i].Type {
 			t.Errorf("late change %d: %+v, want %+v", i, c, want[i])
 		}
@@ -115,10 +116,13 @@ func TestDeferredLateFolder(t *testing.T) {
 		sort.Strings(got)
 		return strings.Join(got, ",")
 	}
-	// Deferred: the past is as it was (a view after the folder's later
-	// states doesn't show the changes), the present has them.
-	if got := listed(midYear(2024)); got != "a.txt,b.txt,c.txt" {
-		t.Fatalf("/dir as of mid-2024 before the settle: %s, want the past as it was", got)
+	// Deferred: the past before the folder's newest state (2024) is as it
+	// was; from that state on, and now, the folder has the changes.
+	if got := listed(midYear(2023)); got != "a.txt,b.txt" {
+		t.Fatalf("/dir as of mid-2023 before the settle: %s, want the past as it was", got)
+	}
+	if got := listed(midYear(2024)); got != present {
+		t.Fatalf("/dir as of mid-2024 before the settle: %s, want the present %s", got, present)
 	}
 	if got := live(); got != present {
 		t.Fatalf("/dir now before the settle: %s, want %s", got, present)

@@ -142,11 +142,9 @@ func TestUndatedWriteIsAState(t *testing.T) {
 // then a late write of x at 2021, settled: the present has all, the past
 // x from 2021 and u, v, w only now.
 //
-// KNOWN, not fixed in T83-1 (see TestLateWriteThatSplitsABlock): the late
-// write splits a block below the root, and the settle reads that split
-// (dated 2021) into later states: w shows in the past from 2021.
+// Round 3's KNOWN fault, gone in round 4: the late write is written into
+// the present, dated at the folder's newest state, never behind it.
 func TestUndatedSplitThenLate(t *testing.T) {
-	t.Skip("KNOWN: a late write that splits a block below a folder's root (TestLateWriteThatSplitsABlock)")
 	d := newDriveWith(t, miniotest.Store(t), icbfs.Settings{Name: "undatedsplit", Size: 1 << 30, RootMode: 0o777, Created: year(2015), DirBlockEntries: 4}, Config{DeferLateFolders: true})
 	ctx := system()
 	writeAt(t, d, ctx, 2020, "/dir/a.txt")
@@ -164,16 +162,12 @@ func TestUndatedSplitThenLate(t *testing.T) {
 	settleLeftovers(t, d, folder, 64)
 }
 
-// TestLateWriteThatSplitsABlock pins a fault found in T83-1 round 3 and
-// not fixed here: present on icbfs main's per-file repair (f9e4777, the
-// late write itself fails) and on round 2 (9a067f4). A folder split in
-// blocks of four (f0 to f4 by 2020, f5 in 2022); a late write of x at
-// 2021 lands in a full block and splits it, rewriting the folder's root
-// block dated 2021. Nothing in the root block's own history is dated
-// after 2021 (the 2022 write changed a block below it), so the settle
-// takes that root version for the folder's state at 2021 and at 2022,
-// and reads the old and the new blocks below it together: a name twice.
-// The settle refuses the state (ErrInvalid) and writes nothing.
+// TestLateWriteThatSplitsABlock was round 3's KNOWN fault (the settle
+// refused, "f4.txt" twice): a folder split in blocks of four (f0 to f4 by
+// 2020, f5 in 2022); a late write of x at 2021 lands in a full block and
+// splits it. Written into the present, dated 2022, the split's root and
+// halves are all of one date, every view is a state the folder had, and
+// the settle puts x into 2021.
 func TestLateWriteThatSplitsABlock(t *testing.T) {
 	d := newDriveWith(t, miniotest.Store(t), icbfs.Settings{Name: "latesplits", Size: 1 << 30, RootMode: 0o777, Created: year(2015), DirBlockEntries: 4}, Config{DeferLateFolders: true})
 	ctx := system()
@@ -184,14 +178,15 @@ func TestLateWriteThatSplitsABlock(t *testing.T) {
 	if _, err := d.Write(at(drive.WithLateChanges(ctx, late), 2021), "/dir/x.txt", strings.NewReader("x"), drive.Condition{}, drive.WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := d.SettleFolder(ctx, late.Take(), drive.SettleOptions{})
-	if !errors.Is(err, drive.ErrInvalid) || !strings.Contains(err.Error(), `"f4.txt" twice`) {
-		t.Fatalf("KNOWN: the settle of a late write that split a block: %v; if it now works, this test's fault is fixed: make it check the past", err)
+	before := map[int]string{2020: "f0.txt,f1.txt,f2.txt,f3.txt,f4.txt", 2021: "f0.txt,f1.txt,f2.txt,f3.txt,f4.txt", 2022: "f0.txt,f1.txt,f2.txt,f3.txt,f4.txt,f5.txt,x.txt"}
+	pastIs(t, d, before)
+	if _, err := d.SettleFolder(ctx, late.Take(), drive.SettleOptions{}); err != nil {
+		t.Fatal(err)
 	}
-	t.Logf("KNOWN: %v", err)
 	if got := liveNames(t, d, folderID(t, d, "/dir")); got != "f0.txt,f1.txt,f2.txt,f3.txt,f4.txt,f5.txt,x.txt" {
 		t.Errorf("present: %s", got)
 	}
+	pastIs(t, d, map[int]string{2020: "f0.txt,f1.txt,f2.txt,f3.txt,f4.txt", 2021: "f0.txt,f1.txt,f2.txt,f3.txt,f4.txt,x.txt", 2022: "f0.txt,f1.txt,f2.txt,f3.txt,f4.txt,f5.txt,x.txt"})
 }
 
 // sameAtCase is a folder of a@2020 and b@2022 on a drive that defers
@@ -399,8 +394,9 @@ func TestSettleCutThenAnotherDrive(t *testing.T) {
 // TestCutSettleBlocksNothing (N4): after a settle cut in its window, the
 // folder is deleted by another drive; the first drive's writes anywhere
 // go through (round 2 refused every change on the drive), and the
-// caller's settle again with its record gets ErrFolderGone: it drops the
-// rows and the record.
+// caller's settle again with its record finishes the settle by the
+// folder's key (the owner's rule 7: never ErrFolderGone while a record is
+// open) and releases the record.
 func TestCutSettleBlocksNothing(t *testing.T) {
 	store := &failStore{Store: miniotest.Store(t)}
 	a, changes := cutCase(t, store, "blocksnothing", Config{DeferLateFolders: true})
@@ -416,8 +412,11 @@ func TestCutSettleBlocksNothing(t *testing.T) {
 			t.Errorf("the first drive's write %d anywhere: %v", i, err)
 		}
 	}
-	if _, err := a.SettleFolder(system(), changes, k.opts()); !errors.Is(err, drive.ErrFolderGone) {
-		t.Errorf("the cut settle of a folder deleted since: %v, want ErrFolderGone", err)
+	if _, err := a.SettleFolder(system(), changes, k.opts()); err != nil {
+		t.Errorf("the cut settle of a folder deleted since: %v, want it finished", err)
+	}
+	if k.held() != nil {
+		t.Errorf("the record is held: %+v", k.held())
 	}
 }
 
@@ -462,12 +461,11 @@ func TestSettleFolderGone(t *testing.T) {
 				t.Errorf("the settle of a %s folder wrote:\nbefore:\n%s\nafter:\n%s", how, before, after)
 			}
 			if how == "trashed" {
-				// The cost of a queue left unsettled: as of mid-2021 the folder
-				// shows its whole present at the late date (x with b, from
-				// 2022), as while a change is deferred; as of mid-2022, x is
-				// missing.
+				// The cost of a queue left unsettled: x is in the folder's past
+				// from the folder's newest state when it was written (2022) on,
+				// not from 2021; every view a state the folder had.
 				folder := changes[0].Folder
-				for y, want := range map[int]string{2020: "a.txt", 2021: "a.txt,b.txt,x.txt", 2022: "a.txt,b.txt", 2023: "a.txt,b.txt"} {
+				for y, want := range map[int]string{2020: "a.txt", 2021: "a.txt", 2022: "a.txt,b.txt,x.txt", 2023: "a.txt,b.txt,x.txt"} {
 					if got := folderAt(t, d, folder, midYear(y)); got != want {
 						t.Errorf("the trashed folder as of mid-%d: %s, want %s", y, got, want)
 					}

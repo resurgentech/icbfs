@@ -926,7 +926,11 @@ func (f *Filesystem) insertEntry(ctx context.Context, rootKey, name, uuid string
 }
 
 func (f *Filesystem) tryInsert(ctx context.Context, rootKey, name, uuid string, typ EntryType) error {
-	if err := f.checkLate(ctx, rootKey); err != nil {
+	// The directory's blocks are written at wctx's date: the change's own,
+	// or the directory's newest state's if the change is behind it
+	// (lateDating). The change is noted at its own.
+	wctx, err := f.lateDating(ctx, rootKey)
+	if err != nil {
 		return err
 	}
 	path, err := f.descendForWrite(ctx, rootKey, name)
@@ -940,7 +944,7 @@ func (f *Filesystem) tryInsert(ctx context.Context, rootKey, name, uuid string, 
 		}
 		return err
 	}
-	if err := f.writeBack(ctx, rootKey, path[len(path)-1], leaf.blk); err != nil {
+	if err := f.writeBack(wctx, rootKey, path[len(path)-1], leaf.blk); err != nil {
 		return err
 	}
 	noteDirChange(ctx, rootKey, ChangeAdd, name, uuid, typ)
@@ -1099,7 +1103,8 @@ func (f *Filesystem) removeEntryIf(ctx context.Context, rootKey, name string, ch
 }
 
 func (f *Filesystem) tryRemove(ctx context.Context, rootKey, name string, check func(block.Entry) error) (block.Entry, error) {
-	if err := f.checkLate(ctx, rootKey); err != nil {
+	wctx, err := f.lateDating(ctx, rootKey) // as tryInsert's
+	if err != nil {
 		return block.Entry{}, err
 	}
 	path, err := f.descendForWrite(ctx, rootKey, name)
@@ -1123,7 +1128,7 @@ func (f *Filesystem) tryRemove(ctx context.Context, rootKey, name string, check 
 	if err != nil {
 		return block.Entry{}, err
 	}
-	_, err = f.store.Put(objstore.AsBlock(ctx, rootKey), leaf.key, bytes.NewReader(data), leaf.obj.Metadata, leaf.obj.ETag)
+	_, err = f.store.Put(objstore.AsBlock(wctx, rootKey), leaf.key, bytes.NewReader(data), leaf.obj.Metadata, leaf.obj.ETag)
 	if objstore.IsPreconditionFailed(err) {
 		return block.Entry{}, errRetry
 	}
@@ -1917,6 +1922,11 @@ func (f *Filesystem) writeMetadataRead(ctx context.Context, key string, statusCh
 // under a declared time (a mirror's) is the folder's history, and fails
 // without it.
 func (f *Filesystem) touchDir(ctx context.Context, key string) error {
+	// A directory an entry change wrote dated at its newest state
+	// (lateDating) has its .metadata dated there too.
+	if t, ok := presentDate(ctx, key); ok {
+		ctx = objstore.WithDeclaredTime(ctx, t)
+	}
 	// One instant for both: a status-change write stamps ctime when it
 	// writes, after reading the .metadata, a round trip later than this,
 	// so the two fell in different seconds whenever one ticked over in
