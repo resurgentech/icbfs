@@ -26,12 +26,19 @@ type viewCache struct {
 	// on next use, without waiting for the mark (sent at most once a
 	// second: pastMarker).
 	forget bool
+	// seenMark is the past-changed mark these views last saw (seen: at
+	// all). The history cache's own note is shared by every drive and
+	// program over it, and says whether the cache is up to date; views
+	// hold more (each item's dates), and start again when the mark moves
+	// past the one they saw, whoever's it is but this drive's own.
+	seenMark string
+	seen     bool
 }
 
 // pastCheck is how often views look for a change to the past (a purge, a
 // change made under a source time) since the last look: until then a
 // view can show the past as it was before.
-const pastCheck = 30 * time.Second
+var pastCheck = 30 * time.Second // a variable for the tests
 
 type view struct {
 	fsys *icbfs.Filesystem
@@ -147,15 +154,86 @@ func (d *Drive) CheckPast(ctx context.Context) (bool, error) {
 }
 
 func (c *viewCache) checkPastLocked(ctx context.Context, history *objstore.HistoryCache) (bool, error) {
-	forgot, err := icbfs.ForgetChangedPast(ctx, c.d.fs, history)
+	mark, forgot, err := icbfs.CheckPastMark(ctx, c.d.fs, history)
 	if err != nil {
 		return false, err
 	}
 	c.pastSeen = time.Now()
-	if forgot {
+	moved := !c.seen || mark != c.seenMark
+	if forgot || moved {
 		clear(c.views)
 	}
-	return forgot, nil
+	c.seenMark, c.seen = mark, true
+	return forgot || moved, nil
+}
+
+// fresh is the history cache, brought up to date for a reader that goes
+// round views (a settle): what this drive changed of the past forgotten
+// (lookAgain), and the past-changed mark looked at now.
+func (c *viewCache) fresh(ctx context.Context) (*objstore.HistoryCache, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	history, err := c.cacheLocked(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if c.forget {
+		if err := icbfs.ForgetPast(ctx, c.d.fs, history); err != nil {
+			return nil, err
+		}
+		clear(c.views)
+		c.forget = false
+	}
+	if _, err := c.checkPastLocked(ctx, history); err != nil {
+		return nil, err
+	}
+	return history, nil
+}
+
+// forgetKeys makes the history cache, if one is open, forget keys now, and
+// views start again (their memo of each item's dates goes with them):
+// this drive has just written them. The rest of the cache stays. A
+// forget that fails falls back on forgetting everything (lookAgain).
+func (c *viewCache) forgetKeys(ctx context.Context, keys []string, prefixes ...string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	clear(c.views)
+	if c.history == nil {
+		return
+	}
+	err := c.history.ForgetKeys(ctx, keys...)
+	for _, p := range prefixes {
+		if err == nil {
+			err = c.history.ForgetUnder(ctx, p)
+		}
+	}
+	if err != nil {
+		c.forget = true
+	}
+}
+
+// markPast sends the drive's past-changed mark (icbfs.MarkPastChanged)
+// with the drive's own history cache, if one is open, told that this
+// mark is one it has seen (icbfs.MarkPastChangedSeen): the drive's own
+// writes already forgot what they changed (forgetKeys), so its cache
+// needn't forget everything when its views next look for a mark.
+func (c *viewCache) markPast(ctx context.Context) error {
+	c.mu.Lock()
+	history := c.history
+	c.mu.Unlock()
+	if history == nil {
+		return c.d.fs.MarkPastChanged(ctx)
+	}
+	before, after, err := icbfs.MarkPastChangedSeen(ctx, c.d.fs, history)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	if c.seen && c.seenMark == before {
+		c.seenMark = after // its own: what it changed, its views forgot
+	}
+	c.mu.Unlock()
+	return nil
 }
 
 // lookAgain makes the next view forget what views kept of the past:

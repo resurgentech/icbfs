@@ -30,7 +30,12 @@ type Config struct {
 	ID string
 	// History is the history cache as-of views read through. If it's
 	// nil, the drive opens a temporary one in CacheDir, which Close
-	// removes.
+	// removes. One cache may serve several drives, of one filesystem or
+	// of several (a library gives every drive it opens its one cache), and
+	// its file is shared by every program of one store and credential on
+	// the machine (storeflags.History): each drive forgets in it what it
+	// changes, its views look at the past-changed mark for themselves, and
+	// a settle's working table is its own run's (objstore.SettleTable).
 	History *objstore.HistoryCache
 	// CacheDir holds the drive's temporary files ("" for the temp
 	// directory).
@@ -60,6 +65,12 @@ type Config struct {
 	// drive.Locker, and its writes refuse a file another holder has
 	// locked, from a mount or through a drive.
 	NoLocking bool
+	// DeferLateFolders: a write behind a folder's newest state leaves the
+	// folder's past to be settled later (SettleFolder), reporting the
+	// changes it made to the folder to its context's drive.LateChanges.
+	// A write whose context has none settles at once, as without the
+	// option, so nothing is ever lost.
+	DeferLateFolders bool
 }
 
 // Drive is an icbfs drive.
@@ -71,6 +82,7 @@ type Drive struct {
 	windows bool
 
 	views   viewCache
+	settle  settling
 	events  broadcaster
 	idPaths idPathCache
 	dirs    *dirCache
@@ -82,7 +94,7 @@ var _ drive.Drive = (*Drive)(nil)
 // New attaches to the filesystem and finds the drive's root directory.
 func New(ctx context.Context, cfg Config) (*Drive, error) {
 	dirs := newDirCache(cfg.TrustFor, cfg.DirCacheBytes)
-	fsys := icbfs.New(&dropOnWrite{Store: cfg.Store, dirs: dirs}, cfg.Filesystem)
+	fsys := icbfs.New(&noteWrites{Store: &dropOnWrite{Store: cfg.Store, dirs: dirs}}, cfg.Filesystem)
 	if err := fsys.Attach(ctx); err != nil {
 		return nil, mapErr(err)
 	}
@@ -90,7 +102,7 @@ func New(ctx context.Context, cfg Config) (*Drive, error) {
 	d := &Drive{cfg: cfg, fs: fsys, windows: fsys.PrimaryWindows(), dirs: dirs}
 	d.root = cleanPath(cfg.Root)
 	d.views.d = d
-	d.past.mark = fsys.MarkPastChanged
+	d.past.mark = d.views.markPast
 	fsys.SetPastChanged(d.past.changed)
 	key := fsys.RootKey()
 	for _, part := range splitPath(d.root) {

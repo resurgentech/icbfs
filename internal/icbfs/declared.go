@@ -392,6 +392,42 @@ func (f *Filesystem) MarkPastChanged(ctx context.Context) error {
 	return err
 }
 
+// MarkPastChangedSeen is MarkPastChanged for the filesystem's own writer,
+// whose history cache already dropped what its change changed: if cache
+// had seen the mark before this one (ForgetChangedPast), it is told it
+// has seen this one too, so it doesn't drop everything when it next
+// looks. It reports the mark before (as a HEAD saw it, "" for none) and
+// the one it sent, for the writer's own views (which hold more than the
+// cache: each item's dates) to say the same. Every drive and program
+// sharing cache drops what it changes from it, so the note stays right
+// for all of them; each one's views look at the mark for themselves. A
+// mark another writer sends between this one's look at the mark (a HEAD)
+// and its write is taken for seen as well: that writer's change is
+// forgotten by this cache only when the next mark after it comes, or the
+// cache's TTL ends.
+func MarkPastChangedSeen(ctx context.Context, live *Filesystem, cache *objstore.HistoryCache) (before, after string, err error) {
+	ctx = context.WithoutCancel(undeclared(ctx))
+	switch obj, err := live.store.Head(ctx, live.pastKey()); {
+	case err == nil:
+		before = obj.VersionID
+	case !objstore.IsNotFound(err):
+		return "", "", err
+	}
+	note := "past:" + live.id
+	seen, err := cache.Note(ctx, note)
+	if err != nil {
+		return "", "", err
+	}
+	obj, err := live.store.Put(ctx, live.pastKey(), bytes.NewReader(nil), nil, "")
+	if err != nil {
+		return "", "", err
+	}
+	if seen != before {
+		return before, obj.VersionID, nil // the cache hadn't seen the mark before: it looks for itself
+	}
+	return before, obj.VersionID, cache.SetNote(ctx, note, obj.VersionID)
+}
+
 // SourceTime reports whether the filesystem is written in a source's
 // time (its master entry's source_time), as of attaching or the last
 // Refresh.
@@ -462,21 +498,29 @@ func ForgetPast(ctx context.Context, live *Filesystem, cache *objstore.HistoryCa
 // last looked, and reports whether it did. live is the filesystem
 // attached to the live store, not a past view.
 func ForgetChangedPast(ctx context.Context, live *Filesystem, cache *objstore.HistoryCache) (bool, error) {
-	mark := ""
+	_, forgot, err := CheckPastMark(ctx, live, cache)
+	return forgot, err
+}
+
+// CheckPastMark is ForgetChangedPast that also reports the mark it
+// found ("" for none): a cache shared by several drives says whether
+// the cache is up to date, and each drive's own views compare the mark
+// with the one they last saw.
+func CheckPastMark(ctx context.Context, live *Filesystem, cache *objstore.HistoryCache) (mark string, forgot bool, err error) {
 	obj, err := live.store.Head(ctx, live.pastKey())
 	switch {
 	case err == nil:
 		mark = obj.VersionID
 	case !objstore.IsNotFound(err):
-		return false, err
+		return "", false, err
 	}
 	note := "past:" + live.id
 	seen, err := cache.Note(ctx, note)
 	if err != nil || seen == mark {
-		return false, err
+		return mark, false, err
 	}
 	if err := cache.ForgetUnder(ctx, live.prefix()); err != nil {
-		return false, err
+		return mark, false, err
 	}
-	return true, cache.SetNote(ctx, note, mark)
+	return mark, true, cache.SetNote(ctx, note, mark)
 }

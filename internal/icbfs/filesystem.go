@@ -933,7 +933,11 @@ func (f *Filesystem) tryInsert(ctx context.Context, rootKey, name, uuid string, 
 		}
 		return err
 	}
-	return f.writeBack(ctx, rootKey, path[len(path)-1], leaf.blk)
+	if err := f.writeBack(ctx, rootKey, path[len(path)-1], leaf.blk); err != nil {
+		return err
+	}
+	noteDirChange(ctx, rootKey, ChangeAdd, name, uuid, typ)
+	return nil
 }
 
 // writeBack writes step's block back as blk (now one entry or child
@@ -1116,6 +1120,7 @@ func (f *Filesystem) tryRemove(ctx context.Context, rootKey, name string, check 
 	if err != nil {
 		return block.Entry{}, err
 	}
+	noteDirChange(ctx, rootKey, ChangeRemove, name, removed.UUID, removed.Type)
 	return removed, nil
 }
 
@@ -1395,6 +1400,39 @@ func (f *Filesystem) find(ctx context.Context, dirKey, name string, fold bool) (
 // many shard-tree levels it currently has.
 func (f *Filesystem) ReadDir(ctx context.Context, dirKey string) ([]block.Entry, error) {
 	return f.collectEntries(ctx, dirKey)
+}
+
+// ReadDirKeys is ReadDir that also returns the keys of the blocks below
+// the directory's root it read.
+func (f *Filesystem) ReadDirKeys(ctx context.Context, dirKey string) ([]block.Entry, []string, error) {
+	var entries []block.Entry
+	var keys []string
+	var walk func(key, upper string) error
+	walk = func(key, upper string) error {
+		for {
+			blk, _, err := f.readBlock(ctx, key)
+			if err != nil {
+				return err
+			}
+			if key != dirKey {
+				keys = append(keys, key)
+			}
+			if blk.Kind == block.Leaf {
+				entries = append(entries, blk.Entries...)
+			} else {
+				for i, c := range blk.Children {
+					if err := walk(c.UUID, childUpper(blk, i, upper)); err != nil {
+						return err
+					}
+				}
+			}
+			if !followRight(blk, upper) {
+				return nil
+			}
+			key = blk.Right
+		}
+	}
+	return entries, keys, walk(dirKey, "")
 }
 
 // Mkdir creates a new, empty directory named name inside dirKey: its

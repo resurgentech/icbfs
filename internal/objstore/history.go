@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +47,9 @@ type HistoryCache struct {
 	mu       sync.Mutex
 	offset   time.Duration // the store's clock minus ours
 	offsetAt time.Time     // when offset was measured; zero for never
+
+	// withoutLate, if set: histories leave out late versions (WithoutLate).
+	withoutLate *lateFilter
 }
 
 // historyLayout is the database's layout (PRAGMA user_version). A cache
@@ -292,8 +296,17 @@ func (c *HistoryCache) upto(ctx context.Context, at time.Time) (time.Time, error
 	return at, nil
 }
 
-// history is key's history, newest first, complete at least up to at.
+// history is key's history, newest first, complete at least up to at
+// (without its late versions, for a cache WithoutLate).
 func (c *HistoryCache) history(ctx context.Context, key string, at time.Time) ([]Object, error) {
+	list, err := c.fullHistory(ctx, key, at)
+	if err != nil || c.withoutLate == nil || strings.HasSuffix(key, VersionSuffix) {
+		return list, err
+	}
+	return c.dropLate(ctx, key, list, at)
+}
+
+func (c *HistoryCache) fullHistory(ctx context.Context, key string, at time.Time) ([]Object, error) {
 	ok, err := c.covers(ctx, `(whole = 1 AND prefix = ?1) OR (whole = 0 AND substr(?1, 1, length(prefix)) = prefix)`, key, at)
 	if err != nil {
 		return nil, err

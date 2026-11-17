@@ -272,9 +272,39 @@ func sameEntries(a, b []block.Entry) bool {
 // Blocks are full but the last of each level, linked right as splits
 // leave them.
 func (f *Filesystem) writeDirTree(ctx context.Context, dirKey string, entries []block.Entry) ([]string, error) {
+	root, levels, err := f.dirTree(entries, func() (string, error) { return f.newKey(ctx) })
+	if err != nil {
+		return nil, err
+	}
+	var below []string
+	for _, level := range levels {
+		// Written right to left, so a block's right sibling is there first.
+		for i := len(level) - 1; i >= 0; i-- {
+			if err := f.putBlock(ctx, dirKey, level[i].key, level[i].blk, nil, ""); err != nil {
+				return nil, err
+			}
+		}
+		for _, b := range level {
+			below = append(below, b.key)
+		}
+	}
+	return below, f.putBlock(ctx, dirKey, dirKey, root, nil, "")
+}
+
+// treeBlock is a block below a directory's root, and its key.
+type treeBlock struct {
+	key string
+	blk *block.Block
+}
+
+// dirTree lays entries (sorted) out as a directory's tree: its root
+// block, and the blocks below it by level, lowest first, each left to
+// right, under keys from mint (taken in that order). Blocks are full but
+// the last of each level, linked right as splits leave them.
+func (f *Filesystem) dirTree(entries []block.Entry, mint func() (string, error)) (*block.Block, [][]treeBlock, error) {
 	n, c := f.dirBlockEntries, f.collation()
 	if len(entries) <= n {
-		return nil, f.putBlock(ctx, dirKey, dirKey, &block.Block{Kind: block.Leaf, Collation: c, Entries: entries}, nil, "")
+		return &block.Block{Kind: block.Leaf, Collation: c, Entries: entries}, nil, nil
 	}
 	// A level: blocks and, for the level above, each one's least name.
 	type node struct {
@@ -286,30 +316,26 @@ func (f *Filesystem) writeDirTree(ctx context.Context, dirKey string, entries []
 		chunk := entries[i:min(i+n, len(entries))]
 		level = append(level, node{&block.Block{Kind: block.Leaf, Collation: c, Entries: chunk}, chunk[0].Name})
 	}
-	var below []string
+	var levels [][]treeBlock
 	for {
-		keys := make([]string, len(level))
-		for i := range level {
-			k, err := f.newKey(ctx)
-			if err != nil {
-				return nil, err
-			}
-			keys[i] = k
-		}
 		if len(level) == 1 {
 			// The top: it goes under the directory's own key instead.
-			return below, f.putBlock(ctx, dirKey, dirKey, level[0].blk, nil, "")
+			return level[0].blk, levels, nil
 		}
-		// Written right to left, so a block's right sibling is there first.
-		for i := len(level) - 1; i >= 0; i-- {
+		blocks := make([]treeBlock, len(level))
+		for i := range level {
+			k, err := mint()
+			if err != nil {
+				return nil, nil, err
+			}
+			blocks[i] = treeBlock{k, level[i].blk}
+		}
+		for i := range level {
 			if i+1 < len(level) {
-				level[i].blk.HighKey, level[i].blk.Right = level[i+1].min, keys[i+1]
-			}
-			if err := f.putBlock(ctx, dirKey, keys[i], level[i].blk, nil, ""); err != nil {
-				return nil, err
+				level[i].blk.HighKey, level[i].blk.Right = level[i+1].min, blocks[i+1].key
 			}
 		}
-		below = append(below, keys...)
+		levels = append(levels, blocks)
 		var up []node
 		for i := 0; i < len(level); i += n {
 			var children []block.Child
@@ -318,7 +344,7 @@ func (f *Filesystem) writeDirTree(ctx context.Context, dirKey string, entries []
 				if j == 0 {
 					minKey = "" // the first child of a level covers everything below
 				}
-				children = append(children, block.Child{MinKey: minKey, UUID: keys[j]})
+				children = append(children, block.Child{MinKey: minKey, UUID: blocks[j].key})
 			}
 			up = append(up, node{&block.Block{Kind: block.Internal, Collation: c, Children: children}, level[i].min})
 		}

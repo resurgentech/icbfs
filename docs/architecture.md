@@ -880,9 +880,9 @@ the filesystem's history goes:
   file's current content and `.metadata` by a server-side copy, dated as
   they were (`restoreCurrent`; the `.metadata` references by ETag, the
   mtime override and the checksums, follow the copy's ETag); a directory
-  by rewriting its history from that date on with the change in every
-  later copy (the drive's `repairLateFolders`, through
-  `ReplaceDirHistory`). In a filesystem written in a source's time,
+  by settling it: its states from that date on written once more, with
+  the change in each (`Filesystem.SettleDir`, below). In a filesystem
+  written in a source's time,
   whose items list every version, a change dated no earlier than every
   version its item lists is current with nothing more to read; only one
   behind lists the key's versions from the store. A time in the future is
@@ -901,6 +901,33 @@ the filesystem's history goes:
   never finished (the process stopped between writing it and dating it):
   once it's five minutes old, the next change that lists the key's
   versions erases it, unless it's the key's only version.
+
+**Settling a directory** (`internal/icbfs/settle.go`, the drive's
+`SettleFolder`). A directory's late changes are put into its past in one
+write-out of its states from the earliest change on, not a rewrite of its
+whole history per change. The state just before the earliest change and
+each later one are read (through the history cache, late and unlisted
+versions left out) into a working table in the history cache's SQLite
+file, as entry lifetimes; the changes are played into it by time (those
+of one time in the order given); the states from the first that differs
+from what the store has (known by sums of the states read) are written:
+every block below a root first, under new keys, then each state's
+`.metadata` and root block back to back, oldest first (the window, two
+requests a state, in which the present reads an earlier state), then the
+directory's `.version` once (the commit); then what they supersede is
+erased, and every block the present no longer reaches gets a deletion on
+top. From the window on a settle doesn't stop with its caller, and tries
+a failed request again before it gives up. A version the directory's
+`.version` doesn't list is never a state (an unfinished or superseded
+write), so the directory's present, to a settle, is its newest *listed*
+root: what it was before a cut write-out. A drive that defers
+(`Config.DeferLateFolders`) reports a write's late changes to its caller
+(`drive.WithLateChanges`) to settle later, once per folder; any other
+settles inside the write. A settle that gives up after it may have
+written is finished before the drive's next change, which is refused if
+it can't be; a caller settling again itself passes the cut settle's plan
+(`SettleOptions.Cut`), and what the cut settle wrote that nothing reaches
+goes.
 
 Corrections, for a date the source got wrong, are the caller's:
 `DirHistory` / `ReplaceDirHistory` and `FileHistory` /

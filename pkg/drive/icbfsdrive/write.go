@@ -917,6 +917,11 @@ func (d *Drive) begin(ctx context.Context) (context.Context, func(*error), error
 	if d.fs.Archived() {
 		return ctx, nil, fmt.Errorf("the filesystem is archived: %w", drive.ErrReadOnly)
 	}
+	// A folder whose settle gave up is as of a past state now: settled
+	// before anything else is written, or nothing is.
+	if err := d.finishPending(ctx); err != nil {
+		return ctx, nil, mapErr(err)
+	}
 	t, ok := drive.SourceTime(ctx)
 	if !ok {
 		return ctx, func(*error) {}, nil
@@ -930,13 +935,18 @@ func (d *Drive) begin(ctx context.Context) (context.Context, func(*error), error
 		return ctx, nil, mapErr(err)
 	}
 	rec := &objstore.Recorder{}
+	changes := &icbfs.DirChanges{}
+	written := &writtenKeys{}
 	ctx = objstore.WithRecorder(objstore.WithDeclaredTime(ctx, t), rec)
+	ctx = withWrittenKeys(icbfs.WithDirChanges(ctx, changes), written)
 	return ctx, func(errp *error) {
-		if err := d.finishDated(ctx, rec); err != nil && *errp == nil {
+		if err := d.finishDated(ctx, rec, changes); err != nil && *errp == nil {
 			*errp = err
 		}
 		d.past.changed(ctx)
-		d.views.lookAgain()
+		// Views forget what this change wrote, not the whole past.
+		keys, prefixes := written.forgettable()
+		d.views.forgetKeys(context.WithoutCancel(ctx), keys, prefixes...)
 	}, nil
 }
 
@@ -945,12 +955,13 @@ const datingTries = 3
 
 // finishDated dates what a change in a source's time wrote, and puts
 // right anything written behind its item's current state: the item's
-// current version back on top, and a directory's copies from then on
-// rewritten with the change. Both are part of the change: one whose
+// current version back on top, and a directory's states from then on
+// settled with the change (settleLateFolders), or the change reported
+// for the caller to settle. Both are part of the change: one whose
 // writes can't be dated is undone, each version it wrote that is still
 // its key's newest erased, and fails. Undated, a version would be taken
 // for a write that never finished.
-func (d *Drive) finishDated(ctx context.Context, rec *objstore.Recorder) error {
+func (d *Drive) finishDated(ctx context.Context, rec *objstore.Recorder, changes *icbfs.DirChanges) error {
 	var restored map[string]bool
 	var err error
 	for try := 0; try < datingTries; try++ {
@@ -962,7 +973,7 @@ func (d *Drive) finishDated(ctx context.Context, rec *objstore.Recorder) error {
 		d.undo(ctx, rec)
 		return fmt.Errorf("the change is undone: dating what it wrote: %w", err)
 	}
-	return d.repairLateFolders(ctx, rec, restored)
+	return d.settleLateFolders(ctx, rec, restored, changes)
 }
 
 // undo erases what rec recorded written, newest first, where it's still
