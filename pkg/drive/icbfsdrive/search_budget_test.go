@@ -16,6 +16,9 @@ import (
 // that isn't there is "not found" once the search has read every folder:
 // in one call when the tree is within the budget, else after the calls
 // that read it all.
+// STATES: LK-4
+// STATES: LK-8
+// STATES: LK-9
 func TestSearchByIDStopsAtItsBudget(t *testing.T) {
 	base := miniotest.Store(t)
 	s := icbfs.Settings{Name: "budget", Size: 1 << 32, RootMode: 0o777}

@@ -112,6 +112,7 @@ func TestFindByOriginHintAfterRestart(t *testing.T) {
 // holds at most its bound, drops the least recently used first (a get
 // counts as a use), keeps a moved folder's remembered items under it,
 // and is safe for use from many goroutines.
+// STATES: ME-3
 func TestIDPathCacheBound(t *testing.T) {
 	c := idPathCache{max: 8}
 	for i := range 8 {

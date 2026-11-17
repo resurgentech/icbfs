@@ -36,7 +36,13 @@ type viewCache struct {
 	// in use, by its filesystem, weakly: a view dropped while a lookup
 	// holds it is still known by its moment (ME-5), and gone once nothing
 	// holds it.
-	moments map[weak.Pointer[icbfs.Filesystem]]time.Time
+	moments map[weak.Pointer[icbfs.Filesystem]]moment
+}
+
+// moment is a view's time and the past's generation it was made in.
+type moment struct {
+	t   time.Time
+	gen uint64
 }
 
 // viewMemory is one time's id → path memory.
@@ -58,6 +64,7 @@ type view struct {
 	fsys *icbfs.Filesystem
 	used time.Time
 	mem  *viewMemory
+	gen  uint64 // the past's generation when it was made (ME-8)
 }
 
 const maxViews = 8
@@ -127,8 +134,9 @@ func (c *viewCache) get(ctx context.Context, t time.Time) (*icbfs.Filesystem, er
 		}
 		delete(c.views, oldest)
 	}
-	c.views[t] = &view{fsys: fsys, used: time.Now(), mem: c.memLocked(t)}
-	c.noteMomentLocked(fsys, t)
+	gen := c.d.stopped.generation()
+	c.views[t] = &view{fsys: fsys, used: time.Now(), mem: c.memLocked(t), gen: gen}
+	c.noteMomentLocked(fsys, moment{t, gen})
 	return fsys, nil
 }
 
@@ -157,9 +165,9 @@ func (c *viewCache) memLocked(t time.Time) *viewMemory {
 
 // noteMomentLocked records fsys's moment, and lets go of the filesystems
 // nothing holds any more.
-func (c *viewCache) noteMomentLocked(fsys *icbfs.Filesystem, t time.Time) {
+func (c *viewCache) noteMomentLocked(fsys *icbfs.Filesystem, t moment) {
 	if c.moments == nil {
-		c.moments = map[weak.Pointer[icbfs.Filesystem]]time.Time{}
+		c.moments = map[weak.Pointer[icbfs.Filesystem]]moment{}
 	}
 	for k := range c.moments {
 		if k.Value() == nil {
@@ -173,22 +181,22 @@ func (c *viewCache) noteMomentLocked(fsys *icbfs.Filesystem, t time.Time) {
 // its moment: the view's, or, for a view dropped since (evicted, or the
 // past changed) that a lookup still holds, its moment's, made again if it
 // was let go (ME-5). ok is false for a filesystem this cache never made.
-func (c *viewCache) memoryOf(fsys *icbfs.Filesystem) (mem *idPathCache, at time.Time, ok bool) {
+func (c *viewCache) memoryOf(fsys *icbfs.Filesystem) (mem *idPathCache, at time.Time, gen uint64, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for t, v := range c.views {
 		if v.fsys == fsys {
 			v.mem.used = time.Now()
-			return &v.mem.paths, t, true
+			return &v.mem.paths, t, v.gen, true
 		}
 	}
-	t, ok := c.moments[weak.Make(fsys)]
+	mo, ok := c.moments[weak.Make(fsys)]
 	if !ok {
-		return nil, time.Time{}, false
+		return nil, time.Time{}, 0, false
 	}
-	m := c.memLocked(t)
+	m := c.memLocked(mo.t)
 	m.used = time.Now()
-	return &m.paths, t, true
+	return &m.paths, mo.t, mo.gen, true
 }
 
 // forgetLocked drops the views, the past having changed, and the

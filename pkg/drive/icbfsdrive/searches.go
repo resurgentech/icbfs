@@ -31,8 +31,10 @@ const (
 )
 
 // absentFor is how long an id found in no folder (or in the trash) is
-// answered "not there" with no search (LK-13). A var for tests.
-var absentFor = 10 * time.Minute
+// answered "not there" with no search (LK-13): as long as a kept search
+// (XO, 2026-11-17: 10 minutes let a folder moved by another process be
+// answered 404 for too long). A var for tests.
+var absentFor = 2 * time.Minute
 
 // stoppedKey is a search: the moment of the view it is in (zero for the
 // present) and the id sought. A view of the past is named by its moment,
@@ -62,6 +64,29 @@ type stoppedSearches struct {
 	running map[stoppedKey]chan struct{}
 	// absent are the ids found nowhere, by when.
 	absent map[stoppedKey]time.Time
+	// gen counts the changes of the past (dropPast). A view of the past
+	// records the generation it was made in; what a lookup in it finds,
+	// keeps or finds nowhere is stored only while that is still the
+	// generation (ME-8).
+	gen uint64
+}
+
+// generation is the past's generation now.
+func (s *stoppedSearches) generation() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.gen
+}
+
+// current says gen is still the past's generation.
+func (s *stoppedSearches) current(gen uint64) bool {
+	return s.generation() == gen
+}
+
+// staleLocked says key is in a view of the past made before the past
+// last changed: nothing is stored for it.
+func (s *stoppedSearches) staleLocked(key stoppedKey, gen uint64) bool {
+	return !key.at.IsZero() && gen != s.gen
 }
 
 // begin waits until no other lookup searches for key, then marks key's
@@ -115,8 +140,9 @@ func (s *stoppedSearches) take(key stoppedKey) *stoppedSearch {
 
 // keep keeps sr, stopped, for key, dropping the oldest to stay within the
 // bounds; a search with more folders still to read than maxStoppedDirs is
-// not kept (the next call starts again).
-func (s *stoppedSearches) keep(key stoppedKey, sr *stoppedSearch) {
+// not kept (the next call starts again), nor one in a view of a past that
+// has changed since gen (ME-8).
+func (s *stoppedSearches) keep(key stoppedKey, sr *stoppedSearch, gen uint64) {
 	if len(sr.queue) > maxStoppedDirs {
 		return
 	}
@@ -124,6 +150,9 @@ func (s *stoppedSearches) keep(key stoppedKey, sr *stoppedSearch) {
 	sr.at = time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.staleLocked(key, gen) {
+		return
+	}
 	if s.m == nil {
 		s.m = map[stoppedKey]*stoppedSearch{}
 	}
@@ -165,10 +194,14 @@ func (s *stoppedSearches) isAbsent(key stoppedKey) bool {
 }
 
 // noteAbsent remembers key's id as found nowhere, dropping the oldest
-// past maxAbsent.
-func (s *stoppedSearches) noteAbsent(key stoppedKey) {
+// past maxAbsent; not in a view of a past that has changed since gen
+// (ME-8).
+func (s *stoppedSearches) noteAbsent(key stoppedKey, gen uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.staleLocked(key, gen) {
+		return
+	}
 	if s.absent == nil {
 		s.absent = map[stoppedKey]time.Time{}
 	}
@@ -185,12 +218,17 @@ func (s *stoppedSearches) noteAbsent(key stoppedKey) {
 	s.absent[key] = time.Now()
 }
 
-// present forgets that id was found nowhere in the present: it is back (a
-// restore through this drive).
-func (s *stoppedSearches) present(id string) {
+// restored forgets every id found nowhere in the present: a restore
+// through this drive brings back an item and, for a folder, everything
+// that was under it (LK-17, LK-21). At most maxAbsent entries.
+func (s *stoppedSearches) restored() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.absent, stoppedKey{id: id})
+	for k := range s.absent {
+		if k.at.IsZero() {
+			delete(s.absent, k)
+		}
+	}
 }
 
 // dropPast forgets every stopped search, and every id found nowhere, but
@@ -199,6 +237,7 @@ func (s *stoppedSearches) present(id string) {
 func (s *stoppedSearches) dropPast() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.gen++
 	for k, v := range s.m {
 		if !k.at.IsZero() {
 			s.removeLocked(k, v)

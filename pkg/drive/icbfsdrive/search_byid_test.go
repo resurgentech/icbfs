@@ -122,6 +122,7 @@ func searchTree(t *testing.T, d drive.Drive, folders, depth int) (paths []string
 // drive: one search in each view, then none. Before T82-15 the two
 // lookups shared one memory and overwrote each other: 6 searches in 6
 // calls.
+// STATES: ME-2
 func TestSearchByIDPastViewKeepsItsOwnMemory(t *testing.T) {
 	base := miniotest.Store(t)
 	s := icbfs.Settings{Name: "pastview", Size: 1 << 32, RootMode: 0o777}
@@ -176,6 +177,8 @@ func TestSearchByIDPastViewKeepsItsOwnMemory(t *testing.T) {
 // mid-search answers that it could not search (the context's error), not
 // "not found"; asked again on the same drive, it goes on from where it
 // stopped instead of reading every folder again.
+// STATES: LK-5
+// STATES: KS-1
 func TestSearchByIDCutSaysSoAndGoesOn(t *testing.T) {
 	base := miniotest.Store(t)
 	s := icbfs.Settings{Name: "cutsearch", Size: 1 << 32, RootMode: 0o777}

@@ -1,11 +1,8 @@
 package icbfsdrive
 
 // docs/STATES.md section 5, "Finding an item by its id": one test a row
-// (T82-15 round 2). Rows proven by an older test are named in the T82-15
-// report instead: LK-4 and LK-8, LK-9 (TestSearchByIDStopsAtItsBudget),
-// LK-5 and KS-1 (TestSearchByIDCutSaysSoAndGoesOn), ME-2
-// (TestSearchByIDPastViewKeepsItsOwnMemory), ME-3 (TestIDPathCacheBound),
-// LC-5 (TestFindByOriginMatchesOldSearch).
+// (T82-15 rounds 2 and 3), named by the row. Rows proven by an older test
+// carry a "STATES:" comment above that test.
 
 import (
 	"context"
@@ -314,7 +311,7 @@ func TestLK12_ARestartForgets(t *testing.T) {
 // TestLK13_TheTrashBeforeASearchAndNotThereRemembered: an id in the trash
 // is answered not found from the trash, with no search and a few reads; an
 // id in no folder and not in the trash is searched for once and then
-// remembered as not there for absentFor (10 minutes); a restore through
+// remembered as not there for absentFor (2 minutes); a restore through
 // the drive forgets it at once.
 func TestLK13_TheTrashBeforeASearchAndNotThereRemembered(t *testing.T) {
 	lw := newLookupWorld(t, "lk13", 30, 6)
@@ -367,6 +364,9 @@ func TestLK13_TheTrashBeforeASearchAndNotThereRemembered(t *testing.T) {
 	}
 	if _, err, walks, reads := stat(m, mtap, lw.ctx, drive.ByID(missing), drive.At{}); !errors.Is(err, drive.ErrNotFound) || walks != 0 || reads != 0 {
 		t.Errorf("a missing id again: %v, %d searches, %d reads; want not found, remembered", err, walks, reads)
+	}
+	if absentFor != 2*time.Minute {
+		t.Errorf("not there is remembered for %v; want 2 minutes, as a kept search", absentFor)
 	}
 	was := absentFor
 	absentFor = 0
@@ -526,7 +526,7 @@ func TestKS2_AKeptSearchOlderThanTwoMinutesStartsAgain(t *testing.T) {
 func TestKS3_KeptSearchesAreBounded(t *testing.T) {
 	var s stoppedSearches
 	for i := range maxStopped + 1 {
-		s.keep(stoppedKey{id: fmt.Sprint(i)}, &stoppedSearch{queue: []searchDir{{"k", "/p"}}})
+		s.keep(stoppedKey{id: fmt.Sprint(i)}, &stoppedSearch{queue: []searchDir{{"k", "/p"}}}, 0)
 		time.Sleep(time.Millisecond)
 	}
 	if len(s.m) != maxStopped {
@@ -536,7 +536,7 @@ func TestKS3_KeptSearchesAreBounded(t *testing.T) {
 		t.Error("the oldest was kept")
 	}
 	big := &stoppedSearch{queue: make([]searchDir, maxStoppedDirs+1)}
-	s.keep(stoppedKey{id: "big"}, big)
+	s.keep(stoppedKey{id: "big"}, big, 0)
 	if _, ok := s.m[stoppedKey{id: "big"}]; ok || s.dirs > maxStoppedDirs {
 		t.Errorf("a search too large to keep was kept (%d folders in all)", s.dirs)
 	}
@@ -606,5 +606,416 @@ func TestLC3_AStubTargetThatCannotBeSearchedIsUnavailable(t *testing.T) {
 	}
 	if got := read(t, ctx, d, drive.ByPath("/stub.txt"), drive.At{}); got != sameAsData {
 		t.Errorf("the stub reads %d bytes; want the target's", len(got))
+	}
+}
+
+// --- round 3 (the review of 2026-11-17) ---
+
+const missingID = "0000000000000000000000000000beef"
+
+// TestLK15_AQueuedFolderGoneIsNotSearched (the review's RVRow_LK15): a kept
+// search whose next folder is gone answers "could not be searched", never
+// "not there", naming no path; the kept search is dropped, so the next
+// call starts from the root.
+func TestLK15_AQueuedFolderGoneIsNotSearched(t *testing.T) {
+	lw := newLookupWorld(t, "lk15", 30, 9)
+	d, tap := lw.reader(t, 3)
+	if _, err, _, _ := stat(d, tap, lw.ctx, drive.ByID(missingID), drive.At{}); !keptAll(err, 3) {
+		t.Fatalf("first: %v", err)
+	}
+	key := stoppedKey{id: missingID}
+	d.stopped.mu.Lock()
+	s := d.stopped.m[key]
+	if s == nil {
+		d.stopped.mu.Unlock()
+		t.Fatal("nothing kept")
+	}
+	// A folder the search queued that is gone now (purged since).
+	s.queue = append([]searchDir{{"lk15-0000000000000000000000000000gone", "/ghost-name"}}, s.queue...)
+	d.stopped.dirs++
+	d.stopped.mu.Unlock()
+	_, err, _, _ := stat(d, tap, lw.ctx, drive.ByID(missingID), drive.At{})
+	if errors.Is(err, drive.ErrNotFound) || !errors.Is(err, drive.ErrNotSearched) {
+		t.Fatalf("a queued folder gone: %v; want ErrNotSearched, never not found", err)
+	}
+	if strings.Contains(err.Error(), "ghost-name") {
+		t.Errorf("the answer names the path the search had queued: %v", err)
+	}
+	if _, err, _, _ := stat(d, tap, lw.ctx, drive.ByID(missingID), drive.At{}); !keptAll(err, 3) {
+		t.Errorf("after: %v; want the kept search dropped (started from the root)", err)
+	}
+}
+
+// TestLK16_TheTrashUnreadableIsNotSearched (the review's RVRow_LK16): the
+// store fails reading the trash's pointer for the id: "could not be
+// searched" with the store's error, never "not there".
+func TestLK16_TheTrashUnreadableIsNotSearched(t *testing.T) {
+	lw := newLookupWorld(t, "lk16", 9, 9)
+	tap := &faultTap{Store: lw.base}
+	d := newDriveWith(t, tap, lw.s, Config{})
+	tap.mu.Lock()
+	tap.failKey = "-trashby-"
+	tap.mu.Unlock()
+	_, err := d.Stat(lw.ctx, drive.ByID(missingID), drive.At{})
+	if tap.failed != 1 {
+		t.Fatalf("the trash's read failed %d times; want 1", tap.failed)
+	}
+	if !errors.Is(err, drive.ErrNotSearched) || errors.Is(err, drive.ErrNotFound) || !errors.Is(err, errStoreDown) {
+		t.Errorf("the trash unreadable: %v; want ErrNotSearched with the store's error", err)
+	}
+}
+
+// TestLK17_NotThereComesBackAnotherWay: an id this drive found in the
+// trash is answered "not there" for absentFor even after another process
+// restores it, unless the caller gives a path that leads to it; once the
+// time is over it is searched for and found.
+func TestLK17_NotThereComesBackAnotherWay(t *testing.T) {
+	lw := newLookupWorld(t, "lk17", 30, 6)
+	p := lw.paths[20] + "/doc.txt"
+	id := lw.ids[p]
+	if err := lw.w.Delete(lw.ctx, drive.ByPath(p), false, drive.Condition{}); err != nil {
+		t.Fatal(err)
+	}
+	d, tap := lw.reader(t, 0)
+	if _, err, _, _ := stat(d, tap, lw.ctx, drive.ByID(id), drive.At{}); !errors.Is(err, drive.ErrNotFound) {
+		t.Fatalf("trashed: %v", err)
+	}
+	te, err := lw.w.trashedItem(lw.ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lw.w.Restore(lw.ctx, te.ID, drive.RestoreOptions{}); err != nil { // another process
+		t.Fatal(err)
+	}
+	if _, err, walks, reads := stat(d, tap, lw.ctx, drive.ByID(id), drive.At{}); !errors.Is(err, drive.ErrNotFound) || walks != 0 || reads != 0 {
+		t.Errorf("restored by another, within the time: %v, %d searches, %d reads; want not found, remembered", err, walks, reads)
+	}
+	if it, err, walks, _ := stat(d, tap, lw.ctx, drive.ItemRef{ID: id, Path: p}, drive.At{}); err != nil || it.Path != p || walks != 0 {
+		t.Errorf("with the path that leads to it: %q, %v, %d searches; want found, no search", it.Path, err, walks)
+	}
+	was := absentFor
+	absentFor = 0
+	defer func() { absentFor = was }()
+	if it, err, _, _ := stat(d, tap, lw.ctx, drive.ByID(id), drive.At{}); err != nil || it.Path != p {
+		t.Errorf("after the time: %q, %v; want found by a search", it.Path, err)
+	}
+}
+
+// TestLK18_ASecondLookupCarriesOnUnderItsOwnBudget: a lookup that stopped
+// at its budget is carried on by the next lookup of the id, which reads
+// its own budget's worth from where the first stopped.
+func TestLK18_ASecondLookupCarriesOnUnderItsOwnBudget(t *testing.T) {
+	lw := newLookupWorld(t, "lk18", 30, 9)
+	id := lw.ids[lw.paths[8]+"/doc.txt"]
+	d, tap := lw.reader(t, 3)
+	if _, err, _, _ := stat(d, tap, lw.ctx, drive.ByID(id), drive.At{}); !keptAll(err, 3) {
+		t.Fatalf("first: %v", err)
+	}
+	_, err, _, _ := stat(d, tap, lw.ctx, drive.ByID(id), drive.At{})
+	if err == nil || !strings.Contains(err.Error(), "searched 6 folders (3 in this call)") {
+		t.Errorf("second: %v; want 3 more folders read from where the first stopped", err)
+	}
+}
+
+// TestLK10_AWaiterWhoseFirstIsCutGoesOn (the review's RVRow_LK10): the
+// first lookup of an id is cut while a second waits for it: the second
+// neither hangs nor takes the first's error; it goes on and finds the
+// item, and nothing is left marked running.
+func TestLK10_AWaiterWhoseFirstIsCutGoesOn(t *testing.T) {
+	lw := newLookupWorld(t, "lk10b", 30, 9)
+	p := lw.paths[8] + "/doc.txt"
+	id := lw.ids[p]
+	d, tap := lw.reader(t, 0)
+	cctx, cancel := context.WithCancel(lw.ctx)
+	defer cancel()
+	type answer struct {
+		it  drive.Item
+		err error
+	}
+	second := make(chan answer, 1)
+	tap.mu.Lock()
+	tap.cutAfter = tap.n.Load() + 4
+	tap.cut = func() {
+		go func() {
+			it, err := d.Stat(lw.ctx, drive.ByID(id), drive.At{})
+			second <- answer{it, err}
+		}()
+		time.Sleep(300 * time.Millisecond)
+		cancel()
+	}
+	tap.mu.Unlock()
+	_, err := d.Stat(cctx, drive.ByID(id), drive.At{})
+	if !errors.Is(err, drive.ErrNotSearched) || !errors.Is(err, context.Canceled) {
+		t.Fatalf("first, cut: %v", err)
+	}
+	select {
+	case a := <-second:
+		if a.err != nil || a.it.Path != p {
+			t.Errorf("second, waiting on a cut first: %q, %v; want %s", a.it.Path, a.err, p)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("the second lookup hangs")
+	}
+	d.stopped.mu.Lock()
+	defer d.stopped.mu.Unlock()
+	if len(d.stopped.running) != 0 {
+		t.Errorf("%d searches still marked running", len(d.stopped.running))
+	}
+}
+
+// TestLK19_AForbiddenFindIsTheRefusalAndNamesNoFoundPath (the review's
+// RVGap, B1): a caller who may not traverse /private asks by id for a file
+// in it. The search (which reads as the drive) finds it; the answer is the
+// refusal a lookup by that path gets, naming only the folder refused,
+// never the found file's name.
+func TestLK19_AForbiddenFindIsTheRefusalAndNamesNoFoundPath(t *testing.T) {
+	base := miniotest.Store(t)
+	s := icbfs.Settings{Name: "lk19", Size: 1 << 30, RootMode: 0o777}
+	alice, bob := as(1000, 1000), as(1001, 1001)
+	w := newDrive(t, base, s, "")
+	if _, err := w.Mkdir(alice, "/private", false); err != nil {
+		t.Fatal(err)
+	}
+	sec := write(t, alice, w, "/private/secret-name.txt", "s", drive.Condition{})
+	fs := w.Filesystem()
+	e, _, _ := fs.Lookup(context.Background(), fs.RootKey(), "private")
+	mode := uint32(0o700)
+	if _, err := fs.SetAttr(context.Background(), e.UUID, icbfs.TypeDir, &mode, nil, nil, nil, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	d := newDriveWith(t, base, s, Config{SearchBudget: DefaultSearchBudget})
+	_, byPath := d.Stat(bob, drive.ByPath("/private/secret-name.txt"), drive.At{})
+	_, err := d.Stat(bob, drive.ByID(sec.ID), drive.At{})
+	t.Logf("bob, by path: %v; by id: %v", byPath, err)
+	if err == nil {
+		t.Fatal("bob reached a file in a 0700 folder of alice's")
+	}
+	if errors.Is(err, drive.ErrNotSearched) || !errors.Is(err, drive.ErrForbidden) {
+		t.Errorf("a find the caller may not reach: %v; want ErrForbidden, not ErrNotSearched", err)
+	}
+	if strings.Contains(err.Error(), "secret-name") {
+		t.Errorf("the answer names the file under a folder the caller may not traverse: %v", err)
+	}
+}
+
+// trashWorld is a drive whose trash holds junk entries and one file, x.
+func trashWorld(t *testing.T, name string, junk int) (objstore.Store, icbfs.Settings, drive.Item) {
+	t.Helper()
+	base := miniotest.Store(t)
+	s := icbfs.Settings{Name: name, Size: 1 << 32, RootMode: 0o777}
+	ctx := system()
+	w := newDrive(t, base, s, "")
+	for i := range junk {
+		p := fmt.Sprintf("/junk/f%03d.txt", i)
+		write(t, ctx, w, p, "x", drive.Condition{})
+		if err := w.Delete(ctx, drive.ByPath(p), false, drive.Condition{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	x := write(t, ctx, w, "/t/target.txt", "target\n", drive.Condition{})
+	if err := w.Delete(ctx, drive.ByPath("/t/target.txt"), false, drive.Condition{}); err != nil {
+		t.Fatal(err)
+	}
+	return base, s, x
+}
+
+// TestLK20_ATrashedItemsEntryIsReadByItsID (the review's RVGap, B2): the
+// callers that need a trashed item's entry (Checksums for an approval,
+// Versions, Stat with a version) read it by the item's id: the same
+// number of reads with 10 entries in the trash as with 150.
+func TestLK20_ATrashedItemsEntryIsReadByItsID(t *testing.T) {
+	ctx := system()
+	type cost struct{ sums, versions, stat int64 }
+	measure := func(junk int) cost {
+		base, s, x := trashWorld(t, fmt.Sprintf("lk20-%d", junk), junk)
+		var c cost
+		for i, f := range []func(d *Drive) error{
+			func(d *Drive) error {
+				_, err := d.Checksums(ctx, drive.ItemRef{ID: x.ID, Path: "/t/target.txt"}, x.Version.ID)
+				return err
+			},
+			func(d *Drive) error { _, err := d.Versions(ctx, drive.ByID(x.ID)); return err },
+			func(d *Drive) error {
+				_, err := d.Stat(ctx, drive.ByID(x.ID), drive.At{Version: x.Version.ID})
+				return err
+			},
+		} {
+			tap := &searchTap{Store: base}
+			d := newDriveWith(t, tap, s, Config{SearchBudget: DefaultSearchBudget})
+			r0 := tap.n.Load()
+			// Checksums of a small trashed file answers that its
+			// checksums were never kept (no .metadata to read), after
+			// it found the entry: only its reads count here.
+			if err := f(d); err != nil && i > 0 {
+				t.Fatalf("%d entries, call %d: %v", junk+1, i, err)
+			}
+			n := tap.n.Load() - r0
+			switch i {
+			case 0:
+				c.sums = n
+			case 1:
+				c.versions = n
+			case 2:
+				c.stat = n
+			}
+		}
+		return c
+	}
+	small, large := measure(10), measure(150)
+	t.Logf("reads with 11 trash entries %+v; with 151 %+v", small, large)
+	grew := large.sums > small.sums+2 || large.versions > small.versions+2 || large.stat > small.stat+2
+	if grew || large.sums > 40 {
+		t.Errorf("reads for a trashed item's entry grow with the trash: 11 entries %+v, 151 entries %+v (G5)", small, large)
+	}
+}
+
+// TestLK21_ARestoredFolderBringsBackItsChildren (the review's RVGap, U2):
+// a document whose folder was trashed is answered "not there" and
+// remembered so; the folder restored through the same drive brings the
+// document back, and it is found by id at once.
+func TestLK21_ARestoredFolderBringsBackItsChildren(t *testing.T) {
+	lw := newLookupWorld(t, "lk21", 30, 6)
+	folder := lw.paths[20]
+	doc := folder + "/doc.txt"
+	docID := lw.ids[doc]
+	fit, err := lw.w.Stat(lw.ctx, drive.ByPath(folder), drive.At{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lw.w.Delete(lw.ctx, drive.ByPath(folder), true, drive.Condition{}); err != nil {
+		t.Fatal(err)
+	}
+	d, tap := lw.reader(t, 0)
+	if _, err, _, _ := stat(d, tap, lw.ctx, drive.ByID(docID), drive.At{}); !errors.Is(err, drive.ErrNotFound) {
+		t.Fatalf("the document, its folder trashed: %v; want not found", err)
+	}
+	te, err := d.trashedItem(lw.ctx, fit.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Restore(lw.ctx, te.ID, drive.RestoreOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if it, err, _, _ := stat(d, tap, lw.ctx, drive.ByID(docID), drive.At{}); err != nil || it.Path != doc {
+		t.Errorf("the document by id after its folder was restored through this drive: %q, %v; want %s", it.Path, err, doc)
+	}
+}
+
+// TestLC7_ACutStubLookupIsTheStopsError (the review's RVRow_LC7): refTarget
+// whose lookup is cut by its context answers the stop's error, not
+// ErrRefUnavailable: a stop never becomes a write of the bytes in full.
+func TestLC7_ACutStubLookupIsTheStopsError(t *testing.T) {
+	lw := newLookupWorld(t, "lc7", 30, 9)
+	x := write(t, lw.ctx, lw.w, lw.paths[8]+"/x.txt", sameAsData, drive.Condition{})
+	d, tap := lw.reader(t, 0)
+	cctx, cancel := context.WithCancel(lw.ctx)
+	defer cancel()
+	tap.mu.Lock()
+	tap.cutAfter, tap.cut = tap.n.Load()+4, cancel
+	tap.mu.Unlock()
+	_, err := d.refTarget(cctx, *refTo(x), nil)
+	if errors.Is(err, drive.ErrRefUnavailable) || !errors.Is(err, context.Canceled) {
+		t.Errorf("a stub's target lookup cut by a stop: %v; want the stop's error, not ErrRefUnavailable", err)
+	}
+}
+
+// TestME7_ThePastsNotThereGoesWhenThePastChanges (the review's RVRow_ME7):
+// an id found in no folder as of a time is searched for again once the
+// past changed.
+func TestME7_ThePastsNotThereGoesWhenThePastChanges(t *testing.T) {
+	lw, then := pastWorld(t, "me7", 20, 4)
+	d, tap := lw.reader(t, 0)
+	at := drive.At{Time: then}
+	if _, err, walks, _ := stat(d, tap, lw.ctx, drive.ByID(missingID), at); !errors.Is(err, drive.ErrNotFound) || walks != 1 {
+		t.Fatalf("first: %v, %d searches", err, walks)
+	}
+	if _, err, walks, _ := stat(d, tap, lw.ctx, drive.ByID(missingID), at); !errors.Is(err, drive.ErrNotFound) || walks != 0 {
+		t.Fatalf("again: %v, %d searches; want remembered", err, walks)
+	}
+	d.views.lookAgain()
+	if _, err, walks, _ := stat(d, tap, lw.ctx, drive.ByID(missingID), at); !errors.Is(err, drive.ErrNotFound) || walks != 1 {
+		t.Errorf("after the past changed: %v, %d searches; want searched again", err, walks)
+	}
+}
+
+// TestME8_APastChangeDuringALookupStoresNothing (the review's RVGap, U1):
+// lookups in a view of the past that the past's change dropped while they
+// held it store nothing under the moment: not "not there", not a kept
+// search, not a find.
+func TestME8_APastChangeDuringALookupStoresNothing(t *testing.T) {
+	lw, then := pastWorld(t, "me8", 30, 9)
+	deep := lw.paths[8] + "/doc.txt"
+	near := lw.paths[0] + "/doc.txt"
+	// A drive with no budget (not there, a find) and one with a budget of
+	// 3 (a kept search), each holding a view of then whose past changes.
+	held := func(budget int) (*Drive, *icbfs.Filesystem, *idPathCache, time.Time) {
+		d, _ := lw.reader(t, budget)
+		fsys, err := d.at(lw.ctx, drive.At{Time: then})
+		if err != nil {
+			t.Fatal(err)
+		}
+		mem, mt, _, _ := d.memory(fsys)
+		d.views.mu.Lock()
+		d.views.forgetLocked()
+		d.views.mu.Unlock()
+		return d, fsys, mem, mt
+	}
+	d0, fsys0, mem, mt := held(0)
+	if _, err := d0.resolve(lw.ctx, fsys0, drive.ByID(missingID)); !errors.Is(err, drive.ErrNotFound) {
+		t.Fatalf("a missing id in the old past: %v", err)
+	}
+	if d0.stopped.isAbsent(stoppedKey{at: mt, id: missingID}) {
+		t.Error("a not-there learned in a past already changed is kept for the new past")
+	}
+	if n, err := d0.resolve(lw.ctx, fsys0, drive.ByID(lw.ids[near])); err != nil || n.path != near {
+		t.Fatalf("a near id in the old past: %v", err)
+	}
+	if _, ok := mem.get(lw.ids[near]); ok {
+		t.Error("a find in a past already changed is stored for the new past")
+	}
+	d, fsys, _, mt := held(3)
+	if _, err := d.resolve(lw.ctx, fsys, drive.ByID(lw.ids[deep])); !errors.Is(err, drive.ErrNotSearched) {
+		t.Fatalf("a deep id in the old past, budget 3: %v", err)
+	}
+	d.stopped.mu.Lock()
+	_, kept := d.stopped.m[stoppedKey{at: mt, id: lw.ids[deep]}]
+	d.stopped.mu.Unlock()
+	if kept {
+		t.Error("a search stopped in a past already changed is kept for the new past")
+	}
+}
+
+// TestME9_AFilesystemTheDriveDidNotMakeSharesNothing (the review's U3):
+// lookups in two filesystems this drive did not make keep no search and
+// remember nothing, so neither can answer for the other.
+func TestME9_AFilesystemTheDriveDidNotMakeSharesNothing(t *testing.T) {
+	lw := newLookupWorld(t, "me9", 30, 9)
+	d, _ := lw.reader(t, 3)
+	other := func() *icbfs.Filesystem {
+		f := icbfs.New(lw.base, lw.s.Name)
+		if err := f.Attach(lw.ctx); err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	a, b := other(), other()
+	if _, err := d.resolve(lw.ctx, a, drive.ByID(missingID)); !errors.Is(err, drive.ErrNotSearched) {
+		t.Fatalf("a missing id in a, budget 3: %v", err)
+	}
+	if _, err := d.resolve(lw.ctx, b, drive.ByID(missingID)); !keptAll(err, 3) {
+		t.Errorf("the same id in b: %v; want b's own search from the root, not a's kept one", err)
+	}
+	big, _ := lw.reader(t, 0)
+	if _, err := big.resolve(lw.ctx, a, drive.ByID(missingID)); !errors.Is(err, drive.ErrNotFound) {
+		t.Fatalf("a missing id in a, no budget: %v", err)
+	}
+	big.stopped.mu.Lock()
+	n, k := len(big.stopped.absent), len(big.stopped.m)
+	big.stopped.mu.Unlock()
+	d.stopped.mu.Lock()
+	k += len(d.stopped.m)
+	d.stopped.mu.Unlock()
+	if n != 0 || k != 0 {
+		t.Errorf("lookups in filesystems the drive did not make: %d remembered not there, %d searches kept; want none", n, k)
 	}
 }

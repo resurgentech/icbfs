@@ -188,18 +188,18 @@ func (d *Drive) trashEntry(ctx context.Context, id string) (icbfs.TrashEntry, dr
 	return icbfs.TrashEntry{}, drive.TrashEntry{}, fmt.Errorf("trash entry %s: %w", id, drive.ErrNotFound)
 }
 
-// trashedItem is the newest trash entry of this drive for an item id.
+// trashedItem is the newest trash entry of this drive for an item id,
+// read through the item's pointer to it (icbfs.Filesystem.TrashedItem):
+// three reads whatever the size of the trash, which is kept for ever
+// (LK-20, G5). An entry written before items had a pointer is not found
+// this way: it is "not found", as an item outside the drive is.
 func (d *Drive) trashedItem(ctx context.Context, itemID string) (drive.TrashEntry, error) {
-	entries, err := d.fs.ListTrash(ctx, icbfs.TrashOptions{})
+	e, err := d.fs.TrashedItem(ctx, itemID)
 	if err != nil {
 		return drive.TrashEntry{}, mapErr(err)
 	}
-	for _, e := range entries {
-		if e.ItemID == itemID {
-			if te, ok := d.toTrash(e); ok {
-				return te, nil
-			}
-		}
+	if te, ok := d.toTrash(e); ok {
+		return te, nil
 	}
 	return drive.TrashEntry{}, fmt.Errorf("id %s: %w", itemID, drive.ErrNotFound)
 }
@@ -244,7 +244,7 @@ func (d *Drive) Restore(ctx context.Context, id string, opts drive.RestoreOption
 	if _, err := d.fs.Restore(rctx, id, icbfs.RestoreOptions{ToDir: parent.key, ToName: name, Replace: opts.Replace}); err != nil {
 		return drive.Item{}, mapErr(err)
 	}
-	d.stopped.present(te.ItemID) // no longer "not there" (LK-13)
+	d.stopped.restored() // the item, and a folder's contents, no longer "not there" (LK-17, LK-21)
 	d.changed(parent)
 	return d.statItem(ctx, joinPath(parent.path, name))
 }

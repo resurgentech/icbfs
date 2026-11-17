@@ -126,6 +126,7 @@ func foundOf(it drive.Item, te *drive.TrashEntry, err error) found {
 // forgot every path it remembered (a start). Every hinted answer is the
 // plain lookup's, exactly.
 // ICBFS_SEARCH_SEEDS and ICBFS_SEARCH_STEPS run it longer.
+// STATES: LC-5
 func TestFindByOriginMatchesOldSearch(t *testing.T) {
 	seeds, steps := envInt("ICBFS_SEARCH_SEEDS", 6), envInt("ICBFS_SEARCH_STEPS", 60)
 	store := miniotest.Store(t)
