@@ -105,6 +105,12 @@ func (s *versionsSampler) Versions(ctx context.Context, ref drive.ItemRef) ([]dr
 	return vs, err
 }
 
+// VersionsOf is Versions: the rebuild reads by key on a KeyVersioner
+// (interloc T82-9d), and what is sampled is the same either way.
+func (s *versionsSampler) VersionsOf(ctx context.Context, it drive.Item) ([]drive.Version, error) {
+	return s.Versions(ctx, drive.ItemRef{ID: it.ID, Path: it.Path})
+}
+
 // overEntry is more than a map entry could cost: hashMapCost measured
 // about 250 bytes.
 const overEntry = 1 << 10

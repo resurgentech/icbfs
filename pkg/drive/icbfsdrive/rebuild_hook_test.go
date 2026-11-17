@@ -27,7 +27,18 @@ type versionsSpy struct {
 }
 
 func (s *versionsSpy) Versions(ctx context.Context, ref drive.ItemRef) ([]drive.Version, error) {
-	dir := path.Dir(ref.Path)
+	return s.read(ref.Path, func() ([]drive.Version, error) { return s.Drive.Versions(ctx, ref) })
+}
+
+// VersionsOf is the drive's, recorded and failed as Versions is: the
+// rebuild reads by key on a KeyVersioner (interloc T82-9d).
+func (s *versionsSpy) VersionsOf(ctx context.Context, it drive.Item) ([]drive.Version, error) {
+	return s.read(it.Path, func() ([]drive.Version, error) { return s.Drive.VersionsOf(ctx, it) })
+}
+
+// read records a call for the file at p, waits, then fails it or reads.
+func (s *versionsSpy) read(p string, versions func() ([]drive.Version, error)) ([]drive.Version, error) {
+	dir := path.Dir(p)
 	s.mu.Lock()
 	s.calls++
 	s.inFlight[dir]++
@@ -45,15 +56,17 @@ func (s *versionsSpy) Versions(ctx context.Context, ref drive.ItemRef) ([]drive.
 		s.mu.Unlock()
 	}()
 	time.Sleep(20 * time.Millisecond)
-	if err := s.fail[ref.Path]; err != nil {
+	if err := s.fail[p]; err != nil {
 		return nil, err
 	}
-	return s.Drive.Versions(ctx, ref)
+	return versions()
 }
 
 // TestRebuildHashesProgress: RebuildHashes asks for 8 files' versions at
-// once, in one folder at a time; its progress hook sees the items and
-// files go up to all of them, the last call saying all; a file gone
+// once, by key (VersionsOf), in as many folders as they come from
+// (since interloc T82-9d; before, one folder at a time); its progress
+// hook sees the items and files go up to all of them, the last call
+// saying all; a file gone
 // since the walk is skipped, and another error is the file's, with the
 // map left as it was.
 func TestRebuildHashesProgress(t *testing.T) {
@@ -73,9 +86,10 @@ func TestRebuildHashesProgress(t *testing.T) {
 	if err := fresh.RebuildHashes(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if spy.most != 8 || spy.folders != 1 || spy.calls != files {
-		t.Fatalf("%d calls, at most %d at once, in %d folders at once; want %d, 8, in 1", spy.calls, spy.most, spy.folders, files)
+	if spy.most != 8 || spy.calls != files {
+		t.Fatalf("%d calls, at most %d at once, in %d folders at once; want %d, 8", spy.calls, spy.most, spy.folders, files)
 	}
+	t.Logf("at most %d calls at once, in %d folders at once", spy.most, spy.folders)
 	// b gone since the walk: skipped, as the listing skipped it.
 	if got := fresh.Hashes().Entries(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("rebuilt without b %+v\nlisted %+v", got, want)
