@@ -26,7 +26,22 @@ type viewCache struct {
 	// on next use, without waiting for the mark (sent at most once a
 	// second: pastMarker).
 	forget bool
+	// mems are the views' id → path memories, by time (T82-15): kept
+	// apart from views, so a view made again for the same time (after
+	// it was dropped, or the past changed) still knows where it found
+	// items; a remembered path is checked against the id on use.
+	mems map[time.Time]*viewMemory
 }
+
+// viewMemory is one time's id → path memory.
+type viewMemory struct {
+	paths idPathCache
+	used  time.Time
+}
+
+// maxViewMemories is how many times' memories are kept: twice the views,
+// the least recently used dropped first. Each is an idPathCache.
+const maxViewMemories = 2 * maxViews
 
 // pastCheck is how often views look for a change to the past (a purge, a
 // change made under a source time) since the last look: until then a
@@ -36,6 +51,7 @@ const pastCheck = 30 * time.Second
 type view struct {
 	fsys *icbfs.Filesystem
 	used time.Time
+	mem  *viewMemory
 }
 
 const maxViews = 8
@@ -69,7 +85,7 @@ func (c *viewCache) get(ctx context.Context, t time.Time) (*icbfs.Filesystem, er
 		if err := icbfs.ForgetPast(ctx, c.d.fs, history); err != nil {
 			return nil, err
 		}
-		clear(c.views)
+		c.forgetLocked()
 		c.forget = false
 	}
 	if time.Since(c.pastSeen) >= pastCheck {
@@ -105,8 +121,53 @@ func (c *viewCache) get(ctx context.Context, t time.Time) (*icbfs.Filesystem, er
 		}
 		delete(c.views, oldest)
 	}
-	c.views[t] = &view{fsys: fsys, used: time.Now()}
+	c.views[t] = &view{fsys: fsys, used: time.Now(), mem: c.memLocked(t)}
 	return fsys, nil
+}
+
+// memLocked is time t's memory, made if there is none.
+func (c *viewCache) memLocked(t time.Time) *viewMemory {
+	if m, ok := c.mems[t]; ok {
+		return m
+	}
+	if c.mems == nil {
+		c.mems = map[time.Time]*viewMemory{}
+	}
+	for len(c.mems) >= maxViewMemories {
+		var oldest time.Time
+		var oldestUse time.Time
+		for k, m := range c.mems {
+			if oldestUse.IsZero() || m.used.Before(oldestUse) {
+				oldest, oldestUse = k, m.used
+			}
+		}
+		delete(c.mems, oldest)
+	}
+	m := &viewMemory{used: time.Now()}
+	c.mems[t] = m
+	return m
+}
+
+// memoryOf is the id → path memory of fsys, a view this cache made, or
+// nil if it no longer keeps that view.
+func (c *viewCache) memoryOf(fsys *icbfs.Filesystem) *idPathCache {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, v := range c.views {
+		if v.fsys == fsys {
+			v.mem.used = time.Now()
+			return &v.mem.paths
+		}
+	}
+	return nil
+}
+
+// forgetLocked drops the views, the past having changed, and the
+// searches in them that stopped; the memories stay (their paths are
+// checked on use).
+func (c *viewCache) forgetLocked() {
+	clear(c.views)
+	c.d.stopped.dropPast(&c.d.idPaths)
 }
 
 // cache is the history cache views read through: the drive's
@@ -153,7 +214,7 @@ func (c *viewCache) checkPastLocked(ctx context.Context, history *objstore.Histo
 	}
 	c.pastSeen = time.Now()
 	if forgot {
-		clear(c.views)
+		c.forgetLocked()
 	}
 	return forgot, nil
 }

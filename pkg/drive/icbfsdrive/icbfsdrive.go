@@ -61,7 +61,28 @@ type Config struct {
 	// drive.Locker, and its writes refuse a file another holder has
 	// locked, from a mount or through a drive.
 	NoLocking bool
+	// SearchBudget bounds a search of the tree for an item by id (an id
+	// with no path that leads to it, and none remembered): it reads at
+	// most this many folders in one call, then stops with
+	// drive.ErrNotSearched, keeping where it got to so the next call for
+	// that id goes on from there (stoppedSearches). 0, the default, is no
+	// budget: a search reads up to every folder, as before T82-15. A host
+	// that answers requests under a deadline sets one
+	// (DefaultSearchBudget). A cut context stops a search the same way,
+	// with or without a budget.
+	SearchBudget int
 }
+
+// DefaultSearchBudget is the search budget for a drive that answers
+// requests (T82-15): 128 folders, one store read each for a folder in
+// one block, so about 14 s at the 110 ms a read measured against
+// production's bucket, and a request that makes two such lookups (a
+// Draft's folder now and as of its base) still ends inside Workspaces'
+// 30-second client and far inside Drives' 60-second deadline. It covers
+// a Draft's own filesystem (a few dozen folders) and the top of a
+// library (every folder down to depth 4 of a ternary tree) in one call;
+// a deeper search goes on over the calls that ask again.
+const DefaultSearchBudget = 128
 
 // Drive is an icbfs drive.
 type Drive struct {
@@ -71,10 +92,16 @@ type Drive struct {
 	rootKey string
 	windows bool
 
-	views   viewCache
-	events  broadcaster
+	views  viewCache
+	events broadcaster
+	// idPaths is where items are now, by id: the present tree's memory.
+	// A view of the past keeps its own (viewMemory), so a lookup as of a
+	// time never overwrites where an item is now (T82-15).
 	idPaths idPathCache
-	// searches counts the walks of the tree for an item by id (findPaths).
+	// stopped are the searches by id that stopped before they ended.
+	stopped stoppedSearches
+	// searches counts the walks of the tree for an item by id (findPaths,
+	// search).
 	searches atomic.Int64
 	dirs     *dirCache
 	past     pastMarker
@@ -304,29 +331,114 @@ func (d *Drive) resolve(ctx context.Context, fsys *icbfs.Filesystem, ref drive.I
 			return n, nil
 		}
 	}
-	if p, ok := d.idPaths.get(ref.ID); ok {
+	// What this view remembers: the present's memory for the present,
+	// the view's own for a view of the past (T82-15).
+	mem := d.memory(fsys)
+	if p, ok := mem.get(ref.ID); ok {
 		if n, err := d.resolvePath(ctx, fsys, p); err == nil && n.key == ref.ID {
 			return n, nil
 		}
 	}
-	paths, err := d.findPaths(ctx, fsys, ref.ID, 1)
+	p, err := d.search(ctx, fsys, mem, ref.ID)
 	if err != nil {
 		return nil, err
 	}
-	if len(paths) == 0 {
+	if p == "" {
 		return nil, fmt.Errorf("id %s: %w", ref.ID, drive.ErrNotFound)
 	}
-	d.idPaths.put(ref.ID, paths[0])
-	return d.resolvePath(ctx, fsys, paths[0])
+	n, err := d.resolvePath(ctx, fsys, p)
+	if err != nil {
+		return nil, err
+	}
+	if n.key != ref.ID {
+		// Moved while it was searched for (a search that went on from an
+		// earlier call read that call's paths): asked again, it searches
+		// afresh.
+		return nil, fmt.Errorf("lookup by id %s: found at %s, which no longer leads to it: %w", ref.ID, p, drive.ErrNotSearched)
+	}
+	mem.put(ref.ID, p)
+	return n, nil
+}
+
+// memory is the id → path memory of fsys: the present's (d.idPaths) for
+// the drive's filesystem, else the view's own (viewCache.memoryOf). A
+// view no longer kept gets one that is thrown away after the call.
+func (d *Drive) memory(fsys *icbfs.Filesystem) *idPathCache {
+	if fsys == d.fs {
+		return &d.idPaths
+	}
+	if m := d.views.memoryOf(fsys); m != nil {
+		return m
+	}
+	return &idPathCache{}
 }
 
 // Walks is how many walks of the drive's tree for an item by id it has
-// made since it was opened (findPaths: an id it doesn't remember, with no
-// path, record or hint that finds it; a read a folder, up to the whole
-// tree). For tests and diagnostics.
+// made since it was opened (findPaths, search: an id it doesn't
+// remember, with no path, record or hint that finds it; a read a folder,
+// up to the whole tree or the search budget). A search that goes on from
+// one that stopped is a walk again. For tests and diagnostics.
 func (d *Drive) Walks() int64 { return d.searches.Load() }
 
-// findPaths is up to max (0: all) drive-relative paths naming id.
+// search is the path of item id in fsys's tree, "" if it isn't there:
+// breadth first, one ReadDir a folder, going on from where a search for
+// it in the same view stopped (stoppedSearches). It stops when ctx ends,
+// or once it has read the drive's budget of folders in this call
+// (Config.SearchBudget), with drive.ErrNotSearched, and keeps the folders
+// it still had to read for the next call. A folder it can't read is
+// skipped, as before; one cut by the context is read again next time.
+func (d *Drive) search(ctx context.Context, fsys *icbfs.Filesystem, mem *idPathCache, id string) (string, error) {
+	d.searches.Add(1)
+	key := stoppedKey{mem: mem, id: id}
+	s := d.stopped.take(key)
+	if s == nil {
+		s = &stoppedSearch{queue: []searchDir{{d.rootKey, "/"}}}
+	}
+	budget := d.cfg.SearchBudget
+	read := 0
+	stop := func(cause error) error {
+		d.stopped.keep(key, s)
+		if cause != nil {
+			return fmt.Errorf("lookup by id %s: searched %d folders (%d in this call), %d still to read: %w (%w)",
+				id, s.read, read, len(s.queue), drive.ErrNotSearched, cause)
+		}
+		return fmt.Errorf("lookup by id %s: searched %d folders (%d in this call), %d still to read: %w (its budget of %d folders a call)",
+			id, s.read, read, len(s.queue), drive.ErrNotSearched, budget)
+	}
+	for len(s.queue) > 0 {
+		if err := ctx.Err(); err != nil {
+			return "", stop(err)
+		}
+		if budget > 0 && read >= budget {
+			return "", stop(nil)
+		}
+		cur := s.queue[0]
+		entries, err := fsys.ReadDir(ctx, cur.key)
+		if err != nil && ctx.Err() != nil {
+			return "", stop(ctx.Err())
+		}
+		s.queue = s.queue[1:]
+		read++
+		s.read++
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			p := joinPath(cur.path, e.Name)
+			if e.UUID == id {
+				return p, nil
+			}
+			if e.Type == icbfs.TypeDir {
+				s.queue = append(s.queue, searchDir{e.UUID, p})
+			}
+		}
+	}
+	return "", nil
+}
+
+// findPaths is up to max (0: all) drive-relative paths naming id: a
+// whole walk, no budget (Stat's every path to a file with more than one
+// link; a lookup by id is search).
 func (d *Drive) findPaths(ctx context.Context, fsys *icbfs.Filesystem, id string, max int) ([]string, error) {
 	d.searches.Add(1)
 	type dir struct{ key, path string }
