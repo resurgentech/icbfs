@@ -47,6 +47,19 @@ func (p *poolDrive) Walk(ctx context.Context, dir drive.ItemRef, opts drive.Walk
 	return nil
 }
 
+// FindByOrigin makes poolDrive a mirror's destination (an OriginFinder):
+// a lookup in its fixed layout, which no call changes. Every folder holds
+// a copy of the source's file fileKK; the first folder's is the one found,
+// as a listing of the drive in path order would find it first.
+func (p *poolDrive) FindByOrigin(ctx context.Context, originDrive, originID string) (drive.Item, *drive.TrashEntry, error) {
+	var k int
+	if _, err := fmt.Sscanf(originID, "file%02d", &k); err == nil && originDrive == "src" && p.folders > 0 && k >= 0 && k < p.perFolder && originID == fmt.Sprintf("file%02d", k) {
+		return drive.Item{ID: fmt.Sprintf("key%04d-%02d", 0, k), Name: originID, Path: "/f0000/" + originID, Type: drive.TypeFile,
+			Origin: &drive.Origin{Drive: "src", ID: originID}}, nil, nil
+	}
+	return drive.Item{}, nil, fmt.Errorf("source item %s: %w", originID, drive.ErrNotFound)
+}
+
 // read is a file's one version, after a wait, its content's SHA-256
 // that of its key.
 func (p *poolDrive) read(id string, of bool) []drive.Version {

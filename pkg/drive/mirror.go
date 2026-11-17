@@ -35,6 +35,8 @@ import (
 // bad listing.
 type Mirror struct {
 	d           Drive
+	finder      OriginFinder // d, which finds an item by its origin
+	err         error        // why the mirror refuses to work, if it does
 	source      string
 	sourceTimes bool
 	// contents is the content map the mirror uses; hashes is the same
@@ -55,16 +57,25 @@ type hashKind struct {
 }
 
 // NewMirror is a mirror of the source drive source (an Origin.Drive) on d.
-// d needs the Origin and Trash capabilities. A backend that implements
-// OriginFinder finds items by origin in a lookup; any other is searched
-// (a listing of the whole drive and its trash per lookup).
+// d needs the Origin and Trash capabilities, and must be an OriginFinder:
+// the mirror finds every source item's copy by a lookup. A drive that
+// isn't one is refused: the mirror's Err says so, and every call that
+// returns an error returns that one (ErrNoOriginFinder) and touches
+// nothing. Finding an item there would take a listing of the whole drive
+// per lookup, work that grows with the square of the drive's size.
 func NewMirror(d Drive, source string) *Mirror {
 	h := NewHashMap()
-	return &Mirror{d: d, source: source, contents: h.ContentMap(), hashes: h, kinds: map[string]hashKind{
+	m := &Mirror{d: d, source: source, contents: h.ContentMap(), hashes: h, kinds: map[string]hashKind{
 		"md5":    {new: md5.New},
 		"sha1":   {new: sha1.New},
 		"sha256": {new: sha256.New},
 	}}
+	if f, ok := d.(OriginFinder); ok {
+		m.finder = f
+	} else {
+		m.err = fmt.Errorf("drive: %T doesn't find an item by its origin (no FindByOrigin): %w", d, ErrNoOriginFinder)
+	}
+	return m
 }
 
 // HashKind teaches the mirror a source's kind of hash (SourceItem.Hash):
@@ -117,6 +128,16 @@ func born(src SourceItem) time.Time {
 type OriginFinder interface {
 	FindByOrigin(ctx context.Context, originDrive, originID string) (Item, *TrashEntry, error)
 }
+
+// ErrNoOriginFinder is a mirror's answer when its destination drive
+// can't find an item by its origin (it isn't an OriginFinder), so the
+// mirror refuses it (NewMirror).
+var ErrNoOriginFinder = errors.New("a mirror's destination must implement drive.OriginFinder")
+
+// Err is nil, or why the mirror refuses to work: its destination isn't
+// an OriginFinder (ErrNoOriginFinder). A daemon checks it once it has
+// made the mirror; each call that returns an error returns it too.
+func (m *Mirror) Err() error { return m.err }
 
 // SourceItem is what a sync daemon knows about one source item, now.
 type SourceItem struct {
@@ -188,6 +209,9 @@ var ErrNotMirrored = errors.New("the path holds an item not copied from that sou
 // Known is what the drive holds for a source item: the live item, or its
 // trash entry, or neither (found false).
 func (m *Mirror) Known(ctx context.Context, sourceID string) (item Item, trashed *TrashEntry, found bool, err error) {
+	if m.err != nil {
+		return Item{}, nil, false, m.err
+	}
 	item, trashed, err = m.find(ctx, sourceID)
 	if errors.Is(err, ErrNotFound) {
 		return Item{}, nil, false, nil
@@ -225,6 +249,9 @@ func (m *Mirror) Known(ctx context.Context, sourceID string) (item Item, trashed
 // while its FoldInto and its bytes agree with the item's; else it's
 // dropped (Unfolded) and given an item of its own.
 func (m *Mirror) Apply(ctx context.Context, src SourceItem) (Applied, error) {
+	if m.err != nil {
+		return Applied{}, m.err
+	}
 	o := src.Origin
 	if o.Drive == "" {
 		o.Drive = m.source
@@ -1095,6 +1122,9 @@ func (m *Mirror) reinfo(ctx context.Context, item Item, modified time.Time, src 
 // item it's folded into, and only it. An item's origin that has aliases
 // isn't trashed: the oldest alias becomes its origin (promote).
 func (m *Mirror) Remove(ctx context.Context, sourceID string) (bool, error) {
+	if m.err != nil {
+		return false, m.err
+	}
 	item, trashed, err := m.find(ctx, sourceID)
 	if errors.Is(err, ErrNotFound) || err == nil && trashed != nil {
 		return false, nil
@@ -1123,6 +1153,9 @@ func (m *Mirror) Remove(ctx context.Context, sourceID string) (bool, error) {
 // daemon does when it finds a pass ran on a bad listing. It returns how
 // many items it brought back (a directory counts once, with its contents).
 func (m *Mirror) Undo(ctx context.Context, pass string) (int, error) {
+	if m.err != nil {
+		return 0, m.err
+	}
 	if pass == "" {
 		return 0, fmt.Errorf("undo needs a pass: %w", ErrInvalid)
 	}
@@ -1155,53 +1188,10 @@ func (m *Mirror) Undo(ctx context.Context, pass string) (int, error) {
 	return n, nil
 }
 
-// find is the drive's item, or trash entry, for the source item.
+// find is the drive's item, or trash entry, for the source item: a
+// lookup (OriginFinder), never a listing of the drive.
 func (m *Mirror) find(ctx context.Context, sourceID string) (Item, *TrashEntry, error) {
-	if f, ok := m.d.(OriginFinder); ok {
-		return f.FindByOrigin(ctx, m.source, sourceID)
-	}
-	return m.search(ctx, sourceID)
-}
-
-// search finds by origin on a backend that can't: a listing of the whole
-// drive, then of its trash.
-func (m *Mirror) search(ctx context.Context, sourceID string) (Item, *TrashEntry, error) {
-	var found, alias *Item
-	for cursor := ""; ; {
-		page, err := m.d.List(ctx, ByPath("/"), ListOptions{Depth: 1 << 30, Cursor: cursor})
-		if err != nil {
-			return Item{}, nil, err
-		}
-		for i := range page.Items {
-			it := page.Items[i]
-			if it.Origin != nil && it.Origin.Drive == m.source && it.Origin.ID == sourceID {
-				if found == nil || it.Origin.Copied.After(found.Origin.Copied) {
-					found = &it // the newest claim wins
-				}
-			} else if alias == nil && it.Origin != nil && it.Origin.Drive == m.source && aliasAt(it.Origin, sourceID) >= 0 {
-				it.Alias = sourceID
-				alias = &it
-			}
-		}
-		if page.Next == "" {
-			break
-		}
-		cursor = page.Next
-	}
-	if found != nil {
-		return *found, nil, nil
-	}
-	if alias != nil {
-		return *alias, nil, nil // folded into another's item
-	}
-	trash, err := m.d.Trash(ctx, TrashOptions{OriginDrive: m.source, OriginID: sourceID, Limit: 1})
-	if err != nil {
-		return Item{}, nil, err
-	}
-	if len(trash.Entries) > 0 {
-		return Item{}, &trash.Entries[0], nil
-	}
-	return Item{}, nil, fmt.Errorf("source item %s: %w", sourceID, ErrNotFound)
+	return m.finder.FindByOrigin(ctx, m.source, sourceID)
 }
 
 // Hash is a source's own hash of an item's content: its kind (as the
@@ -1547,6 +1537,9 @@ func (m *Mirror) WithHashStore(s HashStore) *Mirror {
 // map is left empty: a connector sets it aside and rebuilds
 // (RebuildHashes).
 func (m *Mirror) LoadHashes(ctx context.Context) error {
+	if m.err != nil {
+		return m.err
+	}
 	if m.hashes == nil {
 		return errNoHashMap
 	}
@@ -1570,6 +1563,9 @@ func (m *Mirror) LoadHashes(ctx context.Context) error {
 
 // SaveHashes gives the HashStore the hash map as it is now.
 func (m *Mirror) SaveHashes(ctx context.Context) error {
+	if m.err != nil {
+		return m.err
+	}
 	if m.hashes == nil {
 		return errNoHashMap
 	}
@@ -1622,6 +1618,9 @@ const (
 // ErrNotFound: gone since the walk) or of the walk stops the rest; on
 // any error the rebuild is abandoned, the map as it was.
 func (m *Mirror) RebuildHashes(ctx context.Context) error {
+	if m.err != nil {
+		return m.err
+	}
 	r, err := m.contents.Rebuild(ctx)
 	if err != nil {
 		return fmt.Errorf("the content map: %w", err)

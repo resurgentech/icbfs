@@ -19,10 +19,6 @@ import (
 	"github.com/resurgentech/icbfs/pkg/drive"
 )
 
-// plainDrive hides FindByOrigin, so a Mirror on it uses the generic search
-// any backend gets.
-type plainDrive struct{ drive.Drive }
-
 // readCounter counts a store's reads.
 type readCounter struct {
 	objstore.Store
@@ -88,20 +84,21 @@ func actions(t *testing.T, what string, a drive.Applied, err error, want ...driv
 // new file, versions, a move, a delete and the recycle bin bringing it
 // back, a folder deleted and shared again, a bad pass undone. Each source
 // item is applied as it is now; the mirror decides what that means, and
-// asks for the bytes only when it must. Once with icbfs's origin index,
-// once with the generic search.
+// asks for the bytes only when it must. Once on icbfs's drive, once
+// behind plainDrive (the paths any backend gets, its lookups checked
+// against the old whole-drive search).
 func TestMirror(t *testing.T) {
 	for _, indexed := range []bool{true, false} {
 		name := "indexed"
 		if !indexed {
-			name = "searched"
+			name = "plain"
 		}
 		t.Run(name, func(t *testing.T) {
 			store := miniotest.Store(t)
 			idrv := newDrive(t, store, icbfs.Settings{Name: "mirror-" + name, Size: 1 << 30, RootMode: 0o777}, "")
 			var d drive.Drive = idrv
 			if !indexed {
-				d = plainDrive{idrv}
+				d = plain(t, idrv)
 			}
 			m := drive.NewMirror(d, srcDrive)
 			ctx := system()
@@ -303,8 +300,9 @@ func (s *source) hashed(id, version, path, body string, mod time.Time) drive.Sou
 }
 
 // noRefs is a drive that keeps no references: it ignores SameAs, as a
-// drive other than icbfs does, and isn't a FileWriter.
-type noRefs struct{ drive.Drive }
+// drive other than icbfs does, and isn't a FileWriter. It finds by origin
+// as plainDrive does (icbfs's lookup, checked against the old search).
+type noRefs struct{ plainDrive }
 
 func (n noRefs) Write(ctx context.Context, p string, body io.Reader, cond drive.Condition, opts drive.WriteOptions) (drive.Item, error) {
 	opts.SameAs = nil
@@ -348,7 +346,7 @@ func TestMirrorTwin(t *testing.T) {
 	// A drive that keeps no references gets the bytes, from the spool.
 	nstore := miniotest.Store(t)
 	nd := newDrive(t, nstore, icbfs.Settings{Name: "mirror-norefs", Size: 1 << 30, RootMode: 0o777}, "")
-	nm := drive.NewMirror(noRefs{nd}, srcDrive)
+	nm := drive.NewMirror(noRefs{plain(t, nd)}, srcDrive)
 	apply(t, ctx, nm, "first, no references", src.item("a", "1", "/a.txt", x, jan), drive.Created)
 	nb := apply(t, ctx, nm, "twin, no references", src.item("b", "1", "/b.txt", x, jan), drive.Created)
 	notStub(t, nstore, nb.Item.ID, nb.Item.Version.ID)
@@ -491,14 +489,14 @@ func TestMirrorRebuildHashes(t *testing.T) {
 	for _, indexed := range []bool{true, false} {
 		name := "indexed"
 		if !indexed {
-			name = "searched"
+			name = "plain"
 		}
 		t.Run(name, func(t *testing.T) {
 			store := miniotest.Store(t)
 			idrv := newDrive(t, store, icbfs.Settings{Name: "mirror-rebuild-" + name, Size: 1 << 30, RootMode: 0o777}, "")
 			var d drive.Drive = idrv
 			if !indexed {
-				d = plainDrive{idrv}
+				d = plain(t, idrv)
 			}
 			m := drive.NewMirror(d, srcDrive)
 			ctx := system()
