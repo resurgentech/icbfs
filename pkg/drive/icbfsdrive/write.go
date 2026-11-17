@@ -70,6 +70,9 @@ type writeSource struct {
 	// upload, if set, is an upload's staged parts (parts.go), copied on
 	// the store's side: no body.
 	upload *icbfs.UploadSource
+	// plan, with upload, is told the key before the first byte, and the
+	// store's copy id before the first piece (drive.UploadWrite.Plan).
+	plan func(ctx context.Context, p drive.UploadPlan) error
 }
 
 // streamed is whether the content goes to the store as it arrives, so
@@ -133,6 +136,19 @@ func (d *Drive) write(ctx context.Context, p string, src writeSource, cond drive
 			// checksums made as they were staged.
 			sums = src.upload.Sums
 			put = func(ctx context.Context, key, etag string) (*objstore.Object, error) {
+				if src.plan != nil {
+					// T82-10 round 6 (AS-14, AS-15): the key before any
+					// byte (a new file's when there is no etag: create's
+					// put), and the store's copy id before its first piece.
+					plan := drive.UploadPlan{Key: key, New: etag == ""}
+					if err := src.plan(ctx, plan); err != nil {
+						return nil, err
+					}
+					ctx = objstore.WithCopyStarted(ctx, func(id string) error {
+						plan.Copy = id
+						return src.plan(ctx, plan)
+					})
+				}
 				return d.fs.WriteUpload(ctx, key, *src.upload, etag)
 			}
 		case src.at != nil:

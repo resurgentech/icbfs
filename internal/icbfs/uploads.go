@@ -116,6 +116,11 @@ func (f *Filesystem) StartUpload(ctx context.Context, id string, record []byte) 
 	if len(record) > MaxUploadRecord {
 		return fmt.Errorf("upload record of %d bytes, over %d: %w", len(record), MaxUploadRecord, ErrInvalidArgument)
 	}
+	// The filesystem's mark first (if absent): a sweep that lists the marks
+	// finds this upload's filesystem once its record is there.
+	if _, err := f.store.PutIfAbsent(ctx, f.uploadMark(), strings.NewReader(""), nil); err != nil && !objstore.IsPreconditionFailed(err) {
+		return err
+	}
 	_, err := f.store.PutIfAbsent(ctx, uploadRecordKey(f.uploadDir(id)), strings.NewReader(string(record)), nil)
 	if objstore.IsPreconditionFailed(err) {
 		return fmt.Errorf("upload %s: %w", id, ErrExists)
@@ -249,16 +254,26 @@ func (f *Filesystem) UploadState(ctx context.Context, id string) (UploadState, e
 // UploadSource is an upload's parts as the copies that make the file,
 // with the file's size and checksums.
 type UploadSource struct {
-	ID    string // the upload's: recorded on the version it writes (MetaUpload)
-	Parts []objstore.Part
-	Size  int64
-	Sums  Checksums
+	ID string // the upload's: recorded on the version it writes (MetaUpload)
+	// Completed is when the caller accepted the upload's complete, if it
+	// said (recorded as MetaUploadAt).
+	Completed time.Time
+	Parts     []objstore.Part
+	Size      int64
+	Sums      Checksums
 }
 
 // MetaUpload is the content version's metadata naming the upload it was
 // written from (WriteUpload): how a write run again finds it already
 // landed (UploadVersion), whatever was written to the file since.
 const MetaUpload = "icbfs_upload"
+
+// MetaUploadAt is the content version's metadata saying when the caller
+// accepted the complete of the upload it was written from (RFC 3339 with
+// nanoseconds, UTC): how an upload's write run late finds that one
+// completed after it already wrote the file (UploadVersions' newer,
+// T82-10 round 6, AS-31).
+const MetaUploadAt = "icbfs_upload_at"
 
 // uploadHeads is how many parts' Heads UploadSources has in flight.
 const uploadHeads = 8
@@ -360,8 +375,113 @@ func (f *Filesystem) WriteUpload(ctx context.Context, key string, src UploadSour
 	var md map[string]string
 	if src.ID != "" {
 		md = map[string]string{MetaUpload: src.ID}
+		if !src.Completed.IsZero() {
+			md[MetaUploadAt] = src.Completed.UTC().Format(time.RFC3339Nano)
+		}
 	}
 	return f.store.PutParts(ctx, key, src.Parts, md, ifMatch)
+}
+
+// UploadVersions looks at key's versions dated since (less
+// uploadClockSlack), newest first, one Head each, for two things: the
+// version upload id wrote (own; nil if none), and whether a version was
+// written by an upload completed after completed (newer: its
+// MetaUploadAt later; T82-10 round 6, AS-31). A key with no versions is
+// neither.
+func (f *Filesystem) UploadVersions(ctx context.Context, key, id string, since, completed time.Time) (own *objstore.Object, newer bool, err error) {
+	if err := CheckUploadID(id); err != nil {
+		return nil, false, err
+	}
+	hist, err := objstore.VersionsSince(ctx, f.store, key, since.Add(-uploadClockSlack))
+	if objstore.IsNotFound(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	for _, v := range hist {
+		obj, err := f.store.HeadVersion(ctx, key, v.VersionID)
+		if objstore.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return nil, false, err
+		}
+		up := obj.Metadata[MetaUpload]
+		if up == id {
+			if own == nil {
+				own = obj
+			}
+			continue
+		}
+		if up == "" || completed.IsZero() {
+			continue
+		}
+		if at, err := time.Parse(time.RFC3339Nano, obj.Metadata[MetaUploadAt]); err == nil && at.After(completed) {
+			newer = true
+		}
+	}
+	return own, newer, nil
+}
+
+// EraseKey erases every version of every object under key (a new file's
+// content key, its .metadata and .version): EraseUnnamed's work, the
+// caller having made sure no name reaches key.
+func (f *Filesystem) EraseKey(ctx context.Context, key string) error {
+	if err := f.checkWritable(); err != nil {
+		return err
+	}
+	if !strings.HasPrefix(key, f.id+"-") || len(key) < len(f.id)+2 {
+		return fmt.Errorf("key %q is not one of filesystem %s's: %w", key, f.id, ErrInvalidArgument)
+	}
+	objstore.ForgetNew(ctx, key)
+	return f.store.EraseAll(ctx, key)
+}
+
+// The filesystems of a bucket that have uploads in parts are marked, one
+// small object each under one prefix (T82-10 round 6, bound 2.5: the
+// sweep lists one prefix, then only those filesystems' uploads, not every
+// filesystem's). StartUpload writes the mark before the record, if absent
+// (no version a start); the sweep erases it once the filesystem has no
+// upload left (UnmarkUploads); DropUploads and Prune erase it.
+const uploadMarks = "_uploads/"
+
+func (f *Filesystem) uploadMark() string { return uploadMarks + f.id }
+
+// UnmarkUploads erases the filesystem's mark: its caller listed its
+// uploads and found none, and no start of its own is under way.
+func (f *Filesystem) UnmarkUploads(ctx context.Context) error {
+	return f.store.EraseAll(ctx, f.uploadMark())
+}
+
+// UploadingFilesystems is the names of the store's filesystems that have
+// a mark (uploads in parts, or had them until their last sweep): one
+// listing of the marks, and the master block for the names.
+func UploadingFilesystems(ctx context.Context, store objstore.Store) (map[string]bool, error) {
+	ids := map[string]bool{}
+	err := objstore.ListEach(ctx, store, uploadMarks, func(page []objstore.Object) error {
+		for _, o := range page {
+			ids[strings.TrimPrefix(o.Key, uploadMarks)] = true
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	mb, _, err := readMaster(ctx, store)
+	if err != nil {
+		return nil, mapNotFound(err)
+	}
+	for i, e := range mb.Filesystems {
+		if e.Name != "" && ids[fsID(i)] {
+			out[e.Name] = true
+		}
+	}
+	return out, nil
 }
 
 // uploadClockSlack is how far before since UploadVersion looks: the
@@ -570,16 +690,30 @@ func (f *Filesystem) DropUploadParts(ctx context.Context, id string) error {
 // DropUploads erases every upload of the filesystem, every version: what
 // the filesystem's end (a fork deleted) leaves of them, as Prune does.
 func (f *Filesystem) DropUploads(ctx context.Context) error {
-	return f.store.EraseAll(ctx, f.uploadPrefix())
+	if err := f.store.EraseAll(ctx, f.uploadPrefix()); err != nil {
+		return err
+	}
+	return f.UnmarkUploads(ctx)
 }
 
 // DropUpload erases upload id: its record and parts, every version (the
-// bucket keeps versions: a delete would leave them).
+// bucket keeps versions: a delete would leave them). The parts first, the
+// notes next, the record last (T82-10 round 6, UP-16): EraseAll promises
+// no order, and an erase that fails partway must leave the record, so
+// that the upload is still there to be erased again (an abort sent again,
+// or its expiry), and a part sent meanwhile finds its part before it gone
+// (refused, ErrUploadOrder).
 func (f *Filesystem) DropUpload(ctx context.Context, id string) error {
 	if err := CheckUploadID(id); err != nil {
 		return err
 	}
-	return f.store.EraseAll(ctx, f.uploadDir(id))
+	dir := f.uploadDir(id)
+	for _, p := range []string{dir + "p", dir + "note-", dir} {
+		if err := f.store.EraseAll(ctx, p); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // UploadEntry is one upload ListUploads found: whether it has its record,

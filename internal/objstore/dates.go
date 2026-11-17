@@ -510,3 +510,8 @@ func (r *recording) PutParts(ctx context.Context, key string, parts []Part, meta
 	}
 	return obj, err
 }
+
+// AbortCopy passes the store's through (CopyAborter).
+func (r *recording) AbortCopy(ctx context.Context, key, id string) error {
+	return AbortCopy(ctx, r.Store, key, id)
+}

@@ -8,7 +8,9 @@
 # with the old "icbfs-part-000000" ids and with 8-byte ids) and
 # TestAzureConcurrent* (two writers of one blob) and, since round 5,
 # TestAzureCreateLeavesNothing (a create whose link is refused, and one
-# whose checksum is wrong, leave nothing under the key they minted).
+# whose checksum is wrong, leave nothing under the key they minted), and
+# since round 6 TestAzureUploadPartMemory (four 5 MiB parts at once: the
+# heap and resident set the SDK holds beyond the bodies, logged).
 #
 #   test/azure/run-uploads.sh [go test flags]
 #   ICBFS_TEST_AZURE_AUTH=login test/azure/run-uploads.sh [go test flags]

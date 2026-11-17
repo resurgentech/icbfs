@@ -132,6 +132,13 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 			Bucket: aws.String(s.bucket), Key: aws.String(s.k(key)), UploadId: up.UploadId,
 		})
 	}
+	// The caller keeps the id before the first piece (T82-10 round 6,
+	// AS-14): a process killed from here on leaves a copy only that id
+	// ends.
+	if err := objstore.CopyStarted(ctx, aws.ToString(up.UploadId)); err != nil {
+		abort()
+		return nil, fmt.Errorf("put parts %s: %w", key, err)
+	}
 
 	pctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -740,4 +747,23 @@ func s3Error(err error) error {
 		return fmt.Errorf("%w: %w", objstore.ErrPreconditionFailed, err)
 	}
 	return err
+}
+
+var _ objstore.CopyAborter = (*Store)(nil)
+
+// AbortCopy ends multipart upload id into key (objstore.CopyAborter: the
+// copy a PutParts killed mid-way left, T82-10 round 6). An id S3 no longer
+// has (NoSuchUpload, a 404: completed or aborted already) is not an
+// error. It lists nothing: Drives' IAM user may abort and may not list.
+func (s *Store) AbortCopy(ctx context.Context, key, id string) error {
+	_, err := s.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket: aws.String(s.bucket), Key: aws.String(s.k(key)), UploadId: aws.String(id),
+	})
+	if err = s3Error(err); objstore.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("abort copy %s into %s: %w", id, key, err)
+	}
+	return nil
 }

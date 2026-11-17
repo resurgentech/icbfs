@@ -47,6 +47,32 @@ type PartWriter interface {
 	// (DropUploadParts). Parts not as named (one missing, more, a size
 	// wrong) is ErrUploadParts, and nothing is written.
 	CompleteUpload(ctx context.Context, id, path string, parts int, cond Condition, opts WriteOptions) (Item, error)
+	// CompleteUploadWith is CompleteUpload with up: the time the caller
+	// accepted the complete, recorded on the version written (FindUpload's
+	// Newer), and Plan, told the file's key before a byte is written and
+	// the store's copy id once the store has made one (T82-10 round 6).
+	CompleteUploadWith(ctx context.Context, id, path string, parts int, cond Condition, opts WriteOptions, up UploadWrite) (Item, error)
+	// FindUpload is what an earlier write of upload id left under key
+	// (the key a Plan named; "" for the file at path now), looking at the
+	// versions dated since: the version it wrote, if any; whether a person
+	// has the file (at path, or since renamed, moved or deleted: in the
+	// trash); and whether an upload completed after completed wrote the
+	// file meanwhile. An error is "could not be searched", never "not
+	// there".
+	FindUpload(ctx context.Context, id, key, path string, since, completed time.Time) (UploadFind, error)
+	// EraseUnnamed erases every object under key, a new file's key that a
+	// Plan named and no name reaches (its write cut before its link). A
+	// key some name reaches is refused (ErrExists) and nothing is erased.
+	EraseUnnamed(ctx context.Context, key string) error
+	// AbortCopy ends the store's copy copyID into key (a Plan's Copy: on
+	// S3 a multipart upload), so its pieces are not kept: nothing to do on
+	// a store without one, and an id the store no longer has is not an
+	// error.
+	AbortCopy(ctx context.Context, key, copyID string) error
+	// UnmarkUploads erases the drive's filesystem's mark in its store's
+	// index of filesystems with uploads (UploadIndex): its caller listed
+	// its uploads, found none, and starts none meanwhile.
+	UnmarkUploads(ctx context.Context) error
 	// SetUploadNote keeps a note of the caller's beside upload id's record
 	// (a name of lowercase letters; at most 16 KiB), and UploadNote reads
 	// it back (ErrNotFound: none).
@@ -72,6 +98,50 @@ type PartWriter interface {
 	// Uploads calls fn with each upload of the drive's filesystem, a page
 	// of the store's listing at a time.
 	Uploads(ctx context.Context, fn func(UploadEntry) error) error
+}
+
+// UploadWrite is what CompleteUploadWith is given beyond CompleteUpload's.
+type UploadWrite struct {
+	// Completed is when the caller accepted the upload's complete: it is
+	// recorded on the version written, so a later look at the file
+	// (FindUpload) knows an upload completed after another wrote it.
+	Completed time.Time
+	// Plan, if not nil, is called with the file's key before the first
+	// byte is written (an existing file's key, or a new file's freshly
+	// made one: New), and again with Copy once the store has made a copy
+	// whose pieces outlive a process killed in it (S3's multipart upload;
+	// Azure has none). An error ends the write before anything more is
+	// written.
+	Plan func(ctx context.Context, p UploadPlan) error
+}
+
+// UploadPlan is what an upload's write names before it writes.
+type UploadPlan struct {
+	Key  string `json:"key,omitempty"`
+	New  bool   `json:"new,omitempty"`
+	Copy string `json:"copy,omitempty"`
+}
+
+// UploadFind is what FindUpload found.
+type UploadFind struct {
+	// Version is the version upload id wrote under the key, if any.
+	Version *Version
+	// Key is the key looked at (the one given, or the file at path's).
+	Key string
+	// AtPath: the key is the file at path now. Named: some name reaches
+	// it (at path, or elsewhere since a rename or move). Trashed: it was
+	// deleted, and is in the trash.
+	AtPath, Named, Trashed bool
+	// Newer: a version of the key dated since was written by an upload
+	// completed after the one asked about.
+	Newer bool
+}
+
+// UploadIndex is a drive that can say which filesystems of its store
+// have uploads in parts, in one listing (T82-10 round 6): a sweep reads
+// only those.
+type UploadIndex interface {
+	UploadingFilesystems(ctx context.Context) (map[string]bool, error)
 }
 
 // UploadState is what an upload has received: parts 1 to Parts, Size

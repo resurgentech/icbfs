@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
+	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/pkg/drive"
 )
 
@@ -82,6 +83,13 @@ func (d *Drive) UploadState(ctx context.Context, id string) (drive.UploadState, 
 }
 
 func (d *Drive) CompleteUpload(ctx context.Context, id, p string, parts int, cond drive.Condition, opts drive.WriteOptions) (drive.Item, error) {
+	return d.CompleteUploadWith(ctx, id, p, parts, cond, opts, drive.UploadWrite{})
+}
+
+// CompleteUploadWith is CompleteUpload with up (T82-10 round 6): the
+// complete's time recorded on the version, and up.Plan told the key before
+// the first byte and the store's copy id before the first piece.
+func (d *Drive) CompleteUploadWith(ctx context.Context, id, p string, parts int, cond drive.Condition, opts drive.WriteOptions, up drive.UploadWrite) (drive.Item, error) {
 	if err := d.uploadsWritable(ctx); err != nil {
 		return drive.Item{}, err
 	}
@@ -92,7 +100,110 @@ func (d *Drive) CompleteUpload(ctx context.Context, id, p string, parts int, con
 	if err != nil {
 		return drive.Item{}, uploadErr(err)
 	}
-	return d.write(ctx, p, writeSource{upload: &src}, cond, opts)
+	src.Completed = up.Completed
+	return d.write(ctx, p, writeSource{upload: &src, plan: up.Plan}, cond, opts)
+}
+
+// FindUpload is what an earlier write of upload id left under key, or
+// under the file at p's key when key is "" (drive.PartWriter). Where a
+// person has the file is asked in order of cost: p (one walk down), the
+// trash (three reads), then a lookup by the key as an id (the drive's
+// memory, then a search of its tree: the one rare case, a key written,
+// not found at p nor in the trash, costs a walk). An error at any step is
+// returned: "could not be searched", never "not there".
+func (d *Drive) FindUpload(ctx context.Context, id, key, p string, since, completed time.Time) (drive.UploadFind, error) {
+	var out drive.UploadFind
+	at, err := d.resolve(ctx, d.fs, drive.ByPath(p))
+	switch {
+	case err == nil && at.typ == icbfs.TypeFile:
+	case err == nil, errors.Is(mapErr(err), drive.ErrNotFound), errors.Is(mapErr(err), drive.ErrNotDir):
+		at = nil
+	default:
+		return out, mapErr(err)
+	}
+	if key == "" {
+		if at == nil {
+			return out, nil
+		}
+		key = at.key
+	}
+	out.Key = key
+	own, newer, err := d.fs.UploadVersions(ctx, key, id, since, completed)
+	if err != nil {
+		return out, uploadErr(err)
+	}
+	out.Newer = newer
+	if own != nil {
+		out.Version = &drive.Version{ID: own.VersionID, Size: own.Size, Stored: own.LastModified, Time: own.LastModified}
+	}
+	if at != nil && at.key == key {
+		out.AtPath, out.Named = true, true
+		return out, nil
+	}
+	if own == nil {
+		// Nothing of this upload's under the key: whether a name reaches it
+		// is not asked (its caller writes again, or erases a new key that
+		// holds nothing of it).
+		return out, nil
+	}
+	if _, err := d.fs.TrashedItem(ctx, key); err == nil {
+		out.Trashed = true
+		return out, nil
+	} else if !errors.Is(err, icbfs.ErrNotFound) {
+		return out, mapErr(err)
+	}
+	if _, err := d.resolve(ctx, d.fs, drive.ByID(key)); err == nil {
+		out.Named = true
+	} else if !errors.Is(mapErr(err), drive.ErrNotFound) {
+		return out, mapErr(err)
+	}
+	return out, nil
+}
+
+// EraseUnnamed erases every object under key, a new file's key whose
+// write was cut before its link (drive.PartWriter): refused (ErrExists)
+// if a name reaches it, or it is in the trash.
+func (d *Drive) EraseUnnamed(ctx context.Context, key string) error {
+	if d.cfg.ReadOnly {
+		return errDriveReadOnly
+	}
+	if _, err := d.fs.TrashedItem(ctx, key); err == nil {
+		return fmt.Errorf("%s is in the trash: %w", key, drive.ErrExists)
+	} else if !errors.Is(err, icbfs.ErrNotFound) {
+		return mapErr(err)
+	}
+	if _, err := d.resolve(ctx, d.fs, drive.ByID(key)); err == nil {
+		return fmt.Errorf("%s is named: %w", key, drive.ErrExists)
+	} else if !errors.Is(mapErr(err), drive.ErrNotFound) {
+		return mapErr(err)
+	}
+	return uploadErr(d.fs.EraseKey(ctx, key))
+}
+
+// AbortCopy ends the store's copy copyID into key (drive.PartWriter).
+func (d *Drive) AbortCopy(ctx context.Context, key, copyID string) error {
+	if d.cfg.ReadOnly {
+		return errDriveReadOnly
+	}
+	return mapErr(objstore.AbortCopy(ctx, d.fs.Store(), key, copyID))
+}
+
+var _ drive.UploadIndex = (*Drive)(nil)
+
+// UploadingFilesystems is the names of the store's filesystems with
+// uploads in parts (drive.UploadIndex): one listing of their marks.
+func (d *Drive) UploadingFilesystems(ctx context.Context) (map[string]bool, error) {
+	m, err := icbfs.UploadingFilesystems(ctx, d.fs.Store())
+	return m, mapErr(err)
+}
+
+// UnmarkUploads erases the mark that says the drive's filesystem has
+// uploads in parts (drive.UploadMarker): its caller found none.
+func (d *Drive) UnmarkUploads(ctx context.Context) error {
+	if d.cfg.ReadOnly {
+		return errDriveReadOnly
+	}
+	return mapErr(d.fs.UnmarkUploads(ctx))
 }
 
 func (d *Drive) CheckUploadParts(ctx context.Context, id string, count int) (int64, drive.Checksums, error) {

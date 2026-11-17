@@ -56,3 +56,9 @@ func (s r3Store) ListPages(ctx context.Context, prefix string, fn func([]objstor
 func (s r3Store) VersionsSince(ctx context.Context, key string, since time.Time) ([]objstore.Object, error) {
 	return objstore.VersionsSince(ctx, s.Store, key, since)
 }
+
+// AbortCopy passes the store's through (objstore.CopyAborter, T82-10
+// round 6).
+func (s r3Store) AbortCopy(ctx context.Context, key, id string) error {
+	return objstore.AbortCopy(ctx, s.Store, key, id)
+}

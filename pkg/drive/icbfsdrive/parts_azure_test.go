@@ -552,3 +552,18 @@ func TestAzureCreateLeavesNothing(t *testing.T) {
 		nothingUnder(t, st.key)
 	})
 }
+
+// TestAzureUploadPartMemory (T82-10 round 6, bound 2.5: "a part request:
+// 4 at once, 20 MiB, measured with the store client's own buffers"): four
+// parts of 5 MiB staged at once on a real account, three rounds; the
+// growth of the Go heap and of the resident set (the SDK's upload buffer
+// is outside the heap) beyond the 20 MiB of bodies is logged, and held
+// under 64 MiB. A named run (run-uploads.sh), not the everyday gate.
+func TestAzureUploadPartMemory(t *testing.T) {
+	az := azureForUploads(t)
+	d := newDrive(t, az.store, icbfs.Settings{Name: "azpartmem", Size: 1 << 30, RootMode: 0o755}, "/")
+	extra := partMemory(t, d, "azure")
+	if extra.rss > 64<<20 {
+		t.Fatalf("the Azure client held %d MiB of resident set beyond the four bodies", extra.rss>>20)
+	}
+}
