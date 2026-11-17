@@ -232,7 +232,7 @@ func (d *Drive) Restore(ctx context.Context, id string, opts drive.RestoreOption
 	}
 	if opts.To != "" {
 		// A new place takes a new name; where it was, its own name back.
-		if err := drive.CheckNewName(name); err != nil {
+		if err := drive.CheckName(ctx, name); err != nil {
 			return drive.Item{}, err
 		}
 	}

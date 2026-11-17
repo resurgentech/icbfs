@@ -139,3 +139,30 @@ func TestPathRuleNoEscape(t *testing.T) {
 		t.Fatalf("/B/contract.txt = %q", b)
 	}
 }
+
+// TestExistingNamesCopied: a write that copies names which already exist
+// (drive.WithExistingNames: a layer copied at a commit, a stash put
+// back) may make a name with a backslash; ".." and "" stay refused.
+func TestExistingNamesCopied(t *testing.T) {
+	store := miniotest.Store(t)
+	d := newDrive(t, store, icbfs.Settings{Name: "copied", Size: 1 << 30, RootMode: 0o777}, "")
+	ctx := drive.WithExistingNames(system())
+	if _, err := d.Write(ctx, `/c/old\dir/old\x.txt`, strings.NewReader("X"), drive.Condition{}, drive.WriteOptions{Parents: true}); err != nil {
+		t.Fatalf("copy of a backslash name: %v", err)
+	}
+	if got := read(t, ctx, d, drive.ByPath(`/c/old\dir/old\x.txt`), drive.At{}); got != "X" {
+		t.Fatalf("read = %q", got)
+	}
+	if _, err := d.Mkdir(ctx, `/c/m\n`, false); err != nil {
+		t.Fatalf("mkdir of a copied name: %v", err)
+	}
+	for _, p := range []string{"/c/../x", "/c//x"} {
+		if _, err := d.Write(ctx, p, strings.NewReader("X"), drive.Condition{}, drive.WriteOptions{Parents: true}); !errors.Is(err, drive.ErrInvalidName) {
+			t.Errorf("write %s: %v", p, err)
+		}
+	}
+	// Without it, a new backslash name is refused as before.
+	if _, err := d.Write(system(), `/c/new\y.txt`, strings.NewReader("Y"), drive.Condition{}, drive.WriteOptions{}); !errors.Is(err, drive.ErrInvalidName) {
+		t.Errorf("a new backslash name: %v", err)
+	}
+}

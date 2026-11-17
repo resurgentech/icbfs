@@ -1,6 +1,7 @@
 package drive
 
 import (
+	"context"
 	"fmt"
 	"strings"
 )
@@ -100,4 +101,25 @@ func Under(root, p string) bool {
 		return strings.HasPrefix(p, "/")
 	}
 	return p == root || strings.HasPrefix(p, root+"/")
+}
+
+type existingNamesKey struct{}
+
+// WithExistingNames is ctx for a write that copies names which already
+// exist: a working copy's layer copied into a commit's folder, a stash
+// put back, a file copied up from a layer below. The drive then holds
+// the names it makes to CheckPathName only, not CheckNewName, so a name
+// stored with a backslash before T82-14 (or by a POSIX mount) is never
+// lost or left blocking a copy of it. Only Go callers set it, for names
+// they read from a store; no request can (T82-14 review).
+func WithExistingNames(ctx context.Context) context.Context {
+	return context.WithValue(ctx, existingNamesKey{}, true)
+}
+
+// CheckName is CheckNewName, or CheckPathName under WithExistingNames.
+func CheckName(ctx context.Context, name string) error {
+	if v, _ := ctx.Value(existingNamesKey{}).(bool); v {
+		return CheckPathName(name)
+	}
+	return CheckNewName(name)
 }
