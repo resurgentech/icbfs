@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/resurgentech/icbfs/internal/syncer"
-	"github.com/resurgentech/icbfs/pkg/drive"
 )
 
 // TempPrefix starts the names of the files a download writes before
@@ -74,33 +73,8 @@ func (s *Side) Caps() syncer.Caps { return s.caps }
 
 // abs is the file p names under the root, or why p can't be one
 // (localPath): refused, so the sync reports that entry and goes on.
-//
-// Each name under the root that exists on disk is checked as it is
-// (Lstat): a symbolic link or a junction (a reparse point) is refused,
-// so nothing is read, written or removed through a link that may lead
-// out of the root (T82-14 review). List leaves links out already.
 func (s *Side) abs(p string) (string, error) {
-	root := filepath.Clean(s.root)
-	full, err := localPath(root, p, onWindows)
-	if err != nil || full == root {
-		return full, err
-	}
-	names, _ := drive.SplitPath(p)
-	cur := root
-	for _, n := range names {
-		cur = filepath.Join(cur, n)
-		fi, err := os.Lstat(cur)
-		if errors.Is(err, fs.ErrNotExist) {
-			break // nothing further down exists either
-		}
-		if err != nil {
-			return "", err
-		}
-		if fi.Mode()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
-			return "", fmt.Errorf("%q: %s is a link or a junction, not followed: %w", p, cur, drive.ErrInvalidName)
-		}
-	}
-	return full, nil
+	return localPath(filepath.Clean(s.root), p, onWindows)
 }
 
 func (s *Side) List(ctx context.Context) ([]syncer.Entry, error) {
