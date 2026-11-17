@@ -879,9 +879,19 @@ the filesystem's history goes:
   written as given, and then what should be current is put back on top: a
   file's current content and `.metadata` by a server-side copy, dated as
   they were (`restoreCurrent`; the `.metadata` references by ETag, the
-  mtime override and the checksums, follow the copy's ETag); a directory
-  by settling it: its states from that date on written once more, with
-  the change in each (`Filesystem.SettleDir`, below). In a filesystem
+  mtime override and the checksums, follow the copy's ETag). A change to
+  a directory's entries dated behind its latest state is taken only by a
+  drive whose caller settles late changes (`Config.DeferLateFolders`, a
+  mirror daemon), which reports it to the caller to settle later: the
+  directory's states from that date on written once more, with the change
+  in each (`Filesystem.SettleDir`, below). Any other drive (Drives, a
+  mount, `icbfs-cli`) refuses it before the directory is written, and
+  undoes what the change wrote before that (`drive.ErrLateChange`, an
+  `ErrInvalid`, whose message gives both dates and what to do instead:
+  no source time, one at or after the folder's newest state, or a mirror
+  that settles). Before T83-1 such a write rewrote the folder's later
+  states inside the write; that is gone, and is why a late write through
+  those drives now fails. In a filesystem
   written in a source's time,
   whose items list every version, a change dated no earlier than every
   version its item lists is current with nothing more to read; only one
@@ -906,28 +916,59 @@ the filesystem's history goes:
 `SettleFolder`). A directory's late changes are put into its past in one
 write-out of its states from the earliest change on, not a rewrite of its
 whole history per change. The state just before the earliest change and
-each later one are read (through the history cache, late and unlisted
-versions left out) into a working table in the history cache's SQLite
-file, as entry lifetimes; the changes are played into it by time (those
-of one time in the order given); the states from the first that differs
-from what the store has (known by sums of the states read) are written:
-every block below a root first, under new keys, then each state's
-`.metadata` and root block back to back, oldest first (the window, two
-requests a state, in which the present reads an earlier state), then the
-directory's `.version` once (the commit); then what they supersede is
-erased, and every block the present no longer reaches gets a deletion on
-top. From the window on a settle doesn't stop with its caller, and tries
-a failed request again before it gives up. A version the directory's
-`.version` doesn't list is never a state (an unfinished or superseded
-write), so the directory's present, to a settle, is its newest *listed*
-root: what it was before a cut write-out. A drive that defers
-(`Config.DeferLateFolders`) reports a write's late changes to its caller
-(`drive.WithLateChanges`) to settle later, once per folder; any other
-settles inside the write. A settle that gives up after it may have
-written is finished before the drive's next change, which is refused if
-it can't be; a caller settling again itself passes the cut settle's plan
-(`SettleOptions.Cut`), and what the cut settle wrote that nothing reaches
-goes.
+each later one are read (through the history cache, what is not a state
+left out: a version shadowed by a newer one dated alike, and a late one,
+stored after one dated later; a late version shadows nothing) into a
+working table in the history cache's SQLite file, as entry lifetimes;
+the changes are played into it by time (those of one time in the order
+given); the states from the first that differs from what the store has
+(known by sums of the states read) are written. Before anything is
+written the settle hands its caller a record (`SettleOptions.Record`):
+the versions of the directory's root block and `.metadata` that are its
+present (V0), the keys of the new blocks it will write below the root,
+and the old ones it may clear; it waits for the caller to have stored
+it, and an error stops it with nothing written. Then every block below a
+root, under new keys; then each state's `.metadata` and root block back
+to back, oldest first (the window, two requests a state, in which the
+present reads an earlier state); then the new versions dated in the
+directory's `.version` (the commit). Then, in this order: any root or
+`.metadata` version stored after V0 that is not one of the new states (a
+cut settle's, or one a lost answer left: a put tried again may have been
+made the first time) is erased; V0 itself (`.metadata`, then root); the
+blocks below the roots no state reaches any more (or a deletion on top);
+the other versions the new states supersede; the `.version` lines of
+what is gone; and the caller is told the record can go
+(`SettleOptions.Done`). From the window on a settle doesn't stop with its
+caller, and tries a failed request again before it gives up.
+
+Nothing about a settle under way is kept by the drive or in the store:
+the record is the caller's. A settle cut short is finished by settling
+again with its changes and the record (`SettleOptions.Cut`), in any
+process: while V0 is stored, nothing of the old states has been erased
+(V0 goes first), so every root and `.metadata` version stored after V0
+is the cut settle's whatever the `.version` lists, the present is V0,
+and the settle runs again from it; once V0 is gone the cut settle had
+committed, and the rerun reads the states as stored and does the erases
+left. Without a record every stored version is a state: an ordinary
+write with no source time (whose root block version no `.version` lists)
+is a state at the time it was stored. What makes the record sound is the
+caller's rule, not enforced: nothing but the settling caller writes into
+the folder from the record to Done (one worker a folder; a folder's
+queue settled before the folder is removed). A person writing into the
+folder by hand while a settle there is cut has that write undone by the
+rerun. A folder that is gone (trashed or purged) gets
+`drive.ErrFolderGone`, and nothing is written; the past of a trashed
+folder whose late change was never settled shows, at the late date, the
+folder's whole present then, and lacks the change from its next state
+on.
+
+Known, not fixed (T83-1 round 3): a late change that splits a block
+below a split folder's root rewrites the root dated at the change, and
+nothing in the root's own history is dated after it (the later states
+changed blocks below it), so the settle takes that root version for a
+state and reads old and new blocks together: it refuses the state (a
+name twice) and writes nothing (`TestLateWriteThatSplitsABlock`). The
+per-file repair before T83-1 failed the same way.
 
 Corrections, for a date the source got wrong, are the caller's:
 `DirHistory` / `ReplaceDirHistory` and `FileHistory` /

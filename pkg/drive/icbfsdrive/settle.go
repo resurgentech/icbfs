@@ -55,7 +55,7 @@ func (d *Drive) SettleFolder(ctx context.Context, changes []drive.LateChange, op
 	// (opts.Path, if given, is where it is looked for first); anyone but
 	// the library's own housekeeping needs its rights to write its
 	// history, as ReplaceFolderHistory does.
-	n, err := d.resolve(ctx, d.fs, drive.ItemRef{ID: folder, Path: opts.Path})
+	n, err := d.resolveToSettle(ctx, folder, opts.Path)
 	if err != nil {
 		return drive.Settled{}, err
 	}
@@ -91,19 +91,39 @@ func (d *Drive) SettleFolder(ctx context.Context, changes []drive.LateChange, op
 		}
 		dirChanges[i] = dc
 	}
-	var cut *icbfs.SettlePlan
-	if opts.Cut != nil {
-		cut = &icbfs.SettlePlan{From: opts.Cut.From, States: opts.Cut.States, Create: opts.Cut.Create,
-			RootBefore: opts.Cut.RootBefore, MetaBefore: opts.Cut.MetaBefore}
-		for _, v := range opts.Cut.Erase {
-			cut.Erase = append(cut.Erase, objstore.Object{Key: v.Key, VersionID: v.Version})
+	var cut *icbfs.SettleRecord
+	if c := opts.Cut; c != nil {
+		if c.Folder != "" && c.Folder != folder {
+			return drive.Settled{}, fmt.Errorf("the record of a settle of folder %s settling %s: %w", c.Folder, folder, drive.ErrInvalid)
 		}
+		cut = &icbfs.SettleRecord{Root: c.Root, Meta: c.Meta, Create: c.Create, Old: c.Old}
 	}
-	s, err := d.settleDir(ctx, folder, dirChanges, opts.Plan, cut, false)
+	s, err := d.settleDir(ctx, folder, dirChanges, opts.Record, opts.Done, cut)
 	if errors.Is(err, icbfs.ErrInvalidArgument) || errors.Is(err, icbfs.ErrExists) {
 		return s, fmt.Errorf("%w (%v)", drive.ErrInvalid, err)
 	}
 	return s, mapErr(err)
+}
+
+// resolveToSettle is the folder a settle is of: a directory under the
+// drive's root, looked for at path first. One that isn't found by a
+// search of the whole tree that read every directory is gone
+// (drive.ErrFolderGone): trashed or purged. A directory the search can't
+// read fails the settle, rather than take the folder for gone.
+func (d *Drive) resolveToSettle(ctx context.Context, folder, path string) (*node, error) {
+	n, err := d.resolve(ctx, d.fs, drive.ItemRef{ID: folder, Path: path})
+	if err == nil || !errors.Is(err, drive.ErrNotFound) {
+		return n, err
+	}
+	paths, err := d.searchPaths(ctx, d.fs, folder, 1, true)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("folder %s: %w", folder, drive.ErrFolderGone)
+	}
+	d.idPaths.put(folder, paths[0])
+	return d.resolvePath(ctx, d.fs, paths[0])
 }
 
 // lateChanges is changes as a write reports them: its changes to each
@@ -129,153 +149,51 @@ func lateChanges(changes []icbfs.DirChange) []drive.LateChange {
 
 // settling is the drive's settles, one at a time: each reads states
 // through one view filesystem and keeps its work in the history cache's
-// database. pending is the settles that gave up after they began to
-// write (or, for a write's own settle, at all): each is finished before
-// the drive's next change (begin), which is refused if it can't be.
+// database. Nothing of a settle is kept once it returns: the record of a
+// settle under way is its caller's (drive.SettleOptions.Record).
 type settling struct {
 	mu   sync.Mutex
 	view *swapStore
 	fsys *icbfs.Filesystem
-
-	pmu     sync.Mutex
-	pending map[string]*pendingSettle
-}
-
-// pendingSettle is a folder's settle that gave up: its changes, and its
-// plan if it got as far as one (what it may have written).
-type pendingSettle struct {
-	changes []icbfs.DirChange
-	cut     *icbfs.SettlePlan
-}
-
-// remember keeps a settle that gave up, with any of the folder's already
-// kept.
-func (s *settling) remember(dir string, changes []icbfs.DirChange, cut *icbfs.SettlePlan) {
-	s.pmu.Lock()
-	defer s.pmu.Unlock()
-	if s.pending == nil {
-		s.pending = map[string]*pendingSettle{}
-	}
-	p := s.pending[dir]
-	if p == nil {
-		p = &pendingSettle{}
-		s.pending[dir] = p
-	}
-	p.changes = mergeChanges(p.changes, changes)
-	p.cut = mergePlans(p.cut, cut)
-}
-
-// take is the folder's kept settle, which is no longer kept.
-func (s *settling) take(dir string) *pendingSettle {
-	s.pmu.Lock()
-	defer s.pmu.Unlock()
-	p := s.pending[dir]
-	delete(s.pending, dir)
-	return p
-}
-
-// finishPending settles every folder whose settle gave up, before the
-// drive changes anything else: a change into such a folder would build
-// on a present the cut left (a past state), and make it the present for
-// good.
-func (d *Drive) finishPending(ctx context.Context) error {
-	d.settle.pmu.Lock()
-	dirs := make([]string, 0, len(d.settle.pending))
-	for dir := range d.settle.pending {
-		dirs = append(dirs, dir)
-	}
-	d.settle.pmu.Unlock()
-	sort.Strings(dirs)
-	for _, dir := range dirs {
-		// settleDir takes the folder's kept settle in with it.
-		if _, err := d.settleDir(ctx, dir, nil, nil, nil, true); err != nil {
-			return fmt.Errorf("finishing the settle of folder %s that was cut: %w", dir, err)
-		}
-	}
-	return nil
-}
-
-// mergeChanges is a then b, without b's changes a already has.
-func mergeChanges(a, b []icbfs.DirChange) []icbfs.DirChange {
-	have := map[icbfs.DirChange]bool{}
-	for _, c := range a {
-		have[c] = true
-	}
-	out := append([]icbfs.DirChange(nil), a...)
-	for _, c := range b {
-		if !have[c] {
-			have[c] = true
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
-// mergePlans is what two cut settles' plans name together.
-func mergePlans(a, b *icbfs.SettlePlan) *icbfs.SettlePlan {
-	if a == nil {
-		return b
-	}
-	if b == nil {
-		return a
-	}
-	m := &icbfs.SettlePlan{From: a.From, States: max(a.States, b.States), RootBefore: a.RootBefore, MetaBefore: a.MetaBefore}
-	if b.From.Before(m.From) {
-		m.From = b.From
-	}
-	m.Create = append(append([]string(nil), a.Create...), b.Create...)
-	m.Erase = append(append([]objstore.Object(nil), a.Erase...), b.Erase...)
-	return m
 }
 
 // swapStore is the store of the settle's view filesystem: the view of
 // the state being read, swapped for each.
 type swapStore struct{ objstore.Store }
 
-// settleDir settles directory dirKey's changes (icbfs.SettleDir), with
-// any settle of it that gave up before, reading its states through the
-// drive's history cache, brought up to date first (what this drive
-// changed of the past forgotten, the past-changed mark looked at), with
-// late and unlisted versions left out. A drive with no Config.History
-// uses the temporary cache its views open (in Config.CacheDir), whose
-// database holds the working table as it holds the views' histories.
-// When it's done, the views forget the directory's keys and keep what
-// it wrote. If it gives up, it is kept to be finished before the drive's
-// next change (finishPending): always for a write's own settle (own),
-// whose changes nobody else holds; for a caller's (SettleFolder) once it
-// may have written, the caller holding the changes until then.
-func (d *Drive) settleDir(ctx context.Context, dirKey string, changes []icbfs.DirChange, plan func(drive.SettlePlan) error, cut *icbfs.SettlePlan, own bool) (drive.Settled, error) {
+// settleDir settles directory dirKey's changes (icbfs.SettleDir),
+// reading its states through the drive's history cache, brought up to
+// date first (what this drive changed of the past forgotten, the
+// past-changed mark looked at), with what is not a state left out. A
+// drive with no Config.History uses the temporary cache its views open
+// (in Config.CacheDir), whose database holds the working table as it
+// holds the views' histories. When it's done, the views forget the
+// directory's keys and keep what it wrote. record and done are the
+// caller's (drive.SettleOptions), cut the record of a cut settle.
+func (d *Drive) settleDir(ctx context.Context, dirKey string, changes []icbfs.DirChange, record, done func(drive.SettleRecord) error, cut *icbfs.SettleRecord) (drive.Settled, error) {
 	d.settle.mu.Lock()
 	defer d.settle.mu.Unlock()
-	if p := d.settle.take(dirKey); p != nil {
-		changes = mergeChanges(p.changes, changes)
-		cut = mergePlans(p.cut, cut)
-	}
 	if len(changes) == 0 {
 		return drive.Settled{}, nil
 	}
-	// Not a write's own: the settle forgets and keeps for itself.
 	ctx = withWrittenKeys(objstore.WithoutDeclaredTime(ctx), nil)
 	cache, err := d.views.fresh(ctx)
 	if err != nil {
-		if own {
-			d.settle.remember(dirKey, changes, cut)
-		}
 		return drive.Settled{}, err
 	}
 	tab, err := cache.SettleTable(ctx, dirKey)
 	if err != nil {
-		if own {
-			d.settle.remember(dirKey, changes, cut)
-		}
 		return drive.Settled{}, err
 	}
 	if d.settle.fsys == nil {
 		d.settle.view = &swapStore{}
 		d.settle.fsys = icbfs.New(d.settle.view, d.cfg.Filesystem)
 	}
-	withoutLate := cache.WithoutLate()
-	stateAt := func(ctx context.Context, t time.Time) ([]block.Entry, []string, error) {
+	var withoutLate *objstore.HistoryCache
+	stateAt := func(ctx context.Context, t time.Time, upTo map[string]string) ([]block.Entry, []string, error) {
+		if withoutLate == nil {
+			withoutLate = cache.WithoutLate(upTo)
+		}
 		asOf, err := objstore.NewAsOf(ctx, withoutLate, t)
 		if err != nil {
 			return nil, nil, err
@@ -286,38 +204,30 @@ func (d *Drive) settleDir(ctx context.Context, dirKey string, changes []icbfs.Di
 		}
 		return d.settle.fsys.ReadDirKeys(ctx, dirKey)
 	}
-	var planned *icbfs.SettlePlan
+	toDrive := func(r icbfs.SettleRecord) drive.SettleRecord {
+		return drive.SettleRecord{Folder: dirKey, Root: r.Root, Meta: r.Meta,
+			Create: append([]string(nil), r.Create...), Old: append([]string(nil), r.Old...)}
+	}
 	in := icbfs.SettleInput{
 		StateAt: stateAt,
 		History: cache.FreshHistory,
 		Table:   tab,
 		Cut:     cut,
-		Plan: func(p icbfs.SettlePlan) error {
-			if plan != nil {
-				dp := drive.SettlePlan{Folder: dirKey, From: p.From, States: p.States, Create: p.Create,
-					RootBefore: p.RootBefore, MetaBefore: p.MetaBefore, Erase: make([]drive.StoreVersion, len(p.Erase))}
-				for i, o := range p.Erase {
-					dp.Erase[i] = drive.StoreVersion{Key: o.Key, Version: o.VersionID}
-				}
-				if err := plan(dp); err != nil {
-					return err
-				}
-			}
-			planned = &p
-			return nil
-		},
 		Forget: func(ctx context.Context, keys []string) error {
 			d.views.forgetKeys(ctx, keys)
 			return nil
 		},
 		Keep: cache.Keep,
 	}
+	if record != nil {
+		in.Record = func(r icbfs.SettleRecord) error { return record(toDrive(r)) }
+	}
+	if done != nil {
+		in.Done = func(r icbfs.SettleRecord) error { return done(toDrive(r)) }
+	}
 	s, err := d.fs.SettleDir(ctx, dirKey, changes, in)
 	settled := drive.Settled{Read: s.Read, Written: s.Written, Erased: s.Erased}
 	if err != nil {
-		if own || planned != nil {
-			d.settle.remember(dirKey, changes, mergePlans(cut, planned))
-		}
 		// What it changed before it stopped isn't known here: views look
 		// again from scratch.
 		d.views.lookAgain()
@@ -329,16 +239,18 @@ func (d *Drive) settleDir(ctx context.Context, dirKey string, changes []icbfs.Di
 	return settled, nil
 }
 
-// settleLateFolders settles the directories that a change in a source's
+// reportLateFolders reports the directories that a change in a source's
 // time (recorded in rec and changes) changed behind their latest state:
 // a late entry. The block just written holds the directory as it is now,
 // with the change, but dated at the change's time: a view of then can't
 // reach it (the root block of a split directory points elsewhere) and a
-// view of later shows the blocks without it. So the directory's states
-// from the change on are written again with it (settleDir), or, on a
-// drive that defers late folders, the change goes to the context's
-// drive.LateChanges for the caller to settle (SettleFolder).
-func (d *Drive) settleLateFolders(ctx context.Context, rec *objstore.Recorder, restored map[string]bool, changes *icbfs.DirChanges) error {
+// view of later shows the blocks without it. The directory's states from
+// the change on must be written again with it (SettleFolder): on a drive
+// that defers late folders, the change goes to the context's
+// drive.LateChanges for the caller to settle. Anywhere else such a change
+// is refused before it is written (begin), and one found here was dated
+// behind by another writer meanwhile: an error.
+func (d *Drive) reportLateFolders(ctx context.Context, rec *objstore.Recorder, restored map[string]bool, changes *icbfs.DirChanges) error {
 	late := map[string]time.Time{}
 	for _, w := range rec.Written() {
 		if w.Dir == "" {
@@ -359,7 +271,6 @@ func (d *Drive) settleLateFolders(ctx context.Context, rec *objstore.Recorder, r
 	}
 	sort.Strings(dirs)
 	report := drive.LateChangesFrom(ctx)
-	ctx = objstore.WithoutDeclaredTime(ctx)
 	for _, dir := range dirs {
 		chs := changes.For(dir)
 		if len(chs) == 0 {
@@ -369,9 +280,17 @@ func (d *Drive) settleLateFolders(ctx context.Context, rec *objstore.Recorder, r
 			report.Add(lateChanges(chs)...)
 			continue
 		}
-		if _, err := d.settleDir(ctx, dir, chs, nil, nil, true); err != nil {
-			return fmt.Errorf("settle folder %s with a change at %s: %w", dir, late[dir].Format(time.RFC3339), err)
-		}
+		// Refused before it was written (icbfs.RefuseLateChanges), unless
+		// another writer dated the folder later in the meantime.
+		return fmt.Errorf("folder %s was dated after %s by another writer while this change was written; "+
+			"the change is in the folder now, and its past does not show it: %w",
+			dir, late[dir].Format(time.RFC3339Nano), drive.ErrLateChange)
 	}
 	return nil
+}
+
+// lateChangeErr is the drive's error for a late change refused before
+// it was written.
+func lateChangeErr(le *icbfs.LateChangeError) error {
+	return fmt.Errorf("%s: %w", le.Error(), drive.ErrLateChange)
 }

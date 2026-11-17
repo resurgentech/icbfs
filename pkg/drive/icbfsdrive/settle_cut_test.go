@@ -27,6 +27,7 @@ type failStore struct {
 	mu    sync.Mutex
 	armed bool
 	once  bool
+	lost  bool // the cut-th request is made, and its answer lost
 	cut   int
 	n     int
 	seq   []string
@@ -37,9 +38,22 @@ type failStore struct {
 
 var errFail = errors.New("the store is away")
 
+// errLost is a request's error when the request was made and its answer
+// lost (failStore.lost).
+var errLost = fmt.Errorf("the answer was lost: %w", errFail)
+
 func (s *failStore) arm(cut int, once bool) {
 	s.mu.Lock()
-	s.armed, s.cut, s.once, s.n, s.seq = true, cut, once, 0, nil
+	s.armed, s.cut, s.once, s.lost, s.n, s.seq = true, cut, once, false, 0, nil
+	s.mu.Unlock()
+}
+
+// armLost is arm (the store away from the cut-th request on), with the
+// cut-th request made and its answer lost.
+func (s *failStore) armLost(cut int) {
+	s.arm(cut, false)
+	s.mu.Lock()
+	s.lost = true
 	s.mu.Unlock()
 }
 
@@ -70,16 +84,23 @@ func (s *failStore) hit(op, key string) error {
 	s.n++
 	s.seq = append(s.seq, op+" "+key)
 	fail := s.n == s.cut || !s.once && s.cut > 0 && s.n > s.cut
+	lost := s.lost && s.n == s.cut
 	n := s.n
 	s.mu.Unlock()
 	if !fail {
 		return nil
+	}
+	if lost {
+		return fmt.Errorf("request %d (%s %s): %w", n, op, key, errLost)
 	}
 	return fmt.Errorf("request %d (%s %s): %w", n, op, key, errFail)
 }
 
 func (s *failStore) Put(ctx context.Context, key string, body io.Reader, md map[string]string, ifMatch string) (*objstore.Object, error) {
 	if err := s.hit("PUT", key); err != nil {
+		if errors.Is(err, errLost) {
+			s.Store.Put(ctx, key, body, md, ifMatch)
+		}
 		return nil, err
 	}
 	return s.Store.Put(ctx, key, body, md, ifMatch)
@@ -87,6 +108,9 @@ func (s *failStore) Put(ctx context.Context, key string, body io.Reader, md map[
 
 func (s *failStore) PutIfAbsent(ctx context.Context, key string, body io.Reader, md map[string]string) (*objstore.Object, error) {
 	if err := s.hit("PUT-absent", key); err != nil {
+		if errors.Is(err, errLost) {
+			s.Store.PutIfAbsent(ctx, key, body, md)
+		}
 		return nil, err
 	}
 	return s.Store.PutIfAbsent(ctx, key, body, md)
@@ -94,6 +118,9 @@ func (s *failStore) PutIfAbsent(ctx context.Context, key string, body io.Reader,
 
 func (s *failStore) PutParts(ctx context.Context, key string, parts []objstore.Part, md map[string]string, ifMatch string) (*objstore.Object, error) {
 	if err := s.hit("PUT-parts", key); err != nil {
+		if errors.Is(err, errLost) {
+			s.Store.PutParts(ctx, key, parts, md, ifMatch)
+		}
 		return nil, err
 	}
 	return s.Store.PutParts(ctx, key, parts, md, ifMatch)
@@ -136,6 +163,9 @@ func (s *failStore) HeadVersion(ctx context.Context, key, v string) (*objstore.O
 
 func (s *failStore) Delete(ctx context.Context, key string) error {
 	if err := s.hit("DELETE", key); err != nil {
+		if errors.Is(err, errLost) {
+			_ = s.Store.Delete(ctx, key)
+		}
 		return err
 	}
 	return s.Store.Delete(ctx, key)
@@ -143,6 +173,9 @@ func (s *failStore) Delete(ctx context.Context, key string) error {
 
 func (s *failStore) Undelete(ctx context.Context, key string) error {
 	if err := s.hit("UNDELETE", key); err != nil {
+		if errors.Is(err, errLost) {
+			_ = s.Store.Undelete(ctx, key)
+		}
 		return err
 	}
 	return s.Store.Undelete(ctx, key)
@@ -164,6 +197,9 @@ func (s *failStore) HistoryUnder(ctx context.Context, prefix string) ([]objstore
 
 func (s *failStore) Erase(ctx context.Context, key, v string) error {
 	if err := s.hit("ERASE", key); err != nil {
+		if errors.Is(err, errLost) {
+			_ = s.Store.Erase(ctx, key, v)
+		}
 		return err
 	}
 	return s.Store.Erase(ctx, key, v)
@@ -171,6 +207,9 @@ func (s *failStore) Erase(ctx context.Context, key, v string) error {
 
 func (s *failStore) EraseAll(ctx context.Context, prefix string) error {
 	if err := s.hit("ERASE-all", prefix); err != nil {
+		if errors.Is(err, errLost) {
+			_ = s.Store.EraseAll(ctx, prefix)
+		}
 		return err
 	}
 	return s.Store.EraseAll(ctx, prefix)
@@ -221,9 +260,11 @@ func pastIs(t *testing.T, d *Drive, want map[int]string) {
 	}
 }
 
-// settleLeftovers checks what a settle left in the store: no version of the
-// folder's root block or .metadata its .version doesn't list (a cut
-// write-out's, or one superseded and not erased), and, by fs.Check,
+// settleLeftovers checks what a settle left in the store: of the folder's
+// root block and .metadata, no version its .version doesn't list (a cut
+// write-out's, or one a lost answer left), none shadowed by a newer one
+// dated alike (one superseded and not erased) and none late: nothing
+// newer than the present before but the final states. And, by fs.Check,
 // nothing current that no name leads to but the .version records of
 // blocks only the past reads (as ReplaceDirHistory leaves them), at most
 // records of them.
@@ -244,6 +285,10 @@ func settleLeftovers(t *testing.T, d *Drive, folder string, records int) {
 			if _, ok := dates[o.VersionID]; !ok && !o.Deleted {
 				t.Errorf("%s: version %s (stored %s) isn't in the folder's .version: left behind", key, o.VersionID, o.LastModified.Format(time.RFC3339Nano))
 			}
+		}
+		shadowed, late := objstore.NotStates(h, dates)
+		if len(shadowed)+len(late) > 0 {
+			t.Errorf("%s: versions shadowed %v and late %v left behind", key, shadowed, late)
 		}
 	}
 	rep, err := d.fs.Check(ctx)
@@ -273,11 +318,58 @@ func settleLeftovers(t *testing.T, d *Drive, folder string, records int) {
 	}
 }
 
+// keeper keeps a settle's record as its caller does: from Record to Done.
+type keeper struct {
+	mu   sync.Mutex
+	rec  *drive.SettleRecord
+	done int
+	// fail, if set, is Record's error.
+	fail error
+}
+
+// opts is SettleOptions handing the record to k, with Cut the record k
+// holds (none if it holds none).
+func (k *keeper) opts() drive.SettleOptions {
+	k.mu.Lock()
+	cut := k.rec
+	k.mu.Unlock()
+	return drive.SettleOptions{
+		Cut: cut,
+		Record: func(r drive.SettleRecord) error {
+			k.mu.Lock()
+			defer k.mu.Unlock()
+			if k.fail != nil {
+				return k.fail
+			}
+			k.rec = &r
+			return nil
+		},
+		Done: func(drive.SettleRecord) error {
+			k.mu.Lock()
+			k.rec = nil
+			k.done++
+			k.mu.Unlock()
+			return nil
+		},
+	}
+}
+
+func (k *keeper) held() *drive.SettleRecord {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.rec
+}
+
+// cutCaseSettings is cutCase's filesystem.
+func cutCaseSettings(name string) icbfs.Settings {
+	return icbfs.Settings{Name: name, Size: 1 << 30, RootMode: 0o777, Created: year(2015)}
+}
+
 // cutCase is the review's folder: a@2020, b@2022, c@2024, and x written
 // at 2021, deferred.
 func cutCase(t *testing.T, store objstore.Store, name string, cfg Config) (*Drive, []drive.LateChange) {
 	t.Helper()
-	d := newDriveWith(t, store, icbfs.Settings{Name: name, Size: 1 << 30, RootMode: 0o777, Created: year(2015)}, cfg)
+	d := newDriveWith(t, store, cutCaseSettings(name), cfg)
 	ctx := system()
 	for _, w := range []struct {
 		y    int
@@ -304,16 +396,21 @@ var cutCaseAfter = map[int]string{
 	2025: "a.txt,b.txt,c.txt,d.txt,x.txt",
 }
 
-// TestSettleCutAtEveryRequest (review finding 1, and 8's cuts before the
-// window and in the erases): a settle given only a LateTouch at the late
-// write's time (what a crash's recovery queues: it names no entry) is
-// cut at each of its requests in turn (that request and every one after
-// fail). The caller settles again with the same touch and the cut
-// settle's plan, then writes into the folder on time. Whatever the cut,
-// the folder ends with the present it had before (x kept), x in the past
-// from 2021, the on-time write in place, no root or .metadata version
-// left unlisted, nothing current unreachable, and what the cut settle
-// created that nothing reaches gone.
+// TestSettleCutAtEveryRequest: a settle given only a LateTouch at the
+// late write's time (what a crash's recovery queues: it names no entry)
+// is cut at each of its requests in turn: in "cut", that request and
+// every one after fail; in "lost", that request is made and its answer
+// lost (the store took it; the settle saw an error), and every one after
+// fails. The caller settles again with the same touch and the record the
+// cut settle handed it (none if it was cut before it handed one out):
+// in "lost", and at every odd request in "cut", from a new Drive over the
+// same store with an empty history cache (the process restarted). Then
+// it writes into the folder on time. Whatever the cut, the folder ends
+// with the present it had before (x kept), x in the past from 2021, the
+// on-time write in place, nothing newer than the present before but the
+// final states (no root or .metadata version unlisted, shadowed or
+// late), nothing current unreachable, the cut settle's new blocks that
+// nothing reaches gone, and the record released (Done).
 func TestSettleCutAtEveryRequest(t *testing.T) {
 	if testing.Short() {
 		t.Skip("one folder per request of a settle")
@@ -326,10 +423,14 @@ func TestSettleCutAtEveryRequest(t *testing.T) {
 	folder := changes[0].Folder
 	touch := []drive.LateChange{{Folder: folder, At: changes[0].At, Op: drive.LateTouch}}
 	store.arm(0, false)
-	if _, err := d.SettleFolder(system(), touch, drive.SettleOptions{}); err != nil {
+	k := &keeper{}
+	if _, err := d.SettleFolder(system(), touch, k.opts()); err != nil {
 		t.Fatal(err)
 	}
 	total, seq := store.disarm()
+	if k.done != 1 || k.held() != nil {
+		t.Fatalf("an uncut settle: done %d times, record held %+v", k.done, k.held())
+	}
 	rep, err := d.fs.Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -337,54 +438,65 @@ func TestSettleCutAtEveryRequest(t *testing.T) {
 	records := rep.Unreachable
 	t.Logf("an uncut settle: %d requests, leaving %d .version records unreachable: %s", total, records, summarize(seq))
 
-	for cut := 1; cut <= total+1; cut++ {
-		t.Run(fmt.Sprintf("request %d of %d fails", cut, total), func(t *testing.T) {
-			d, changes := cutCase(t, store, fmt.Sprintf("cutall%d", cut), cfg)
-			folder := changes[0].Folder
-			touch := []drive.LateChange{{Folder: folder, At: changes[0].At, Op: drive.LateTouch}}
-			ctx := system()
-			before := liveNames(t, d, folder)
-			var plan *drive.SettlePlan
-			store.arm(cut, false)
-			_, err := d.SettleFolder(ctx, touch, drive.SettleOptions{Plan: func(p drive.SettlePlan) error { plan = &p; return nil }})
-			_, seq := store.disarm()
-			// (A cut while the folder is looked up reads as not found: the
-			// drive's search goes on past a folder it can't read.)
-			if cut <= total && err == nil {
-				t.Fatalf("cut at request %d (%s), and no error", cut, seq[len(seq)-1])
-			}
-			if cut > total && err != nil {
-				t.Fatalf("not cut: %v", err)
-			}
-			// The caller settles again, with the cut's plan if it had one.
-			if _, err := d.SettleFolder(ctx, touch, drive.SettleOptions{Cut: plan}); err != nil {
-				t.Fatalf("settled again: %v", err)
-			}
-			if got := liveNames(t, d, folder); got != before {
-				t.Fatalf("the folder now after the cut and again: %s, want %s as before", got, before)
-			}
-			if _, err := d.Write(at(ctx, 2025), "/dir/d.txt", strings.NewReader("d"), drive.Condition{}, drive.WriteOptions{}); err != nil {
-				t.Fatal(err)
-			}
-			if got := liveNames(t, d, folder); got != cutCaseAfter[2025] {
-				t.Errorf("the folder now after an on-time write: %s, want %s", got, cutCaseAfter[2025])
-			}
-			pastIs(t, d, cutCaseAfter)
-			settleLeftovers(t, d, folder, records)
-			if plan != nil {
-				for _, k := range plan.Create {
-					h, err := store.Store.History(context.Background(), k)
+	for _, mode := range []string{"cut", "lost"} {
+		for cut := 1; cut <= total+1; cut++ {
+			t.Run(fmt.Sprintf("%s at request %d of %d", mode, cut, total), func(t *testing.T) {
+				name := fmt.Sprintf("%s%d", mode, cut)
+				d, changes := cutCase(t, store, name, cfg)
+				folder := changes[0].Folder
+				touch := []drive.LateChange{{Folder: folder, At: changes[0].At, Op: drive.LateTouch}}
+				ctx := system()
+				before := liveNames(t, d, folder)
+				k := &keeper{}
+				if mode == "lost" {
+					store.armLost(cut)
+				} else {
+					store.arm(cut, false)
+				}
+				_, err := d.SettleFolder(ctx, touch, k.opts())
+				_, seq := store.disarm()
+				if cut <= total && err == nil {
+					t.Fatalf("cut at request %d (%s), and no error", cut, seq[len(seq)-1])
+				}
+				if cut > total && (err != nil || k.held() != nil) {
+					t.Fatalf("not cut: %v, record held %+v", err, k.held())
+				}
+				cutRec := k.held()
+				// The caller settles again, with the record it holds.
+				if mode == "lost" || cut%2 == 1 {
+					d = newDriveWith(t, store, cutCaseSettings(name), cfg)
+				}
+				if _, err := d.SettleFolder(ctx, touch, k.opts()); err != nil {
+					t.Fatalf("settled again (record %+v): %v", cutRec, err)
+				}
+				if k.held() != nil {
+					t.Errorf("settled again, and the record is held: %+v", k.held())
+				}
+				if got := liveNames(t, d, folder); got != before {
+					t.Fatalf("the folder now after the cut and again: %s, want %s as before", got, before)
+				}
+				settleLeftovers(t, d, folder, records)
+				if _, err := d.Write(at(ctx, 2025), "/dir/d.txt", strings.NewReader("d"), drive.Condition{}, drive.WriteOptions{}); err != nil {
+					t.Fatal(err)
+				}
+				if got := liveNames(t, d, folder); got != cutCaseAfter[2025] {
+					t.Errorf("the folder now after an on-time write: %s, want %s", got, cutCaseAfter[2025])
+				}
+				pastIs(t, d, cutCaseAfter)
+				settleLeftovers(t, d, folder, records)
+				if cutRec != nil {
+					rep, err := d.fs.Check(context.Background())
 					if err != nil {
 						t.Fatal(err)
 					}
-					if len(h) > 0 && !h[0].Deleted {
-						if rep, _ := d.fs.Check(context.Background()); slicesContain(rep.UnreachableListed, k) {
+					for _, k := range cutRec.Create {
+						if slicesContain(rep.UnreachableListed, k) {
 							t.Errorf("the cut settle's new block %s is left, unreachable", k)
 						}
 					}
 				}
-			}
-		})
+			})
+		}
 	}
 }
 
@@ -397,85 +509,11 @@ func slicesContain(list []string, s string) bool {
 	return false
 }
 
-// TestLateWriteCutThenOnTimeWrite (review finding 2): on a drive that
-// doesn't defer, a late write's own settle is cut at each of its
-// requests in turn; the write fails. The next write into the folder, on
-// time, lands on the present the folder had before the cut (b and c not
-// lost), the settle finished first; the past has x from 2021.
-func TestLateWriteCutThenOnTimeWrite(t *testing.T) {
-	if testing.Short() {
-		t.Skip("one folder per request of a settle")
-	}
-	store := &failStore{Store: miniotest.Store(t)}
-	setup := func(t *testing.T, name string) (*Drive, string) {
-		d := newDriveWith(t, store, icbfs.Settings{Name: name, Size: 1 << 30, RootMode: 0o777, Created: year(2015)}, Config{})
-		ctx := system()
-		for _, w := range []struct {
-			y    int
-			path string
-		}{{2020, "/dir/a.txt"}, {2022, "/dir/b.txt"}, {2024, "/dir/c.txt"}} {
-			if _, err := d.Write(at(ctx, w.y), w.path, strings.NewReader(w.path), drive.Condition{}, drive.WriteOptions{Parents: true}); err != nil {
-				t.Fatal(err)
-			}
-		}
-		dir, err := d.Stat(ctx, drive.ByPath("/dir"), drive.At{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return d, dir.ID
-	}
-	// The late write uncut: where its settle starts (its first listing of
-	// the folder's root block), and how many requests it makes.
-	d, folder := setup(t, "cutwrite0")
-	store.arm(0, false)
-	if _, err := d.Write(at(system(), 2021), "/dir/x.txt", strings.NewReader("x"), drive.Condition{}, drive.WriteOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	total, seq := store.disarm()
-	start := -1
-	for i, r := range seq {
-		if r == "HISTORY "+folder {
-			start = i + 1 // 1-based
-			break
-		}
-	}
-	if start < 0 {
-		t.Fatalf("the late write's settle never listed the folder: %v", seq)
-	}
-	rep, err := d.fs.Check(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	records := rep.Unreachable
-	t.Logf("a late write: %d requests, its settle from request %d", total, start)
-
-	for cut := start; cut <= total; cut++ {
-		t.Run(fmt.Sprintf("request %d of %d fails", cut, total), func(t *testing.T) {
-			d, folder := setup(t, fmt.Sprintf("cutwrite%d", cut))
-			ctx := system()
-			store.arm(cut, false)
-			_, err := d.Write(at(ctx, 2021), "/dir/x.txt", strings.NewReader("x"), drive.Condition{}, drive.WriteOptions{})
-			store.disarm()
-			if !errors.Is(err, errFail) {
-				t.Fatalf("a late write cut in its settle: %v", err)
-			}
-			if _, err := d.Write(at(ctx, 2025), "/dir/d.txt", strings.NewReader("d"), drive.Condition{}, drive.WriteOptions{}); err != nil {
-				t.Fatalf("the next write: %v", err)
-			}
-			if got := liveNames(t, d, folder); got != cutCaseAfter[2025] {
-				t.Errorf("the folder now: %s, want %s", got, cutCaseAfter[2025])
-			}
-			pastIs(t, d, cutCaseAfter)
-			settleLeftovers(t, d, folder, records)
-		})
-	}
-}
-
-// TestSettleOutlivesItsCaller (review finding 2): a late write whose
-// caller goes away inside its settle's window (its context canceled at
-// the window's first request), and one whose store fails the window's
-// first request once, both end with the folder settled: the present as
-// it was, the past with the change, the write done.
+// TestSettleOutlivesItsCaller: a settle whose caller goes away inside its
+// window (its context canceled at the window's first request), and one
+// whose store fails the window's first request once, both end with the
+// folder settled: the present as it was, the past with the change, the
+// settle's record released.
 func TestSettleOutlivesItsCaller(t *testing.T) {
 	store := &failStore{Store: miniotest.Store(t)}
 	for _, c := range []struct {
@@ -483,21 +521,9 @@ func TestSettleOutlivesItsCaller(t *testing.T) {
 		cancel bool
 	}{{"outlive", true}, {"retried", false}} {
 		t.Run(c.name, func(t *testing.T) {
-			d := newDriveWith(t, store, icbfs.Settings{Name: c.name, Size: 1 << 30, RootMode: 0o777, Created: year(2015)}, Config{})
-			sys := system()
-			for _, w := range []struct {
-				y    int
-				path string
-			}{{2020, "/dir/a.txt"}, {2022, "/dir/b.txt"}, {2024, "/dir/c.txt"}} {
-				if _, err := d.Write(at(sys, w.y), w.path, strings.NewReader(w.path), drive.Condition{}, drive.WriteOptions{Parents: true}); err != nil {
-					t.Fatal(err)
-				}
-			}
-			dir, err := d.Stat(sys, drive.ByPath("/dir"), drive.At{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			ctx, cancel := context.WithCancel(sys)
+			d, changes := cutCase(t, store, c.name, Config{DeferLateFolders: true})
+			folder := changes[0].Folder
+			ctx, cancel := context.WithCancel(system())
 			defer cancel()
 			// The window's first request: the settle's first write of the
 			// folder's .metadata, after its listing of the folder.
@@ -505,9 +531,9 @@ func TestSettleOutlivesItsCaller(t *testing.T) {
 			store.mu.Lock()
 			store.watch = func(op, key string) error {
 				switch {
-				case op == "HISTORY" && key == dir.ID:
+				case op == "HISTORY" && key == folder:
 					listed = true
-				case listed && !hit && op == "PUT" && key == dir.ID+".metadata":
+				case listed && !hit && op == "PUT" && key == folder+".metadata":
 					hit = true
 					if c.cancel {
 						cancel()
@@ -518,7 +544,8 @@ func TestSettleOutlivesItsCaller(t *testing.T) {
 				return nil
 			}
 			store.mu.Unlock()
-			_, err = d.Write(at(ctx, 2021), "/dir/x.txt", strings.NewReader("x"), drive.Condition{}, drive.WriteOptions{})
+			k := &keeper{}
+			_, err := d.SettleFolder(ctx, changes, k.opts())
 			store.mu.Lock()
 			store.watch = nil
 			store.mu.Unlock()
@@ -526,13 +553,16 @@ func TestSettleOutlivesItsCaller(t *testing.T) {
 				t.Fatalf("the settle's window never came")
 			}
 			if err != nil {
-				t.Fatalf("the late write: %v", err)
+				t.Fatalf("the settle: %v", err)
 			}
-			if got := liveNames(t, d, dir.ID); got != "a.txt,b.txt,c.txt,x.txt" {
+			if k.done != 1 || k.held() != nil {
+				t.Errorf("done %d, record held %+v", k.done, k.held())
+			}
+			if got := liveNames(t, d, folder); got != "a.txt,b.txt,c.txt,x.txt" {
 				t.Errorf("the folder now: %s", got)
 			}
 			pastIs(t, d, map[int]string{2020: "a.txt", 2021: "a.txt,x.txt", 2022: "a.txt,b.txt,x.txt", 2024: "a.txt,b.txt,c.txt,x.txt"})
-			settleLeftovers(t, d, dir.ID, 0)
+			settleLeftovers(t, d, folder, 0)
 		})
 	}
 }

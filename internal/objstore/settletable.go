@@ -456,32 +456,42 @@ func (t *SettleTable) Encoded(ctx context.Context, at time.Time) (root, meta []b
 // --- The history cache, for a settle and for the writer it serves ---
 
 // WithoutLate is a cache sharing c's database whose histories leave out
-// late versions: those stored after a version of the same key dated later
-// (by the item's .version table). A settle reads a directory's states
-// through it, so that a block a late write left (the directory as it is
-// now, dated at the change) isn't taken for the state at its date. It is
-// closed with c, never itself. It takes the store to stand still while
-// it's used: what it finds late in a key is found once.
-func (c *HistoryCache) WithoutLate() *HistoryCache {
+// what is not a state (NotStates): versions shadowed by a newer one dated
+// alike, and late versions, stored after a version of the same key dated
+// later (by the item's .version table). A settle reads a directory's
+// states through it, so that a block a late write left (the directory as
+// it is now, dated at the change) isn't taken for the state at its date.
+// upTo, if it names a key, leaves out that key's versions stored after
+// the version it names (a cut settle's, SettleDir's record). It is closed
+// with c, never itself. It takes the store to stand still while it's
+// used: what it leaves out of a key is found once.
+func (c *HistoryCache) WithoutLate(upTo map[string]string) *HistoryCache {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return &HistoryCache{store: c.store, db: c.db, ttl: c.ttl, offset: c.offset, offsetAt: c.offsetAt,
-		withoutLate: &lateFilter{late: map[string]map[string]bool{}}}
+		withoutLate: &lateFilter{late: map[string]map[string]bool{}, upTo: upTo}}
 }
 
-// lateFilter is a WithoutLate cache's: each key's late versions, by key.
+// lateFilter is a WithoutLate cache's: each key's versions left out, by
+// key, and the version after which a key's versions are left out.
 type lateFilter struct {
 	mu   sync.Mutex
 	late map[string]map[string]bool
+	upTo map[string]string
 }
 
-// dropLate is list without its late versions, nor (in a key whose table
-// lists any) its unlisted ones: neither is a state.
+// dropLate is list without what is not a state: versions stored after
+// the filter's upTo version of key, and NotStates.
 func (c *HistoryCache) dropLate(ctx context.Context, key string, list []Object, at time.Time) ([]Object, error) {
 	if len(list) == 0 {
 		return list, nil
 	}
 	f := c.withoutLate
+	if id, ok := f.upTo[key]; ok {
+		if i := VersionIndex(list, id); i > 0 {
+			list = list[i:]
+		}
+	}
 	f.mu.Lock()
 	late, ok := f.late[key]
 	f.mu.Unlock()
@@ -490,8 +500,9 @@ func (c *HistoryCache) dropLate(ctx context.Context, key string, list []Object, 
 		if err != nil {
 			return nil, err
 		}
-		late = LateVersions(Listed(list, dates), dates)
-		for id := range Unlisted(list, dates) {
+		shadowed, lateIDs := NotStates(list, dates)
+		late = lateIDs
+		for id := range shadowed {
 			late[id] = true
 		}
 		f.mu.Lock()
@@ -510,57 +521,62 @@ func (c *HistoryCache) dropLate(ctx context.Context, key string, list []Object, 
 	return out, nil
 }
 
-// Unlisted is the versions in history (deletions aside) that dates, if
-// it lists any, doesn't: in an item whose .version lists every version
-// written (DateAll), writes that never finished, or versions superseded
-// and not yet erased. With dates empty, none.
-func Unlisted(history []Object, dates Dates) map[string]bool {
-	out := map[string]bool{}
-	if len(dates) == 0 {
-		return out
-	}
-	for _, o := range history {
-		if _, ok := dates[o.VersionID]; !ok && !o.Deleted {
-			out[o.VersionID] = true
+// VersionIndex is the place of version id in history (newest stored
+// first), -1 if it isn't there: the versions before it were stored after
+// it.
+func VersionIndex(history []Object, id string) int {
+	for i := range history {
+		if history[i].VersionID == id {
+			return i
 		}
 	}
-	return out
+	return -1
 }
 
-// Listed is history without its Unlisted versions.
-func Listed(history []Object, dates Dates) []Object {
-	un := Unlisted(history, dates)
-	if len(un) == 0 {
-		return history
-	}
-	out := make([]Object, 0, len(history)-len(un))
-	for _, o := range history {
-		if !un[o.VersionID] {
-			out = append(out, o)
+// NotStates is what in history (newest stored first) is not a state of
+// the key, by dates: shadowed, the versions with a version stored after
+// them dated alike that is itself not late (a view takes the newest
+// stored of those); and late, of the rest, the versions stored after one
+// dated later, written behind their key's newest state. A late version
+// shadows nothing: the settled state at a late write's own date stays a
+// state. Deletions are neither.
+func NotStates(history []Object, dates Dates) (shadowed, late map[string]bool) {
+	late = map[string]bool{}
+	for {
+		shadowed = map[string]bool{}
+		newer := map[int64]bool{}
+		for i := range history {
+			o := &history[i]
+			if o.Deleted {
+				continue
+			}
+			t := dates.Time(o).UnixNano()
+			if newer[t] {
+				shadowed[o.VersionID] = true
+			}
+			if !late[o.VersionID] {
+				newer[t] = true
+			}
 		}
-	}
-	return out
-}
-
-// LateVersions is the versions in history (newest stored first) stored
-// after a version dated later than they are, by dates: written behind
-// their key's newest state. Deletions are neither.
-func LateVersions(history []Object, dates Dates) map[string]bool {
-	late := map[string]bool{}
-	var latest time.Time
-	for i := len(history) - 1; i >= 0; i-- {
-		o := &history[i]
-		if o.Deleted {
-			continue
+		next := map[string]bool{}
+		var latest time.Time
+		for i := len(history) - 1; i >= 0; i-- {
+			o := &history[i]
+			if o.Deleted || shadowed[o.VersionID] {
+				continue
+			}
+			t := dates.Time(o)
+			if t.Before(latest) {
+				next[o.VersionID] = true
+				continue
+			}
+			latest = t
 		}
-		t := dates.Time(o)
-		if t.Before(latest) {
-			late[o.VersionID] = true
-			continue
+		if len(next) == len(late) {
+			return shadowed, next
 		}
-		latest = t
+		late = next
 	}
-	return late
 }
 
 // currentDates is base's .version table as it is now, through the cache,

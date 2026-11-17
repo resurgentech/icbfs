@@ -293,10 +293,67 @@ func TestHistoryWithoutLate(t *testing.T) {
 	if got := pick(c); got != "late" {
 		t.Fatalf("a plain view at 25 picked %s, want late", got)
 	}
-	if got := pick(c.WithoutLate()); got != "v10" {
+	if got := pick(c.WithoutLate(nil)); got != "v10" {
 		t.Fatalf("a view without late versions at 25 picked %s, want v10", got)
 	}
 	if got := pick(c); got != "late" {
 		t.Fatalf("the plain cache after: %s, want late", got)
+	}
+	// Up to v10: v30 and late, stored after it, are left out; at 35 only
+	// v10 is there.
+	at = tm(35)
+	if got := pick(c.WithoutLate(map[string]string{"d": "v10"})); got != "v10" {
+		t.Fatalf("a view up to v10 at 35 picked %s, want v10", got)
+	}
+	if got := pick(c.WithoutLate(nil)); got != "v30" {
+		t.Fatalf("a view without late versions at 35 picked %s, want v30", got)
+	}
+}
+
+// TestNotStates: a version with a newer one dated alike is shadowed, and
+// lateness is judged without the shadowed: a settle's new states, stored
+// after the old ones they shadow, are not late; an undated version is
+// dated when it was stored, and is a state.
+func TestNotStates(t *testing.T) {
+	stored := time.Now().Add(-time.Hour)
+	at := func(s int) time.Time { return stored.Add(time.Duration(s) * time.Second) }
+	// Old states 10, 20, 30 stored in order; then a settle's new 15, 20,
+	// 30 (newest first in the list); then an undated version.
+	h := []Object{
+		{VersionID: "undated", LastModified: at(7)},
+		{VersionID: "n30", LastModified: at(6)},
+		{VersionID: "n20", LastModified: at(5)},
+		{VersionID: "n15", LastModified: at(4)},
+		{VersionID: "o30", LastModified: at(3)},
+		{VersionID: "o20", LastModified: at(2)},
+		{VersionID: "o10", LastModified: at(1)},
+	}
+	d := Dates{"o10": tm(10), "o20": tm(20), "o30": tm(30), "n15": tm(15), "n20": tm(20), "n30": tm(30)}
+	shadowed, late := NotStates(h, d)
+	if len(shadowed) != 2 || !shadowed["o20"] || !shadowed["o30"] {
+		t.Errorf("shadowed %v, want o20 and o30", shadowed)
+	}
+	if len(late) != 0 {
+		t.Errorf("late %v, want none", late)
+	}
+	// Before the new states: a late write's version, stored after o30.
+	h = []Object{{VersionID: "lw", LastModified: at(4)}, h[4], h[5], h[6]}
+	d["lw"] = tm(15)
+	if shadowed, late = NotStates(h, d); len(shadowed) != 0 || len(late) != 1 || !late["lw"] {
+		t.Errorf("shadowed %v late %v, want lw late", shadowed, late)
+	}
+	// A settled folder (s15, s20, s30), then a second late write at 15:
+	// its version shadows nothing (the settled state at 15 stays one), and
+	// it is late.
+	h = []Object{
+		{VersionID: "lw2", LastModified: at(9)},
+		{VersionID: "s30", LastModified: at(8)},
+		{VersionID: "s20", LastModified: at(7)},
+		{VersionID: "s15", LastModified: at(6)},
+		{VersionID: "o10", LastModified: at(1)},
+	}
+	d = Dates{"o10": tm(10), "s15": tm(15), "s20": tm(20), "s30": tm(30), "lw2": tm(15)}
+	if shadowed, late = NotStates(h, d); len(shadowed) != 0 || len(late) != 1 || !late["lw2"] {
+		t.Errorf("shadowed %v late %v, want lw2 late and nothing shadowed", shadowed, late)
 	}
 }

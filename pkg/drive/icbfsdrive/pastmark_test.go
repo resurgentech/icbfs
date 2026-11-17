@@ -16,7 +16,8 @@ import (
 // end, as one; closing the drive sends one still put off.
 func TestPastMarkedOncePerSecond(t *testing.T) {
 	store := &requestCounter{Store: miniotest.Store(t), n: map[string]int{}}
-	d := newDrive(t, store, icbfs.Settings{Name: "pastmark", Size: 1 << 30, RootMode: 0o777}, "")
+	// Its history from 2015: the 2021 writes into the root are on time.
+	d := newDrive(t, store, icbfs.Settings{Name: "pastmark", Size: 1 << 30, RootMode: 0o777, Created: year(2015)}, "")
 	ctx := system()
 	marks := func() int {
 		store.mu.Lock()

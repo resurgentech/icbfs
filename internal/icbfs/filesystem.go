@@ -926,6 +926,9 @@ func (f *Filesystem) insertEntry(ctx context.Context, rootKey, name, uuid string
 }
 
 func (f *Filesystem) tryInsert(ctx context.Context, rootKey, name, uuid string, typ EntryType) error {
+	if err := f.checkLate(ctx, rootKey); err != nil {
+		return err
+	}
 	path, err := f.descendForWrite(ctx, rootKey, name)
 	if err != nil {
 		return err
@@ -1096,6 +1099,9 @@ func (f *Filesystem) removeEntryIf(ctx context.Context, rootKey, name string, ch
 }
 
 func (f *Filesystem) tryRemove(ctx context.Context, rootKey, name string, check func(block.Entry) error) (block.Entry, error) {
+	if err := f.checkLate(ctx, rootKey); err != nil {
+		return block.Entry{}, err
+	}
 	path, err := f.descendForWrite(ctx, rootKey, name)
 	if err != nil {
 		return block.Entry{}, err

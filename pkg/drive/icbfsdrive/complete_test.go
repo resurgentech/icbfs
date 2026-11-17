@@ -98,7 +98,7 @@ func TestEveryVersionDated(t *testing.T) {
 // second: a write's own description of itself has no finer).
 func TestFirstDatesListEarlier(t *testing.T) {
 	store := miniotest.Store(t)
-	d := newDrive(t, store, icbfs.Settings{Name: "earlier", Size: 1 << 30, RootMode: 0o777}, "")
+	d := newDriveWith(t, store, icbfs.Settings{Name: "earlier", Size: 1 << 30, RootMode: 0o777}, Config{DeferLateFolders: true})
 	ctx := system()
 	var old drive.Item
 	for _, content := range []string{"a", "b"} {
@@ -107,9 +107,9 @@ func TestFirstDatesListEarlier(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := d.Write(at(ctx, 2021), "/other.txt", strings.NewReader("x"), drive.Condition{}, drive.WriteOptions{}); err != nil {
-		t.Fatal(err)
-	}
+	// Late in the root folder (written undated just now): reported and
+	// settled, on a drive that defers.
+	putSettled(t, d, ctx, 2021, "/other.txt", "x")
 	if !d.fs.SourceTime() {
 		t.Fatal("a change in a source's time didn't mark the filesystem")
 	}

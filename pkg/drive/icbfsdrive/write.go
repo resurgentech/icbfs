@@ -917,11 +917,6 @@ func (d *Drive) begin(ctx context.Context) (context.Context, func(*error), error
 	if d.fs.Archived() {
 		return ctx, nil, fmt.Errorf("the filesystem is archived: %w", drive.ErrReadOnly)
 	}
-	// A folder whose settle gave up is as of a past state now: settled
-	// before anything else is written, or nothing is.
-	if err := d.finishPending(ctx); err != nil {
-		return ctx, nil, mapErr(err)
-	}
 	t, ok := drive.SourceTime(ctx)
 	if !ok {
 		return ctx, func(*error) {}, nil
@@ -939,8 +934,21 @@ func (d *Drive) begin(ctx context.Context) (context.Context, func(*error), error
 	written := &writtenKeys{}
 	ctx = objstore.WithRecorder(objstore.WithDeclaredTime(ctx, t), rec)
 	ctx = withWrittenKeys(icbfs.WithDirChanges(ctx, changes), written)
+	// Only a caller that settles late changes (a deferring drive's, with
+	// somewhere to report them) may make one; anyone else's is refused
+	// before the folder is written, and what the change wrote before that
+	// (a new file's content) is undone.
+	if !d.cfg.DeferLateFolders || drive.LateChangesFrom(ctx) == nil {
+		ctx = icbfs.RefuseLateChanges(ctx)
+	}
 	return ctx, func(errp *error) {
-		if err := d.finishDated(ctx, rec, changes); err != nil && *errp == nil {
+		var refused *icbfs.LateChangeError
+		if *errp != nil && (errors.As(*errp, &refused) || errors.Is(*errp, drive.ErrLateChange)) {
+			d.undoRefused(ctx, rec)
+			if refused != nil && !errors.Is(*errp, drive.ErrLateChange) {
+				*errp = lateChangeErr(refused)
+			}
+		} else if err := d.finishDated(ctx, rec, changes); err != nil && *errp == nil {
 			*errp = err
 		}
 		d.past.changed(ctx)
@@ -955,9 +963,8 @@ const datingTries = 3
 
 // finishDated dates what a change in a source's time wrote, and puts
 // right anything written behind its item's current state: the item's
-// current version back on top, and a directory's states from then on
-// settled with the change (settleLateFolders), or the change reported
-// for the caller to settle. Both are part of the change: one whose
+// current version back on top, and a directory changed behind its newest
+// state reported for the caller to settle (reportLateFolders). Both are part of the change: one whose
 // writes can't be dated is undone, each version it wrote that is still
 // its key's newest erased, and fails. Undated, a version would be taken
 // for a write that never finished.
@@ -973,7 +980,7 @@ func (d *Drive) finishDated(ctx context.Context, rec *objstore.Recorder, changes
 		d.undo(ctx, rec)
 		return fmt.Errorf("the change is undone: dating what it wrote: %w", err)
 	}
-	return d.settleLateFolders(ctx, rec, restored, changes)
+	return d.reportLateFolders(ctx, rec, restored, changes)
 }
 
 // undo erases what rec recorded written, newest first, where it's still
@@ -987,6 +994,23 @@ func (d *Drive) undo(ctx context.Context, rec *objstore.Recorder) {
 			_ = d.fs.Store().Erase(ctx, w.Key, w.VersionID)
 		}
 	}
+}
+
+// undoRefused undoes a change refused as late (icbfs.LateChangeError)
+// after it wrote something: an item the change made (a new file's
+// content and .metadata, and whatever its own failure left of it, a
+// deletion on top or a .version record) goes whole; any other version it
+// wrote goes as undo has it.
+func (d *Drive) undoRefused(ctx context.Context, rec *objstore.Recorder) {
+	ctx = context.WithoutCancel(objstore.WithoutDeclaredTime(ctx))
+	made := map[string]bool{}
+	for _, w := range rec.Written() {
+		if base := objstore.BaseKey(w.Key); rec.IsNew(base) && !made[base] {
+			made[base] = true
+			_ = d.fs.Store().EraseAll(ctx, base) // its companions share its key as prefix
+		}
+	}
+	d.undo(ctx, rec)
 }
 
 // maxSourceTimeAhead is how far past this machine's clock a source time

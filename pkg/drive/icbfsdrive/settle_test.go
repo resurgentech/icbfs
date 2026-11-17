@@ -47,7 +47,7 @@ func midYear(y int) time.Time { return year(y).AddDate(0, 6, 0) }
 // the folder's past as it was; SettleFolder then puts each change into
 // the past at its time and after, the present the same throughout; the
 // same changes settled again write nothing. A late write with no
-// LateChanges in its context settles at once.
+// LateChanges in its context is refused (nowhere to report it).
 func TestDeferredLateFolder(t *testing.T) {
 	counter := &requestCounter{Store: miniotest.Store(t), n: map[string]int{}}
 	d := newDriveWith(t, counter, icbfs.Settings{Name: "deferred", Size: 1 << 30, RootMode: 0o777, Created: year(2015)}, Config{DeferLateFolders: true})
@@ -175,71 +175,92 @@ func TestDeferredLateFolder(t *testing.T) {
 		t.Errorf("no changes: %+v %v", s, err)
 	}
 
-	// Deferring, but no LateChanges to report to: settled at once.
-	if _, err := d.Write(at(ctx, 2021), "/dir/y.txt", strings.NewReader("y"), drive.Condition{}, drive.WriteOptions{}); err != nil {
-		t.Fatal(err)
+	// Deferring, but no LateChanges to report to: refused.
+	if _, err := d.Write(at(ctx, 2021), "/dir/y.txt", strings.NewReader("y"), drive.Condition{}, drive.WriteOptions{}); !errors.Is(err, drive.ErrLateChange) {
+		t.Errorf("a late write with nowhere to report it: %v, want ErrLateChange", err)
 	}
-	if got := listed(midYear(2022)); got != "a.txt,b.txt,x.txt,y.txt" {
-		t.Errorf("/dir as of mid-2022 after a late write with nowhere to report it: %s, want y.txt in it at once", got)
+	if got := live(); got != present {
+		t.Errorf("/dir now after a refused late write: %s, want %s", got, present)
 	}
 }
 
-// TestSettlePlan: a settle tells its Plan what it will create and erase
-// before it writes, and an error from the Plan stops it with nothing
-// written.
-func TestSettlePlan(t *testing.T) {
+// TestSettleRecord: a settle hands its caller its record before it
+// writes anything (the folder, the versions of its root block and
+// .metadata that are its present, the new blocks' keys, the old blocks
+// it may clear), and an error from Record stops it with nothing written;
+// a settle that goes through tells Done the record it handed out, once;
+// one that has nothing to do hands out none.
+func TestSettleRecord(t *testing.T) {
 	counter := &requestCounter{Store: miniotest.Store(t), n: map[string]int{}}
-	d := newDriveWith(t, counter, icbfs.Settings{Name: "settleplan", Size: 1 << 30, RootMode: 0o777, Created: year(2015)}, Config{DeferLateFolders: true})
+	d, changes := splitCase(t, counter, "settlerecord", Config{DeferLateFolders: true})
 	ctx := system()
-	for _, w := range []struct {
-		y    int
-		path string
-	}{{2020, "/dir/a.txt"}, {2022, "/dir/b.txt"}} {
-		if _, err := d.Write(at(ctx, w.y), w.path, strings.NewReader(w.path), drive.Condition{}, drive.WriteOptions{Parents: true}); err != nil {
-			t.Fatal(err)
+	folder := changes[0].Folder
+	newest := func(key string) string {
+		h, err := counter.Store.History(context.Background(), key)
+		if err != nil || len(h) == 0 {
+			t.Fatalf("history of %s: %v", key, err)
 		}
+		return h[0].VersionID
 	}
-	late := &drive.LateChanges{}
-	if _, err := d.Write(at(drive.WithLateChanges(ctx, late), 2021), "/dir/x.txt", strings.NewReader("x"), drive.Condition{}, drive.WriteOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	changes := late.Take()
+	root, meta := newest(folder), newest(folder+".metadata")
 	writesSince(counter)
-	stop := errStopPlan
-	var seen drive.SettlePlan
-	_, err := d.SettleFolder(ctx, changes, drive.SettleOptions{Plan: func(p drive.SettlePlan) error { seen = p; return stop }})
-	if err == nil || !strings.Contains(err.Error(), stop.Error()) {
-		t.Fatalf("a plan refused: %v", err)
+	var seen drive.SettleRecord
+	_, err := d.SettleFolder(ctx, changes, drive.SettleOptions{Record: func(r drive.SettleRecord) error { seen = r; return errStopPlan }})
+	if err == nil || !strings.Contains(err.Error(), errStopPlan.Error()) {
+		t.Fatalf("a record refused: %v", err)
 	}
 	if n, all := writesSince(counter); n != 0 {
-		t.Fatalf("a plan refused, and %d writes:%s", n, all)
+		t.Fatalf("a record refused, and %d writes:%s", n, all)
 	}
-	if seen.Folder != changes[0].Folder || seen.States != 2 || len(seen.Erase) == 0 || seen.RootBefore == "" || seen.MetaBefore == "" || !seen.From.Equal(year(2020)) {
-		t.Fatalf("plan %+v", seen)
+	if seen.Folder != folder || seen.Root != root || seen.Meta != meta || len(seen.Create) == 0 || len(seen.Old) == 0 {
+		t.Fatalf("record %+v, want folder %s, root %s, meta %s, new and old blocks", seen, folder, root, meta)
 	}
-	var planned drive.SettlePlan
-	s, err := d.SettleFolder(ctx, changes, drive.SettleOptions{Plan: func(p drive.SettlePlan) error { planned = p; return nil }})
+	var recorded, done []drive.SettleRecord
+	opts := drive.SettleOptions{
+		Record: func(r drive.SettleRecord) error { recorded = append(recorded, r); return nil },
+		Done:   func(r drive.SettleRecord) error { done = append(done, r); return nil },
+	}
+	s, err := d.SettleFolder(ctx, changes, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Written != planned.States || s.Erased != len(planned.Erase) {
-		t.Fatalf("settled %+v, planned %+v", s, planned)
+	if len(recorded) != 1 || len(done) != 1 || recorded[0].Root != done[0].Root || len(recorded[0].Create) != len(done[0].Create) {
+		t.Fatalf("recorded %+v, done %+v", recorded, done)
 	}
-	if got := names(t, d, "/dir", midYear(2021)); got != "a.txt,x.txt" {
+	if s.Written == 0 {
+		t.Fatalf("settled %+v", s)
+	}
+	if got := sortedAt(t, d, "/dir", midYear(2021)); got != "fa.txt,fb.txt,fc.txt,fd.txt,fe.txt,late.txt" {
 		t.Fatalf("/dir as of mid-2021: %s", got)
+	}
+	// Settled already: no record, nothing done.
+	recorded, done = nil, nil
+	if _, err := d.SettleFolder(ctx, changes, opts); err != nil || len(recorded)+len(done) != 0 {
+		t.Fatalf("settled again: %v, recorded %+v, done %+v", err, recorded, done)
 	}
 }
 
-var errStopPlan = errString("the plan says no")
+var errStopPlan = errString("the caller can't keep the record")
 
 type errString string
 
 func (e errString) Error() string { return string(e) }
 
-// TestLateWriteSettlesAtOnce: without DeferLateFolders, a late write
-// settles its folder inside the write, through the settle (SettleDir),
-// and the past is right as soon as it returns.
-func TestLateWriteSettlesAtOnce(t *testing.T) {
+// lateChangeText is the refusal of TestLateWriteRefused's late write, as
+// a person reads it.
+const lateChangeText = "the change is dated 2021-01-01T00:00:00Z, behind the newest state of folder %s (dated 2022-01-01T00:00:00Z): " +
+	"this drive does not rewrite a folder's past, so nothing was written; " +
+	"write it with no source time, or one at or after the folder's newest state, " +
+	"or through a mirror that defers and settles late changes: invalid request"
+
+// TestLateWriteRefused: a drive that doesn't defer late folders (Drives,
+// a mount, icbfs-cli) refuses a write dated behind its folder's newest
+// state, with an error that says the dates and what to do instead, and
+// writes nothing: the store's objects and versions are as they were, the
+// folder's present and past too, and nothing is settled. So are a late
+// delete and a late move into the folder; a write on time, or with no
+// source time, goes through.
+func TestLateWriteRefused(t *testing.T) {
 	var mu sync.Mutex
 	var settled []string
 	onSettle = func(dir string, s drive.Settled) {
@@ -248,34 +269,68 @@ func TestLateWriteSettlesAtOnce(t *testing.T) {
 		mu.Unlock()
 	}
 	t.Cleanup(func() { onSettle = nil })
-	d, _ := sourceDrive(t, "atonce")
+	d, store := sourceDrive(t, "refused")
 	ctx := system()
 	for _, w := range []struct {
 		y    int
 		path string
-	}{{2020, "/dir/a.txt"}, {2022, "/dir/b.txt"}} {
-		if _, err := d.Write(at(ctx, w.y), w.path, strings.NewReader(w.path), drive.Condition{}, drive.WriteOptions{Parents: true}); err != nil {
+	}{{2020, "/dir/a.txt"}, {2022, "/dir/b.txt"}, {2020, "/other/o.txt"}} {
+		writeAt(t, d, ctx, w.y, w.path)
+	}
+	folder := folderID(t, d, "/dir")
+	snapshot := func() string {
+		t.Helper()
+		objs, err := store.HistoryUnder(context.Background(), "")
+		if err != nil {
 			t.Fatal(err)
 		}
+		var lines []string
+		for _, o := range objs {
+			if strings.HasSuffix(o.Key, "-past") {
+				continue // the past-changed mark: the drive's own clock
+			}
+			lines = append(lines, fmt.Sprintf("%s %s %v", o.Key, o.VersionID, o.Deleted))
+		}
+		sort.Strings(lines)
+		return strings.Join(lines, "\n")
 	}
-	dir, err := d.Stat(ctx, drive.ByPath("/dir"), drive.At{})
-	if err != nil {
-		t.Fatal(err)
+	before := snapshot()
+	_, err := d.Write(at(ctx, 2021), "/dir/x.txt", strings.NewReader("x"), drive.Condition{}, drive.WriteOptions{})
+	if !errors.Is(err, drive.ErrLateChange) || !errors.Is(err, drive.ErrInvalid) {
+		t.Fatalf("a late write: %v, want ErrLateChange", err)
 	}
-	if _, err := d.Write(drive.WithLateChanges(at(ctx, 2021), &drive.LateChanges{}), "/dir/x.txt", strings.NewReader("x"), drive.Condition{}, drive.WriteOptions{}); err != nil {
-		t.Fatal(err)
+	if want := fmt.Sprintf(lateChangeText, folder); err.Error() != want {
+		t.Errorf("the refusal reads:\n%s\nwant:\n%s", err, want)
 	}
+	if err := d.Delete(at(ctx, 2021), drive.ByPath("/dir/a.txt"), false, drive.Condition{}); !errors.Is(err, drive.ErrLateChange) {
+		t.Errorf("a late delete: %v, want ErrLateChange", err)
+	}
+	if _, err := d.Move(at(ctx, 2021), drive.ByPath("/other/o.txt"), "/dir/o.txt", false); !errors.Is(err, drive.ErrLateChange) {
+		t.Errorf("a late move into the folder: %v, want ErrLateChange", err)
+	}
+	if after := snapshot(); after != before {
+		t.Errorf("refused late changes wrote to the store:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+	if got := liveNames(t, d, folder); got != "a.txt,b.txt" {
+		t.Errorf("/dir now: %s", got)
+	}
+	if got := sortedAt(t, d, "/other", time.Time{}); got != "o.txt" {
+		t.Errorf("/other now: %s", got)
+	}
+	pastIs(t, d, map[int]string{2020: "a.txt", 2021: "a.txt", 2022: "a.txt,b.txt"})
 	mu.Lock()
-	got := strings.Join(settled, ",")
+	n := len(settled)
 	mu.Unlock()
-	if got != dir.ID {
-		t.Fatalf("settled %q inside the write, want the folder %s once", got, dir.ID)
+	if n != 0 {
+		t.Errorf("settled %v", settled)
 	}
-	if got := names(t, d, "/dir", midYear(2021)); got != "a.txt,x.txt" {
-		t.Fatalf("/dir as of mid-2021 right after the write: %s", got)
+	// On time, and with no source time: written.
+	writeAt(t, d, ctx, 2023, "/dir/c.txt")
+	if _, err := d.Write(ctx, "/dir/u.txt", strings.NewReader("u"), drive.Condition{}, drive.WriteOptions{}); err != nil {
+		t.Fatal(err)
 	}
-	if got := names(t, d, "/dir", midYear(2022)); got != "a.txt,b.txt,x.txt" {
-		t.Fatalf("/dir as of mid-2022 right after the write: %s", got)
+	if got := liveNames(t, d, folder); got != "a.txt,b.txt,c.txt,u.txt" {
+		t.Errorf("/dir now: %s", got)
 	}
 }
 
@@ -376,8 +431,8 @@ func (s *cutStore) Put(ctx context.Context, key string, body io.Reader, md map[s
 // TestSettleCutThenAgain: a settle cut inside its window (its first,
 // second or third request there fails, and every one after) leaves the
 // folder's present a state of the write-out at worst, and the same
-// changes settled again put everything right: the present as it was,
-// each change in the past.
+// changes settled again with the record the cut settle handed out put
+// everything right: the present as it was, each change in the past.
 func TestSettleCutThenAgain(t *testing.T) {
 	for cut := 1; cut <= 3; cut++ {
 		t.Run(fmt.Sprintf("request %d fails", cut), func(t *testing.T) {
@@ -403,13 +458,17 @@ func TestSettleCutThenAgain(t *testing.T) {
 			store.mu.Lock()
 			store.folder, store.cut = changes[0].Folder, cut
 			store.mu.Unlock()
-			if _, err := d.SettleFolder(ctx, changes, drive.SettleOptions{}); err == nil || !strings.Contains(err.Error(), errCut.Error()) {
+			k := &keeper{}
+			if _, err := d.SettleFolder(ctx, changes, k.opts()); err == nil || !strings.Contains(err.Error(), errCut.Error()) {
 				t.Fatalf("a cut settle: %v", err)
 			}
 			store.mu.Lock()
 			store.folder = ""
 			store.mu.Unlock()
-			if _, err := d.SettleFolder(ctx, changes, drive.SettleOptions{}); err != nil {
+			if k.held() == nil {
+				t.Fatalf("a settle cut in its window holds no record")
+			}
+			if _, err := d.SettleFolder(ctx, changes, k.opts()); err != nil {
 				t.Fatalf("settled again: %v", err)
 			}
 			entries, err := d.fs.ReadDir(ctx, changes[0].Folder)

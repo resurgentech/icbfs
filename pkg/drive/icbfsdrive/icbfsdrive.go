@@ -65,11 +65,33 @@ type Config struct {
 	// drive.Locker, and its writes refuse a file another holder has
 	// locked, from a mount or through a drive.
 	NoLocking bool
-	// DeferLateFolders: a write behind a folder's newest state leaves the
-	// folder's past to be settled later (SettleFolder), reporting the
-	// changes it made to the folder to its context's drive.LateChanges.
-	// A write whose context has none settles at once, as without the
-	// option, so nothing is ever lost.
+	// DeferLateFolders: a write behind a folder's newest state (dated,
+	// drive.WithSourceTime, before a state the folder's dates table
+	// lists) is made, and leaves the folder's past to be settled later
+	// (SettleFolder), reporting the changes it made to the folder to its
+	// context's drive.LateChanges. Only a mirror daemon that queues those
+	// changes and settles each folder once should set it.
+	//
+	// Without it (Drives itself, a mount, icbfs-cli), and under a context
+	// with no drive.LateChanges, such a write is refused before the
+	// folder is written, and anything it wrote before is undone: nothing
+	// is written. The error (drive.ErrLateChange, an ErrInvalid) says the
+	// change's date and the folder's newest state's, and what to do
+	// instead: write it with no source time, or one at or after the
+	// folder's newest state, or through a mirror that settles. Up to
+	// T83-1 such a write rewrote the folder's later states inside the
+	// write; now only a deferring caller's settle does.
+	//
+	// The settling caller's rule, documented and not enforced: nothing
+	// but it writes into a folder from the time a settle of it hands out
+	// its record (drive.SettleOptions.Record) to the time it says the
+	// record can go (drive.SettleOptions.Done): one worker a folder, and
+	// a folder's queue settled before the folder is removed. The known
+	// exception is a person writing into the folder by hand (icbfs-cli)
+	// while a settle there was cut: the settle run again with its record
+	// takes every version of the folder's root block and .metadata newer
+	// than the recorded present for the cut settle's, and that person's
+	// write is undone.
 	DeferLateFolders bool
 }
 
@@ -323,8 +345,15 @@ func (d *Drive) resolve(ctx context.Context, fsys *icbfs.Filesystem, ref drive.I
 	return d.resolvePath(ctx, fsys, paths[0])
 }
 
-// findPaths is up to max (0: all) drive-relative paths naming id.
+// findPaths is up to max (0: all) drive-relative paths naming id. A
+// directory it can't read is passed over.
 func (d *Drive) findPaths(ctx context.Context, fsys *icbfs.Filesystem, id string, max int) ([]string, error) {
+	return d.searchPaths(ctx, fsys, id, max, false)
+}
+
+// searchPaths is findPaths; strict, a directory it can't read (but for
+// one gone meanwhile) fails it.
+func (d *Drive) searchPaths(ctx context.Context, fsys *icbfs.Filesystem, id string, max int, strict bool) ([]string, error) {
 	type dir struct{ key, path string }
 	var out []string
 	queue := []dir{{d.rootKey, "/"}}
@@ -333,6 +362,9 @@ func (d *Drive) findPaths(ctx context.Context, fsys *icbfs.Filesystem, id string
 		queue = queue[1:]
 		entries, err := fsys.ReadDir(ctx, cur.key)
 		if err != nil {
+			if strict && !errors.Is(err, icbfs.ErrNotFound) && !objstore.IsNotFound(err) {
+				return nil, err
+			}
 			continue
 		}
 		for _, e := range entries {
@@ -469,6 +501,10 @@ func mapErr(err error) error {
 	switch {
 	case err == nil:
 		return nil
+	case errors.As(err, new(*icbfs.LateChangeError)) && !errors.Is(err, drive.ErrLateChange):
+		var le *icbfs.LateChangeError
+		errors.As(err, &le)
+		return lateChangeErr(le)
 	case errors.Is(err, drive.ErrNotFound), errors.Is(err, drive.ErrForbidden), errors.Is(err, drive.ErrPrecondition),
 		errors.Is(err, drive.ErrNoAccess), errors.Is(err, drive.ErrReadOnly),
 		errors.Is(err, drive.ErrInvalid), errors.Is(err, drive.ErrChecksum),

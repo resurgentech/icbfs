@@ -25,6 +25,43 @@ func writeAt(t *testing.T, d *Drive, ctx context.Context, y int, path string) dr
 	return it
 }
 
+// writeSettled writes path late in year y on a drive that defers late
+// folders, and settles what it reported: what a late write did inside the
+// write before T83-1 round 3, through the public calls.
+func writeSettled(t *testing.T, d *Drive, ctx context.Context, y int, path string) drive.Item {
+	t.Helper()
+	late := &drive.LateChanges{}
+	it := writeAt(t, d, drive.WithLateChanges(ctx, late), y, path)
+	byFolder := map[string][]drive.LateChange{}
+	var order []string
+	for _, c := range late.Take() {
+		if byFolder[c.Folder] == nil {
+			order = append(order, c.Folder)
+		}
+		byFolder[c.Folder] = append(byFolder[c.Folder], c)
+	}
+	for _, f := range order {
+		if _, err := d.SettleFolder(ctx, byFolder[f], drive.SettleOptions{}); err != nil {
+			t.Fatalf("settle the folder of %s: %v", path, err)
+		}
+	}
+	return it
+}
+
+// putSettled is writeSettled with body as the file's content.
+func putSettled(t *testing.T, d *Drive, ctx context.Context, y int, path, body string) {
+	t.Helper()
+	late := &drive.LateChanges{}
+	if _, err := d.Write(at(drive.WithLateChanges(ctx, late), y), path, strings.NewReader(body), drive.Condition{}, drive.WriteOptions{}); err != nil {
+		t.Fatalf("write %s late in %d: %v", path, y, err)
+	}
+	if changes := late.Take(); len(changes) > 0 {
+		if _, err := d.SettleFolder(ctx, changes, drive.SettleOptions{}); err != nil {
+			t.Fatalf("settle the folder of %s: %v", path, err)
+		}
+	}
+}
+
 // folderID is the id of the folder at p.
 func folderID(t *testing.T, d *Drive, p string) string {
 	t.Helper()
@@ -41,7 +78,7 @@ func folderID(t *testing.T, d *Drive, p string) string {
 // Its settle reads the past as the store has it now, not as the cache
 // kept it: no state lists an entry from a later year.
 func TestSettleReadsAFreshCache(t *testing.T) {
-	d := newDriveWith(t, miniotest.Store(t), icbfs.Settings{Name: "freshcache", Size: 1 << 30, RootMode: 0o777, Created: year(2015)}, Config{})
+	d := newDriveWith(t, miniotest.Store(t), icbfs.Settings{Name: "freshcache", Size: 1 << 30, RootMode: 0o777, Created: year(2015)}, Config{DeferLateFolders: true})
 	ctx := system()
 	ids := map[string]string{}
 	for _, w := range []struct {
@@ -64,9 +101,7 @@ func TestSettleReadsAFreshCache(t *testing.T) {
 	if err := d.ReplaceFolderHistory(ctx, drive.ByPath("/dir"), hist, drive.Condition{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.Write(at(ctx, 2022), "/dir/x.txt", strings.NewReader("x"), drive.Condition{}, drive.WriteOptions{}); err != nil {
-		t.Fatal(err)
-	}
+	writeSettled(t, d, ctx, 2022, "/dir/x.txt")
 	pastIs(t, d, map[int]string{
 		2020: "a.txt",
 		2021: "a.txt,b.txt",
@@ -178,7 +213,7 @@ func TestTwoDrivesOneHistoryCache(t *testing.T) {
 	}
 	t.Cleanup(func() { cache.Close() })
 	s := icbfs.Settings{Name: "twodrives", Size: 1 << 30, RootMode: 0o777, Created: year(2015)}
-	a := newDriveWith(t, store, s, Config{History: cache})
+	a := newDriveWith(t, store, s, Config{History: cache, DeferLateFolders: true})
 	sys := system()
 	for _, w := range []struct {
 		y    int
@@ -193,7 +228,7 @@ func TestTwoDrivesOneHistoryCache(t *testing.T) {
 	if got := sortedAt(t, b, "/", midYear(2021)); got != "a.txt" {
 		t.Fatalf("drive b, mid-2021: %s", got)
 	}
-	writeAt(t, a, sys, 2021, "/dir/x.txt") // late: settled at once
+	writeSettled(t, a, sys, 2021, "/dir/x.txt")
 	time.Sleep(pastMarkEvery + 100*time.Millisecond)
 	a.past.flush()
 	b.past.flush()
@@ -274,41 +309,31 @@ func TestSettleFolderChecksTheFolder(t *testing.T) {
 	}
 }
 
-// TestSettleLowerErasures (review findings 7 and 8, the blocks below a
-// split folder's root): a settle's plan names every version it erases,
-// and for a block it erases whole, the block's .version record (Version
-// ""); after the settle each named version is gone, each block erased
-// whole is gone with its record, and the blocks it kept have a deletion
-// on top and only versions dated before the first state it wrote.
+// TestSettleLowerErasures (the blocks below a split folder's root): a
+// settle's record names the old blocks below the root it may clear; after
+// the settle each of them is erased whole (no version, no .version
+// record) or kept with a deletion on top and only versions dated before
+// the first state it wrote; both happen here. The new blocks it records
+// are reached by its states.
 func TestSettleLowerErasures(t *testing.T) {
 	store := miniotest.Store(t)
 	d, changes := splitCase(t, store, "lowererase", Config{DeferLateFolders: true})
 	folder := changes[0].Folder
-	var plan drive.SettlePlan
-	s, err := d.SettleFolder(system(), changes, drive.SettleOptions{Plan: func(p drive.SettlePlan) error { plan = p; return nil }})
+	k := &keeper{}
+	var rec drive.SettleRecord
+	opts := k.opts()
+	record := opts.Record
+	opts.Record = func(r drive.SettleRecord) error { rec = r; return record(r) }
+	s, err := d.SettleFolder(system(), changes, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if rec.Folder != folder || len(rec.Old) == 0 || len(rec.Create) == 0 {
+		t.Fatalf("record %+v", rec)
+	}
 	ctx := context.Background()
-	whole := map[string]bool{}
-	byKey := map[string][]string{}
-	for _, v := range plan.Erase {
-		if v.Version == "" {
-			if !strings.HasSuffix(v.Key, objstore.VersionSuffix) {
-				t.Errorf("every version of %s, not a .version record", v.Key)
-			}
-			whole[strings.TrimSuffix(v.Key, objstore.VersionSuffix)] = true
-			continue
-		}
-		if v.Key != folder && v.Key != folder+".metadata" {
-			byKey[v.Key] = append(byKey[v.Key], v.Version)
-		}
-	}
-	if len(byKey) == 0 || len(whole) == 0 {
-		t.Fatalf("the plan erases %d blocks' versions, %d whole: want both (%+v)", len(byKey), len(whole), plan.Erase)
-	}
-	t.Logf("settled %+v: blocks below the root with versions erased %d, erased whole %d", s, len(byKey), len(whole))
-	for k, ids := range byKey {
+	whole, kept := 0, 0
+	for _, k := range rec.Old {
 		h, err := store.History(ctx, k)
 		if err != nil {
 			t.Fatal(err)
@@ -317,22 +342,15 @@ func TestSettleLowerErasures(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if whole[k] {
-			if len(h) != 0 || len(vh) != 0 {
-				t.Errorf("%s erased whole: %d versions and %d of its record left", k, len(h), len(vh))
+		if len(h) == 0 {
+			whole++
+			if len(vh) != 0 {
+				t.Errorf("%s erased whole: %d versions of its record left", k, len(vh))
 			}
 			continue
 		}
-		left := map[string]bool{}
-		for _, o := range h {
-			left[o.VersionID] = true
-		}
-		for _, id := range ids {
-			if left[id] {
-				t.Errorf("%s: version %s named in the plan, still there", k, id)
-			}
-		}
-		if len(h) == 0 || !h[0].Deleted {
+		kept++
+		if !h[0].Deleted {
 			t.Errorf("%s kept: no deletion on top", k)
 		}
 		dates, err := objstore.ReadDates(ctx, store, k)
@@ -345,10 +363,9 @@ func TestSettleLowerErasures(t *testing.T) {
 			}
 		}
 	}
-	for k := range whole {
-		if _, ok := byKey[k]; !ok {
-			t.Errorf("%s erased whole, its versions not named", k)
-		}
+	t.Logf("settled %+v: old blocks below the root erased whole %d, kept with a deletion on top %d", s, whole, kept)
+	if whole == 0 || kept == 0 {
+		t.Errorf("old blocks erased whole %d, kept %d: want both", whole, kept)
 	}
 	settleLeftovers(t, d, folder, replaceLeftUnreachable+2)
 }
@@ -409,7 +426,7 @@ func TestSettleSplitByTheLateWrite(t *testing.T) {
 // (from it) are reported and settled: each in the past from its time,
 // the present as it is, both folders' pasts right.
 func TestSettleLateRemovesAndMovesSplit(t *testing.T) {
-	d := newDriveWith(t, miniotest.Store(t), icbfs.Settings{Name: "latemoves", Size: 1 << 30, RootMode: 0o777, Created: year(2015), DirBlockEntries: 4}, Config{DeferLateFolders: true})
+	d := newDriveWith(t, miniotest.Store(t), icbfs.Settings{Name: "latemoves", Size: 1 << 30, RootMode: 0o777, Created: year(2005), DirBlockEntries: 4}, Config{DeferLateFolders: true})
 	ctx := system()
 	for i := 0; i < 10; i++ {
 		writeAt(t, d, ctx, 2010+i, fmt.Sprintf("/dir/f%d.txt", i))

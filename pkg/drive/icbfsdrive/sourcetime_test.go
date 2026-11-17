@@ -197,7 +197,9 @@ func TestMoveInSourceTime(t *testing.T) {
 // into a folder that had changed since. A source time in the future is
 // refused.
 func TestSourceTimeAnyOrder(t *testing.T) {
-	d, _ := sourceDrive(t, "order")
+	// Deferring: the late file into a folder is settled by SettleFolder
+	// (putSettled), as only such a drive takes it since T83-1 round 3.
+	d := newDriveWith(t, miniotest.Store(t), icbfs.Settings{Name: "order", Size: 1 << 30, RootMode: 0o777, Created: year(2015)}, Config{DeferLateFolders: true})
 	ctx := system()
 	if _, err := d.Mkdir(at(ctx, 2020), "/dir", false); err != nil {
 		t.Fatal(err)
@@ -239,9 +241,7 @@ func TestSourceTimeAnyOrder(t *testing.T) {
 	}
 
 	// A file into a folder that changed since: there now, and from 2021.
-	if _, err := d.Write(at(ctx, 2021), "/dir/old.txt", strings.NewReader("old"), drive.Condition{}, drive.WriteOptions{}); err != nil {
-		t.Fatal(err)
-	}
+	putSettled(t, d, ctx, 2021, "/dir/old.txt", "old")
 	for _, tc := range []struct {
 		when time.Time
 		want string
@@ -398,7 +398,7 @@ func names(t *testing.T, d *Drive, dir string, when time.Time) string {
 // and fsck finds nothing wrong after.
 func TestReplaceFolderHistory(t *testing.T) {
 	store := miniotest.Store(t)
-	d := newDrive(t, store, icbfs.Settings{Name: "repair", Size: 1 << 30, RootMode: 0o777, Created: year(2015), DirBlockEntries: 4}, "")
+	d := newDriveWith(t, store, icbfs.Settings{Name: "repair", Size: 1 << 30, RootMode: 0o777, Created: year(2015), DirBlockEntries: 4}, Config{DeferLateFolders: true})
 	ctx := system()
 	if _, err := d.Mkdir(at(ctx, 2020), "/P", false); err != nil {
 		t.Fatal(err)
@@ -413,10 +413,8 @@ func TestReplaceFolderHistory(t *testing.T) {
 		}
 	}
 	// A late file: the drive puts it into the folder's history at its
-	// date, every later copy included, with no help.
-	if err := put(at(ctx, 2022), "/P/late"); err != nil {
-		t.Fatal(err)
-	}
+	// date, every later copy included, when it is settled.
+	putSettled(t, d, ctx, 2022, "/P/late", "/P/late")
 	for _, tc := range []struct {
 		when time.Time
 		want string

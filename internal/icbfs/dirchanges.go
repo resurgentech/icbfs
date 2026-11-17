@@ -2,6 +2,7 @@ package icbfs
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -54,6 +55,86 @@ func (c *DirChanges) For(dir string) []DirChange {
 		}
 	}
 	return out
+}
+
+// LateChangeError is a change to directory Dir's entries dated At, behind
+// the directory's newest state (dated Newest), refused before anything
+// of it was written to the directory (RefuseLateChanges).
+type LateChangeError struct {
+	Dir        string
+	At, Newest time.Time
+}
+
+func (e *LateChangeError) Error() string {
+	return fmt.Sprintf("the change is dated %s, behind the newest state of folder %s (dated %s)",
+		e.At.UTC().Format(time.RFC3339Nano), e.Dir, e.Newest.UTC().Format(time.RFC3339Nano))
+}
+
+type refuseLateKey struct{}
+
+// RefuseLateChanges has an entry change made under ctx with a declared
+// time refused (a *LateChangeError) when the directory has a state dated
+// after that time, before the directory is written: a caller that can't
+// put the change into the directory's later states (SettleDir) refuses
+// it rather than leave them without it.
+func RefuseLateChanges(ctx context.Context) context.Context {
+	return context.WithValue(ctx, refuseLateKey{}, true)
+}
+
+// checkLate refuses an entry change to dirKey under ctx's declared time,
+// if ctx refuses late changes (RefuseLateChanges) and the directory has a
+// state dated after it: one read of the directory's .version record.
+// The rule is RecordDates': a directory changed behind its latest state
+// is one whose table dates a version after the change.
+func (f *Filesystem) checkLate(ctx context.Context, dirKey string) error {
+	if refuse, _ := ctx.Value(refuseLateKey{}).(bool); !refuse || !f.sourceTime.Load() {
+		return nil
+	}
+	at, ok := objstore.DeclaredTime(ctx)
+	if !ok {
+		return nil
+	}
+	rec := objstore.RecorderFrom(ctx)
+	if rec != nil && rec.IsNew(dirKey) {
+		return nil // made by this change: no state before it
+	}
+	ours := map[string]bool{}
+	if rec != nil {
+		for _, w := range rec.Written() {
+			ours[w.VersionID] = true
+		}
+	}
+	uctx := undeclared(ctx)
+	dates, err := objstore.ReadDates(uctx, f.store, dirKey)
+	if err != nil {
+		return err
+	}
+	var newest time.Time
+	for id, t := range dates {
+		if !ours[id] && t.After(newest) {
+			newest = t
+		}
+	}
+	if len(dates) == 0 {
+		// No record yet: the first one lists the versions the directory
+		// has, at the times the store wrote them (objstore.MergeDates), and
+		// RecordDates finds the change late against those.
+		for _, key := range []string{dirKey, metadataObjectKey(dirKey)} {
+			h, err := f.store.History(uctx, key)
+			if err != nil {
+				return err
+			}
+			for _, o := range h {
+				if !o.Deleted && !ours[o.VersionID] && o.LastModified.After(newest) {
+					newest = o.LastModified
+				}
+			}
+		}
+	}
+	if newest.After(at) {
+		return &LateChangeError{Dir: dirKey, At: at, Newest: newest}
+	}
+	return nil
 }
 
 // noteDirChange records an entry change made under ctx, if it has a

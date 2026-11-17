@@ -378,6 +378,12 @@ func WithRecorder(ctx context.Context, rec *Recorder) context.Context {
 	return context.WithValue(ctx, recorderKey{}, rec)
 }
 
+// RecorderFrom is ctx's Recorder (WithRecorder), or nil.
+func RecorderFrom(ctx context.Context) *Recorder {
+	rec, _ := ctx.Value(recorderKey{}).(*Recorder)
+	return rec
+}
+
 // Recording wraps store so that every version it writes under a context
 // with a declared time and a Recorder is recorded. A .version object's
 // own writes aren't: they're the record, not the history.

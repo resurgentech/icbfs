@@ -171,12 +171,16 @@ var requestRuns = []struct {
 // operation cheaper lowers its ceiling here, so the count can't creep
 // back.
 var requestCeilings = map[string][4]int{
-	// The first folder in source time also dates the root, listing its
-	// versions so far, and marks the filesystem as written in source time,
-	// once.
-	"new top-level folder":  {21, 68, 19, 66},
-	"new folder at depth 2": {27, 33, 19, 25},
-	"new file at depth 3":   {16, 20, 12, 16},
+	// The first folder in source time also dates the root and marks the
+	// filesystem as written in source time, once. In source time, each
+	// change to a folder's entries first reads the folder's .version, to
+	// refuse one dated behind its newest state (T83-1 round 3: one more
+	// request than before, at depth 2 and 3; the top-level folder's 68 and
+	// 66 were measured on a filesystem made now, whose first source-time
+	// write into the root was late and settled inside the write).
+	"new top-level folder":  {21, 30, 19, 28},
+	"new folder at depth 2": {27, 34, 19, 26},
+	"new file at depth 3":   {16, 21, 12, 17},
 	"the same file again":   {9, 10, 5, 6},
 	// And once more: the file's creation wrote its folder, which the
 	// drive then read again; a pass over unchanged files reads it once.
@@ -200,7 +204,9 @@ func TestRequestsPerOperation(t *testing.T) {
 	for i, run := range requestRuns {
 		t.Run(run.name, func(t *testing.T) {
 			store := &requestCounter{Store: miniotest.Store(t), n: map[string]int{}}
-			d := newDriveWith(t, store, icbfs.Settings{Name: fmt.Sprintf("requests-%d", i), Size: 1 << 30, RootMode: 0o777}, Config{TrustFor: run.trustFor})
+			// Its history from 2015, as a mirror's: the source's January
+			// 2026 is not behind the root folder's making.
+			d := newDriveWith(t, store, icbfs.Settings{Name: fmt.Sprintf("requests-%d", i), Size: 1 << 30, RootMode: 0o777, Created: year(2015)}, Config{TrustFor: run.trustFor})
 			m := drive.NewMirror(d, srcDrive)
 			if run.sourceTime {
 				m = m.InSourceTime()

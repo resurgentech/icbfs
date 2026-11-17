@@ -33,11 +33,14 @@ func (s *failOnce) Put(ctx context.Context, key string, body io.Reader, md map[s
 
 // TestLateFolderWithoutItsTime: a file written into a folder behind the
 // folder's latest state, whose write of the folder's modified time fails,
-// fails (the time is the folder's history), and the folder's history is
-// still put right: found late from its dates, not from that write.
+// fails (the time is the folder's history), and the folder is still
+// reported late (found late from its dates, not from that write), so its
+// settle puts its history right. (On a drive that defers late folders,
+// settled through SettleFolder: since T83-1 round 3 only such a drive
+// takes a late write.)
 func TestLateFolderWithoutItsTime(t *testing.T) {
 	store := &failOnce{Store: miniotest.Store(t)}
-	d := newDrive(t, store, icbfs.Settings{Name: "latefolder", Size: 1 << 30, RootMode: 0o777, Created: year(2015)}, "")
+	d := newDriveWith(t, store, icbfs.Settings{Name: "latefolder", Size: 1 << 30, RootMode: 0o777, Created: year(2015)}, Config{DeferLateFolders: true})
 	ctx := system()
 	if _, err := d.Write(at(ctx, 2022), "/dir/new.txt", strings.NewReader("new"), drive.Condition{}, drive.WriteOptions{Parents: true}); err != nil {
 		t.Fatal(err)
@@ -48,8 +51,12 @@ func TestLateFolderWithoutItsTime(t *testing.T) {
 	}
 	meta := dir.ID + ".metadata"
 	store.key.Store(&meta)
-	if _, err := d.Write(at(ctx, 2021), "/dir/old.txt", strings.NewReader("old"), drive.Condition{}, drive.WriteOptions{}); !errors.Is(err, errFailOnce) {
+	late := &drive.LateChanges{}
+	if _, err := d.Write(at(drive.WithLateChanges(ctx, late), 2021), "/dir/old.txt", strings.NewReader("old"), drive.Condition{}, drive.WriteOptions{}); !errors.Is(err, errFailOnce) {
 		t.Fatalf("a late file whose folder's time couldn't be written: %v; want it to fail", err)
+	}
+	if _, err := d.SettleFolder(ctx, late.Take(), drive.SettleOptions{}); err != nil {
+		t.Fatal(err)
 	}
 	if got := names(t, d, "/dir", year(2021).AddDate(0, 6, 0)); got != "old.txt" {
 		t.Fatalf("/dir as of mid-2021: %q, want old.txt", got)
@@ -60,8 +67,9 @@ func TestLateFolderWithoutItsTime(t *testing.T) {
 // item held at that time, and has since left, doesn't put the name in
 // the folder twice. Where the name was taken, the occupant keeps it; the
 // late file has it from the state where it was free.
+// (Settled through SettleFolder on a drive that defers late folders.)
 func TestLateCreateOnANameTakenThen(t *testing.T) {
-	d, _ := sourceDrive(t, "latetaken")
+	d := newDriveWith(t, miniotest.Store(t), icbfs.Settings{Name: "latetaken", Size: 1 << 30, RootMode: 0o777, Created: year(2015)}, Config{DeferLateFolders: true})
 	ctx := system()
 	for _, w := range []struct {
 		y          int
@@ -74,8 +82,12 @@ func TestLateCreateOnANameTakenThen(t *testing.T) {
 	if _, err := d.Move(at(ctx, 2023), drive.ByPath("/dir/x.txt"), "/dir/aside.txt", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.Write(at(ctx, 2021), "/dir/x.txt", strings.NewReader("late"), drive.Condition{}, drive.WriteOptions{}); err != nil {
+	late := &drive.LateChanges{}
+	if _, err := d.Write(at(drive.WithLateChanges(ctx, late), 2021), "/dir/x.txt", strings.NewReader("late"), drive.Condition{}, drive.WriteOptions{}); err != nil {
 		t.Fatalf("a late create at a name taken then: %v", err)
+	}
+	if _, err := d.SettleFolder(ctx, late.Take(), drive.SettleOptions{}); err != nil {
+		t.Fatal(err)
 	}
 	for _, c := range []struct {
 		when        time.Time
