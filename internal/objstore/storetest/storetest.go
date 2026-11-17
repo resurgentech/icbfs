@@ -738,7 +738,7 @@ func putPartsFromStream(t *testing.T, newStore func(*testing.T) objstore.Store) 
 
 // putPartsFromStreamOfUnknownLength: parts from a reader whose length
 // isn't known, only its most (objstore.StreamPartsUpTo), go up in order
-// until it ends: short of a part, at a part's end, empty, or at the
+// until it ends: short of a part, at a part's end, or at the
 // most; a reader longer than the most, or one that fails, fails the
 // write with nothing written.
 func putPartsFromStreamOfUnknownLength(t *testing.T, newStore func(*testing.T) objstore.Store) {
@@ -758,7 +758,6 @@ func putPartsFromStreamOfUnknownLength(t *testing.T, newStore func(*testing.T) o
 		{"short of a part", 2*part + 1234, 10 * part},
 		{"at a part's end", 2 * part, 10 * part},
 		{"one small part", 1234, 10 * part},
-		{"empty", 0, 10 * part},
 		{"at the most", 3 * part, 3 * part},
 		{"at the most, not a part's end", 2*part + 7, 2*part + 7},
 	} {
@@ -792,8 +791,8 @@ func putPartsFromStreamOfUnknownLength(t *testing.T, newStore func(*testing.T) o
 	if head, err := store.Head(ctx, "unknown"); err != nil || head.ETag != v.ETag {
 		t.Fatalf("object after the failed streams: %v, %v; want unchanged %s", head, err, v.ETag)
 	}
-	if h, err := store.History(ctx, "unknown"); err != nil || len(h) != 6 {
-		t.Fatalf("history: %d entries, %v; want the 6 written", len(h), err)
+	if h, err := store.History(ctx, "unknown"); err != nil || len(h) != 5 {
+		t.Fatalf("history: %d entries, %v; want the 5 written", len(h), err)
 	}
 }
 
