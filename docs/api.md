@@ -454,9 +454,8 @@ and origin in one write.
   folded item belongs: the item is moved there, once, its history and
   origin as they are; without it, it stays where it is. The origin's own
   `Apply` keeps the item's aliases, and with a `FoldPath` keeps it there.
-  - `Known`, and on icbfs `FindByOrigin`, of an alias's id give the item
-    with `Item.Alias` set to the id asked; any other drive is searched
-    for it in `Origin.Aliases`, after the items whose origin it is.
+  - `Known`, and `FindByOrigin`, of an alias's id give the item with
+    `Item.Alias` set to the id asked, after the items whose origin it is.
   - A fold holds while the name, folder and bytes agree. An `Apply` of an
     alias whose `FoldInto` is gone or names another item, whose new
     version's bytes differ, or whose item's bytes have changed, drops the
@@ -469,9 +468,14 @@ and origin in one write.
     one; then the order folded): its id, version and path become the
     origin's, and the rest stay aliases. The item isn't trashed, and keeps
     its name and its history; `Undo` doesn't bring the old origin back.
-- On icbfs, finding a source item is a lookup (`OriginFinder`: an origin
-  record per item, and a pointer from each trashed item to its entry);
-  any other backend is searched, a listing of the drive and its trash.
+- Finding a source item is a lookup: the destination drive must be a
+  `drive.OriginFinder` (`FindByOrigin`; on icbfs, an origin record per
+  item, and a pointer from each trashed item to its entry). A drive that
+  isn't one is refused: `NewMirror` keeps its signature, the mirror's
+  `Err()` says so (`ErrNoOriginFinder`), and `Known`, `Apply`, `Remove`,
+  `Undo`, `RebuildHashes`, `LoadHashes` and `SaveHashes` return that error
+  without touching the drive. There is no search: a listing of the whole
+  drive per lookup grows with the square of the drive's size.
 - Applying in parallel: on icbfs, items made or removed under one folder
   contend on that folder's block, since each is a compare-and-swap of it.
   Of several at once, one lands and the rest read the block again and

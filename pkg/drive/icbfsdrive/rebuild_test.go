@@ -321,7 +321,7 @@ func TestRebuildHashesAsListed(t *testing.T) {
 	for _, d := range []struct {
 		name string
 		d    drive.Drive
-	}{{"a Walker", idrv}, {"not a Walker", listOnly{idrv}}} {
+	}{{"a Walker", idrv}, {"not a Walker", plain(t, idrv)}} {
 		fresh := drive.NewMirror(d.d, srcDrive)
 		for s, sha := range kept {
 			fresh.Hashes().AddSource(s, sha)
