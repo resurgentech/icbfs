@@ -46,7 +46,7 @@ func (s r3Store) PutParts(ctx context.Context, key string, parts []objstore.Part
 	if h := R3Hook.Load(); h != nil && md["icbfs_upload"] != "" {
 		return (*h)(ctx, key, md, do)
 	}
-	return do(ctx)
+	return write(ctx, WritePutParts, key, func() (*objstore.Object, error) { return do(ctx) })
 }
 
 func (s r3Store) ListPages(ctx context.Context, prefix string, fn func([]objstore.Object) error) error {
