@@ -70,10 +70,94 @@ func (f *Filesystem) RecordDates(ctx context.Context, rec *objstore.Recorder) (r
 	// Each item's table as written, for restoreCurrent; an item the
 	// operation made has none to read first, and nothing to put right.
 	tables := map[string]objstore.Dates{}
-	for base, dates := range rec.Dates() {
-		if tables[base], err = objstore.MergeDates(ctx, f.store, base, dates, rec.Fresh(base)); err != nil {
+	// A version the operation wrote on top of (or built on: a directory's
+	// root above the block it changed) that no table lists is one a write
+	// left and never dated (killed between its put and its dating), or,
+	// for a directory's block, an undated write's. It is listed now: at the
+	// date its own write carried (objstore.PutAt), or, carrying none, at
+	// its store's second or the operation's date if that is earlier; so it
+	// never outranks what was written after it. The blocks a block left so
+	// are found from it (its children, its right sibling), and dated so too.
+	ours := map[string]bool{}
+	for _, w := range rec.Written() {
+		ours[w.VersionID] = true
+	}
+	over := map[string]objstore.Dates{}
+	links := map[string][]string{} // version id -> what it points to
+	for _, w := range rec.Overs() {
+		o := w.Over
+		if o == nil || o.Deleted || o.VersionID == "" || ours[o.VersionID] {
+			continue
+		}
+		base := objstore.BaseKey(w.Key)
+		// The table, as the dating below reads it anyway (one read per item
+		// an operation: objstore.DatesRead).
+		cur, err := objstore.ReadDates(ctx, f.store, base)
+		if err != nil {
 			return nil, err
 		}
+		if _, listed := cur[o.VersionID]; listed {
+			continue
+		}
+		if _, ok := objstore.PutAt(o); !ok {
+			// What the write read may not carry its store metadata (a
+			// cache's copy): ask for this one version's.
+			if h, err := f.store.HeadVersion(ctx, w.Key, o.VersionID); err == nil {
+				o = h
+			}
+		}
+		if over[base] == nil {
+			over[base] = objstore.Dates{}
+		}
+		at := leftoverDate(o, w.At)
+		if t, ok := over[base][o.VersionID]; !ok || at.Before(t) {
+			over[base][o.VersionID] = at
+		}
+		links[o.VersionID] = append(links[o.VersionID], w.Links...)
+	}
+	add := rec.Dates()
+	for base := range over {
+		if add[base] == nil {
+			add[base] = objstore.Dates{}
+		}
+	}
+	var follow []string
+	var followAt []time.Time
+	// A directory's own record (its root block and .metadata) is dated
+	// last: a write killed while it dates leaves its root undated, and the
+	// next write, which reads that root first, finds from it whatever else
+	// it left undated (dateLeftoverBlocks).
+	roots := map[string]bool{}
+	for _, w := range rec.Written() {
+		if w.Dir != "" {
+			roots[w.Dir] = true
+		}
+	}
+	bases := make([]string, 0, len(add))
+	for base := range add {
+		bases = append(bases, base)
+	}
+	sort.SliceStable(bases, func(i, j int) bool {
+		if roots[bases[i]] != roots[bases[j]] {
+			return !roots[bases[i]]
+		}
+		return bases[i] < bases[j]
+	})
+	for _, base := range bases {
+		dates := add[base]
+		var listed []string
+		if tables[base], listed, err = objstore.MergeDatesOver(ctx, f.store, base, dates, over[base], rec.Fresh(base)); err != nil {
+			return nil, err
+		}
+		for _, id := range listed {
+			for _, k := range links[id] {
+				follow = append(follow, k)
+				followAt = append(followAt, over[base][id])
+			}
+		}
+	}
+	if err := f.dateLeftoverBlocks(ctx, follow, followAt); err != nil {
+		return nil, err
 	}
 	restored = map[string]bool{}
 	// Content before .metadata: a content version put back on top is a
@@ -129,6 +213,67 @@ func (f *Filesystem) RecordDates(ctx context.Context, rec *objstore.Recorder) (r
 		}
 	}
 	return restored, nil
+}
+
+// leftoverDate is the date a version no table lists is listed at by a
+// write dated at made on top of it: the date its own write carried, or
+// its store's second, or at if that is earlier.
+func leftoverDate(o *objstore.Object, at time.Time) time.Time {
+	if t, ok := objstore.PutAt(o); ok {
+		return t
+	}
+	t := objstore.StoreSecond(o.LastModified)
+	if at.Before(t) {
+		return at
+	}
+	return t
+}
+
+// dateLeftoverBlocks lists the current versions of blocks keys (with the
+// dates of the leftovers that point to them, ats), and of the blocks
+// they point to in turn, where no table lists them: the rest of what a
+// killed write left. Only what such a leftover reaches is read.
+func (f *Filesystem) dateLeftoverBlocks(ctx context.Context, keys []string, ats []time.Time) error {
+	seen := map[string]bool{}
+	for len(keys) > 0 {
+		k, at := keys[0], ats[0]
+		keys, ats = keys[1:], ats[1:]
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		head, err := f.store.Head(ctx, k)
+		if objstore.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if _, ok := objstore.PutAt(head); !ok {
+			if h, err := f.store.HeadVersion(ctx, k, head.VersionID); err == nil {
+				head = h
+			}
+		}
+		dates, err := objstore.ReadDates(ctx, f.store, k)
+		if err != nil {
+			return err
+		}
+		if _, ok := dates[head.VersionID]; ok {
+			continue
+		}
+		t := leftoverDate(head, at)
+		if _, _, err := objstore.MergeDatesOver(ctx, f.store, k, objstore.Dates{}, objstore.Dates{head.VersionID: t}, false); err != nil {
+			return err
+		}
+		blk, _, err := f.readBlock(ctx, k)
+		if err != nil {
+			return err
+		}
+		for _, l := range blockLinks(blk) {
+			keys, ats = append(keys, l), append(ats, t)
+		}
+	}
+	return nil
 }
 
 // latestDated reports whether w is dated no earlier than every version in

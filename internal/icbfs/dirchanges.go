@@ -154,7 +154,7 @@ func presentDate(ctx context.Context, dirKey string) (time.Time, bool) {
 // (RefuseLateChanges) or ctx is dated at that state (WithPresentDating);
 // otherwise ctx as it is. One read of the directory's .version record,
 // made only under one of the two and a declared time.
-func (f *Filesystem) lateDating(ctx context.Context, dirKey string) (context.Context, error) {
+func (f *Filesystem) lateDating(ctx context.Context, dirKey string, root *objstore.Object) (context.Context, error) {
 	refuse, _ := ctx.Value(refuseLateKey{}).(bool)
 	p, _ := ctx.Value(presentDatesKey{}).(*presentDates)
 	if !refuse && p == nil || !f.sourceTime.Load() {
@@ -171,7 +171,7 @@ func (f *Filesystem) lateDating(ctx context.Context, dirKey string) (context.Con
 	if rec != nil && rec.IsNew(dirKey) {
 		return ctx, nil // made by this change: no state before it
 	}
-	newest, err := f.newestState(ctx, dirKey, rec, at)
+	newest, err := f.newestState(ctx, dirKey, rec, root)
 	if err != nil {
 		return ctx, err
 	}
@@ -191,26 +191,27 @@ func (f *Filesystem) lateDating(ctx context.Context, dirKey string) (context.Con
 // date in its .version record, what rec (if set) recorded of this
 // operation's own writes left out. The rule is RecordDates': a directory
 // changed behind its latest state is one whose table dates a version
-// after the change.
+// after the change. The record is read through ctx's objstore.DatesRead,
+// so the dating after the write (RecordDates) reads it no more: a dated
+// entry change costs what it cost before the check. A directory with no
+// record yet has its first one's dates (its versions at the store's
+// times), which the dating would list anyway.
 //
-// A write with no source time leaves its root block version out of the
-// record (blocks aren't dated), and a view dates such a version when the
-// store's listing says it was stored, to the millisecond, while its
-// .metadata is listed at the second the store answered with: the root
-// block's version may be dated up to a second after the record's newest.
-// So for a change at less than a second after the record's newest (a
-// late change, or one just on time) the root block's history is listed
-// too (one request), and its versions the record doesn't list count at
-// their listed times.
-func (f *Filesystem) newestState(ctx context.Context, dirKey string, rec *objstore.Recorder, at time.Time) (time.Time, error) {
+// A version no record lists (a block an undated write left) is dated at
+// the store's second (objstore.Dates.Time), as its write's .metadata,
+// which the record lists, is: the record's newest is never behind it.
+//
+// root, if set, is the root block's version the change read: one no record
+// lists (an undated write's, or a write's killed before it was dated)
+// counts at its store's second, so the change is never stored behind it.
+func (f *Filesystem) newestState(ctx context.Context, dirKey string, rec *objstore.Recorder, root *objstore.Object) (time.Time, error) {
 	ours := map[string]bool{}
 	if rec != nil {
 		for _, w := range rec.Written() {
 			ours[w.VersionID] = true
 		}
 	}
-	uctx := undeclared(ctx)
-	dates, err := objstore.ReadDates(uctx, f.store, dirKey)
+	dates, _, err := objstore.StoreDatesRead(undeclared(ctx), f.store, dirKey)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -220,31 +221,16 @@ func (f *Filesystem) newestState(ctx context.Context, dirKey string, rec *objsto
 			newest = t
 		}
 	}
-	if len(dates) == 0 {
-		// No record yet: the first one lists the versions the directory
-		// has, at the times the store wrote them (objstore.MergeDates), and
-		// RecordDates finds the change late against those.
-		for _, key := range []string{dirKey, metadataObjectKey(dirKey)} {
-			h, err := f.store.History(uctx, key)
-			if err != nil {
-				return time.Time{}, err
+	if root != nil && !root.Deleted && !ours[root.VersionID] {
+		if _, listed := dates[root.VersionID]; !listed {
+			// Not dated: a write killed before its dating says its own date
+			// (objstore.PutAt); an undated write's is its store's second.
+			t, ok := objstore.PutAt(root)
+			if !ok {
+				t = objstore.StoreSecond(root.LastModified)
 			}
-			for _, o := range h {
-				if !o.Deleted && !ours[o.VersionID] && o.LastModified.After(newest) {
-					newest = o.LastModified
-				}
-			}
-		}
-		return newest, nil
-	}
-	if at.Before(newest.Add(time.Second)) {
-		h, err := f.store.History(uctx, dirKey)
-		if err != nil {
-			return time.Time{}, err
-		}
-		for _, o := range h {
-			if _, listed := dates[o.VersionID]; !listed && !o.Deleted && !ours[o.VersionID] && o.LastModified.After(newest) {
-				newest = o.LastModified
+			if t.After(newest) {
+				newest = t
 			}
 		}
 	}

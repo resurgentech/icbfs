@@ -53,7 +53,7 @@ func TestSettleProof(t *testing.T) {
 			{yr(2022), []objstore.SettleEntry{ent("a"), ent("b")}},
 			{yr(2024), []objstore.SettleEntry{ent("a"), ent("b"), ent("c"), ent("x")}},
 		} {
-			if _, err := tab.ReadState(ctx, s.at, s.es); err != nil {
+			if _, err := tab.ReadState(ctx, s.at, s.es, nil, ""); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -101,7 +101,7 @@ func TestSettleProof(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			tab := build(t, c.play)
-			err := f.settleProof(ctx, tab, c.changes, yr(2021), c.present)
+			err := f.settleProof(ctx, tab, c.changes, yr(2021), c.present, Attr{})
 			if c.ok && err != nil {
 				t.Fatalf("refused: %v", err)
 			}

@@ -415,6 +415,9 @@ var cutCaseAfter = map[int]string{
 // (Done). Before the reruns and between them, every view is a state the
 // folder really had.
 func TestSettleCutAtEveryRequest(t *testing.T) {
+	if raceOn {
+		t.Skip("measured without the race detector: `just test-settle`")
+	}
 	if testing.Short() {
 		t.Skip("one folder per request of a settle")
 	}

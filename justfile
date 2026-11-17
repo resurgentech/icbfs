@@ -72,7 +72,18 @@ test-erase-full:
     ICBFS_ERASE_FULL=1 go test -race -count=1 -run 'TestEraseAllHoldsOnePage' ./internal/objstore/s3store ./internal/objstore/azurestore
 
 # What CI checks
-ci: fmt-check tidy-check vet build test-ci test-erase-full
+ci: fmt-check tidy-check vet build test-ci test-erase-full test-settle
+
+# T83-1's settle tests run without -race (too long under it, and heap
+# measured without it): the request and heap gates, the cut sweeps, the
+# killed-write sweep, the round-4 review's model (two seeds at 4 entries a
+# block, one at 128, with moves, renames, restores, child folders and the
+# folders' own records)
+test-settle:
+    go test -count=1 -timeout 40m -run 'TestSettleRequestsBoundedByLaterStates|TestSettleRequestsBeyondOnePage|TestSettleCutAtEveryRequest' ./pkg/drive/icbfsdrive
+    T83_ALWAYS=1 RV4_CUT=plain go test -count=1 -timeout 40m -run 'TestKilledWriteLeavesTheFolderSettleable|TestRV4Cut$' ./pkg/drive/icbfsdrive
+    RV4_SEEDS=4229-4230 RV4_K=3 RV4_ENTRIES=4 RV4_OPS=120 go test -count=1 -timeout 30m -run 'TestRV4Model$' ./pkg/drive/icbfsdrive
+    RV4_SEEDS=5201 RV4_K=3 RV4_ENTRIES=0 RV4_N0=300 RV4_OPS=150 go test -count=1 -timeout 40m -run 'TestRV4Model$' ./pkg/drive/icbfsdrive
 
 # Tag HEAD as VERSION (vX.Y.Z, new; tree clean, on origin/main, CI green) and build bin/; the tag's push is printed, not done
 release VERSION:

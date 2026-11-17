@@ -187,6 +187,15 @@ type LateSettler interface {
 	// changes and that record (SettleOptions.Cut), in this process or
 	// another, before anything else is written into the folder.
 	SettleFolder(ctx context.Context, changes []LateChange, opts SettleOptions) (Settled, error)
+
+	// FolderWrittenBehind reports whether the folder's root block has a
+	// version stored after one dated later: written behind its newest
+	// state, as an older build's per-file repair cut short leaves a
+	// folder. SettleFolder refuses such a folder (ErrSettleRefused);
+	// rewriting its history as its views read it (ReplaceFolderHistory)
+	// puts it right. One listing of the root block's history and one read
+	// of the folder's .version; it writes nothing and decides nothing.
+	FolderWrittenBehind(ctx context.Context, folder ItemRef) (bool, error)
 }
 
 // SettleOptions are SettleFolder's options.
@@ -234,6 +243,11 @@ type SettleRecord struct {
 	// states from the settle's first on reach before it: once the settle
 	// has committed, what of them no state reaches any more goes.
 	Old []string
+	// Times is the times of the states the settle writes: a rerun with the
+	// record stops (ErrSettleStopped, nothing erased) on a version of the
+	// folder stored after Root and Meta that is dated as none of them,
+	// another writer's since the cut.
+	Times []time.Time
 }
 
 // Settled is what a settle did: the states it read, the states it wrote,

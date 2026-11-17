@@ -47,11 +47,56 @@ func Run(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	t.Run("HistoryCacheKeepsVersions", func(t *testing.T) { historyCacheKeepsVersions(t, newStore) })
 	t.Run("AsOfByVersionDates", func(t *testing.T) { asOfByVersionDates(t, newStore) })
 	t.Run("MergeDatesFresh", func(t *testing.T) { mergeDatesFresh(t, newStore) })
+	t.Run("ListedTimeIsTheWritesToTheSecond", func(t *testing.T) { listedTimeIsTheWritesToTheSecond(t, newStore) })
 }
 
 // pause lets the store's clock pass a whole second, so a time taken
 // after it falls strictly between the writes on either side.
 func pause() { time.Sleep(1100 * time.Millisecond) }
+
+// listedTimeIsTheWritesToTheSecond: a version's time as a key's history
+// lists it is, to the second, the time the store's answer to its write
+// gave (what dates a write's recorded versions, objstore.DateAll), and
+// HeadVersion's; a listing may say more (MinIO: milliseconds; S3's and
+// Azure's: whole seconds), which objstore.Dates.Time leaves out. Logged,
+// so a run against a real account shows the store's precision.
+func listedTimeIsTheWritesToTheSecond(t *testing.T, newStore func(*testing.T) objstore.Store) {
+	store := newStore(t)
+	ctx := context.Background()
+	var wrote []*objstore.Object
+	for i := 0; i < 5; i++ {
+		o, err := store.Put(ctx, "precision", strings.NewReader(fmt.Sprint(i)), nil, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		wrote = append(wrote, o)
+		time.Sleep(230 * time.Millisecond)
+	}
+	h, err := store.History(ctx, "precision")
+	if err != nil {
+		t.Fatal(err)
+	}
+	subsecond := false
+	for _, w := range wrote {
+		i := objstore.VersionIndex(h, w.VersionID)
+		if i < 0 {
+			t.Fatalf("version %s not listed", w.VersionID)
+		}
+		listed := h[i].LastModified
+		subsecond = subsecond || listed.Nanosecond() != 0
+		if got, want := objstore.StoreSecond(listed), objstore.StoreSecond(w.LastModified); !got.Equal(want) {
+			t.Errorf("version %s: listed at %s, its write answered %s: not the same second", w.VersionID, listed.Format(time.RFC3339Nano), w.LastModified.Format(time.RFC3339Nano))
+		}
+		head, err := store.HeadVersion(ctx, "precision", w.VersionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := objstore.StoreSecond(head.LastModified), objstore.StoreSecond(listed); !got.Equal(want) {
+			t.Errorf("version %s: listed at %s, HeadVersion %s: not the same second", w.VersionID, listed.Format(time.RFC3339Nano), head.LastModified.Format(time.RFC3339Nano))
+		}
+	}
+	t.Logf("this store's listing gives times finer than a second: %v (MinIO: true; S3 and Azure: false)", subsecond)
+}
 
 func serverNow(t *testing.T, s objstore.Store) time.Time {
 	t.Helper()

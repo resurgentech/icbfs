@@ -46,7 +46,7 @@ func TestSettleTable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := other.ReadState(ctx, tm(1), []SettleEntry{{Name: "z", Item: "Z", Type: 1}}); err != nil {
+	if _, err := other.ReadState(ctx, tm(1), []SettleEntry{{Name: "z", Item: "Z", Type: 1}}, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -65,7 +65,7 @@ func TestSettleTable(t *testing.T) {
 		{tm(30), []SettleEntry{b}, true},
 		{tm(35), []SettleEntry{b}, false}, // the same as the one before: collapsed
 	} {
-		kept, err := tab.ReadState(ctx, s.at, s.entries)
+		kept, err := tab.ReadState(ctx, s.at, s.entries, nil, "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -201,7 +201,7 @@ func TestSettleTable(t *testing.T) {
 	}
 	// A new table for a dir starts empty, whatever another settle of it
 	// has, and leaves that settle's rows alone.
-	if _, err := other.ReadState(ctx, tm(2), []SettleEntry{{Name: "y", Item: "Y", Type: 1}}); err != nil {
+	if _, err := other.ReadState(ctx, tm(2), []SettleEntry{{Name: "y", Item: "Y", Type: 1}}, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	again, err := c.SettleTable(ctx, "d2")
@@ -225,7 +225,7 @@ func TestSettleTableRunsReaped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := left.ReadState(ctx, tm(1), []SettleEntry{{Name: "z", Item: "Z", Type: 1}}); err != nil {
+	if _, err := left.ReadState(ctx, tm(1), []SettleEntry{{Name: "z", Item: "Z", Type: 1}}, nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.SettleTable(ctx, "d2"); err != nil {
@@ -298,7 +298,7 @@ func TestSettleTableUntil(t *testing.T) {
 		at      time.Time
 		entries []SettleEntry
 	}{{tm(10), []SettleEntry{a}}, {tm(20), []SettleEntry{a}}, {tm(30), []SettleEntry{a, x}}, {tm(40), []SettleEntry{a}}} {
-		if _, err := tab.ReadState(ctx, s.at, s.entries); err != nil {
+		if _, err := tab.ReadState(ctx, s.at, s.entries, nil, ""); err != nil {
 			t.Fatal(err)
 		}
 	}

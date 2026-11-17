@@ -987,6 +987,52 @@ is (a trashed folder too), and never answers `drive.ErrFolderGone`; with
 none, a folder that is gone (trashed or purged) gets
 `drive.ErrFolderGone`, and nothing is written.
 
+Round 5 of T83-1 adds, to the late change and the settle:
+
+- **What a dated entry change costs.** It reads its folder's `.version`
+  once before it writes (late or on time), and its dating after reuses
+  that read (`objstore.DatesRead`): no request more than a write made
+  before T83-1. Nothing lists a key's history on the write path.
+- **Dates to the second.** A version no `.version` lists (a block an
+  undated write left) is dated at its store's second
+  (`objstore.Dates.Time`), as the write's `.metadata`, which is listed,
+  is; and a first record lists a key's versions so too. A store's listing
+  may say milliseconds (MinIO); its answer to a write says seconds (every
+  store; S3's and Azure's listings too): the conformance suite's
+  `ListedTimeIsTheWritesToTheSecond` says which a store gives.
+- **A write killed before its dating.** Every directory block and
+  `.metadata` written under a declared time carries that time as store
+  metadata (`objstore.PutAtKey`). A write made on top of a version no
+  table lists (the one it read and is conditional on, and the root and
+  every block it read on its way) lists it at the time it carries, or,
+  carrying none, at its store's second or the write's own date if that
+  is earlier, and follows what such a block points to (children, right
+  sibling) to list those too. A directory's own root block and
+  `.metadata` are dated last of a write's versions, so a write killed
+  while it dates leaves its root undated and the next write finds the
+  rest from it. A root a write left undated counts, for the next write,
+  at the time it carries (`newestState`).
+- **The folder's own record.** Each state a settle writes carries the
+  `.metadata` its state read had (mode, owner, app data, origin), not the
+  present's; a state that changed only the record is a state, kept and
+  rewritten as read; the proof covers the record.
+- **Parts.** `SettleFolder` settles more than `MaxSettleChanges` (256)
+  changes in parts of that size, oldest first, each its own settle
+  (record, write-out, Done); a part settled already plays again as
+  nothing, so a rerun after a cut in any part is given every change and
+  the record. A settle holds one state's blocks at a time (the cache is
+  given the last state's versions only).
+- **A rerun after a write since the cut.** The record carries the times
+  of the states the settle writes (`Times`); a rerun stops
+  (`drive.ErrSettleStopped`, nothing erased) on a root or `.metadata`
+  version stored after the recorded present that the `.version` dates
+  other than the cut settle's states would be (before its commit none is
+  dated; after it, exactly those times).
+- **A folder written behind** (an older build's per-file repair cut
+  short) is found by `LateSettler.FolderWrittenBehind` (one listing of
+  the root block's history, one read of the `.version`); rewritten from
+  its views (`ReplaceFolderHistory`) it settles again.
+
 Corrections, for a date the source got wrong, are the caller's:
 `DirHistory` / `ReplaceDirHistory` and `FileHistory` /
 `ReplaceFileHistory` erase an item's history and write a series of dated

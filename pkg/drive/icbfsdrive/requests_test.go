@@ -173,19 +173,16 @@ var requestRuns = []struct {
 var requestCeilings = map[string][4]int{
 	// The first folder in source time also dates the root and marks the
 	// filesystem as written in source time, once. In source time, each
-	// change to a folder's entries first reads the folder's .version, to
-	// refuse one dated behind its newest state (T83-1 round 3: one more
-	// request than before, at depth 2 and 3; the top-level folder's 68 and
-	// 66 were measured on a filesystem made now, whose first source-time
-	// write into the root was late and settled inside the write). T83-1
-	// round 4: a change dated within a second of the folder's newest state
-	// (here every write is at one source time) also lists the folder's
-	// root block: a version an undated write left there is dated by the
-	// listing, to the millisecond, and the change must not go behind it
-	// (newestState): one request more at depth 2 and 3.
+	// change to a folder's entries reads the folder's .version before it
+	// writes (late or on time: T83-1), and its dating after reuses that
+	// read (objstore.DatesRead): no request more than before T83-1 (main
+	// a607b8d: 33 and 25 at depth 2, 20 and 16 at depth 3). The top-level
+	// folder's 68 and 66 there were measured on a filesystem made now,
+	// whose first source-time write into the root was late and repaired
+	// inside the write; it is written into the root's present now.
 	"new top-level folder":  {21, 30, 19, 28},
-	"new folder at depth 2": {27, 35, 19, 27},
-	"new file at depth 3":   {16, 22, 12, 18},
+	"new folder at depth 2": {27, 33, 19, 25},
+	"new file at depth 3":   {16, 20, 12, 16},
 	"the same file again":   {9, 10, 5, 6},
 	// And once more: the file's creation wrote its folder, which the
 	// drive then read again; a pass over unchanged files reads it once.

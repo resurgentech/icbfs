@@ -394,9 +394,9 @@ func TestSettleCutThenAnotherDrive(t *testing.T) {
 // TestCutSettleBlocksNothing (N4): after a settle cut in its window, the
 // folder is deleted by another drive; the first drive's writes anywhere
 // go through (round 2 refused every change on the drive), and the
-// caller's settle again with its record finishes the settle by the
-// folder's key (the owner's rule 7: never ErrFolderGone while a record is
-// open) and releases the record.
+// caller's settle again with its record never answers ErrFolderGone (the
+// owner's rule 7); the delete wrote the folder since the cut, so it stops
+// (ErrSettleStopped, round 5's D3).
 func TestCutSettleBlocksNothing(t *testing.T) {
 	store := &failStore{Store: miniotest.Store(t)}
 	a, changes := cutCase(t, store, "blocksnothing", Config{DeferLateFolders: true})
@@ -412,11 +412,10 @@ func TestCutSettleBlocksNothing(t *testing.T) {
 			t.Errorf("the first drive's write %d anywhere: %v", i, err)
 		}
 	}
-	if _, err := a.SettleFolder(system(), changes, k.opts()); err != nil {
-		t.Errorf("the cut settle of a folder deleted since: %v, want it finished", err)
-	}
-	if k.held() != nil {
-		t.Errorf("the record is held: %+v", k.held())
+	// The delete wrote the folder since the cut (its entries went to the
+	// trash): the rerun stops, never ErrFolderGone (round 5, D3 and rule 7).
+	if _, err := a.SettleFolder(system(), changes, k.opts()); !errors.Is(err, drive.ErrSettleStopped) {
+		t.Errorf("the cut settle of a folder deleted since: %v, want ErrSettleStopped", err)
 	}
 }
 
@@ -481,8 +480,9 @@ func TestSettleFolderGone(t *testing.T) {
 // caller's, not enforced, and this pins its one known exception: while a
 // settle of a folder is cut, a person writes into the folder with no
 // source time (as icbfs-cli does); the caller's settle again with its
-// record takes that write for the cut settle's, and it is undone: the
-// present is the one the record names, with the late change in place.
+// record finds a version since the cut that it did not write (dated as
+// none of its states) and stops (ErrSettleStopped, round 5, D3): nothing
+// is erased, the write by hand stays, the record is held.
 func TestTwoWritersOneFolder(t *testing.T) {
 	store := &failStore{Store: miniotest.Store(t)}
 	d, changes := cutCase(t, store, "twowriters", Config{DeferLateFolders: true})
@@ -492,10 +492,13 @@ func TestTwoWritersOneFolder(t *testing.T) {
 	if _, err := other.Write(system(), "/dir/byhand.txt", strings.NewReader("h"), drive.Condition{}, drive.WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.SettleFolder(system(), changes, k.opts()); err != nil {
-		t.Fatal(err)
+	if _, err := d.SettleFolder(system(), changes, k.opts()); !errors.Is(err, drive.ErrSettleStopped) {
+		t.Fatalf("the rerun after a write by hand: %v, want ErrSettleStopped", err)
 	}
-	if got := liveNames(t, d, folder); got != "a.txt,b.txt,c.txt,x.txt" {
-		t.Errorf("present: %s, want the recorded present (the write by hand undone)", got)
+	if got := liveNames(t, d, folder); !strings.Contains(got, "byhand.txt") {
+		t.Errorf("present: %s, want the write by hand kept", got)
+	}
+	if k.held() == nil {
+		t.Errorf("the record was released")
 	}
 }

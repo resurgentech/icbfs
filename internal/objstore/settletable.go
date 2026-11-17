@@ -40,6 +40,8 @@ import (
 //	                of a state that reached each, and whether the present does
 //	settle_read:    settle_entries as the states were read, before any change was played:
 //	                what the settle's proof (SettleDir) checks each generated state against
+//	settle_records: the directory's own record (its .metadata) as each state read had it,
+//	                where it differs from the state before: what each state written carries
 var settleSchema = []string{
 	`CREATE TABLE IF NOT EXISTS settle_runs (
 		run     TEXT PRIMARY KEY,
@@ -82,10 +84,17 @@ var settleSchema = []string{
 		to_at   INTEGER
 	)`,
 	`CREATE INDEX IF NOT EXISTS settle_read_from ON settle_read (run, from_at)`,
+	`CREATE TABLE IF NOT EXISTS settle_records (
+		run TEXT NOT NULL,
+		at  INTEGER NOT NULL,
+		sum TEXT NOT NULL,
+		rec BLOB,
+		PRIMARY KEY (run, at)
+	)`,
 }
 
 // settleTables is the tables holding a run's rows.
-var settleTables = []string{"settle_entries", "settle_read", "settle_states", "settle_blocks", "settle_runs"}
+var settleTables = []string{"settle_entries", "settle_read", "settle_records", "settle_states", "settle_blocks", "settle_runs"}
 
 // settleRunsKeptFor is how long a run's rows are kept if its settle
 // never ends them (its process killed): far longer than a settle takes.
@@ -191,17 +200,36 @@ func fromNanos(n int64) time.Time { return time.Unix(0, n).UTC() }
 
 // ReadState records the state read at at, which is after every state
 // recorded so far: its entries' lifetimes, diffed against the open ones
-// (the state before), and its sum. A state the same as the one before
-// is not recorded (kept false).
-func (t *SettleTable) ReadState(ctx context.Context, at time.Time, entries []SettleEntry) (kept bool, err error) {
+// (the state before), and its sum; and the directory's own record as
+// that state had it (rec, its .metadata; recSum, a sum of what of it is
+// the record and not the state's times), if it differs from the one
+// before. A state the same as the one before, entries and record, is not
+// recorded (kept false).
+func (t *SettleTable) ReadState(ctx context.Context, at time.Time, entries []SettleEntry, rec []byte, recSum string) (kept bool, err error) {
 	sum := SettleSum(entries)
 	var last string
 	err = t.db.QueryRowContext(ctx, `SELECT sum FROM settle_states WHERE run = ? AND read = 1 ORDER BY at DESC LIMIT 1`, t.run).Scan(&last)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
+	var lastRec string
+	rerr := t.db.QueryRowContext(ctx, `SELECT sum FROM settle_records WHERE run = ? ORDER BY at DESC LIMIT 1`, t.run).Scan(&lastRec)
+	if rerr != nil && !errors.Is(rerr, sql.ErrNoRows) {
+		return false, rerr
+	}
+	recChanged := errors.Is(rerr, sql.ErrNoRows) || lastRec != recSum
+	if recChanged {
+		if _, err := t.db.ExecContext(ctx, `INSERT OR REPLACE INTO settle_records VALUES (?, ?, ?, ?)`, t.run, nanos(at), recSum, rec); err != nil {
+			return false, err
+		}
+	}
 	if err == nil && last == sum {
-		return false, nil
+		if !recChanged {
+			return false, nil
+		}
+		// The record changed and the entries didn't: a state of its own.
+		_, err := t.db.ExecContext(ctx, `INSERT OR REPLACE INTO settle_states (run, at, sum, read) VALUES (?, ?, ?, 1)`, t.run, nanos(at), sum)
+		return err == nil, err
 	}
 	tx, err := t.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -490,6 +518,16 @@ func (t *SettleTable) ReadEntriesAt(ctx context.Context, at time.Time) ([]Settle
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// RecordAt is the directory's record (its .metadata as read) of the state
+// at at: the latest state read at or before at; nil if none was read.
+func (t *SettleTable) RecordAt(ctx context.Context, at time.Time) (rec []byte, sum string, err error) {
+	err = t.db.QueryRowContext(ctx, `SELECT rec, sum FROM settle_records WHERE run = ? AND at <= ? ORDER BY at DESC LIMIT 1`, t.run, nanos(at)).Scan(&rec, &sum)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", nil
+	}
+	return rec, sum, err
 }
 
 // SetNewKeys records the keys minted for the blocks below the root of the

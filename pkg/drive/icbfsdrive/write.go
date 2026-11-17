@@ -933,6 +933,9 @@ func (d *Drive) begin(ctx context.Context) (context.Context, func(*error), error
 	changes := &icbfs.DirChanges{}
 	written := &writtenKeys{}
 	ctx = objstore.WithRecorder(objstore.WithDeclaredTime(ctx, t), rec)
+	// The .version tables the change reads (its folder's, to tell late from
+	// on time) are read once for it: its dating after reuses them.
+	ctx = objstore.WithDatesRead(ctx, &objstore.DatesRead{})
 	ctx = withWrittenKeys(icbfs.WithDirChanges(ctx, changes), written)
 	// Only a caller that settles late changes (a deferring drive's, with
 	// somewhere to report them) may make one; anyone else's is refused

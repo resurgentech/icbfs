@@ -51,8 +51,12 @@ func (x *tree) checkSameHistory(path string, beforeH []icbfs.FileVersion, before
 	}
 	for i := range h {
 		// Of versions at one date, the older move back a nanosecond each
-		// (ReplaceFileHistory takes strictly increasing dates).
-		tied := i > 0 && beforeH[i].At.Equal(beforeH[i-1].At)
+		// (ReplaceFileHistory takes strictly increasing dates); so may one
+		// a run before moved back already, a tie again with the versions
+		// written since in its second (a version no .version lists is dated
+		// to the second, as S3's and Azure's listings date it).
+		tied := i > 0 && !beforeH[i-1].At.Before(beforeH[i].At) ||
+			i > 0 && beforeH[i-1].At.Sub(beforeH[i].At) < time.Microsecond
 		if d := beforeH[i].At.Sub(h[i].At); !(d == 0 || tied && d > 0 && d < time.Microsecond) || h[i].Size != beforeH[i].Size {
 			x.t.Errorf("%s version %d: %v %d bytes, was %v %d", path, i, h[i].At, h[i].Size, beforeH[i].At, beforeH[i].Size)
 		}

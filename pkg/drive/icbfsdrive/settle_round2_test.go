@@ -522,6 +522,9 @@ func TestSettleSameAtTwoWrites(t *testing.T) {
 // 1000, the same holds at 1100 states, measured once by hand: 568
 // requests at 20 and at 1100, see the step's report.)
 func TestSettleRequestsBeyondOnePage(t *testing.T) {
+	if raceOn {
+		t.Skip("measured without the race detector: `just test-settle`")
+	}
 	if testing.Short() {
 		t.Skip("builds two folders of 300 entries")
 	}

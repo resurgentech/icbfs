@@ -17,6 +17,13 @@ import (
 
 var _ drive.LateSettler = (*Drive)(nil)
 
+// MaxSettleChanges is how many late changes one settle plays at most:
+// SettleFolder settles more in parts of this size. A settle's heap is a
+// state's blocks and bookkeeping that grows with its states, not with the
+// changes; the parts bound what one write-out writes, and so how long a
+// window and a rerun take. A variable for the tests.
+var MaxSettleChanges = 256
+
 // onSettle, if set, is told of every settle the drive makes: for the
 // tests.
 var onSettle func(dir string, s drive.Settled)
@@ -109,9 +116,24 @@ func (d *Drive) SettleFolder(ctx context.Context, changes []drive.LateChange, op
 	}
 	var cut *icbfs.SettleRecord
 	if c := opts.Cut; c != nil {
-		cut = &icbfs.SettleRecord{Root: c.Root, Meta: c.Meta, Create: c.Create, Old: c.Old}
+		cut = &icbfs.SettleRecord{Root: c.Root, Meta: c.Meta, Create: c.Create, Old: c.Old, Times: c.Times}
 	}
-	s, err := d.settleDir(ctx, folder, dirChanges, opts.Record, opts.Done, cut)
+	// Played by At, those of one At in the order given; settled in parts of
+	// at most MaxSettleChanges, oldest first, each a settle of its own:
+	// record, write-out, Done. A part settled already plays again as
+	// nothing, so a rerun after a cut in any part is given every change
+	// and Cut, which the first part takes.
+	sort.SliceStable(dirChanges, func(i, j int) bool { return dirChanges[i].At.Before(dirChanges[j].At) })
+	var s drive.Settled
+	for start := 0; start < len(dirChanges); start += MaxSettleChanges {
+		part := dirChanges[start:min(start+MaxSettleChanges, len(dirChanges))]
+		ps, perr := d.settleDir(ctx, folder, part, opts.Record, opts.Done, cut)
+		s.Read, s.Written, s.Erased = s.Read+ps.Read, s.Written+ps.Written, s.Erased+ps.Erased
+		cut = nil
+		if err = perr; err != nil {
+			break
+		}
+	}
 	switch {
 	case err == nil:
 		return s, nil
@@ -123,6 +145,20 @@ func (d *Drive) SettleFolder(ctx context.Context, changes []drive.LateChange, op
 		return s, fmt.Errorf("%w (%v)", drive.ErrInvalid, err)
 	}
 	return s, mapErr(err)
+}
+
+// FolderWrittenBehind reports whether the folder's root block has a
+// version stored after one dated later (drive.LateSettler).
+func (d *Drive) FolderWrittenBehind(ctx context.Context, folder drive.ItemRef) (bool, error) {
+	n, err := d.resolve(ctx, d.fs, folder)
+	if err != nil {
+		return false, err
+	}
+	if n.typ != icbfs.TypeDir {
+		return false, drive.ErrNotDir
+	}
+	behind, err := d.fs.WrittenBehind(ctx, n.key)
+	return behind, mapErr(err)
 }
 
 // resolveToSettle is the folder a settle is of: a directory under the
@@ -210,23 +246,29 @@ func (d *Drive) settleDir(ctx context.Context, dirKey string, changes []icbfs.Di
 		d.settle.fsys = icbfs.New(d.settle.view, d.cfg.Filesystem)
 	}
 	var upToCache *objstore.HistoryCache
-	stateAt := func(ctx context.Context, t time.Time, upTo map[string]string) ([]block.Entry, []string, error) {
+	stateAt := func(ctx context.Context, t time.Time, upTo map[string]string) ([]block.Entry, []string, []byte, error) {
 		if upToCache == nil {
 			upToCache = cache.UpTo(upTo)
 		}
 		asOf, err := objstore.NewAsOf(ctx, upToCache, t)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		d.settle.view.Store = asOf
 		if err := d.settle.fsys.BootstrapViewOf(ctx, d.fs); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		return d.settle.fsys.ReadDirKeys(ctx, dirKey)
+		entries, keys, err := d.settle.fsys.ReadDirKeys(ctx, dirKey)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		rec, err := d.settle.fsys.DirRecord(ctx, dirKey)
+		return entries, keys, rec, err
 	}
 	toDrive := func(r icbfs.SettleRecord) drive.SettleRecord {
 		return drive.SettleRecord{Folder: dirKey, Root: r.Root, Meta: r.Meta,
-			Create: append([]string(nil), r.Create...), Old: append([]string(nil), r.Old...)}
+			Create: append([]string(nil), r.Create...), Old: append([]string(nil), r.Old...),
+			Times: append([]time.Time(nil), r.Times...)}
 	}
 	in := icbfs.SettleInput{
 		StateAt: stateAt,

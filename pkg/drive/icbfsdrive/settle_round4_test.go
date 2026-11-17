@@ -258,9 +258,8 @@ func TestSettleStoppedByAnOutsideWrite(t *testing.T) {
 // TestSettleFinishedByKeyWhenGone (the owner's rule 7): a settle cut in
 // its window, then its folder trashed (by an outside writer: the daemon
 // settles a folder before it removes it): the settle run again with the
-// record is finished by the folder's key, never answers ErrFolderGone,
-// and releases the record; restored, the folder is as it was, the late
-// file in its past (read by its key). A folder purged with a settle cut: the record's new
+// record never answers ErrFolderGone; the trash wrote the folder, so it
+// stops (ErrSettleStopped) with the record held (round 5, D3). A folder purged with a settle cut: the record's new
 // blocks go, and the record is released. With no record, a folder that
 // is gone answers ErrFolderGone and nothing is written.
 func TestSettleFinishedByKeyWhenGone(t *testing.T) {
@@ -287,21 +286,15 @@ func TestSettleFinishedByKeyWhenGone(t *testing.T) {
 	if _, err := d.SettleFolder(ctx, changes, drive.SettleOptions{}); !errors.Is(err, drive.ErrFolderGone) {
 		t.Errorf("gone, with no record: %v, want ErrFolderGone", err)
 	}
-	if _, err := d.SettleFolder(ctx, changes, k.opts()); err != nil {
-		t.Fatalf("gone, with the record: %v", err)
+	// The trash wrote the folder since the cut (outside the caller's
+	// exclusion: the daemon settles a folder before it removes it): the
+	// rerun with the record never answers ErrFolderGone; it stops, erasing
+	// nothing (round 5, D3).
+	if _, err := d.SettleFolder(ctx, changes, k.opts()); !errors.Is(err, drive.ErrSettleStopped) {
+		t.Fatalf("gone, with the record: %v, want ErrSettleStopped", err)
 	}
-	if k.held() != nil {
-		t.Errorf("the record is held after the settle with it")
-	}
-	// The trashed folder, by its key: as it was, the late file in its
-	// past from 2021.
-	if got := liveNames(t, d, folder); got != "a.txt,b.txt,c.txt,x.txt" {
-		t.Errorf("/dir in the trash, now: %s", got)
-	}
-	for y, want := range map[int]string{2020: "a.txt", 2021: "a.txt,x.txt", 2022: "a.txt,b.txt,x.txt", 2024: "a.txt,b.txt,c.txt,x.txt"} {
-		if got := folderAt(t, d, folder, midYear(y)); got != want {
-			t.Errorf("/dir in the trash as of mid-%d: %s, want %s", y, got, want)
-		}
+	if k.held() == nil {
+		t.Errorf("the stopped rerun released the record")
 	}
 
 	// Purged with a settle cut.

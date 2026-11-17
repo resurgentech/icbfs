@@ -738,24 +738,42 @@ type pathStep struct {
 // name, returning every node visited along the way (root-to-leaf order).
 // Each step carries the ETag needed to CAS-protect a write to it.
 func (f *Filesystem) descendForWrite(ctx context.Context, rootKey, name string) ([]pathStep, error) {
-	var path []pathStep
+	path, _, err := f.descendForWritePassing(ctx, rootKey, name)
+	return path, err
+}
+
+// descendForWritePassing is descendForWrite, also returning every block
+// it read: the path's and those it moved right past.
+func (f *Filesystem) descendForWritePassing(ctx context.Context, rootKey, name string) ([]pathStep, []pathStep, error) {
+	var path, read []pathStep
 	key := rootKey
 	for {
 		blk, obj, err := f.readBlock(ctx, key)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
+		read = append(read, pathStep{key, blk, obj})
 		for blk.Past(name) {
 			key = blk.Right
 			if blk, obj, err = f.readBlock(ctx, key); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
+			read = append(read, pathStep{key, blk, obj})
 		}
 		path = append(path, pathStep{key, blk, obj})
 		if blk.Kind == block.Leaf {
-			return path, nil
+			return path, read, nil
 		}
 		key = blk.ChildFor(name).UUID
+	}
+}
+
+// noteRead tells ctx's recorder of every block a change read on its way
+// to the block it changes (objstore.NoteOver): one a killed write left
+// and never dated is dated with the change.
+func noteRead(wctx context.Context, read []pathStep) {
+	for _, st := range read {
+		objstore.NoteOver(wctx, st.key, st.obj, blockLinks(st.blk))
 	}
 }
 
@@ -929,14 +947,15 @@ func (f *Filesystem) tryInsert(ctx context.Context, rootKey, name, uuid string, 
 	// The directory's blocks are written at wctx's date: the change's own,
 	// or the directory's newest state's if the change is behind it
 	// (lateDating). The change is noted at its own.
-	wctx, err := f.lateDating(ctx, rootKey)
+	path, read, err := f.descendForWritePassing(ctx, rootKey, name)
 	if err != nil {
 		return err
 	}
-	path, err := f.descendForWrite(ctx, rootKey, name)
+	wctx, err := f.lateDating(ctx, rootKey, rootOf(path, rootKey))
 	if err != nil {
 		return err
 	}
+	noteRead(wctx, read) // dated with the change, those no table lists
 	leaf := path[len(path)-1]
 	if err := leaf.blk.Insert(block.Entry{Name: name, UUID: uuid, Type: typ}); err != nil {
 		if errors.Is(err, block.ErrExists) {
@@ -948,6 +967,42 @@ func (f *Filesystem) tryInsert(ctx context.Context, rootKey, name, uuid string, 
 		return err
 	}
 	noteDirChange(ctx, rootKey, ChangeAdd, name, uuid, typ)
+	return nil
+}
+
+// DirRecord is directory key's .metadata as stored (its own record and
+// times), read as the filesystem reads (a view's: as of its time).
+func (f *Filesystem) DirRecord(ctx context.Context, key string) ([]byte, error) {
+	body, _, err := f.store.Get(objstore.CacheContent(ctx), metadataObjectKey(key))
+	if err != nil {
+		return nil, mapNotFound(err)
+	}
+	defer body.Close()
+	return io.ReadAll(body)
+}
+
+// blockLinks is the keys blk points to: its children and its right
+// sibling.
+func blockLinks(blk *block.Block) []string {
+	if blk == nil {
+		return nil
+	}
+	var out []string
+	for _, c := range blk.Children {
+		out = append(out, c.UUID)
+	}
+	if blk.Right != "" {
+		out = append(out, blk.Right)
+	}
+	return out
+}
+
+// rootOf is the version of the directory's root block path read, if it
+// read it.
+func rootOf(path []pathStep, rootKey string) *objstore.Object {
+	if len(path) > 0 && path[0].key == rootKey {
+		return path[0].obj
+	}
 	return nil
 }
 
@@ -966,7 +1021,7 @@ func (f *Filesystem) writeBack(ctx context.Context, rootKey string, step pathSte
 	overflowing := (blk.Kind == block.Leaf && len(blk.Entries) > f.dirBlockEntries) ||
 		(blk.Kind == block.Internal && len(blk.Children) > f.dirBlockEntries)
 	if !overflowing {
-		err := f.putBlock(ctx, rootKey, step.key, blk, step.obj.Metadata, step.obj.ETag)
+		err := f.putBlock(objstore.OverLinks(objstore.Over(ctx, step.obj), blockLinks(step.blk)), rootKey, step.key, blk, step.obj.Metadata, step.obj.ETag)
 		if objstore.IsPreconditionFailed(err) {
 			return errRetry
 		}
@@ -1001,14 +1056,14 @@ func (f *Filesystem) writeBack(ctx context.Context, rootKey string, step pathSte
 			{MinKey: "", UUID: leftKey},
 			{MinKey: sep, UUID: rightKey},
 		}}
-		err = f.putBlock(ctx, rootKey, rootKey, top, step.obj.Metadata, step.obj.ETag)
+		err = f.putBlock(objstore.OverLinks(objstore.Over(ctx, step.obj), blockLinks(step.blk)), rootKey, rootKey, top, step.obj.Metadata, step.obj.ETag)
 		if objstore.IsPreconditionFailed(err) {
 			return errRetry
 		}
 		return err
 	}
 
-	err = f.putBlock(ctx, rootKey, step.key, left, step.obj.Metadata, step.obj.ETag)
+	err = f.putBlock(objstore.OverLinks(objstore.Over(ctx, step.obj), blockLinks(step.blk)), rootKey, step.key, left, step.obj.Metadata, step.obj.ETag)
 	if objstore.IsPreconditionFailed(err) {
 		return errRetry // the right half is left unreferenced, which is harmless
 	}
@@ -1103,14 +1158,15 @@ func (f *Filesystem) removeEntryIf(ctx context.Context, rootKey, name string, ch
 }
 
 func (f *Filesystem) tryRemove(ctx context.Context, rootKey, name string, check func(block.Entry) error) (block.Entry, error) {
-	wctx, err := f.lateDating(ctx, rootKey) // as tryInsert's
+	path, read, err := f.descendForWritePassing(ctx, rootKey, name)
 	if err != nil {
 		return block.Entry{}, err
 	}
-	path, err := f.descendForWrite(ctx, rootKey, name)
+	wctx, err := f.lateDating(ctx, rootKey, rootOf(path, rootKey)) // as tryInsert's
 	if err != nil {
 		return block.Entry{}, err
 	}
+	noteRead(wctx, read)
 	leaf := path[len(path)-1]
 	removed, err := leaf.blk.Remove(name)
 	if err != nil {
@@ -1128,7 +1184,7 @@ func (f *Filesystem) tryRemove(ctx context.Context, rootKey, name string, check 
 	if err != nil {
 		return block.Entry{}, err
 	}
-	_, err = f.store.Put(objstore.AsBlock(wctx, rootKey), leaf.key, bytes.NewReader(data), leaf.obj.Metadata, leaf.obj.ETag)
+	_, err = f.store.Put(objstore.OverLinks(objstore.Over(objstore.AsBlock(wctx, rootKey), leaf.obj), blockLinks(leaf.blk)), leaf.key, bytes.NewReader(data), leaf.obj.Metadata, leaf.obj.ETag)
 	if objstore.IsPreconditionFailed(err) {
 		return block.Entry{}, errRetry
 	}
@@ -1903,7 +1959,7 @@ func (f *Filesystem) writeMetadataRead(ctx context.Context, key string, statusCh
 		if err != nil {
 			return nil, nil, err
 		}
-		written, err := f.store.Put(objstore.Replacing(ctx, obj.VersionID), mk, bytes.NewReader(newData), nil, obj.ETag)
+		written, err := f.store.Put(objstore.Over(objstore.Replacing(ctx, obj.VersionID), obj), mk, bytes.NewReader(newData), nil, obj.ETag)
 		if objstore.IsPreconditionFailed(err) {
 			continue
 		}

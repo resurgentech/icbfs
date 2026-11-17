@@ -3,6 +3,8 @@ package icbfs
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -123,12 +125,13 @@ const maxSettleAhead = time.Second
 
 // SettleInput is how SettleDir reads and where it keeps its work.
 type SettleInput struct {
-	// StateAt is the directory's entries as a view of t sees them, what
-	// is not a state left out (objstore.HistoryCache.WithoutLate, with
-	// upTo), and the keys of the blocks below its root the view read; an
-	// error satisfying ErrNotFound if it didn't exist then. upTo is the
-	// same for every call of one settle.
-	StateAt func(ctx context.Context, t time.Time, upTo map[string]string) ([]block.Entry, []string, error)
+	// StateAt is the directory's entries as a view of t sees them (what a
+	// cut settle wrote after upTo's versions left out:
+	// objstore.HistoryCache.UpTo), the keys of the blocks below its root
+	// the view read, and its .metadata as the view reads it (the
+	// directory's own record then); an error satisfying ErrNotFound if it
+	// didn't exist then. upTo is the same for every call of one settle.
+	StateAt func(ctx context.Context, t time.Time, upTo map[string]string) ([]block.Entry, []string, []byte, error)
 	// History is a key's history now, newest first (the history cache's,
 	// kept for the views that StateAt reads through); nil for the store's.
 	History func(ctx context.Context, key string) ([]objstore.Object, error)
@@ -170,6 +173,11 @@ type SettleRecord struct {
 	Root, Meta string
 	Create     []string // the keys of the new blocks below the root
 	Old        []string // the old blocks below the root it may clear once committed
+	// Times is the times of the states the settle writes, oldest first:
+	// its window puts a root block and a .metadata version at each, and
+	// its commit dates them there. A rerun takes a version after V0 that
+	// the directory's .version dates otherwise for another writer's.
+	Times []time.Time
 }
 
 // Settled is what a settle did.
@@ -284,6 +292,9 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 			rootH, metaH = rootHist[ri:], metaHist[mi:]
 			leftovers = append(liveOf(rootHist[:ri]), liveOf(metaHist[:mi])...)
 			upTo = map[string]string{dirKey: cut.Root, meta: cut.Meta}
+			if err := cutLeftoversOurs(dirKey, rootHist[:ri], metaHist[:mi], dates, cut.Times); err != nil {
+				return Settled{}, err
+			}
 		}
 		// Else V0 is gone: the cut settle committed and began its erases,
 		// and the states stored are its own.
@@ -332,7 +343,7 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 	}
 	read := 0
 	readState := func(t time.Time) error {
-		entries, keys, err := in.StateAt(ctx, t, upTo)
+		entries, keys, recData, err := in.StateAt(ctx, t, upTo)
 		if errors.Is(err, ErrNotFound) || objstore.IsNotFound(err) {
 			return nil // the directory didn't exist then
 		}
@@ -343,7 +354,15 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 		if err := tab.AddBlocks(ctx, t, keys...); err != nil {
 			return err
 		}
-		_, err = tab.ReadState(ctx, t, toSettleEntries(entries))
+		recAttr, err := decodeFileMetadata(recData)
+		if err != nil {
+			return fmt.Errorf("the directory's record as of %s: %w", t.Format(time.RFC3339Nano), err)
+		}
+		recSum, err := recordSum(recAttr)
+		if err != nil {
+			return err
+		}
+		_, err = tab.ReadState(ctx, t, toSettleEntries(entries), recData, recSum)
 		return err
 	}
 	if !tb.IsZero() {
@@ -389,7 +408,7 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 	}
 
 	// --- Proof ---
-	if err := f.settleProof(ctx, tab, changes, t0, present); err != nil {
+	if err := f.settleProof(ctx, tab, changes, t0, present, attr); err != nil {
 		return Settled{}, err
 	}
 
@@ -474,6 +493,10 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 		rec.Old = append(rec.Old, b.Key)
 	}
 	rec.Create, rec.Old = uniqueStrings(rec.Create), uniqueStrings(rec.Old)
+	rec.Times = nil
+	for _, s := range written {
+		rec.Times = append(rec.Times, s.at)
+	}
 	if in.Record != nil {
 		if err := in.Record(rec); err != nil {
 			return Settled{}, err
@@ -496,8 +519,11 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 		obj  *objstore.Object
 		data []byte
 	}
+	// Only the last state's versions are kept for the cache (the present):
+	// the write-out holds one state's blocks at a time.
 	var kept []put
-	for _, s := range written {
+	for si, s := range written {
+		last := si == len(written)-1
 		sctx := objstore.WithRecorder(objstore.WithDeclaredTime(ctx, s.at), recorder)
 		entries, err := tab.EntriesAt(ctx, s.at)
 		if err != nil {
@@ -529,14 +555,28 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 				if err != nil {
 					return Settled{}, err
 				}
-				kept = append(kept, put{obj, data})
+				if last {
+					kept = append(kept, put{obj, data})
+				}
 			}
 		}
 		rootData, err := root.Encode()
 		if err != nil {
 			return Settled{}, err
 		}
+		// The state's own record: the .metadata the state read there (or
+		// the one before it, for a state a change made) had, at the
+		// state's time.
+		recData, _, err := tab.RecordAt(ctx, s.at)
+		if err != nil {
+			return Settled{}, err
+		}
 		ma := attr
+		if recData != nil {
+			if ma, err = decodeFileMetadata(recData); err != nil {
+				return Settled{}, err
+			}
+		}
 		ma.Mtime = s.at
 		if ma.Ctime.IsZero() || ma.Ctime.Before(s.at) {
 			ma.Ctime = s.at
@@ -599,7 +639,9 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 			etag[p.key] = obj.ETag
 			winDates[obj.VersionID] = s.at
 			ours[obj.VersionID] = true
-			kept = append(kept, put{obj, p.data})
+			if i == len(written)-1 {
+				kept = append(kept, put{obj, p.data})
+			}
 		}
 	}
 
@@ -1002,6 +1044,83 @@ func settleRetry(retried *bool, do func() error) error {
 	return err
 }
 
+// WrittenBehind reports whether directory dirKey's root block has a
+// version stored after one dated later (objstore.NotStates' late): one
+// a write behind the directory's newest state left, which SettleDir
+// refuses. One listing of the root block's history, one read of the
+// directory's .version.
+func (f *Filesystem) WrittenBehind(ctx context.Context, dirKey string) (bool, error) {
+	ctx = undeclared(ctx)
+	dates, err := objstore.ReadDates(ctx, f.store, dirKey)
+	if err != nil {
+		return false, err
+	}
+	h, err := f.store.History(ctx, dirKey)
+	if err != nil {
+		return false, err
+	}
+	_, late := objstore.NotStates(h, dates)
+	return len(late) > 0, nil
+}
+
+// cutLeftoversOurs checks that the root block and .metadata versions
+// stored after a cut settle's V0 (root and meta, each newest first) are
+// that settle's own, as far as the directory's .version tells: before its
+// commit none of its window's versions is dated there; after it, each
+// key's are dated at exactly its states' times (times). A version dated
+// otherwise is another writer's (a write made between the cut and this
+// rerun, which the caller's exclusion forbids): ErrSettleStopped, and
+// nothing is erased. An undated version is the settle's (its window
+// before the commit, or a put whose answer was lost).
+func cutLeftoversOurs(dirKey string, root, meta []objstore.Object, dates objstore.Dates, times []time.Time) error {
+	for _, h := range [][]objstore.Object{root, meta} {
+		var dated []time.Time
+		for _, o := range h {
+			if o.Deleted {
+				continue
+			}
+			if t, ok := dates[o.VersionID]; ok {
+				dated = append(dated, t)
+			}
+		}
+		if len(dated) == 0 {
+			continue
+		}
+		want := map[int64]int{}
+		for _, t := range times {
+			want[t.UnixNano()]++
+		}
+		ok := len(dated) == len(times)
+		for _, t := range dated {
+			if want[t.UnixNano()] == 0 {
+				ok = false
+				break
+			}
+			want[t.UnixNano()]--
+		}
+		if !ok {
+			return fmt.Errorf("directory %s: a version stored after the cut settle's present is dated as none of its states (%d dated, %d states): written by another writer since: %w",
+				dirKey, len(dated), len(times), ErrSettleStopped)
+		}
+	}
+	return nil
+}
+
+// recordSum is a sum of what of a directory's .metadata is its own record
+// (mode, owner, app data and origin, extended attributes, ...), its
+// times and bookkeeping left out.
+func recordSum(a Attr) (string, error) {
+	a.Mtime, a.Ctime, a.Atime, a.Btime = time.Time{}, time.Time{}, time.Time{}, time.Time{}
+	a.Size, a.content, a.mtimeOverrideETag = 0, objstore.Object{}, ""
+	a.Checksums, a.Refs, a.dated, a.Nlink = nil, nil, false, 0 // nlink follows the entries
+	data, err := encodeFileMetadata(context.Background(), a)
+	if err != nil {
+		return "", err
+	}
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:16]), nil
+}
+
 // settleProof checks, before anything is written, that the table holds
 // what the settle may write and nothing else: every state from t0 on is
 // the state as read there (the latest read at or before it) with exactly
@@ -1012,7 +1131,7 @@ func settleRetry(retried *bool, do func() error) error {
 // what no change says: a difference between the states read plus the
 // changes and the present (a change not queued, a write not by this
 // rule) is ErrSettleRefused.
-func (f *Filesystem) settleProof(ctx context.Context, tab *objstore.SettleTable, changes []DirChange, t0 time.Time, present []block.Entry) error {
+func (f *Filesystem) settleProof(ctx context.Context, tab *objstore.SettleTable, changes []DirChange, t0 time.Time, present []block.Entry, presentAttr Attr) error {
 	states, err := tab.States(ctx, t0)
 	if err != nil {
 		return err
@@ -1048,6 +1167,21 @@ func (f *Filesystem) settleProof(ctx context.Context, tab *objstore.SettleTable,
 		if d := settleDiff(got, want); d != "" {
 			return fmt.Errorf("the state at %s would be %s: %w", s.At.Format(time.RFC3339Nano), d, ErrSettleRefused)
 		}
+		// Its record: the one the state read there had (none read: a
+		// directory a change made, which has no record before it).
+		recData, recSum, err := tab.RecordAt(ctx, s.At)
+		if err != nil {
+			return err
+		}
+		if recData != nil {
+			a, err := decodeFileMetadata(recData)
+			if err != nil {
+				return err
+			}
+			if sum, err := recordSum(a); err != nil || sum != recSum {
+				return fmt.Errorf("the state at %s: its record is not the one read: %w", s.At.Format(time.RFC3339Nano), ErrSettleRefused)
+			}
+		}
 	}
 	if len(states) == 0 {
 		return nil
@@ -1063,6 +1197,18 @@ func (f *Filesystem) settleProof(ctx context.Context, tab *objstore.SettleTable,
 	if d := settleDiff(last, now); d != "" {
 		return fmt.Errorf("the states read and the changes give, as of %s, not the folder's present (it would be %s): %w",
 			states[len(states)-1].At.Format(time.RFC3339Nano), d, ErrSettleRefused)
+	}
+	_, lastRec, err := tab.RecordAt(ctx, states[len(states)-1].At)
+	if err != nil {
+		return err
+	}
+	presentRec, err := recordSum(presentAttr)
+	if err != nil {
+		return err
+	}
+	if lastRec != "" && lastRec != presentRec {
+		return fmt.Errorf("the states read give, as of %s, not the folder's own record as it is now: %w",
+			states[len(states)-1].At.Format(time.RFC3339Nano), ErrSettleRefused)
 	}
 	return nil
 }

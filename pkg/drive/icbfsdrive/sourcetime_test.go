@@ -97,10 +97,15 @@ func TestVersionsInSourceTime(t *testing.T) {
 // then given an older version in source time (put back on top of which,
 // the current version keeps the mark).
 func TestListingDatesVersions(t *testing.T) {
-	d, _ := sourceDrive(t, "listing-dates")
+	d, store := sourceDrive(t, "listing-dates")
 	ctx := system()
 	write(t, ctx, d, "/now.txt", "now", drive.Condition{})
-	write(t, at(ctx, 2021), d, "/then.txt", "then", drive.Condition{})
+	// A write dated 2021 into the root after the undated one there is
+	// behind the root's undated version (dated by the store, now): a late
+	// change (T83-1 round 5), which only a drive that defers takes.
+	deferring := newDriveWith(t, store, icbfs.Settings{Name: "listing-dates", Size: 1 << 30, RootMode: 0o777, Created: year(2015)}, Config{DeferLateFolders: true})
+	write(t, at(drive.WithLateChanges(ctx, &drive.LateChanges{}), 2021), deferring, "/then.txt", "then", drive.Condition{})
+	d.past.flush()
 	write(t, ctx, d, "/both.txt", "current", drive.Condition{})
 	write(t, at(ctx, 2019), d, "/both.txt", "older", drive.Condition{})
 	for p, dated := range map[string]bool{"/now.txt": false, "/then.txt": true, "/both.txt": true} {
