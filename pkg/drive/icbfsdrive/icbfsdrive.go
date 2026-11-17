@@ -3,6 +3,7 @@
 package icbfsdrive
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/resurgentech/icbfs/internal/block"
@@ -107,8 +109,10 @@ type Drive struct {
 	settle  settling
 	events  broadcaster
 	idPaths idPathCache
-	dirs    *dirCache
-	past    pastMarker
+	// searches counts the walks of the tree for an item by id (findPaths).
+	searches atomic.Int64
+	dirs     *dirCache
+	past     pastMarker
 }
 
 var _ drive.Drive = (*Drive)(nil)
@@ -164,9 +168,15 @@ func (d *Drive) Capabilities() drive.Capabilities {
 
 // --- paths ---
 
-// cleanPath normalizes a path to "" (the top) or "/a/b".
+// cleanPath normalizes a path to "" (the top) or "/a/b". "/" is the only
+// separator: a backslash is a character of a name (T82-14). Turning it
+// into "/" here, after a caller (icbfs-git, a mirror) had checked the
+// path with "/" alone, let "..\" climb out of a Draft's folder and a
+// Clio name land in another matter. "." and ".." are still tidied, as
+// before, within the drive's root: Drafts and mirrors refuse them
+// themselves (drive.SplitPath) before they call the drive.
 func cleanPath(p string) string {
-	p = path.Clean("/" + strings.ReplaceAll(p, `\`, "/"))
+	p = path.Clean("/" + p)
 	if p == "/" {
 		return ""
 	}
@@ -345,6 +355,12 @@ func (d *Drive) resolve(ctx context.Context, fsys *icbfs.Filesystem, ref drive.I
 	return d.resolvePath(ctx, fsys, paths[0])
 }
 
+// Walks is how many walks of the drive's tree for an item by id it has
+// made since it was opened (findPaths: an id it doesn't remember, with no
+// path, record or hint that finds it; a read a folder, up to the whole
+// tree; and the settle's strict search). For tests and diagnostics.
+func (d *Drive) Walks() int64 { return d.searches.Load() }
+
 // findPaths is up to max (0: all) drive-relative paths naming id. A
 // directory it can't read is passed over.
 func (d *Drive) findPaths(ctx context.Context, fsys *icbfs.Filesystem, id string, max int) ([]string, error) {
@@ -354,6 +370,7 @@ func (d *Drive) findPaths(ctx context.Context, fsys *icbfs.Filesystem, id string
 // searchPaths is findPaths; strict, a directory it can't read (but for
 // one gone meanwhile) fails it.
 func (d *Drive) searchPaths(ctx context.Context, fsys *icbfs.Filesystem, id string, max int, strict bool) ([]string, error) {
+	d.searches.Add(1)
 	type dir struct{ key, path string }
 	var out []string
 	queue := []dir{{d.rootKey, "/"}}
@@ -542,39 +559,90 @@ func mapErr(err error) error {
 
 // --- the id → path memory ---
 
+// idPathEntries is how many item paths a drive remembers (T82-13): the
+// items it wrote, moved or found by a walk most recently. An entry is an
+// id (36 bytes), a path, a map slot and a list element: about 300 bytes
+// at a 100-byte path, so a full memory is about 0.3 MiB a drive, under
+// 0.5% of a daemon's 150 MiB soft limit with its two drives, and the
+// same at any size of drive. The mirrors don't need it to find what they
+// wrote: a lookup by origin is told where the item is
+// (drive.Mirror.WithHints, FindByOriginHint), and so is a stub's target
+// (drive.Ref.Path, the content map's place). What it still saves is a
+// walk for an id asked again soon after a write, a move or a walk that
+// found it, by a caller with no path (a stub's target whose place the
+// map doesn't have yet, which the mirror then learns; Drives' reads by
+// id).
+const idPathEntries = 1024
+
+// idPathCache remembers where items are, by id: at most max entries
+// (idPathEntries if 0), the least recently used dropped first.
 type idPathCache struct {
-	mu sync.Mutex
-	m  map[string]string
+	mu  sync.Mutex
+	max int
+	m   map[string]*list.Element // of *idPath, in lru
+	lru list.List                // most recently used first
 }
+
+type idPath struct{ id, path string }
 
 func (c *idPathCache) get(id string) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	p, ok := c.m[id]
-	return p, ok
+	e, ok := c.m[id]
+	if !ok {
+		return "", false
+	}
+	c.lru.MoveToFront(e)
+	return e.Value.(*idPath).path, true
 }
 
 func (c *idPathCache) put(id, p string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.m == nil || len(c.m) > 500000 {
-		c.m = map[string]string{}
+	c.putLocked(id, p)
+}
+
+func (c *idPathCache) putLocked(id, p string) {
+	if e, ok := c.m[id]; ok {
+		e.Value.(*idPath).path = p
+		c.lru.MoveToFront(e)
+		return
 	}
-	c.m[id] = p
+	if c.m == nil {
+		c.m = map[string]*list.Element{}
+	}
+	limit := c.max
+	if limit <= 0 {
+		limit = idPathEntries
+	}
+	for c.lru.Len() >= limit {
+		old := c.lru.Back()
+		delete(c.m, old.Value.(*idPath).id)
+		c.lru.Remove(old)
+	}
+	c.m[id] = c.lru.PushFront(&idPath{id: id, path: p})
+}
+
+func (c *idPathCache) len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lru.Len()
 }
 
 // moved notes that id went from one path to another, and so did what it
-// held: a directory's remembered descendants move with it.
+// held: a directory's remembered descendants move with it (a pass over
+// at most max entries).
 func (c *idPathCache) moved(id, from, to string, dir bool) {
-	c.put(id, to)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.putLocked(id, to)
 	if !dir {
 		return
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for k, p := range c.m {
-		if rest, ok := strings.CutPrefix(p, from+"/"); ok {
-			c.m[k] = joinPath(to, rest)
+	for e := c.lru.Front(); e != nil; e = e.Next() {
+		ip := e.Value.(*idPath)
+		if rest, ok := strings.CutPrefix(ip.path, from+"/"); ok {
+			ip.path = joinPath(to, rest)
 		}
 	}
 }
