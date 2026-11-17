@@ -1,0 +1,411 @@
+package icbfs
+
+import (
+	"context"
+	"encoding"
+	"encoding/base64"
+	"errors"
+	"fmt"
+	"io"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/resurgentech/icbfs/internal/objstore"
+)
+
+// Uploads in parts (T82-10): a file's content sent as parts of
+// UploadPartSize, each stored as an object of its own as it arrives, and
+// written as the file's new version by a copy of the parts on the store's
+// side (PutParts with every part a copy), so that whoever sends it holds
+// one part, never the file, and nothing between parts.
+//
+// An upload's objects are under <id>.upload-<upload>/, outside the
+// filesystem's own prefix (<id>-): no listing of the filesystem (DiskUsage,
+// fsck, HistoryUnder, the MinIO notification filter on Prefix), no view of
+// its tree or its past, and no mount ever sees them, since none reads a key
+// it was not led to from the root or under <id>-. Prune erases them with
+// the filesystem.
+//
+//   - record: the caller's own small record of the upload (StartUpload),
+//     whose presence says the upload exists;
+//   - p00001 ... p10000: the parts, each but the last exactly
+//     UploadPartSize. Each part's metadata holds the MD5 and SHA-256 state
+//     of the content up to its end, so the file's checksums are made here,
+//     a part at a time, and the last part's state is the file's. That
+//     chains the parts: part n is staged only after part n-1, and a part
+//     staged again (a retry) is taken only while it is the last.
+//
+// On S3 a copied part must be at least 5 MiB unless it is the last
+// (UploadPartCopy), and there are at most 10,000: UploadPartSize and
+// MaxUploadParts are those limits, so every staged part becomes one part
+// of the file, whatever the filesystem's own part size (partSize). On
+// Azure each becomes one block, staged from the part's blob by
+// StageBlockFromURL, under the same limits (at most 50,000 blocks).
+const (
+	UploadPartSize int64 = 5 << 20
+	MaxUploadParts       = 10000
+	// MaxUploadRecord is the largest record an upload keeps.
+	MaxUploadRecord = 16 << 10
+)
+
+// ErrUploadOrder is a part staged out of order (not the next, nor the
+// last again); ErrUploadParts is an upload whose parts are not the ones
+// its completion names (one missing, more than named, a size wrong).
+var (
+	ErrUploadOrder = errors.New("upload part out of order")
+	ErrUploadParts = errors.New("the upload's parts are not as named")
+)
+
+// metadata names of a part's checksum state.
+const (
+	mdMD5State    = "icbfs_md5_state"
+	mdSHA256State = "icbfs_sha256_state"
+)
+
+func (f *Filesystem) uploadPrefix() string { return f.id + ".upload-" }
+
+// UploadPrefix is the key prefix of every upload's objects of this
+// filesystem: outside Prefix.
+func (f *Filesystem) UploadPrefix() string { return f.uploadPrefix() }
+
+func (f *Filesystem) uploadDir(id string) string { return f.uploadPrefix() + id + "/" }
+
+func uploadRecordKey(dir string) string { return dir + "record" }
+
+func uploadPartKey(dir string, n int) string { return fmt.Sprintf("%sp%05d", dir, n) }
+
+// CheckUploadID is nil if id can name an upload: 16 to 64 lowercase
+// letters, digits and '-'.
+func CheckUploadID(id string) error {
+	if len(id) < 16 || len(id) > 64 {
+		return fmt.Errorf("upload id %q: 16 to 64 characters: %w", id, ErrInvalidArgument)
+	}
+	for _, r := range id {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
+			return fmt.Errorf("upload id %q: lowercase letters, digits and '-': %w", id, ErrInvalidArgument)
+		}
+	}
+	return nil
+}
+
+// ErrUploadsUnsupported is a store whose part limits can't take an
+// upload's parts as the file's parts.
+var ErrUploadsUnsupported = errors.New("this store's part limits can't take uploads in parts")
+
+// uploadsFit is nil if a store with limits lim takes every staged part as
+// one part of the file: UploadPartSize within Min and Max, and
+// MaxUploadParts within Count. S3 (5 MiB, 5 GiB, 10,000) and Azure (1 B,
+// 4000 MiB, 50,000) both do.
+func uploadsFit(lim objstore.PartLimits) error {
+	if UploadPartSize < lim.Min || UploadPartSize > lim.Max || MaxUploadParts > lim.Count {
+		return fmt.Errorf("%w: parts of %d, at most %d, against %+v", ErrUploadsUnsupported, UploadPartSize, MaxUploadParts, lim)
+	}
+	return nil
+}
+
+// StartUpload writes upload id's record, which makes it exist.
+func (f *Filesystem) StartUpload(ctx context.Context, id string, record []byte) error {
+	if err := f.checkWritable(); err != nil {
+		return err
+	}
+	if err := CheckUploadID(id); err != nil {
+		return err
+	}
+	if len(record) > MaxUploadRecord {
+		return fmt.Errorf("upload record of %d bytes, over %d: %w", len(record), MaxUploadRecord, ErrInvalidArgument)
+	}
+	_, err := f.store.PutIfAbsent(ctx, uploadRecordKey(f.uploadDir(id)), strings.NewReader(string(record)), nil)
+	if objstore.IsPreconditionFailed(err) {
+		return fmt.Errorf("upload %s: %w", id, ErrExists)
+	}
+	return err
+}
+
+// UploadRecord is upload id's record and when it was written.
+func (f *Filesystem) UploadRecord(ctx context.Context, id string) ([]byte, time.Time, error) {
+	if err := CheckUploadID(id); err != nil {
+		return nil, time.Time{}, err
+	}
+	body, obj, err := f.store.Get(ctx, uploadRecordKey(f.uploadDir(id)))
+	if err != nil {
+		return nil, time.Time{}, mapNotFound(err)
+	}
+	defer body.Close()
+	data, err := io.ReadAll(io.LimitReader(body, MaxUploadRecord+1))
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	return data, obj.LastModified, nil
+}
+
+// StageUploadPart stores part n (from 1) of upload id: size bytes of
+// content, 1 to UploadPartSize. Part n is taken when the upload exists,
+// part n-1 is there and whole (UploadPartSize), and no part n+1 is: the
+// next part, or the last one again. It holds nothing of the content
+// beyond what content holds; the store reads it from there.
+func (f *Filesystem) StageUploadPart(ctx context.Context, id string, n int, content io.ReaderAt, size int64) error {
+	if err := f.checkWritable(); err != nil {
+		return err
+	}
+	if err := CheckUploadID(id); err != nil {
+		return err
+	}
+	if n < 1 || n > MaxUploadParts {
+		return fmt.Errorf("part %d: parts are 1 to %d: %w", n, MaxUploadParts, ErrInvalidArgument)
+	}
+	if size < 1 || size > UploadPartSize {
+		return fmt.Errorf("part %d of %d bytes: a part is 1 to %d: %w", n, size, UploadPartSize, ErrInvalidArgument)
+	}
+	if int64(n-1)*UploadPartSize+size > f.maxFileSize {
+		return ErrFileTooLarge
+	}
+	if err := uploadsFit(f.store.PartLimits()); err != nil {
+		return err
+	}
+	dir := f.uploadDir(id)
+	if _, err := f.store.Head(ctx, uploadRecordKey(dir)); err != nil {
+		return fmt.Errorf("upload %s: %w", id, mapNotFound(err))
+	}
+	sum := NewChecksummer()
+	if n > 1 {
+		prev, err := f.store.Head(ctx, uploadPartKey(dir, n-1))
+		if objstore.IsNotFound(err) {
+			return fmt.Errorf("part %d before part %d: %w", n, n-1, ErrUploadOrder)
+		}
+		if err != nil {
+			return err
+		}
+		if prev.Size != UploadPartSize {
+			return fmt.Errorf("part %d after part %d of %d bytes, which was the last: %w", n, n-1, prev.Size, ErrUploadOrder)
+		}
+		if err := sum.restore(prev.Metadata); err != nil {
+			return fmt.Errorf("part %d: %w", n-1, err)
+		}
+	}
+	if _, err := f.store.Head(ctx, uploadPartKey(dir, n+1)); err == nil {
+		return fmt.Errorf("part %d again after part %d: %w", n, n+1, ErrUploadOrder)
+	} else if !objstore.IsNotFound(err) {
+		return err
+	}
+	if _, err := io.Copy(sum, io.NewSectionReader(content, 0, size)); err != nil {
+		return err
+	}
+	md, err := sum.state()
+	if err != nil {
+		return err
+	}
+	_, err = f.store.Put(ctx, uploadPartKey(dir, n), io.NewSectionReader(content, 0, size), md, "")
+	return err
+}
+
+// UploadState is what an upload has received.
+type UploadState struct {
+	Parts    int       // parts 1 to Parts are there
+	Size     int64     // their bytes
+	LastPart time.Time // when part Parts was stored; zero with none
+}
+
+// UploadState lists upload id's parts, a page at a time.
+func (f *Filesystem) UploadState(ctx context.Context, id string) (UploadState, error) {
+	if err := CheckUploadID(id); err != nil {
+		return UploadState{}, err
+	}
+	dir := f.uploadDir(id)
+	if _, err := f.store.Head(ctx, uploadRecordKey(dir)); err != nil {
+		return UploadState{}, fmt.Errorf("upload %s: %w", id, mapNotFound(err))
+	}
+	var st UploadState
+	last := 0
+	err := objstore.ListEach(ctx, f.store, dir+"p", func(page []objstore.Object) error {
+		for _, o := range page {
+			n, err := strconv.Atoi(strings.TrimPrefix(o.Key, dir+"p"))
+			if err != nil {
+				continue
+			}
+			st.Parts++
+			st.Size += o.Size
+			last = max(last, n)
+		}
+		return nil
+	})
+	if err != nil {
+		return UploadState{}, err
+	}
+	if last != st.Parts {
+		return UploadState{}, fmt.Errorf("upload %s: %d parts, the last numbered %d: %w", id, st.Parts, last, ErrUploadParts)
+	}
+	if last > 0 {
+		obj, err := f.store.Head(ctx, uploadPartKey(dir, last))
+		if err != nil {
+			return UploadState{}, err
+		}
+		st.LastPart = obj.LastModified
+	}
+	return st, nil
+}
+
+// UploadSource is an upload's parts as the copies that make the file,
+// with the file's size and checksums.
+type UploadSource struct {
+	Parts []objstore.Part
+	Size  int64
+	Sums  Checksums
+}
+
+// uploadHeads is how many parts' Heads UploadSources has in flight.
+const uploadHeads = 8
+
+// UploadSources are upload id's parts 1 to count, which must be all its
+// parts, each but the last whole, as the parts of a PutParts that copies
+// them: one Head each, uploadHeads at a time.
+func (f *Filesystem) UploadSources(ctx context.Context, id string, count int) (UploadSource, error) {
+	if err := CheckUploadID(id); err != nil {
+		return UploadSource{}, err
+	}
+	if count < 1 || count > MaxUploadParts {
+		return UploadSource{}, fmt.Errorf("%d parts: 1 to %d: %w", count, MaxUploadParts, ErrUploadParts)
+	}
+	dir := f.uploadDir(id)
+	if _, err := f.store.Head(ctx, uploadRecordKey(dir)); err != nil {
+		return UploadSource{}, fmt.Errorf("upload %s: %w", id, mapNotFound(err))
+	}
+	objs := make([]*objstore.Object, count+1)
+	errs := make([]error, count+1)
+	sem := make(chan struct{}, uploadHeads)
+	var wg sync.WaitGroup
+	for n := 1; n <= count+1; n++ {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			objs[n-1], errs[n-1] = f.store.Head(ctx, uploadPartKey(dir, n))
+		}(n)
+	}
+	wg.Wait()
+	if errs[count] == nil {
+		return UploadSource{}, fmt.Errorf("upload %s has more than %d parts: %w", id, count, ErrUploadParts)
+	}
+	if !objstore.IsNotFound(errs[count]) {
+		return UploadSource{}, errs[count]
+	}
+	src := UploadSource{Parts: make([]objstore.Part, count)}
+	for i := 0; i < count; i++ {
+		if objstore.IsNotFound(errs[i]) {
+			return UploadSource{}, fmt.Errorf("upload %s has no part %d: %w", id, i+1, ErrUploadParts)
+		}
+		if errs[i] != nil {
+			return UploadSource{}, errs[i]
+		}
+		o := objs[i]
+		if i < count-1 && o.Size != UploadPartSize {
+			return UploadSource{}, fmt.Errorf("upload %s: part %d is %d bytes, not %d: %w", id, i+1, o.Size, UploadPartSize, ErrUploadParts)
+		}
+		src.Parts[i] = objstore.Part{Size: o.Size, CopyKey: uploadPartKey(dir, i+1), CopyVersion: o.VersionID}
+		src.Size += o.Size
+	}
+	if src.Size > f.maxFileSize {
+		return UploadSource{}, ErrFileTooLarge
+	}
+	sum := NewChecksummer()
+	if err := sum.restore(objs[count-1].Metadata); err != nil {
+		return UploadSource{}, fmt.Errorf("upload %s part %d: %w", id, count, err)
+	}
+	src.Sums = sum.Sum()
+	return src, nil
+}
+
+// WriteUpload writes key's content from src's parts, copied on the store's
+// side, conditional on ifMatch as WriteFile is.
+func (f *Filesystem) WriteUpload(ctx context.Context, key string, src UploadSource, ifMatch string) (*objstore.Object, error) {
+	if err := f.checkWritable(); err != nil {
+		return nil, err
+	}
+	if len(src.Parts) == 0 {
+		return nil, ErrInvalidArgument
+	}
+	return f.store.PutParts(ctx, key, src.Parts, nil, ifMatch)
+}
+
+// DropUpload erases upload id: its record and parts, every version (the
+// bucket keeps versions: a delete would leave them).
+func (f *Filesystem) DropUpload(ctx context.Context, id string) error {
+	if err := CheckUploadID(id); err != nil {
+		return err
+	}
+	return f.store.EraseAll(ctx, f.uploadDir(id))
+}
+
+// UploadEntry is one upload ListUploads found: whether it has its record,
+// and how many parts.
+type UploadEntry struct {
+	ID     string
+	Record bool
+	Parts  int
+}
+
+// ListUploads calls fn with each upload of the filesystem, in id order,
+// listing a page at a time: it holds one page and one entry, never all.
+func (f *Filesystem) ListUploads(ctx context.Context, fn func(UploadEntry) error) error {
+	prefix := f.uploadPrefix()
+	var cur *UploadEntry
+	err := objstore.ListEach(ctx, f.store, prefix, func(page []objstore.Object) error {
+		for _, o := range page {
+			id, rest, ok := strings.Cut(strings.TrimPrefix(o.Key, prefix), "/")
+			if !ok {
+				continue
+			}
+			if cur != nil && cur.ID != id {
+				if err := fn(*cur); err != nil {
+					return err
+				}
+				cur = nil
+			}
+			if cur == nil {
+				cur = &UploadEntry{ID: id}
+			}
+			if rest == "record" {
+				cur.Record = true
+			} else if strings.HasPrefix(rest, "p") {
+				cur.Parts++
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if cur != nil {
+		return fn(*cur)
+	}
+	return nil
+}
+
+// state is h's hashes' state as a part's metadata.
+func (h *Checksummer) state() (map[string]string, error) {
+	md := map[string]string{}
+	for name, x := range map[string]any{mdMD5State: h.md5, mdSHA256State: h.sha256} {
+		b, err := x.(encoding.BinaryMarshaler).MarshalBinary()
+		if err != nil {
+			return nil, err
+		}
+		md[name] = base64.StdEncoding.EncodeToString(b)
+	}
+	return md, nil
+}
+
+// restore sets h's hashes to the state a part's metadata holds.
+func (h *Checksummer) restore(md map[string]string) error {
+	for name, x := range map[string]any{mdMD5State: h.md5, mdSHA256State: h.sha256} {
+		b, err := base64.StdEncoding.DecodeString(md[name])
+		if err != nil || len(b) == 0 {
+			return fmt.Errorf("no checksum state %s: %w", name, ErrUploadParts)
+		}
+		if err := x.(encoding.BinaryUnmarshaler).UnmarshalBinary(b); err != nil {
+			return fmt.Errorf("checksum state %s: %v: %w", name, err, ErrUploadParts)
+		}
+	}
+	return nil
+}

@@ -67,6 +67,9 @@ type writeSource struct {
 	r    io.Reader
 	at   io.ReaderAt
 	size int64
+	// upload, if set, is an upload's staged parts (parts.go), copied on
+	// the store's side: no body.
+	upload *icbfs.UploadSource
 }
 
 // streamed is whether the content goes to the store as it arrives, so
@@ -125,6 +128,13 @@ func (d *Drive) write(ctx context.Context, p string, src writeSource, cond drive
 				return obj, refErr(err)
 			}
 			return nil
+		case src.upload != nil:
+			// An upload's parts (T82-10): copied by the store, the
+			// checksums made as they were staged.
+			sums = src.upload.Sums
+			put = func(ctx context.Context, key, etag string) (*objstore.Object, error) {
+				return d.fs.WriteUpload(ctx, key, *src.upload, etag)
+			}
 		case src.at != nil:
 			if src.size > d.fs.MaxFileSize() {
 				return drive.ErrTooLarge
