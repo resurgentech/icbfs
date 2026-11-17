@@ -133,9 +133,15 @@ func (d *Drive) Capabilities() drive.Capabilities {
 
 // --- paths ---
 
-// cleanPath normalizes a path to "" (the top) or "/a/b".
+// cleanPath normalizes a path to "" (the top) or "/a/b". "/" is the only
+// separator: a backslash is a character of a name (T82-14). Turning it
+// into "/" here, after a caller (icbfs-git, a mirror) had checked the
+// path with "/" alone, let "..\" climb out of a Draft's folder and a
+// Clio name land in another matter. "." and ".." are still tidied, as
+// before, within the drive's root: Drafts and mirrors refuse them
+// themselves (drive.SplitPath) before they call the drive.
 func cleanPath(p string) string {
-	p = path.Clean("/" + strings.ReplaceAll(p, `\`, "/"))
+	p = path.Clean("/" + p)
 	if p == "/" {
 		return ""
 	}
