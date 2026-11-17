@@ -316,6 +316,10 @@ func joinPath(dir, name string) string {
 
 // resolve finds an item by ref; by id it searches the drive's tree (the
 // filesystem keeps no parent pointers), remembering where it found it.
+// docs/STATES.md 5.1: a path given, then the memory, then (one search at
+// a time for an id in a view) what is remembered as nowhere, the trash,
+// and a search; "not there" (drive.ErrNotFound) only when the search read
+// every folder, else drive.ErrNotSearched.
 func (d *Drive) resolve(ctx context.Context, fsys *icbfs.Filesystem, ref drive.ItemRef) (*node, error) {
 	if ref.ID == "" {
 		return d.resolvePath(ctx, fsys, ref.Path)
@@ -334,44 +338,85 @@ func (d *Drive) resolve(ctx context.Context, fsys *icbfs.Filesystem, ref drive.I
 	}
 	// What this view remembers: the present's memory for the present,
 	// the view's own for a view of the past (T82-15).
-	mem := d.memory(fsys)
-	if p, ok := mem.get(ref.ID); ok {
-		if n, err := d.resolvePath(ctx, fsys, p); err == nil && n.key == ref.ID {
+	mem, at := d.memory(fsys)
+	remembered := func() *node {
+		if p, ok := mem.get(ref.ID); ok {
+			if n, err := d.resolvePath(ctx, fsys, p); err == nil && n.key == ref.ID {
+				return n
+			}
+		}
+		return nil
+	}
+	if n := remembered(); n != nil {
+		return n, nil
+	}
+	key := stoppedKey{at: at, id: ref.ID}
+	notThere := func(why string) error {
+		return fmt.Errorf("id %s: %s: %w", ref.ID, why, drive.ErrNotFound)
+	}
+	if d.stopped.isAbsent(key) {
+		return nil, notThere("found nowhere within the last minutes")
+	}
+	// One search for an id in a view at a time (LK-10): a second lookup
+	// waits for the first, within its own deadline, then takes what the
+	// first found, or goes on from where it stopped.
+	end, waited, err := d.stopped.begin(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("lookup by id %s: waited for another lookup of it: %w (%w)", ref.ID, drive.ErrNotSearched, err)
+	}
+	defer end()
+	if waited {
+		if n := remembered(); n != nil {
 			return n, nil
 		}
+		if d.stopped.isAbsent(key) {
+			return nil, notThere("found nowhere within the last minutes")
+		}
 	}
-	p, err := d.search(ctx, fsys, mem, ref.ID)
+	p, err := d.search(ctx, fsys, key)
 	if err != nil {
 		return nil, err
 	}
 	if p == "" {
-		return nil, fmt.Errorf("id %s: %w", ref.ID, drive.ErrNotFound)
+		d.stopped.noteAbsent(key)
+		return nil, notThere("in no folder")
+	}
+	if p == inTrash {
+		d.stopped.noteAbsent(key)
+		return nil, notThere("in the trash")
 	}
 	n, err := d.resolvePath(ctx, fsys, p)
-	if err != nil {
-		return nil, err
-	}
-	if n.key != ref.ID {
+	if err != nil || n.key != ref.ID {
 		// Moved while it was searched for (a search that went on from an
-		// earlier call read that call's paths): asked again, it searches
-		// afresh.
-		return nil, fmt.Errorf("lookup by id %s: found at %s, which no longer leads to it: %w", ref.ID, p, drive.ErrNotSearched)
+		// earlier call read that call's paths): the tree changed under
+		// the search, which is not "not there" (LK-7). Its kept search is
+		// gone (search took it), so asked again it starts from the root.
+		why := "another item"
+		if err != nil {
+			why = err.Error()
+		}
+		return nil, fmt.Errorf("lookup by id %s: found at %s, which no longer leads to it (%s): %w", ref.ID, p, why, drive.ErrNotSearched)
 	}
 	mem.put(ref.ID, p)
 	return n, nil
 }
 
-// memory is the id → path memory of fsys: the present's (d.idPaths) for
-// the drive's filesystem, else the view's own (viewCache.memoryOf). A
-// view no longer kept gets one that is thrown away after the call.
-func (d *Drive) memory(fsys *icbfs.Filesystem) *idPathCache {
+// inTrash is search's answer for an id the trash holds.
+const inTrash = "\x00trash"
+
+// memory is the id → path memory of fsys and its moment: the present's
+// (d.idPaths, zero) for the drive's filesystem, else the view's own
+// (viewCache.memoryOf), also for a view dropped while a lookup held it.
+// A filesystem the drive did not make gets one thrown away after the
+// call.
+func (d *Drive) memory(fsys *icbfs.Filesystem) (*idPathCache, time.Time) {
 	if fsys == d.fs {
-		return &d.idPaths
+		return &d.idPaths, time.Time{}
 	}
-	if m := d.views.memoryOf(fsys); m != nil {
-		return m
+	if m, at, ok := d.views.memoryOf(fsys); ok {
+		return m, at
 	}
-	return &idPathCache{}
+	return &idPathCache{}, time.Unix(0, 1) // not the present's
 }
 
 // Walks is how many walks of the drive's tree for an item by id it has
@@ -381,20 +426,33 @@ func (d *Drive) memory(fsys *icbfs.Filesystem) *idPathCache {
 // one that stopped is a walk again. For tests and diagnostics.
 func (d *Drive) Walks() int64 { return d.searches.Load() }
 
-// search is the path of item id in fsys's tree, "" if it isn't there:
-// breadth first, one ReadDir a folder, going on from where a search for
-// it in the same view stopped (stoppedSearches). It stops when ctx ends,
-// or once it has read the drive's budget of folders in this call
-// (Config.SearchBudget), with drive.ErrNotSearched, and keeps the folders
-// it still had to read for the next call. A folder it can't read is
-// skipped, as before; one cut by the context is read again next time.
-func (d *Drive) search(ctx context.Context, fsys *icbfs.Filesystem, mem *idPathCache, id string) (string, error) {
-	d.searches.Add(1)
-	key := stoppedKey{mem: mem, id: id}
+// search is the path of item id in fsys's tree, "" if it isn't there, or
+// inTrash: breadth first, one ReadDir a folder, going on from where a
+// search for it in the same view stopped (stoppedSearches). A search that
+// starts from the root in the present first asks the trash for the id
+// (a few reads: icbfs.Filesystem.TrashedItem), and an item there is not
+// searched for (LK-13). It stops when ctx ends, once it has read the
+// drive's budget of folders in this call (Config.SearchBudget), or when
+// the store fails reading a folder, with drive.ErrNotSearched, and keeps
+// the folders it still had to read, that one included, for the next call
+// (LK-6). A folder queued that is no longer there is a tree that changed
+// under the search: drive.ErrNotSearched, and nothing kept (LK-7).
+func (d *Drive) search(ctx context.Context, fsys *icbfs.Filesystem, key stoppedKey) (string, error) {
+	id := key.id
 	s := d.stopped.take(key)
 	if s == nil {
+		if fsys == d.fs {
+			_, err := d.fs.TrashedItem(ctx, id)
+			if err == nil {
+				return inTrash, nil
+			}
+			if !errors.Is(err, icbfs.ErrNotFound) {
+				return "", fmt.Errorf("lookup by id %s: asking the trash: %w (%w)", id, drive.ErrNotSearched, err)
+			}
+		}
 		s = &stoppedSearch{queue: []searchDir{{d.rootKey, "/"}}}
 	}
+	d.searches.Add(1)
 	budget := d.cfg.SearchBudget
 	read := 0
 	stop := func(cause error) error {
@@ -415,15 +473,19 @@ func (d *Drive) search(ctx context.Context, fsys *icbfs.Filesystem, mem *idPathC
 		}
 		cur := s.queue[0]
 		entries, err := fsys.ReadDir(ctx, cur.key)
-		if err != nil && ctx.Err() != nil {
-			return "", stop(ctx.Err())
+		if err != nil {
+			if ctx.Err() != nil {
+				return "", stop(ctx.Err())
+			}
+			if errors.Is(err, icbfs.ErrNotFound) || objstore.IsNotFound(err) {
+				return "", fmt.Errorf("lookup by id %s: the folder %s, queued, is gone (%v): the tree changed under the search: %w",
+					id, cur.path, err, drive.ErrNotSearched)
+			}
+			return "", stop(fmt.Errorf("reading %s: %w", cur.path, err))
 		}
 		s.queue = s.queue[1:]
 		read++
 		s.read++
-		if err != nil {
-			continue
-		}
 		for _, e := range entries {
 			p := joinPath(cur.path, e.Name)
 			if e.UUID == id {

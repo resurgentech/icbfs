@@ -244,6 +244,7 @@ func (d *Drive) Restore(ctx context.Context, id string, opts drive.RestoreOption
 	if _, err := d.fs.Restore(rctx, id, icbfs.RestoreOptions{ToDir: parent.key, ToName: name, Replace: opts.Replace}); err != nil {
 		return drive.Item{}, mapErr(err)
 	}
+	d.stopped.present(te.ItemID) // no longer "not there" (LK-13)
 	d.changed(parent)
 	return d.statItem(ctx, joinPath(parent.path, name))
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"time"
+	"weak"
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore"
@@ -31,6 +32,11 @@ type viewCache struct {
 	// it was dropped, or the past changed) still knows where it found
 	// items; a remembered path is checked against the id on use.
 	mems map[time.Time]*viewMemory
+	// moments are the moment of every view this cache made that is still
+	// in use, by its filesystem, weakly: a view dropped while a lookup
+	// holds it is still known by its moment (ME-5), and gone once nothing
+	// holds it.
+	moments map[weak.Pointer[icbfs.Filesystem]]time.Time
 }
 
 // viewMemory is one time's id → path memory.
@@ -122,6 +128,7 @@ func (c *viewCache) get(ctx context.Context, t time.Time) (*icbfs.Filesystem, er
 		delete(c.views, oldest)
 	}
 	c.views[t] = &view{fsys: fsys, used: time.Now(), mem: c.memLocked(t)}
+	c.noteMomentLocked(fsys, t)
 	return fsys, nil
 }
 
@@ -148,18 +155,40 @@ func (c *viewCache) memLocked(t time.Time) *viewMemory {
 	return m
 }
 
-// memoryOf is the id → path memory of fsys, a view this cache made, or
-// nil if it no longer keeps that view.
-func (c *viewCache) memoryOf(fsys *icbfs.Filesystem) *idPathCache {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for _, v := range c.views {
-		if v.fsys == fsys {
-			v.mem.used = time.Now()
-			return &v.mem.paths
+// noteMomentLocked records fsys's moment, and lets go of the filesystems
+// nothing holds any more.
+func (c *viewCache) noteMomentLocked(fsys *icbfs.Filesystem, t time.Time) {
+	if c.moments == nil {
+		c.moments = map[weak.Pointer[icbfs.Filesystem]]time.Time{}
+	}
+	for k := range c.moments {
+		if k.Value() == nil {
+			delete(c.moments, k)
 		}
 	}
-	return nil
+	c.moments[weak.Make(fsys)] = t
+}
+
+// memoryOf is the id → path memory of fsys, a view this cache made, and
+// its moment: the view's, or, for a view dropped since (evicted, or the
+// past changed) that a lookup still holds, its moment's, made again if it
+// was let go (ME-5). ok is false for a filesystem this cache never made.
+func (c *viewCache) memoryOf(fsys *icbfs.Filesystem) (mem *idPathCache, at time.Time, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for t, v := range c.views {
+		if v.fsys == fsys {
+			v.mem.used = time.Now()
+			return &v.mem.paths, t, true
+		}
+	}
+	t, ok := c.moments[weak.Make(fsys)]
+	if !ok {
+		return nil, time.Time{}, false
+	}
+	m := c.memLocked(t)
+	m.used = time.Now()
+	return &m.paths, t, true
 }
 
 // forgetLocked drops the views, the past having changed, and the
@@ -167,7 +196,7 @@ func (c *viewCache) memoryOf(fsys *icbfs.Filesystem) *idPathCache {
 // checked on use).
 func (c *viewCache) forgetLocked() {
 	clear(c.views)
-	c.d.stopped.dropPast(&c.d.idPaths)
+	c.d.stopped.dropPast()
 }
 
 // cache is the history cache views read through: the drive's

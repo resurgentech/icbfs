@@ -340,6 +340,12 @@ func (d *Drive) refTarget(ctx context.Context, r drive.Ref, want *drive.Checksum
 	if errors.Is(err, drive.ErrNotFound) {
 		return nil, unavailable("not an item of this drive") // another drive's or filesystem's, or gone
 	}
+	if errors.Is(err, drive.ErrNotSearched) && ctx.Err() == nil {
+		// Not found within the search's budget, or the tree changed under
+		// it: the caller writes the bytes in full (LC-3). A cut context is
+		// a stop, which ends the write too.
+		return nil, unavailable("could not be searched for: %v", err)
+	}
 	if err != nil {
 		return nil, err
 	}
