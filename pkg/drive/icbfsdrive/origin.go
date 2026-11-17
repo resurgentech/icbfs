@@ -9,7 +9,10 @@ import (
 	"github.com/resurgentech/icbfs/pkg/drive"
 )
 
-var _ drive.OriginFinder = (*Drive)(nil)
+var (
+	_ drive.OriginFinder       = (*Drive)(nil)
+	_ drive.HintedOriginFinder = (*Drive)(nil)
+)
 
 // recordOrigin indexes the item key, at drive path p, as the copy of o's
 // source item (icbfs.OriginRecord), so FindByOrigin finds it in a lookup.
@@ -97,7 +100,28 @@ func (d *Drive) putOrigin(ctx context.Context, rec icbfs.OriginRecord) error {
 // that id; one whose item is trashed, or no longer lists it, is
 // ErrNotFound.
 func (d *Drive) FindByOrigin(ctx context.Context, originDrive, originID string) (drive.Item, *drive.TrashEntry, error) {
-	rec, _, err := d.fs.OriginRecord(ctx, originDrive, originID)
+	return d.findByOrigin(ctx, originDrive, originID, "")
+}
+
+// FindByOriginHint is FindByOrigin told where the caller believes the
+// item is (drive.HintedOriginFinder): hint, a drive path, a daemon's own
+// record of where it put the item. The hint is tried first, once (a
+// resolve of the path), and is the answer only if the item there is the
+// one the origin record names, the item FindByOrigin finds; then an
+// origin's record (not an alias's) is corrected to name it there (best
+// effort), so the next lookup needs no hint. A hint that misses (stale, wrong, another item's path)
+// costs that resolve and the lookup goes on as FindByOrigin's: the same
+// answers, whatever the hint. After a folder's move, which leaves the
+// records of the items under it naming their old paths, in a process
+// that doesn't remember where it put them (a daemon's start), it is what
+// spares each of them a walk of the whole tree (T82-13).
+func (d *Drive) FindByOriginHint(ctx context.Context, originDrive, originID, hint string) (drive.Item, *drive.TrashEntry, error) {
+	return d.findByOrigin(ctx, originDrive, originID, hint)
+}
+
+// findByOrigin is FindByOrigin, trying hint ("": none) first.
+func (d *Drive) findByOrigin(ctx context.Context, originDrive, originID, hint string) (drive.Item, *drive.TrashEntry, error) {
+	rec, recTag, err := d.fs.OriginRecord(ctx, originDrive, originID)
 	if err != nil {
 		if errors.Is(err, icbfs.ErrNotFound) {
 			return drive.Item{}, nil, fmt.Errorf("source item %s: %w", originID, drive.ErrNotFound)
@@ -115,6 +139,25 @@ func (d *Drive) FindByOrigin(ctx context.Context, originDrive, originID string) 
 		return it, nil, nil
 	}
 	recPath, recOK := d.drivePath(rec.Path)
+	if hint != "" && !(recOK && cleanPath(hint) == cleanPath(recPath)) {
+		if n, err := d.resolvePath(ctx, d.fs, hint); err == nil && n.key == rec.ItemID {
+			if err := d.check(ctx, n, needRead); err != nil {
+				return drive.Item{}, nil, err
+			}
+			it, te, err := found(d.item(ctx, n, true))
+			if err == nil && !rec.Alias {
+				// Best effort: the next lookup needs no hint. Only an
+				// origin's record: an alias's is the mirror's to rewrite as
+				// the item's aliases change hands (a fold, an unfold, a
+				// hand-over), and one written back here from an earlier
+				// read was measured to turn a hand-over (Clio's
+				// TestFoldSyncPathsAndRetryKeepTheFold, 6 of 12 runs red).
+				rec.Path = d.fsPath(n.path)
+				_ = d.fs.PutOriginRecord(ctx, rec, recTag)
+			}
+			return it, te, err
+		}
+	}
 	if recOK {
 		if n, err := d.resolvePath(ctx, d.fs, recPath); err == nil && n.key == rec.ItemID {
 			if err := d.check(ctx, n, needRead); err != nil {

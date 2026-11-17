@@ -11,6 +11,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/resurgentech/icbfs/internal/block"
@@ -73,8 +74,10 @@ type Drive struct {
 	views   viewCache
 	events  broadcaster
 	idPaths idPathCache
-	dirs    *dirCache
-	past    pastMarker
+	// searches counts the walks of the tree for an item by id (findPaths).
+	searches atomic.Int64
+	dirs     *dirCache
+	past     pastMarker
 }
 
 var _ drive.Drive = (*Drive)(nil)
@@ -311,8 +314,15 @@ func (d *Drive) resolve(ctx context.Context, fsys *icbfs.Filesystem, ref drive.I
 	return d.resolvePath(ctx, fsys, paths[0])
 }
 
+// Walks is how many walks of the drive's tree for an item by id it has
+// made since it was opened (findPaths: an id it doesn't remember, with no
+// path, record or hint that finds it; a read a folder, up to the whole
+// tree). For tests and diagnostics.
+func (d *Drive) Walks() int64 { return d.searches.Load() }
+
 // findPaths is up to max (0: all) drive-relative paths naming id.
 func (d *Drive) findPaths(ctx context.Context, fsys *icbfs.Filesystem, id string, max int) ([]string, error) {
+	d.searches.Add(1)
 	type dir struct{ key, path string }
 	var out []string
 	queue := []dir{{d.rootKey, "/"}}
