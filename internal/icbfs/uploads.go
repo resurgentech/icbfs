@@ -249,10 +249,16 @@ func (f *Filesystem) UploadState(ctx context.Context, id string) (UploadState, e
 // UploadSource is an upload's parts as the copies that make the file,
 // with the file's size and checksums.
 type UploadSource struct {
+	ID    string // the upload's: recorded on the version it writes (MetaUpload)
 	Parts []objstore.Part
 	Size  int64
 	Sums  Checksums
 }
+
+// MetaUpload is the content version's metadata naming the upload it was
+// written from (WriteUpload): how a write run again finds it already
+// landed (UploadVersion), whatever was written to the file since.
+const MetaUpload = "icbfs_upload"
 
 // uploadHeads is how many parts' Heads UploadSources has in flight.
 const uploadHeads = 8
@@ -274,7 +280,7 @@ func (f *Filesystem) UploadSources(ctx context.Context, id string, count int) (U
 	if _, err := f.store.Head(ctx, uploadRecordKey(dir)); err != nil {
 		return UploadSource{}, fmt.Errorf("upload %s: %w", id, mapNotFound(err))
 	}
-	src := UploadSource{Parts: make([]objstore.Part, count)}
+	src := UploadSource{ID: id, Parts: make([]objstore.Part, count)}
 	var lastMeta map[string]string
 	hctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -351,7 +357,49 @@ func (f *Filesystem) WriteUpload(ctx context.Context, key string, src UploadSour
 	if len(src.Parts) == 0 {
 		return nil, ErrInvalidArgument
 	}
-	return f.store.PutParts(ctx, key, src.Parts, nil, ifMatch)
+	var md map[string]string
+	if src.ID != "" {
+		md = map[string]string{MetaUpload: src.ID}
+	}
+	return f.store.PutParts(ctx, key, src.Parts, md, ifMatch)
+}
+
+// uploadClockSlack is how far before since UploadVersion looks: the
+// caller's clock against the store's.
+const uploadClockSlack = 10 * time.Minute
+
+// UploadVersion is the version of key that upload id wrote (WriteUpload
+// records it in the version's metadata), looking at the versions dated
+// since (less uploadClockSlack), newest first, one Head each: a write run
+// again after it landed finds it here. ErrNotFound if none.
+func (f *Filesystem) UploadVersion(ctx context.Context, key, id string, since time.Time) (*objstore.Object, error) {
+	if err := CheckUploadID(id); err != nil {
+		return nil, err
+	}
+	hist, err := f.store.History(ctx, key)
+	if err != nil {
+		return nil, mapNotFound(err)
+	}
+	from := since.Add(-uploadClockSlack)
+	for _, v := range hist {
+		if v.LastModified.Before(from) {
+			break // newest first: the rest are older
+		}
+		if v.Deleted {
+			continue
+		}
+		obj, err := f.store.HeadVersion(ctx, key, v.VersionID)
+		if objstore.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if obj.Metadata[MetaUpload] == id {
+			return obj, nil
+		}
+	}
+	return nil, fmt.Errorf("upload %s: no version of %s: %w", id, key, ErrNotFound)
 }
 
 // An upload's notes are small objects beside its record that its caller
@@ -385,6 +433,61 @@ func (f *Filesystem) SetUploadNote(ctx context.Context, id, note string, data []
 	}
 	_, err := f.store.Put(ctx, uploadNoteKey(f.uploadDir(id), note), strings.NewReader(string(data)), nil, "")
 	return err
+}
+
+// SetUploadNoteIf is SetUploadNote conditional on the note's current
+// version: ifMatch an etag UploadNoteTag gave (the note is still that), or
+// "" (the note does not exist yet). A lost race is an error
+// objstore.IsPreconditionFailed recognizes (ErrUploadTaken). It returns
+// the etag written.
+func (f *Filesystem) SetUploadNoteIf(ctx context.Context, id, note string, data []byte, ifMatch string) (string, error) {
+	if err := CheckUploadID(id); err != nil {
+		return "", err
+	}
+	if err := checkNote(note); err != nil {
+		return "", err
+	}
+	if len(data) > MaxUploadRecord {
+		return "", fmt.Errorf("upload note of %d bytes, over %d: %w", len(data), MaxUploadRecord, ErrInvalidArgument)
+	}
+	key := uploadNoteKey(f.uploadDir(id), note)
+	var obj *objstore.Object
+	var err error
+	if ifMatch == "" {
+		obj, err = f.store.PutIfAbsent(ctx, key, strings.NewReader(string(data)), nil)
+	} else {
+		obj, err = f.store.Put(ctx, key, strings.NewReader(string(data)), nil, ifMatch)
+	}
+	if objstore.IsPreconditionFailed(err) {
+		return "", fmt.Errorf("upload %s note %s: %w (%w)", id, note, ErrUploadTaken, err)
+	}
+	if err != nil {
+		return "", err
+	}
+	return obj.ETag, nil
+}
+
+// ErrUploadTaken is a conditional note write that lost its race.
+var ErrUploadTaken = errors.New("the upload's note was changed by another writer")
+
+// UploadNoteTag is UploadNote with the note's etag, for SetUploadNoteIf.
+func (f *Filesystem) UploadNoteTag(ctx context.Context, id, note string) ([]byte, string, time.Time, error) {
+	if err := CheckUploadID(id); err != nil {
+		return nil, "", time.Time{}, err
+	}
+	if err := checkNote(note); err != nil {
+		return nil, "", time.Time{}, err
+	}
+	body, obj, err := f.store.Get(ctx, uploadNoteKey(f.uploadDir(id), note))
+	if err != nil {
+		return nil, "", time.Time{}, mapNotFound(err)
+	}
+	defer body.Close()
+	data, err := io.ReadAll(io.LimitReader(body, MaxUploadRecord+1))
+	if err != nil {
+		return nil, "", time.Time{}, err
+	}
+	return data, obj.ETag, obj.LastModified, nil
 }
 
 // UploadNote is upload id's note and when it was written; ErrNotFound if
@@ -490,7 +593,10 @@ type UploadEntry struct {
 	ID     string
 	Record bool
 	Notes  []string // the names of its notes, in order
-	Parts  int
+	// NoteTimes are the notes' times as the listing gives them (the
+	// store's LastModified; zero where the store's listing has none).
+	NoteTimes map[string]time.Time
+	Parts     int
 }
 
 // ListUploads calls fn with each upload of the filesystem, in id order,
@@ -517,6 +623,10 @@ func (f *Filesystem) ListUploads(ctx context.Context, fn func(UploadEntry) error
 				cur.Record = true
 			} else if note, ok := strings.CutPrefix(rest, "note-"); ok {
 				cur.Notes = append(cur.Notes, note)
+				if cur.NoteTimes == nil {
+					cur.NoteTimes = map[string]time.Time{}
+				}
+				cur.NoteTimes[note] = o.LastModified
 			} else if strings.HasPrefix(rest, "p") {
 				cur.Parts++
 			}

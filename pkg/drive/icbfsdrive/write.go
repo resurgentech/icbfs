@@ -293,6 +293,15 @@ func (d *Drive) write(ctx context.Context, p string, src writeSource, cond drive
 			}
 			continue // made meanwhile: write over it
 		}
+		if errors.Is(err, errWrittenFirst) {
+			// The file this write made was written by another first, and
+			// this write's content was refused: what was sent is gone for
+			// a body sent as it arrived; the rest go again, over it.
+			if stream != nil || src.streamed() {
+				return drive.Item{}, fmt.Errorf("another write wrote the file first and a streamed body can't be sent again: %w", drive.ErrBusy)
+			}
+			continue
+		}
 		if err != nil {
 			return drive.Item{}, err
 		}
@@ -498,6 +507,14 @@ func (d *Drive) create(ctx context.Context, parent *node, name string, data []by
 	}
 	created, _ := d.fs.Store().Head(ctx, key)
 	written, err := d.writeContent(ctx, key, data, spool, put, etag)
+	if objstore.IsPreconditionFailed(err) {
+		// T82-10 round 3: another writer found the file this one made and
+		// wrote it first (its create met ErrExists and wrote over). The
+		// file is theirs now: not one to drop. Write takes it as made
+		// meanwhile, and writes over it, or says busy for a body that
+		// can't be sent again.
+		return nil, fmt.Errorf("%s: %w", p, errWrittenFirst)
+	}
 	if err != nil {
 		// The file was made before its content could be: a streamed body
 		// that fell short, or a store that refused. Not a file to leave.
@@ -555,6 +572,10 @@ func (d *Drive) dropCreated(ctx context.Context, parent *node, name, p string) {
 	_ = d.fs.Unlink(dctx, parent.key, name)
 	d.changed(parent)
 }
+
+// errWrittenFirst: the file create made was written by another writer
+// before this one's content landed (T82-10 round 3).
+var errWrittenFirst = errors.New("written by another writer first")
 
 // mapCreateErr is mapErr, leaving icbfs.ErrExists as it is for Write to
 // retry on.

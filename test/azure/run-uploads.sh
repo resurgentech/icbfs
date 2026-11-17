@@ -20,4 +20,4 @@ if [ "${ICBFS_TEST_AZURE_AUTH:-}" != "login" ]; then
   export ICBFS_TEST_AZURE_KEY
 fi
 cd "$REPO"
-exec go test -count=1 -run 'TestAzure(Upload|Write)' -timeout 30m "$@" ./pkg/drive/icbfsdrive
+exec go test -count=1 -run 'TestAzure(Upload|Write|Concurrent)' -timeout 30m "$@" ./pkg/drive/icbfsdrive

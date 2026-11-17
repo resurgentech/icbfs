@@ -2,10 +2,12 @@ package azurestore
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -25,7 +27,7 @@ import (
 // upload, whose ids are another length, or a PutParts of icbfs's own)
 // leaves blocks that make the blob's next PutParts fail for up to a week.
 //
-// icbfs's ids are "icbfs-part-%06d" (17 bytes). On a staging failure that
+// icbfs's ids are 17 bytes (blockIDs). On a staging failure that
 // is a 400, PutParts reads the blob's uncommitted blocks once (Get Block
 // List, blocklisttype=uncommitted); if they are of another length, it
 // takes that length for its own ids (blockIDs.id), stages the block again,
@@ -35,37 +37,75 @@ import (
 // PutParts makes no request more; a failure that is not this one, or a
 // second failure, is the error as before.
 
-// blockIDs are a PutParts's block ids: icbfs's own, or, once repaired, of
-// the length the blob's uncommitted blocks have.
+// blockIDs are a PutParts's block ids (T82-10 round 3, review 2's B3):
+// unique to the call, so that two writes of one blob at once, each
+// committing only the ids it staged, never commit each other's blocks
+// (Azure commits, under an id, whatever was staged under it last). An id
+// is the call's own random tag (lowercase letters and digits, from
+// crypto/rand), cut to fit, then the block's number in 4 base-36 digits
+// (50,000 blocks need 4: 36^4 = 1,679,616). All of a call's ids have one
+// length: icbfs's own 17 bytes (13 characters of tag, about 67 bits), or,
+// once repaired, the length the blob's stale blocks force, whose tag is
+// then that length less 4. The shortest taken is minIDLen, 8 bytes: a
+// 4-character tag (36^4 = 1,679,616 tags, a 1 in 1.7 million chance that
+// two writes of one blob at once, both repaired to 8 bytes, share one);
+// stale blocks of shorter ids are not matched (the store's error, as
+// before). icbfs-git also writes one path at a time (its assemblies), so
+// that chance is met only by two ordinary large writes of one file at
+// once over stale blocks of an 8-byte length.
 type blockIDs struct {
 	mu       sync.Mutex
-	width    int  // the raw id's length in bytes; 0: icbfs's own (17)
-	repaired bool // a repair was tried (once a PutParts)
+	tag      string // the call's own, 60 characters; cut to the width
+	width    int    // the raw id's length in bytes; 0: icbfs's own (17)
+	repaired bool   // a repair was tried (once a PutParts)
 }
 
-// ownIDLen is the raw length of icbfs's own ids.
-const ownIDLen = len("icbfs-part-000000")
+// ownIDLen is the raw length of icbfs's own ids, as before round 3 (the
+// encoded length, 24 characters, stays: stale blocks of icbfs's older ids
+// are of the same length and never fail a write).
+const ownIDLen = 17
 
-// minIDLen is the shortest raw id that numbers 50,000 blocks.
-const minIDLen = 5
+// numLen is the base-36 digits of a block's number; minIDLen the shortest
+// raw id (a 4-character tag and the number).
+const (
+	numLen   = 4
+	minIDLen = numLen + 4
+)
+
+func newBlockIDs() *blockIDs {
+	const alphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+	var raw [60]byte
+	_, _ = rand.Read(raw[:])
+	for i, c := range raw {
+		raw[i] = alphabet[int(c)%len(alphabet)]
+	}
+	return &blockIDs{tag: string(raw[:])}
+}
 
 // id is block i's id, base64 as Azure takes it.
 func (b *blockIDs) id(i int) string {
 	b.mu.Lock()
 	w := b.width
 	b.mu.Unlock()
-	return base64.StdEncoding.EncodeToString([]byte(rawID(i, w)))
+	return base64.StdEncoding.EncodeToString([]byte(b.rawID(i, w)))
 }
 
-// rawID is block i's id of raw length w (0: icbfs's own).
-func rawID(i, w int) string {
-	switch {
-	case w == 0 || w == ownIDLen:
-		return fmt.Sprintf("icbfs-part-%06d", i)
-	case w > ownIDLen:
-		return fmt.Sprintf("icbfs-part-%0*d", w-len("icbfs-part-"), i)
+// rawID is block i's id of raw length w (0: icbfs's own): the call's tag
+// cut to w-numLen, then i in numLen base-36 digits. A width past the tag
+// and the number is padded with '-' between them.
+func (b *blockIDs) rawID(i, w int) string {
+	if w == 0 {
+		w = ownIDLen
 	}
-	return fmt.Sprintf("%0*d", w, i)
+	num := strconv.FormatInt(int64(i), 36)
+	num = strings.Repeat("0", numLen-len(num)) + num
+	tag := b.tag
+	if t := w - numLen; t <= len(tag) {
+		tag = tag[:t]
+	} else {
+		tag += strings.Repeat("-", t-len(tag))
+	}
+	return tag + num
 }
 
 // repair is called on a failure err of staging a block of blob bb. It
@@ -90,7 +130,7 @@ func (b *blockIDs) repair(ctx context.Context, bb *blockblob.Client, err error) 
 	}
 	// Azure compares the ids as sent: base64, so 16 to 18 raw bytes are
 	// all 24 characters.
-	own := len(base64.StdEncoding.EncodeToString([]byte(rawID(0, b.width))))
+	own := len(base64.StdEncoding.EncodeToString([]byte(b.rawID(0, b.width))))
 	for _, blk := range list.UncommittedBlocks {
 		if blk == nil || blk.Name == nil || len(*blk.Name) == own {
 			continue

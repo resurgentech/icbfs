@@ -128,10 +128,27 @@ func TestUploadInParts(t *testing.T) {
 	if got := readAll(t, ctx, d, "/a/parts.bin"); !bytes.Equal(got, data) {
 		t.Fatalf("read %d bytes, not the %d uploaded", len(got), len(data))
 	}
+	// T82-10 round 3 (B2): the version records the upload that wrote it,
+	// found again after a later write of the path.
+	since := time.Now().Add(-time.Minute)
+	if found, ok, err := d.UploadWritten(ctx, id, "/a/parts.bin", since); err != nil || !ok || found.Version == nil || found.Version.ID != it.Version.ID {
+		t.Fatalf("UploadWritten: %+v %v %v (written %+v)", found.Version, ok, err, it.Version)
+	}
+	if _, ok, err := d.UploadWritten(ctx, "upload-0000000999", "/a/parts.bin", since); err != nil || ok {
+		t.Fatalf("UploadWritten of another upload: %v %v", ok, err)
+	}
+	write(t, ctx, d, "/a/parts.bin", "a later write", drive.Condition{})
+	if found, ok, err := d.UploadWritten(ctx, id, "/a/parts.bin", since); err != nil || !ok || found.Version.ID != it.Version.ID {
+		t.Fatalf("UploadWritten after a later write: %v %v", ok, err)
+	}
+	if _, ok, _ := d.UploadWritten(ctx, id, "/a/none.bin", since); ok {
+		t.Fatal("UploadWritten of a path never written")
+	}
 	if it.Size != plain.Size || it.Checksums == nil || plain.Checksums == nil || *it.Checksums != *plain.Checksums || *it.Checksums != sumsOf(data) {
 		t.Fatalf("item %+v %+v, plain %+v %+v", it.Size, it.Checksums, plain.Size, plain.Checksums)
 	}
-	if vs, err := d.Versions(ctx, drive.ByPath("/a/parts.bin")); err != nil || len(vs) != 1 || vs[0].Checksums == nil || *vs[0].Checksums != sumsOf(data) {
+	// Newest first: the later write, then the upload's.
+	if vs, err := d.Versions(ctx, drive.ByPath("/a/parts.bin")); err != nil || len(vs) != 2 || vs[1].Checksums == nil || *vs[1].Checksums != sumsOf(data) {
 		t.Fatalf("versions %+v %v", vs, err)
 	}
 	select {
@@ -194,8 +211,8 @@ func TestUploadInParts(t *testing.T) {
 	if got := readAll(t, ctx, d, "/a/parts.bin"); !bytes.Equal(got, second) {
 		t.Fatal("the second upload is not the file")
 	}
-	if vs, _ := d.Versions(ctx, drive.ByPath("/a/parts.bin")); len(vs) != 2 {
-		t.Fatalf("%d versions, want 2", len(vs))
+	if vs, _ := d.Versions(ctx, drive.ByPath("/a/parts.bin")); len(vs) != 3 { // the upload, a later write, the second upload
+		t.Fatalf("%d versions, want 3", len(vs))
 	}
 }
 

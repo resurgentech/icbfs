@@ -635,8 +635,8 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 	bb := s.blob(key)
 	n := len(parts)
 	stream := objstore.IsStream(parts)
-	var ids blockIDs // icbfs's own, or the length stale blocks force (blockids.go)
-	var copies []int // the parts copied on the store's side, staged after the loop
+	ids := newBlockIDs() // the call's own, of icbfs's length or the one stale blocks force (blockids.go)
+	var copies []int     // the parts copied on the store's side, staged after the loop
 	for i, p := range parts {
 		if stream {
 			// A stream of unknown length may end before its last part.
@@ -668,7 +668,7 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 	// T82-10: the copies, objstore.CopyConcurrency at once (a block's place
 	// in the blob is its place in the list committed, not when it was
 	// staged). The first failure stops the rest; nothing is committed.
-	if err := s.stageCopies(ctx, bb, key, parts, &ids, copies); err != nil {
+	if err := s.stageCopies(ctx, bb, key, parts, ids, copies); err != nil {
 		return nil, err
 	}
 	list := make([]string, n)
@@ -792,6 +792,7 @@ func (s *Store) ListPages(ctx context.Context, prefix string, fn func([]objstore
 			o := objstore.Object{Key: strings.TrimPrefix(deref(b.Name), s.keyPrefix)}
 			if b.Properties != nil {
 				o.Size = deref(b.Properties.ContentLength)
+				o.LastModified = deref(b.Properties.LastModified)
 			}
 			objs = append(objs, o)
 		}

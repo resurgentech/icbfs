@@ -52,6 +52,16 @@ type PartWriter interface {
 	// it back (ErrNotFound: none).
 	SetUploadNote(ctx context.Context, id, note string, data []byte) error
 	UploadNote(ctx context.Context, id, note string) (data []byte, written time.Time, err error)
+	// SetUploadNoteIf is SetUploadNote conditional on the note being still
+	// at etag (UploadNoteTag's), or absent ("" ): a lost race is
+	// ErrPrecondition. It returns the etag written.
+	SetUploadNoteIf(ctx context.Context, id, note string, data []byte, etag string) (string, error)
+	UploadNoteTag(ctx context.Context, id, note string) (data []byte, etag string, written time.Time, err error)
+	// UploadWritten finds the version of path that upload id wrote, among
+	// those dated since (CompleteUpload records the upload on it): a
+	// write run again after it landed. The item is path's file with that
+	// version; ok false if none.
+	UploadWritten(ctx context.Context, id, path string, since time.Time) (Item, bool, error)
 	// DropUploadParts erases upload id's parts, every version, keeping its
 	// record and result.
 	DropUploadParts(ctx context.Context, id string) error
@@ -78,7 +88,9 @@ type UploadEntry struct {
 	ID     string
 	Record bool
 	Notes  []string // its notes' names (SetUploadNote), in order
-	Parts  int
+	// NoteTimes are the notes' times as the store's listing gives them.
+	NoteTimes map[string]time.Time
+	Parts     int
 }
 
 // HasNote: e has the note.

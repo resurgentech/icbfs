@@ -159,7 +159,8 @@ type Store interface {
 	EraseAll(ctx context.Context, prefix string) error
 
 	// List returns every key starting with prefix that has a current
-	// version, with only Key and Size filled in: what df's "Used" needs.
+	// version, with only Key and Size filled in (and LastModified, by
+	// S3Store and AzureStore): what df's "Used" needs.
 	// It costs one listing request per thousand or so objects; no store
 	// has anything faster.
 	List(ctx context.Context, prefix string) ([]Object, error)

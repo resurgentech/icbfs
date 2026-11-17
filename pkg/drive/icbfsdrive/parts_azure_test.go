@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
+	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/internal/objstore/azurestore"
 	"github.com/resurgentech/icbfs/pkg/drive"
 )
@@ -301,3 +304,72 @@ func TestAzureWriteStaleBlocks(t *testing.T) {
 type nopCloser struct{ *bytes.Reader }
 
 func (nopCloser) Close() error { return nil }
+
+// gatedBody is a part body whose first Read waits for open.
+type gatedBody struct {
+	*bytes.Reader
+	open <-chan struct{}
+	once sync.Once
+}
+
+func (g *gatedBody) Read(p []byte) (int, error) {
+	g.once.Do(func() { <-g.open })
+	return g.Reader.Read(p)
+}
+
+// TestAzureConcurrentPutParts (T82-10 round 3, review 2's B3): two
+// PutParts of one blob at once, each staging its first two parts before
+// either commits. Every version committed holds one writer's bytes whole,
+// never a mix: each call's block ids are its own.
+func TestAzureConcurrentPutParts(t *testing.T) {
+	az := azureForUploads(t)
+	ctx := context.Background()
+	const key = "concurrent/blob"
+	mk := func(seed byte, open <-chan struct{}) ([]objstore.Part, []byte) {
+		var all []byte
+		var parts []objstore.Part
+		for i := 0; i < 3; i++ {
+			b := uploadData(1<<20, seed+byte(i))
+			all = append(all, b...)
+			var body io.ReadSeeker = bytes.NewReader(b)
+			if i == 2 {
+				body = &gatedBody{Reader: bytes.NewReader(b), open: open}
+			}
+			parts = append(parts, objstore.Part{Size: int64(len(b)), Body: body})
+		}
+		return parts, all
+	}
+	openA, openB := make(chan struct{}), make(chan struct{})
+	pa, a := mk(10, openA)
+	pb, b := mk(20, openB)
+	errA, errB := make(chan error, 1), make(chan error, 1)
+	go func() { _, err := az.store.PutParts(ctx, key, pa, nil, ""); errA <- err }()
+	go func() { _, err := az.store.PutParts(ctx, key, pb, nil, ""); errB <- err }()
+	time.Sleep(5 * time.Second) // both have staged their first two blocks
+	close(openA)
+	ea := <-errA
+	close(openB)
+	eb := <-errB
+	t.Logf("A: %v; B: %v", ea, eb)
+	h, err := az.store.History(ctx, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range h {
+		if v.Deleted {
+			continue
+		}
+		rc, _, err := az.store.GetVersion(ctx, key, v.VersionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := io.ReadAll(rc)
+		rc.Close()
+		if !bytes.Equal(got, a) && !bytes.Equal(got, b) {
+			t.Fatalf("version %s holds %d bytes of neither writer alone", v.VersionID, len(got))
+		}
+	}
+	if ea != nil && eb != nil {
+		t.Fatal("neither write committed")
+	}
+}

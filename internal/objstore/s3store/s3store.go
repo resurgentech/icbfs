@@ -612,8 +612,9 @@ func (s *Store) ListPages(ctx context.Context, prefix string, fn func([]objstore
 			page := make([]objstore.Object, 0, len(out.Contents))
 			for _, o := range out.Contents {
 				page = append(page, objstore.Object{
-					Key:  strings.TrimPrefix(aws.ToString(o.Key), s.keyPrefix),
-					Size: aws.ToInt64(o.Size),
+					Key:          strings.TrimPrefix(aws.ToString(o.Key), s.keyPrefix),
+					Size:         aws.ToInt64(o.Size),
+					LastModified: aws.ToTime(o.LastModified),
 				})
 			}
 			if err := fn(page); err != nil {
