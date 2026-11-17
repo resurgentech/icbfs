@@ -699,11 +699,22 @@ func (s *Store) List(ctx context.Context, prefix string) ([]objstore.Object, err
 // ListPages is List a page (one listing request, HistoryPageSize blobs,
 // markers left out) at a time (objstore.PageLister).
 func (s *Store) ListPages(ctx context.Context, prefix string, fn func([]objstore.Object) error) error {
-	pager := s.client.NewListBlobsFlatPager(&container.ListBlobsFlatOptions{
+	return s.ListPagesAfter(ctx, prefix, "", fn)
+}
+
+// ListPagesAfter is ListPages from the first blob after after
+// (objstore.AfterLister): the listing starts there (StartFrom, which
+// includes after itself, left out here).
+func (s *Store) ListPagesAfter(ctx context.Context, prefix, after string, fn func([]objstore.Object) error) error {
+	opts := &container.ListBlobsFlatOptions{
 		Prefix:     to.Ptr(s.k(prefix)),
 		Include:    container.ListBlobsInclude{Metadata: true},
 		MaxResults: to.Ptr(objstore.HistoryPageSize),
-	})
+	}
+	if after != "" {
+		opts.StartFrom = to.Ptr(s.k(after))
+	}
+	pager := s.client.NewListBlobsFlatPager(opts)
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
@@ -715,6 +726,9 @@ func (s *Store) ListPages(ctx context.Context, prefix string, fn func([]objstore
 				continue
 			}
 			o := objstore.Object{Key: strings.TrimPrefix(deref(b.Name), s.keyPrefix)}
+			if after != "" && o.Key <= after {
+				continue
+			}
 			if b.Properties != nil {
 				o.Size = deref(b.Properties.ContentLength)
 			}

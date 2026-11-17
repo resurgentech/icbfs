@@ -40,6 +40,7 @@ func Run(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	t.Run("EraseAllAcrossPages", func(t *testing.T) { eraseAllAcrossPages(t, newStore) })
 	t.Run("List", func(t *testing.T) { list(t, newStore) })
 	t.Run("ListPagesMatchesList", func(t *testing.T) { listPagesMatchesList(t, newStore) })
+	t.Run("ListPagesAfterAKey", func(t *testing.T) { listPagesAfterAKey(t, newStore) })
 	t.Run("ServerTimeIsTheStoresClock", func(t *testing.T) { serverTimeIsTheStoresClock(t, newStore) })
 	t.Run("AsOf", func(t *testing.T) { asOf(t, newStore) })
 	t.Run("HistoryCacheLastsForItsTTL", func(t *testing.T) { historyCacheLastsForItsTTL(t, newStore) })
