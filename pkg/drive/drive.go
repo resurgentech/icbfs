@@ -61,6 +61,20 @@ type TimeSetter interface {
 	SetTimes(ctx context.Context, item ItemRef, modified, created time.Time) (Item, error)
 }
 
+// A LatestStater is a drive that says when an item's newest state is
+// dated: for a directory, the latest of its entries' changes and its own
+// record's. A change written in source time (WithSourceTime) at or
+// after it is not late there. A mirror dates a change its source gives
+// no time for just after it: not behind the item's latest state, which
+// the drive would put right by rewriting the item's history, and not at
+// the wall clock, which would put every later-arriving change dated by
+// the source behind it.
+type LatestStater interface {
+	// LatestState is item's newest state's date, as the drive dates its
+	// writes: zero if nothing of it is dated.
+	LatestState(ctx context.Context, item ItemRef) (time.Time, error)
+}
+
 // FolderHistorian is a drive whose folders' history can be read and
 // written over: for a caller (a mirror) correcting a folder's past, say
 // for a date its source got wrong. A change that merely arrives late is
