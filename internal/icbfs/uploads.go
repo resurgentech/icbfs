@@ -454,6 +454,54 @@ func (f *Filesystem) UnmarkUploads(ctx context.Context) error {
 	return f.store.EraseAll(ctx, f.uploadMark())
 }
 
+// A store copy (S3's multipart upload) that could not be ended where it
+// was found (an Upstream's removal, whose prune then erases the notes
+// that name it) is kept named under _uploads/copies/<key>/<id> (round 6,
+// the final review's S2), outside every filesystem, and ended by
+// EndKeptCopies at the next start's first sweep.
+const keptCopies = uploadMarks + "copies/"
+
+// KeepCopy names copy id into key for EndKeptCopies.
+func KeepCopy(ctx context.Context, store objstore.Store, key, id string) error {
+	if strings.Contains(key, "/") || strings.Contains(id, "/") || key == "" || id == "" {
+		return fmt.Errorf("a kept copy's key %q and id %q: %w", key, id, ErrInvalidArgument)
+	}
+	_, err := store.Put(ctx, keptCopies+key+"/"+id, strings.NewReader(""), nil, "")
+	return err
+}
+
+// EndKeptCopies ends every copy KeepCopy named (objstore.AbortCopy), and
+// forgets each it ended; one it cannot end stays named, for the next
+// call. It returns how many are left.
+func EndKeptCopies(ctx context.Context, store objstore.Store) (int, error) {
+	var names []string
+	if err := objstore.ListEach(ctx, store, keptCopies, func(page []objstore.Object) error {
+		for _, o := range page {
+			names = append(names, o.Key)
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+	left := 0
+	var errs []error
+	for _, n := range names {
+		key, id, ok := strings.Cut(strings.TrimPrefix(n, keptCopies), "/")
+		if !ok {
+			continue
+		}
+		if err := objstore.AbortCopy(ctx, store, key, id); err != nil {
+			left++
+			errs = append(errs, err)
+			continue
+		}
+		if err := store.EraseAll(ctx, n); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return left, errors.Join(errs...)
+}
+
 // UploadingFilesystems is the names of the store's filesystems that have
 // a mark (uploads in parts, or had them until their last sweep): one
 // listing of the marks, and the master block for the names.

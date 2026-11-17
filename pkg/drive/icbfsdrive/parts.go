@@ -189,6 +189,25 @@ func (d *Drive) AbortCopy(ctx context.Context, key, copyID string) error {
 }
 
 var _ drive.UploadIndex = (*Drive)(nil)
+var _ drive.CopyKeeper = (*Drive)(nil)
+
+// KeepCopy names a store copy that could not be ended now, for
+// EndKeptCopies (drive.CopyKeeper).
+func (d *Drive) KeepCopy(ctx context.Context, key, copyID string) error {
+	if d.cfg.ReadOnly {
+		return errDriveReadOnly
+	}
+	return mapErr(icbfs.KeepCopy(ctx, d.fs.Store(), key, copyID))
+}
+
+// EndKeptCopies ends the store copies KeepCopy named (drive.CopyKeeper).
+func (d *Drive) EndKeptCopies(ctx context.Context) (int, error) {
+	if d.cfg.ReadOnly {
+		return 0, errDriveReadOnly
+	}
+	n, err := icbfs.EndKeptCopies(ctx, d.fs.Store())
+	return n, mapErr(err)
+}
 
 // UploadingFilesystems is the names of the store's filesystems with
 // uploads in parts (drive.UploadIndex): one listing of their marks.

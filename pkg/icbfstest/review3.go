@@ -50,7 +50,8 @@ func (s r3Store) PutParts(ctx context.Context, key string, parts []objstore.Part
 }
 
 func (s r3Store) ListPages(ctx context.Context, prefix string, fn func([]objstore.Object) error) error {
-	return objstore.ListEach(ctx, s.Store, prefix, fn)
+	_, err := write(ctx, ReadList, prefix, func() (struct{}, error) { return struct{}{}, objstore.ListEach(ctx, s.Store, prefix, fn) })
+	return err
 }
 
 func (s r3Store) VersionsSince(ctx context.Context, key string, since time.Time) ([]objstore.Object, error) {
@@ -60,5 +61,6 @@ func (s r3Store) VersionsSince(ctx context.Context, key string, since time.Time)
 // AbortCopy passes the store's through (objstore.CopyAborter, T82-10
 // round 6).
 func (s r3Store) AbortCopy(ctx context.Context, key, id string) error {
-	return objstore.AbortCopy(ctx, s.Store, key, id)
+	_, err := write(ctx, WriteAbortCopy, key, func() (struct{}, error) { return struct{}{}, objstore.AbortCopy(ctx, s.Store, key, id) })
+	return err
 }

@@ -21,6 +21,8 @@ const (
 	WritePutIfAbsent = "putifabsent" // PutIfAbsent (a record, an outcome, a mark)
 	WritePutParts    = "putparts"    // PutParts (an assembly's copy)
 	WriteEraseAll    = "eraseall"    // EraseAll (an upload's parts, an upload)
+	WriteAbortCopy   = "abortcopy"   // AbortCopy (a store copy ended)
+	ReadList         = "list"        // a listing a page at a time (not a write: a sweep's)
 )
 
 // What a Fault does at its write.

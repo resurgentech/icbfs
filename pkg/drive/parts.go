@@ -137,6 +137,14 @@ type UploadFind struct {
 	Newer bool
 }
 
+// CopyKeeper is a drive that can name a store copy it could not end now
+// (an Upstream's removal), outside every filesystem, and end the copies
+// so named later (T82-10 round 6).
+type CopyKeeper interface {
+	KeepCopy(ctx context.Context, key, copyID string) error
+	EndKeptCopies(ctx context.Context) (left int, err error)
+}
+
 // UploadIndex is a drive that can say which filesystems of its store
 // have uploads in parts, in one listing (T82-10 round 6): a sweep reads
 // only those.
