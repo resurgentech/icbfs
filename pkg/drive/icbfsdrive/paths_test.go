@@ -18,11 +18,11 @@ import (
 // refuse them before they call the drive). A symlink is not followed.
 func TestBackslashIsNotASeparator(t *testing.T) {
 	store := miniotest.Store(t)
-	d := newDrive(t, store, icbfs.Settings{Name: "backslash", Size: 1 << 30, RootMode: 0o777}, "/A")
 	whole := newDrive(t, store, icbfs.Settings{Name: "backslash", Size: 1 << 30, RootMode: 0o777}, "")
 	ctx := system()
 	write(t, ctx, whole, "/A/letter.txt", "A\n", drive.Condition{})
 	write(t, ctx, whole, "/B/contract.txt", "ORIGINAL B\n", drive.Condition{})
+	d := newDrive(t, store, icbfs.Settings{Name: "backslash", Size: 1 << 30, RootMode: 0o777}, "/A")
 
 	// Through the drive rooted at /A: nothing of /B, whatever the shape.
 	for _, p := range []string{`/..\B\contract.txt`, `\..\B\contract.txt`, `..\B/contract.txt`, `/x\..\..\B\contract.txt`} {
