@@ -515,3 +515,25 @@ func partMemory(t *testing.T, d *Drive, what string) memExtra {
 	}
 	return worst
 }
+
+// TestUP22_ThePruneOfAFilesystemErasesItsUploads: an Upstream removed: its
+// filesystems pruned, and every object of their uploads with them.
+func TestUP22_ThePruneOfAFilesystemErasesItsUploads(t *testing.T) {
+	store, _ := miniotest.Start(t)
+	d := newDrive(t, store, icbfs.Settings{Name: "pruned", Size: 1 << 30, RootMode: 0o755}, "/")
+	ctx := system()
+	stagedUpload(t, ctx, d, "upload-pruned-0001", uploadData(partSize+1, 12))
+	prefix := d.Filesystem().UploadPrefix()
+	if vs, _ := store.HistoryUnder(ctx, prefix); len(vs) == 0 {
+		t.Fatal("nothing staged")
+	}
+	if err := icbfs.Archive(ctx, store, "pruned"); err != nil {
+		t.Fatal(err)
+	}
+	if err := icbfs.Prune(ctx, store, "pruned"); err != nil {
+		t.Fatal(err)
+	}
+	if vs, err := store.HistoryUnder(ctx, prefix); err != nil || len(vs) != 0 {
+		t.Fatalf("left after the prune: %d %v", len(vs), err)
+	}
+}

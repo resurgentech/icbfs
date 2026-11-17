@@ -147,3 +147,9 @@ func (s r3Store) EraseAll(ctx context.Context, prefix string) error {
 	_, err := write(ctx, WriteEraseAll, prefix, func() (struct{}, error) { return struct{}{}, s.Store.EraseAll(ctx, prefix) })
 	return err
 }
+
+// List is the store's, under a ReadList fault as ListPages is: a drive's
+// store wrapper that does not pass ListPages through lists by List.
+func (s r3Store) List(ctx context.Context, prefix string) ([]objstore.Object, error) {
+	return write(ctx, ReadList, prefix, func() ([]objstore.Object, error) { return s.Store.List(ctx, prefix) })
+}

@@ -140,6 +140,7 @@ func r4JSON(v any) string {
 	return string(b)
 }
 
+// STATES: AS-16
 // TestReview4CreateObjects: what a create of each kind writes, object by
 // object, and what a reader then sees; the store requests by method.
 func TestReview4CreateObjects(t *testing.T) {
@@ -400,6 +401,7 @@ func r4Leak(t *testing.T, d *Drive, raw objstore.Store, before map[string]r4Ver,
 	}
 }
 
+// STATES: AS-16
 // TestReview4CutAfterContent: the content has landed; then the create is
 // cut (its context cancelled) or the store refuses the next write, before
 // the name. What is left, what a reader sees, what DiskUsage and fs check

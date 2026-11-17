@@ -38,6 +38,8 @@ func (s *cutStore) PutParts(ctx context.Context, key string, parts []objstore.Pa
 	return s.Store.PutParts(ctx, key, parts, md, ifMatch)
 }
 
+// STATES: RD-2
+// STATES: AS-16
 // TestCutWriteLeavesNoName (T82-10 round 4, review 3's N1): a write cut
 // in the middle of its content's copy (a stop cancels its context) leaves
 // no name for a new file, and an existing file as it was, its previous

@@ -219,6 +219,8 @@ func TestUploadInParts(t *testing.T) {
 // TestUploadPartRules: parts in order, the last again replaces it, sizes
 // kept, and complete names exactly the parts there; a refusal writes
 // nothing.
+// STATES: PT-3
+// STATES: PT-6
 func TestUploadPartRules(t *testing.T) {
 	store := miniotest.Store(t)
 	d := newDrive(t, store, icbfs.Settings{Name: "rules", Size: 1 << 30, RootMode: 0o755}, "/")
@@ -269,15 +271,21 @@ func TestUploadPartRules(t *testing.T) {
 	if err := part(3, full[:7]); err != nil {
 		t.Fatal(err)
 	}
+	// PT-3: part 2 sent again with other bytes and size took its checksum
+	// state up from part 1: the file's checksums are its bytes'.
+	want := append(append(append([]byte{}, full...), full...), full[:7]...)
+	if _, sums, err := d.CheckUploadParts(ctx, id, 3); err != nil || sums != sumsOf(want) {
+		t.Fatalf("the checksums after a part replaced: %+v %v, want %+v", sums, err, sumsOf(want))
+	}
 	if _, err := d.CompleteUpload(ctx, id, "/f.bin", 3, drive.Condition{}, drive.WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	want := append(append(append([]byte{}, full...), full...), full[:7]...)
 	if got := readAll(t, ctx, d, "/f.bin"); !bytes.Equal(got, want) {
 		t.Fatalf("read %d bytes, want %d", len(got), len(want))
 	}
 }
 
+// STATES: RD-1
 // TestUploadDropAndInvisible: while an upload holds parts nothing that
 // reads the filesystem sees them (a listing to depth, an as-of view, the
 // filesystem's own key listing and usage, fsck), and a drop erases every
