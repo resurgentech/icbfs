@@ -633,8 +633,9 @@ func (s *Store) promote(ctx context.Context, key, versionID string) error {
 
 func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part, metadata map[string]string, ifMatchETag string) (*objstore.Object, error) {
 	bb := s.blob(key)
-	ids := make([]string, len(parts))
+	n := len(parts)
 	stream := objstore.IsStream(parts)
+	var ids blockIDs // icbfs's own, or the length stale blocks force (blockids.go)
 	var copies []int // the parts copied on the store's side, staged after the loop
 	for i, p := range parts {
 		if stream {
@@ -644,13 +645,20 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 				return nil, fmt.Errorf("put parts %s: %w", key, err)
 			}
 			if !ok {
-				ids = ids[:i]
+				n = i
 				break
 			}
 		}
-		ids[i] = base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("icbfs-part-%06d", i)))
 		if p.Body != nil {
-			if _, err := bb.StageBlock(ctx, ids[i], nopSeekCloser{p.Body}, nil); err != nil {
+			_, err := bb.StageBlock(ctx, ids.id(i), nopSeekCloser{p.Body}, nil)
+			if err != nil && ids.repair(ctx, bb, err) {
+				// Stale blocks of another id length (blockids.go): this
+				// part again, from its start, under the ids they force.
+				if _, serr := p.Body.Seek(0, io.SeekStart); serr == nil {
+					_, err = bb.StageBlock(ctx, ids.id(i), nopSeekCloser{p.Body}, nil)
+				}
+			}
+			if err != nil {
 				return nil, azureErr("put parts", key, err)
 			}
 			continue
@@ -660,10 +668,14 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 	// T82-10: the copies, objstore.CopyConcurrency at once (a block's place
 	// in the blob is its place in the list committed, not when it was
 	// staged). The first failure stops the rest; nothing is committed.
-	if err := s.stageCopies(ctx, bb, key, parts, ids, copies); err != nil {
+	if err := s.stageCopies(ctx, bb, key, parts, &ids, copies); err != nil {
 		return nil, err
 	}
-	resp, err := bb.CommitBlockList(ctx, ids, &blockblob.CommitBlockListOptions{
+	list := make([]string, n)
+	for i := range list {
+		list[i] = ids.id(i)
+	}
+	resp, err := bb.CommitBlockList(ctx, list, &blockblob.CommitBlockListOptions{
 		Metadata:         toAzureMeta(metadata),
 		AccessConditions: ifMatch(ifMatchETag),
 	})
@@ -675,7 +687,7 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 
 // stageCopies stages the copied parts of a PutParts (parts[i] for i in
 // which), objstore.CopyConcurrency at once.
-func (s *Store) stageCopies(ctx context.Context, bb *blockblob.Client, key string, parts []objstore.Part, ids []string, which []int) error {
+func (s *Store) stageCopies(ctx context.Context, bb *blockblob.Client, key string, parts []objstore.Part, ids *blockIDs, which []int) error {
 	if len(which) == 0 {
 		return nil
 	}
@@ -701,10 +713,15 @@ func (s *Store) stageCopies(ctx context.Context, bb *blockblob.Client, key strin
 			}
 			src, auth, err := s.source(cctx, from, p.CopyVersion)
 			if err == nil {
-				_, err = bb.StageBlockFromURL(cctx, ids[i], src, &blockblob.StageBlockFromURLOptions{
+				opts := &blockblob.StageBlockFromURLOptions{
 					Range:                   blob.HTTPRange{Offset: p.CopyOffset, Count: p.Size},
 					CopySourceAuthorization: auth,
-				})
+				}
+				_, err = bb.StageBlockFromURL(cctx, ids.id(i), src, opts)
+				if err != nil && ids.repair(cctx, bb, err) {
+					// Stale blocks of another id length (blockids.go).
+					_, err = bb.StageBlockFromURL(cctx, ids.id(i), src, opts)
+				}
 				if err != nil {
 					// A missing source comes back as CannotVerifyCopySource, not
 					// BlobNotFound; a Head of it says which it was. Staged blocks

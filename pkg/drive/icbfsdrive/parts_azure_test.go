@@ -196,41 +196,106 @@ func TestAzureUploadCompleteTime(t *testing.T) {
 	t.Logf("T82-10 measured (Azure): the drop of %d parts in %.1f s", parts, time.Since(t2).Seconds())
 }
 
-// TestAzureUploadStaleBlocks: the target blob already holds uncommitted
-// blocks with ids of another length (a cut UploadStream leaves UUID-based
-// ids; Azure requires one id length a blob): what CompleteUpload does then.
-// Whatever it answers, the file is not changed by a failure, and the
-// answer is logged for the report.
+// versions is how many versions key's blob has (deletions left out).
+func (a azureUploads) versions(t *testing.T, key string) int {
+	t.Helper()
+	h, err := a.store.History(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, v := range h {
+		if !v.Deleted {
+			n++
+		}
+	}
+	return n
+}
+
+// stale stages an uncommitted block under raw id on key's blob: what a
+// write cut half way leaves.
+func (a azureUploads) stale(t *testing.T, key, raw string) {
+	t.Helper()
+	id := base64.StdEncoding.EncodeToString([]byte(raw))
+	if _, err := a.cont.NewBlockBlobClient(a.pfx+key).StageBlock(context.Background(), id, nopCloser{bytes.NewReader([]byte("stale bytes"))}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.uncommitted(t, key); len(got) == 0 {
+		t.Fatal("the stale block was not staged")
+	}
+}
+
+// TestAzureUploadStaleBlocks (T82-10 round 2): the target blob already
+// holds uncommitted blocks, as a write cut half way leaves them for up to a
+// week: with ids of another length (the SDK's stream upload: 48
+// characters against icbfs's 24), or of icbfs's own (a cut PutParts). A
+// complete over it succeeds, writes exactly one new version (the
+// upload's), and leaves no uncommitted block.
 func TestAzureUploadStaleBlocks(t *testing.T) {
 	az := azureForUploads(t)
 	d := newDrive(t, az.store, icbfs.Settings{Name: "azstale", Size: 1 << 30, RootMode: 0o755}, "/")
 	ctx := system()
-	first := write(t, ctx, d, "/f.bin", "the first version", drive.Condition{})
-	stale := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef0123")) // 36 bytes, not icbfs's 17
-	if _, err := az.cont.NewBlockBlobClient(az.pfx+first.ID).StageBlock(context.Background(), stale, nopCloser{bytes.NewReader([]byte("stale"))}, nil); err != nil {
-		t.Fatal(err)
+	for i, raw := range []string{
+		"0123456789abcdef0123456789abcdef0123", // 36 bytes: another length
+		"icbfs-part-000007",                    // icbfs's own length
+	} {
+		p := fmt.Sprintf("/f%d.bin", i)
+		first := write(t, ctx, d, p, "the first version", drive.Condition{})
+		az.stale(t, first.ID, raw)
+		before := az.versions(t, first.ID)
+		id := fmt.Sprintf("upload-azure-stale%d", i)
+		if err := d.StartUpload(ctx, id, nil); err != nil {
+			t.Fatal(err)
+		}
+		data := uploadData(1000, byte(3+i))
+		if err := d.StagePart(ctx, id, 1, bytes.NewReader(data), int64(len(data))); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.CompleteUpload(ctx, id, p, 1, drive.Condition{}, drive.WriteOptions{}); err != nil {
+			t.Fatalf("stale %q: complete: %v", raw, err)
+		}
+		if got := readAll(t, ctx, d, p); !bytes.Equal(got, data) {
+			t.Fatalf("stale %q: the file is not the upload", raw)
+		}
+		if after := az.versions(t, first.ID); after != before+1 {
+			t.Fatalf("stale %q: %d versions before the complete, %d after: want exactly one new", raw, before, after)
+		}
+		if left := az.uncommitted(t, first.ID); len(left) != 0 {
+			t.Fatalf("stale %q: %d uncommitted blocks left", raw, len(left))
+		}
+		_ = d.DropUpload(ctx, id)
 	}
-	const id = "upload-azure-stale1"
-	if err := d.StartUpload(ctx, id, nil); err != nil {
-		t.Fatal(err)
-	}
-	data := uploadData(1000, 3)
-	if err := d.StagePart(ctx, id, 1, bytes.NewReader(data), int64(len(data))); err != nil {
-		t.Fatal(err)
-	}
-	_, err := d.CompleteUpload(ctx, id, "/f.bin", 1, drive.Condition{}, drive.WriteOptions{})
-	got := readAll(t, ctx, d, "/f.bin")
-	t.Logf("T82-10 measured (Azure): complete over a target with stale blocks of another id length: err %v; the file is %q", err, got[:min(len(got), 20)])
-	if err != nil && string(got) != "the first version" {
-		t.Fatalf("a failed complete changed the file: %q", got)
-	}
-	if err == nil && !bytes.Equal(got, data) {
-		t.Fatal("a complete that succeeded did not write its parts")
-	}
+}
+
+// TestAzureWriteStaleBlocks (T82-10 round 2): an ordinary write of a file
+// in uploaded parts (a known size over the filesystem's part size: 8 MiB
+// at an 8 GiB max file size, so PutParts with bodies) over a blob holding
+// uncommitted blocks of another id length succeeds, with exactly one new
+// version.
+func TestAzureWriteStaleBlocks(t *testing.T) {
+	az := azureForUploads(t)
+	d := newDrive(t, az.store, icbfs.Settings{Name: "azwrite", Size: 1 << 34, RootMode: 0o755, MaxFileSize: 8 << 30}, "/")
+	ctx := system()
+	data := uploadData(17<<20+5, 4)
+	first, err := d.Write(ctx, "/big.bin", bytes.NewReader(data), drive.Condition{}, drive.WriteOptions{Size: int64(len(data))})
 	if err != nil {
-		t.Logf("stale blocks left: %d", len(az.uncommitted(t, first.ID)))
+		t.Fatal(err)
 	}
-	_ = d.DropUpload(ctx, id)
+	az.stale(t, first.ID, "0123456789abcdef0123456789abcdef0123")
+	before := az.versions(t, first.ID)
+	second := uploadData(17<<20+9, 5)
+	if _, err := d.Write(ctx, "/big.bin", bytes.NewReader(second), drive.Condition{}, drive.WriteOptions{Size: int64(len(second))}); err != nil {
+		t.Fatalf("a write in parts over stale blocks: %v", err)
+	}
+	if got := readAll(t, ctx, d, "/big.bin"); !bytes.Equal(got, second) {
+		t.Fatal("the file is not the second write")
+	}
+	if after := az.versions(t, first.ID); after != before+1 {
+		t.Fatalf("%d versions before the write, %d after: want exactly one new", before, after)
+	}
+	if left := az.uncommitted(t, first.ID); len(left) != 0 {
+		t.Fatalf("%d uncommitted blocks left", len(left))
+	}
 }
 
 type nopCloser struct{ *bytes.Reader }
