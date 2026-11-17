@@ -336,11 +336,16 @@ type WriteOptions struct {
 // Ref names one version of an item, by the item's id and the version's,
 // for WriteOptions.SameAs. SHA256, if set, is what the caller knows the
 // version's SHA-256 to be, in hex: one the drive has recorded otherwise
-// makes the reference unavailable.
+// makes the reference unavailable. Path, if set, is where the caller
+// believes the item is (a mirror's recorded place, T82-13): a drive that
+// finds items by path may look there first, and takes the item there only
+// if it is the one ID names; otherwise Path is ignored. It never makes a
+// reference reach another item, nor one ID alone would not.
 type Ref struct {
 	ID      string
 	Version string
 	SHA256  string
+	Path    string
 }
 
 // ItemInfo is what SetInfo records about an item in one metadata write,

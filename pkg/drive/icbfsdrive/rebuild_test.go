@@ -123,7 +123,7 @@ func hashMapCost(entries map[string]drive.HashEntry) uint64 {
 	before := heapInUse()
 	h := drive.NewHashMap()
 	for sha, e := range entries {
-		h.Add(strings.Clone(sha), drive.HashEntry{ID: strings.Clone(e.ID), Version: strings.Clone(e.Version), Size: e.Size})
+		h.Add(strings.Clone(sha), drive.HashEntry{ID: strings.Clone(e.ID), Version: strings.Clone(e.Version), Size: e.Size, Path: strings.Clone(e.Path)})
 	}
 	after := heapInUse()
 	if len(h.Entries()) != len(entries) {
@@ -229,7 +229,7 @@ func listRebuild(ctx context.Context, d drive.Drive, source string, kept map[dri
 			}
 			for _, v := range vs {
 				if v.Checksums != nil && v.Checksums.SHA256 != "" {
-					h.Add(v.Checksums.SHA256, drive.HashEntry{ID: it.ID, Version: v.ID, Size: v.Size})
+					h.Add(v.Checksums.SHA256, drive.HashEntry{ID: it.ID, Version: v.ID, Size: v.Size, Path: it.Path})
 				}
 			}
 		}
