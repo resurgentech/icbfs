@@ -1,7 +1,6 @@
 package drive
 
 import (
-	"context"
 	"fmt"
 	"strings"
 )
@@ -18,10 +17,10 @@ import (
 // resolved upwards, so a path given under a root names something under
 // that root or nothing.
 //
-// A name may hold a backslash (a name stored before T82-14, or one a
-// POSIX program made on a mount of the filesystem itself): such a name is
-// read, listed, renamed and removed like any other. A new name may not
-// (CheckNewName).
+// A name may hold a backslash (a name a POSIX program made on a mount of
+// the filesystem, or one stored before T82-14): such a name is read,
+// listed, renamed and removed like any other. Drafts and mirrors make no
+// new one (CheckNewName).
 
 // SplitPath is p's names from the top, or ErrInvalidName.
 func SplitPath(p string) ([]string, error) {
@@ -62,10 +61,12 @@ func CheckPathName(name string) error {
 	return nil
 }
 
-// CheckNewName is whether an item may be made with name, or moved or
-// renamed to it: a path's name (CheckPathName) with no backslash. Every
-// create, mkdir, move, rename and restore to a new place asks it, at the
-// drive, so every route that makes a name gets it.
+// CheckNewName is whether a Draft or a mirror may make an item with
+// name, or move or rename one to it: a path's name (CheckPathName) with
+// no backslash. icbfs-git asks it on every route that makes or renames a
+// name in a working copy, a Draft or its library, and the mirror daemons
+// never write one (they write %5C). icbfs's own drive does not ask it:
+// on icbfs as a filesystem a backslash is a legal POSIX character.
 func CheckNewName(name string) error {
 	if err := CheckPathName(name); err != nil {
 		return err
@@ -101,25 +102,4 @@ func Under(root, p string) bool {
 		return strings.HasPrefix(p, "/")
 	}
 	return p == root || strings.HasPrefix(p, root+"/")
-}
-
-type existingNamesKey struct{}
-
-// WithExistingNames is ctx for a write that copies names which already
-// exist: a working copy's layer copied into a commit's folder, a stash
-// put back, a file copied up from a layer below. The drive then holds
-// the names it makes to CheckPathName only, not CheckNewName, so a name
-// stored with a backslash before T82-14 (or by a POSIX mount) is never
-// lost or left blocking a copy of it. Only Go callers set it, for names
-// they read from a store; no request can (T82-14 review).
-func WithExistingNames(ctx context.Context) context.Context {
-	return context.WithValue(ctx, existingNamesKey{}, true)
-}
-
-// CheckName is CheckNewName, or CheckPathName under WithExistingNames.
-func CheckName(ctx context.Context, name string) error {
-	if v, _ := ctx.Value(existingNamesKey{}).(bool); v {
-		return CheckPathName(name)
-	}
-	return CheckNewName(name)
 }

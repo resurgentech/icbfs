@@ -138,11 +138,7 @@ func (d *Drive) Trash(ctx context.Context, opts drive.TrashOptions) (drive.Trash
 	}
 	prefix := d.root
 	if opts.Path != "" {
-		p, err := checkedPath(opts.Path)
-		if err != nil {
-			return drive.TrashPage{}, err
-		}
-		prefix = d.root + p
+		prefix = d.fsPath(opts.Path)
 	}
 	entries, err := d.fs.ListTrash(ctx, icbfs.TrashOptions{PathPrefix: prefix, After: opts.Cursor, Pass: opts.Pass})
 	if err != nil {
@@ -229,12 +225,6 @@ func (d *Drive) Restore(ctx context.Context, id string, opts drive.RestoreOption
 	parent, name, err := d.resolveParent(ctx, to, opts.Parents)
 	if err != nil {
 		return drive.Item{}, err
-	}
-	if opts.To != "" {
-		// A new place takes a new name; where it was, its own name back.
-		if err := drive.CheckName(ctx, name); err != nil {
-			return drive.Item{}, err
-		}
 	}
 	what := needAddFile
 	if te.Type == drive.TypeDir {

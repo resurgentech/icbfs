@@ -71,11 +71,7 @@ func Open(root string, o Options) (*Side, error) {
 
 func (s *Side) Caps() syncer.Caps { return s.caps }
 
-// abs is the file p names under the root, or why p can't be one
-// (localPath): refused, so the sync reports that entry and goes on.
-func (s *Side) abs(p string) (string, error) {
-	return localPath(filepath.Clean(s.root), p, onWindows)
-}
+func (s *Side) abs(p string) string { return filepath.Join(s.root, filepath.FromSlash(p)) }
 
 func (s *Side) List(ctx context.Context) ([]syncer.Entry, error) {
 	var out []syncer.Entry
@@ -134,18 +130,11 @@ func (s *Side) List(ctx context.Context) ([]syncer.Entry, error) {
 }
 
 func (s *Side) Read(ctx context.Context, p string) (io.ReadCloser, error) {
-	full, err := s.abs(p)
-	if err != nil {
-		return nil, err
-	}
-	return openShared(full)
+	return openShared(s.abs(p))
 }
 
 func (s *Side) entry(p string) (syncer.Entry, error) {
-	full, err := s.abs(p)
-	if err != nil {
-		return syncer.Entry{}, err
-	}
+	full := s.abs(p)
 	info, err := os.Stat(full)
 	if err != nil {
 		return syncer.Entry{}, err
@@ -169,10 +158,7 @@ func (s *Side) entry(p string) (syncer.Entry, error) {
 // Write writes to a temporary file beside the target and renames it
 // into place, so a reader never sees half a file.
 func (s *Side) Write(ctx context.Context, p string, r io.Reader, size int64, mod, created time.Time) (syncer.Entry, error) {
-	full, err := s.abs(p)
-	if err != nil {
-		return syncer.Entry{}, err
-	}
+	full := s.abs(p)
 	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
 		return syncer.Entry{}, err
 	}
@@ -208,40 +194,25 @@ func (s *Side) Write(ctx context.Context, p string, r io.Reader, size int64, mod
 }
 
 func (s *Side) Mkdir(ctx context.Context, p string) (syncer.Entry, error) {
-	full, err := s.abs(p)
-	if err != nil {
-		return syncer.Entry{}, err
-	}
-	if err := os.MkdirAll(full, 0o755); err != nil {
+	if err := os.MkdirAll(s.abs(p), 0o755); err != nil {
 		return syncer.Entry{}, err
 	}
 	return s.entry(p)
 }
 
 func (s *Side) Move(ctx context.Context, from, to string) (syncer.Entry, error) {
-	dst, err := s.abs(to)
-	if err != nil {
-		return syncer.Entry{}, err
-	}
-	src, err := s.abs(from)
-	if err != nil {
-		return syncer.Entry{}, err
-	}
+	dst := s.abs(to)
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return syncer.Entry{}, err
 	}
-	if err := os.Rename(src, dst); err != nil {
+	if err := os.Rename(s.abs(from), dst); err != nil {
 		return syncer.Entry{}, err
 	}
 	return s.entry(to)
 }
 
 func (s *Side) Remove(ctx context.Context, p string) error {
-	full, err := s.abs(p)
-	if err != nil {
-		return err
-	}
-	err = os.Remove(full)
+	err := os.Remove(s.abs(p))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -252,20 +223,12 @@ func (s *Side) SetCreated(ctx context.Context, p string, t time.Time) error {
 	if !s.caps.Created {
 		return nil
 	}
-	full, err := s.abs(p)
-	if err != nil {
-		return err
-	}
-	return setCreated(full, t)
+	return setCreated(s.abs(p), t)
 }
 
 func (s *Side) SetACL(ctx context.Context, p, sddl string) error {
 	if !s.caps.ACLs {
 		return nil
 	}
-	full, err := s.abs(p)
-	if err != nil {
-		return err
-	}
-	return writeACL(full, sddl)
+	return writeACL(s.abs(p), sddl)
 }
