@@ -130,13 +130,29 @@ func (d *Drive) Capabilities() drive.Capabilities {
 
 // --- paths ---
 
-// cleanPath normalizes a path to "" (the top) or "/a/b".
+// cleanPath normalizes a path the drive itself holds (its root, a path
+// it recorded) to "" (the top) or "/a/b". A backslash is a name's
+// character, never a separator (T82-14). A path a caller gives is held to
+// drive.SplitPath's rule instead (checkedPath): refused, not tidied.
 func cleanPath(p string) string {
-	p = path.Clean("/" + strings.ReplaceAll(p, `\`, "/"))
+	p = path.Clean("/" + p)
 	if p == "/" {
 		return ""
 	}
 	return p
+}
+
+// checkedPath is a caller's path p as cleanPath gives it, "" or "/a/b",
+// or drive.ErrInvalidName: the one rule (drive.SplitPath).
+func checkedPath(p string) (string, error) {
+	c, err := drive.CleanPath(p)
+	if err != nil {
+		return "", err
+	}
+	if c == "/" {
+		return "", nil
+	}
+	return c, nil
 }
 
 func splitPath(p string) []string {
@@ -254,7 +270,11 @@ func (d *Drive) resolvePath(ctx context.Context, fsys *icbfs.Filesystem, p strin
 	if err != nil {
 		return nil, err
 	}
-	for _, part := range splitPath(cleanPath(p)) {
+	parts, err := drive.SplitPath(p)
+	if err != nil {
+		return nil, err
+	}
+	for _, part := range parts {
 		if n.typ != icbfs.TypeDir {
 			return nil, drive.ErrNotDir
 		}
@@ -342,13 +362,15 @@ func (d *Drive) findPaths(ctx context.Context, fsys *icbfs.Filesystem, id string
 // resolveParent resolves the directory p would be in, and p's base name;
 // with parents, missing directories are made.
 func (d *Drive) resolveParent(ctx context.Context, p string, parents bool) (*node, string, error) {
-	p = cleanPath(p)
+	p, err := checkedPath(p)
+	if err != nil {
+		return nil, "", err
+	}
 	if p == "" {
 		return nil, "", fmt.Errorf("the drive's root: %w", drive.ErrInvalidName)
 	}
-	dir, base := path.Split(p)
+	dir, base := path.Dir(p), path.Base(p)
 	var parent *node
-	var err error
 	if parents {
 		parent, err = d.mkdirAll(ctx, dir)
 	} else {

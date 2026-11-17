@@ -393,6 +393,9 @@ func refErr(err error) error {
 // of ref's target (icbfs CreateWithRef), with what opts say recorded in
 // the same write, as create does.
 func (d *Drive) createRef(ctx context.Context, parent *node, name string, ref *refTarget, opts drive.WriteOptions) (*node, error) {
+	if err := drive.CheckNewName(name); err != nil {
+		return nil, err
+	}
 	sddl, mode, uid, gid := d.newOwnership(ctx, parent, false)
 	info, err := d.writeInfo(ctx, opts, icbfs.Checksums{})
 	if err != nil {
@@ -459,6 +462,9 @@ func toChecksums(c icbfs.Checksums) *drive.Checksums {
 // spooled or sent as it arrives (put), into a file created empty. sums
 // are the content's, or, when late, become known as put sends it.
 func (d *Drive) create(ctx context.Context, parent *node, name string, data []byte, spool *os.File, put putFunc, late bool, opts drive.WriteOptions, sums *icbfs.Checksums) (*node, error) {
+	if err := drive.CheckNewName(name); err != nil {
+		return nil, err
+	}
 	sddl, mode, uid, gid := d.newOwnership(ctx, parent, false)
 	p := joinPath(parent.path, name)
 	if spool == nil && put == nil {
@@ -518,6 +524,9 @@ func (d *Drive) create(ctx context.Context, parent *node, name string, data []by
 // name included, unless the whole body is. sums are the content's once
 // body has gone by, which is when they're recorded.
 func (d *Drive) createStream(ctx context.Context, parent *node, name string, body io.Reader, opts drive.WriteOptions, sums *icbfs.Checksums) (*node, error) {
+	if err := drive.CheckNewName(name); err != nil {
+		return nil, err
+	}
 	sddl, mode, uid, gid := d.newOwnership(ctx, parent, false)
 	info, err := d.writeInfo(ctx, opts, icbfs.Checksums{})
 	if err != nil {
@@ -678,6 +687,9 @@ func (d *Drive) Mkdir(ctx context.Context, p string, parents bool) (_ drive.Item
 }
 
 func (d *Drive) mkdirIn(ctx context.Context, parent *node, name string) (*node, error) {
+	if err := drive.CheckNewName(name); err != nil {
+		return nil, err
+	}
 	if err := d.check(ctx, parent, needAddDir); err != nil {
 		return nil, err
 	}
@@ -703,7 +715,11 @@ func (d *Drive) mkdirAll(ctx context.Context, p string) (*node, error) {
 	if err != nil {
 		return nil, err
 	}
-	for _, part := range splitPath(cleanPath(p)) {
+	parts, err := drive.SplitPath(p)
+	if err != nil {
+		return nil, err
+	}
+	for _, part := range parts {
 		if err := d.checkTraverse(ctx, n); err != nil {
 			return nil, err
 		}
@@ -755,6 +771,9 @@ func (d *Drive) Move(ctx context.Context, from drive.ItemRef, to string, replace
 	}
 	parent, name, err := d.resolveParent(ctx, to, false)
 	if err != nil {
+		return drive.Item{}, err
+	}
+	if err := drive.CheckNewName(name); err != nil {
 		return drive.Item{}, err
 	}
 	what := needAddFile
