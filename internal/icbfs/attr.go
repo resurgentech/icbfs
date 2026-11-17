@@ -183,6 +183,11 @@ func (f *Filesystem) encodeMetadata(ctx context.Context, a Attr) ([]byte, error)
 // declared time marks the item dated (Attr.Dated), as the write will be in
 // its .version record.
 func encodeFileMetadata(ctx context.Context, a Attr) ([]byte, error) {
+	return proto.Marshal(fileMetadataMsg(ctx, a))
+}
+
+// fileMetadataMsg is a's wire message (encodeFileMetadata).
+func fileMetadataMsg(ctx context.Context, a Attr) *pb.Metadata {
 	if _, ok := objstore.DeclaredTime(ctx); ok {
 		a.dated = true
 	}
@@ -197,7 +202,7 @@ func encodeFileMetadata(ctx context.Context, a Attr) ([]byte, error) {
 			win.Attributes = &bits
 		}
 	}
-	return proto.Marshal(&pb.Metadata{
+	return &pb.Metadata{
 		Layout:            metadataLayout,
 		Mode:              a.Mode,
 		Uid:               a.Uid,
@@ -219,7 +224,7 @@ func encodeFileMetadata(ctx context.Context, a Attr) ([]byte, error) {
 		Streams:           a.Streams,
 		NextStreamId:      a.nextStreamID,
 		Dated:             a.dated,
-	})
+	}
 }
 
 func timestampOrNil(t time.Time) *timestamppb.Timestamp {

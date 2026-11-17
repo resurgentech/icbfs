@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"google.golang.org/protobuf/proto"
 	"io"
 	"sort"
 	"strings"
@@ -1194,7 +1195,11 @@ func recordSum(a Attr) (string, error) {
 	a.Mtime, a.Ctime, a.Atime, a.Btime = time.Time{}, time.Time{}, time.Time{}, time.Time{}
 	a.Size, a.content, a.mtimeOverrideETag = 0, objstore.Object{}, ""
 	a.Checksums, a.Refs, a.dated, a.Nlink = nil, nil, false, 0 // nlink follows the entries
-	data, err := encodeFileMetadata(context.Background(), a)
+	// Deterministic: a record's maps (app keys, xattrs) are encoded in an
+	// order of their own, so that one record always has one sum (the
+	// default marshal orders a map at random, and a record with two app
+	// keys was refused as "not the one read" now and then).
+	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(fileMetadataMsg(context.Background(), a))
 	if err != nil {
 		return "", err
 	}
