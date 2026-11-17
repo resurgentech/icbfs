@@ -113,6 +113,14 @@ func TestUploadInParts(t *testing.T) {
 	if err != nil || st.Parts != 3 || st.Size != int64(len(data)) || st.LastPart.IsZero() {
 		t.Fatalf("state %+v %v", st, err)
 	}
+	if size, sums, err := d.CheckUploadParts(ctx, id, n); err != nil || size != int64(len(data)) || sums != sumsOf(data) {
+		t.Fatalf("check: %d %+v %v", size, sums, err)
+	}
+	for _, wrong := range []int{n - 1, n + 1} {
+		if _, _, err := d.CheckUploadParts(ctx, id, wrong); !errors.Is(err, drive.ErrUploadParts) {
+			t.Fatalf("check of %d parts: %v", wrong, err)
+		}
+	}
 	it, err := d.CompleteUpload(ctx, id, "/a/parts.bin", n, drive.Condition{}, drive.WriteOptions{Parents: true})
 	if err != nil {
 		t.Fatal(err)
@@ -140,14 +148,17 @@ func TestUploadInParts(t *testing.T) {
 	if v, m := uploadsLeft(t, store, d, srv); v != 4 || m != 0 {
 		t.Fatalf("after complete: %d versions staged (want the record and 3 parts), %d unfinished multipart uploads", v, m)
 	}
-	if _, _, err := d.UploadResult(ctx, id); !errors.Is(err, drive.ErrNotFound) {
-		t.Fatalf("a result before FinishUpload: %v", err)
+	if _, _, err := d.UploadNote(ctx, id, "done"); !errors.Is(err, drive.ErrNotFound) {
+		t.Fatalf("a note before SetUploadNote: %v", err)
 	}
-	if err := d.FinishUpload(ctx, id, []byte(`{"version":"v1"}`)); err != nil {
+	if err := d.SetUploadNote(ctx, id, "done", []byte(`{"version":"v1"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if r, at, err := d.UploadResult(ctx, id); err != nil || string(r) != `{"version":"v1"}` || at.IsZero() {
-		t.Fatalf("result %q %v %v", r, at, err)
+	if r, at, err := d.UploadNote(ctx, id, "done"); err != nil || string(r) != `{"version":"v1"}` || at.IsZero() {
+		t.Fatalf("note %q %v %v", r, at, err)
+	}
+	if err := d.SetUploadNote(ctx, id, "Bad/Name", nil); !errors.Is(err, drive.ErrInvalid) {
+		t.Fatalf("a note named Bad/Name: %v", err)
 	}
 	if err := d.DropUploadParts(ctx, id); err != nil {
 		t.Fatal(err)
@@ -156,7 +167,7 @@ func TestUploadInParts(t *testing.T) {
 		t.Fatalf("after the parts' erase: %d versions (want the record and the result), %d multipart uploads", v, m)
 	}
 	var listed []drive.UploadEntry
-	if err := d.Uploads(ctx, func(e drive.UploadEntry) error { listed = append(listed, e); return nil }); err != nil || len(listed) != 1 || !listed[0].Done || !listed[0].Record || listed[0].Parts != 0 {
+	if err := d.Uploads(ctx, func(e drive.UploadEntry) error { listed = append(listed, e); return nil }); err != nil || len(listed) != 1 || !listed[0].HasNote("done") || !listed[0].Record || listed[0].Parts != 0 {
 		t.Fatalf("listed %+v %v", listed, err)
 	}
 	if err := d.DropUpload(ctx, id); err != nil {
@@ -368,7 +379,7 @@ func TestUploadsListed(t *testing.T) {
 		t.Fatalf("listed %+v, want %+v", got, want)
 	}
 	for i := range want {
-		if got[i] != want[i] {
+		if got[i].ID != want[i].ID || got[i].Record != want[i].Record || got[i].Parts != want[i].Parts || len(got[i].Notes) != 0 {
 			t.Errorf("entry %d: %+v, want %+v", i, got[i], want[i])
 		}
 	}

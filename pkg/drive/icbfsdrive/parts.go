@@ -2,6 +2,7 @@ package icbfsdrive
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -94,16 +95,24 @@ func (d *Drive) CompleteUpload(ctx context.Context, id, p string, parts int, con
 	return d.write(ctx, p, writeSource{upload: &src}, cond, opts)
 }
 
-func (d *Drive) FinishUpload(ctx context.Context, id string, result []byte) error {
+func (d *Drive) CheckUploadParts(ctx context.Context, id string, count int) (int64, drive.Checksums, error) {
+	size, sums, err := d.fs.CheckUploadParts(ctx, id, count)
+	if err != nil {
+		return 0, drive.Checksums{}, uploadErr(err)
+	}
+	return size, drive.Checksums{MD5: hex.EncodeToString(sums.MD5), SHA256: hex.EncodeToString(sums.SHA256)}, nil
+}
+
+func (d *Drive) SetUploadNote(ctx context.Context, id, note string, data []byte) error {
 	if d.cfg.ReadOnly {
 		return errDriveReadOnly
 	}
-	return uploadErr(d.fs.FinishUpload(ctx, id, result))
+	return uploadErr(d.fs.SetUploadNote(ctx, id, note, data))
 }
 
-func (d *Drive) UploadResult(ctx context.Context, id string) ([]byte, time.Time, error) {
-	r, t, err := d.fs.UploadResult(ctx, id)
-	return r, t, uploadErr(err)
+func (d *Drive) UploadNote(ctx context.Context, id, note string) ([]byte, time.Time, error) {
+	data, t, err := d.fs.UploadNote(ctx, id, note)
+	return data, t, uploadErr(err)
 }
 
 func (d *Drive) DropUploadParts(ctx context.Context, id string) error {
@@ -129,6 +138,6 @@ func (d *Drive) DropUpload(ctx context.Context, id string) error {
 
 func (d *Drive) Uploads(ctx context.Context, fn func(drive.UploadEntry) error) error {
 	return uploadErr(d.fs.ListUploads(ctx, func(e icbfs.UploadEntry) error {
-		return fn(drive.UploadEntry{ID: e.ID, Record: e.Record, Done: e.Done, Parts: e.Parts})
+		return fn(drive.UploadEntry{ID: e.ID, Record: e.Record, Notes: e.Notes, Parts: e.Parts})
 	}))
 }

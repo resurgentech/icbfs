@@ -354,29 +354,49 @@ func (f *Filesystem) WriteUpload(ctx context.Context, key string, src UploadSour
 	return f.store.PutParts(ctx, key, src.Parts, nil, ifMatch)
 }
 
-func uploadDoneKey(dir string) string { return dir + "done" }
+// An upload's notes are small objects beside its record that its caller
+// keeps there, by name (lowercase letters): what a caller that assembles
+// the file after the request answers records ("completing", "done",
+// "failed"), so a restart or a client asking later finds it.
+func uploadNoteKey(dir, note string) string { return dir + "note-" + note }
 
-// FinishUpload records that upload id has been written, with the caller's
-// result (at most MaxUploadRecord bytes): what a complete asked again
-// after a lost answer is told, until the upload is dropped.
-func (f *Filesystem) FinishUpload(ctx context.Context, id string, result []byte) error {
+func checkNote(note string) error {
+	if note == "" || len(note) > 32 {
+		return fmt.Errorf("upload note %q: 1 to 32 lowercase letters: %w", note, ErrInvalidArgument)
+	}
+	for _, r := range note {
+		if r < 'a' || r > 'z' {
+			return fmt.Errorf("upload note %q: lowercase letters: %w", note, ErrInvalidArgument)
+		}
+	}
+	return nil
+}
+
+// SetUploadNote writes upload id's note (at most MaxUploadRecord bytes).
+func (f *Filesystem) SetUploadNote(ctx context.Context, id, note string, data []byte) error {
 	if err := CheckUploadID(id); err != nil {
 		return err
 	}
-	if len(result) > MaxUploadRecord {
-		return fmt.Errorf("upload result of %d bytes, over %d: %w", len(result), MaxUploadRecord, ErrInvalidArgument)
+	if err := checkNote(note); err != nil {
+		return err
 	}
-	_, err := f.store.Put(ctx, uploadDoneKey(f.uploadDir(id)), strings.NewReader(string(result)), nil, "")
+	if len(data) > MaxUploadRecord {
+		return fmt.Errorf("upload note of %d bytes, over %d: %w", len(data), MaxUploadRecord, ErrInvalidArgument)
+	}
+	_, err := f.store.Put(ctx, uploadNoteKey(f.uploadDir(id), note), strings.NewReader(string(data)), nil, "")
 	return err
 }
 
-// UploadResult is what FinishUpload recorded of upload id, and when;
-// ErrNotFound if it was not finished.
-func (f *Filesystem) UploadResult(ctx context.Context, id string) ([]byte, time.Time, error) {
+// UploadNote is upload id's note and when it was written; ErrNotFound if
+// it has none.
+func (f *Filesystem) UploadNote(ctx context.Context, id, note string) ([]byte, time.Time, error) {
 	if err := CheckUploadID(id); err != nil {
 		return nil, time.Time{}, err
 	}
-	body, obj, err := f.store.Get(ctx, uploadDoneKey(f.uploadDir(id)))
+	if err := checkNote(note); err != nil {
+		return nil, time.Time{}, err
+	}
+	body, obj, err := f.store.Get(ctx, uploadNoteKey(f.uploadDir(id), note))
 	if err != nil {
 		return nil, time.Time{}, mapNotFound(err)
 	}
@@ -388,8 +408,60 @@ func (f *Filesystem) UploadResult(ctx context.Context, id string) ([]byte, time.
 	return data, obj.LastModified, nil
 }
 
+// CheckUploadParts checks, from a listing (a page of 1,000 keys a
+// request, not a request a part), that upload id has exactly parts 1 to
+// count, each but the last UploadPartSize, and returns their size and the
+// file's checksums (the last part's state: one Head).
+func (f *Filesystem) CheckUploadParts(ctx context.Context, id string, count int) (int64, Checksums, error) {
+	if err := CheckUploadID(id); err != nil {
+		return 0, Checksums{}, err
+	}
+	if count < 1 || count > MaxUploadParts {
+		return 0, Checksums{}, fmt.Errorf("%d parts: 1 to %d: %w", count, MaxUploadParts, ErrUploadParts)
+	}
+	dir := f.uploadDir(id)
+	var size int64
+	seen, last := 0, 0
+	var bad error
+	err := objstore.ListEach(ctx, f.store, dir+"p", func(page []objstore.Object) error {
+		for _, o := range page {
+			n, err := strconv.Atoi(strings.TrimPrefix(o.Key, dir+"p"))
+			if err != nil {
+				continue
+			}
+			seen++
+			last = max(last, n)
+			size += o.Size
+			if bad == nil && n < count && o.Size != UploadPartSize {
+				bad = fmt.Errorf("upload %s: part %d is %d bytes, not %d: %w", id, n, o.Size, UploadPartSize, ErrUploadParts)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, Checksums{}, err
+	}
+	switch {
+	case bad != nil:
+		return 0, Checksums{}, bad
+	case seen != count || last != count:
+		return 0, Checksums{}, fmt.Errorf("upload %s has %d parts, the last numbered %d; complete names %d: %w", id, seen, last, count, ErrUploadParts)
+	case size > f.maxFileSize:
+		return 0, Checksums{}, ErrFileTooLarge
+	}
+	o, err := f.store.Head(ctx, uploadPartKey(dir, count))
+	if err != nil {
+		return 0, Checksums{}, mapNotFound(err)
+	}
+	sum := NewChecksummer()
+	if err := sum.restore(o.Metadata); err != nil {
+		return 0, Checksums{}, fmt.Errorf("upload %s part %d: %w", id, count, err)
+	}
+	return size, sum.Sum(), nil
+}
+
 // DropUploadParts erases upload id's parts, every version, and keeps its
-// record and result: what a finished upload no longer needs.
+// record and notes: what a finished upload no longer needs.
 func (f *Filesystem) DropUploadParts(ctx context.Context, id string) error {
 	if err := CheckUploadID(id); err != nil {
 		return err
@@ -417,7 +489,7 @@ func (f *Filesystem) DropUpload(ctx context.Context, id string) error {
 type UploadEntry struct {
 	ID     string
 	Record bool
-	Done   bool // FinishUpload recorded its result
+	Notes  []string // the names of its notes, in order
 	Parts  int
 }
 
@@ -443,8 +515,8 @@ func (f *Filesystem) ListUploads(ctx context.Context, fn func(UploadEntry) error
 			}
 			if rest == "record" {
 				cur.Record = true
-			} else if rest == "done" {
-				cur.Done = true
+			} else if note, ok := strings.CutPrefix(rest, "note-"); ok {
+				cur.Notes = append(cur.Notes, note)
 			} else if strings.HasPrefix(rest, "p") {
 				cur.Parts++
 			}

@@ -35,18 +35,23 @@ type PartWriter interface {
 	StagePart(ctx context.Context, id string, n int, content io.ReaderAt, size int64) error
 	// UploadState is what upload id has received.
 	UploadState(ctx context.Context, id string) (UploadState, error)
+	// CheckUploadParts checks, from a listing, that upload id has exactly
+	// parts 1 to count, every one but the last whole, and returns the
+	// file's size and checksums (ErrUploadParts if not): what a caller
+	// answers a complete from before it assembles the file later.
+	CheckUploadParts(ctx context.Context, id string, count int) (size int64, sums Checksums, err error)
 	// CompleteUpload writes path's content from upload id's parts 1 to
 	// parts, exactly as Write would from the same bytes (condition,
-	// permissions, locks, checksums, events). The upload stays: the
-	// caller records the result (FinishUpload) and erases the parts
-	// (DropUploadParts) when it chooses, out of the request. Parts not as
-	// named (one missing, more, a size wrong) is ErrUploadParts, and
-	// nothing is written.
+	// permissions, locks, checksums, events). The upload stays: its caller
+	// records the outcome (SetUploadNote) and erases the parts
+	// (DropUploadParts). Parts not as named (one missing, more, a size
+	// wrong) is ErrUploadParts, and nothing is written.
 	CompleteUpload(ctx context.Context, id, path string, parts int, cond Condition, opts WriteOptions) (Item, error)
-	// FinishUpload records the caller's result of upload id (at most 16
-	// KiB), and UploadResult reads it back (ErrNotFound: not finished).
-	FinishUpload(ctx context.Context, id string, result []byte) error
-	UploadResult(ctx context.Context, id string) (result []byte, finished time.Time, err error)
+	// SetUploadNote keeps a note of the caller's beside upload id's record
+	// (a name of lowercase letters; at most 16 KiB), and UploadNote reads
+	// it back (ErrNotFound: none).
+	SetUploadNote(ctx context.Context, id, note string, data []byte) error
+	UploadNote(ctx context.Context, id, note string) (data []byte, written time.Time, err error)
 	// DropUploadParts erases upload id's parts, every version, keeping its
 	// record and result.
 	DropUploadParts(ctx context.Context, id string) error
@@ -72,8 +77,18 @@ type UploadState struct {
 type UploadEntry struct {
 	ID     string
 	Record bool
-	Done   bool // finished: its result recorded (FinishUpload)
+	Notes  []string // its notes' names (SetUploadNote), in order
 	Parts  int
+}
+
+// HasNote: e has the note.
+func (e UploadEntry) HasNote(note string) bool {
+	for _, n := range e.Notes {
+		if n == note {
+			return true
+		}
+	}
+	return false
 }
 
 // ErrUploadOrder is a part out of order; ErrUploadParts an upload whose
