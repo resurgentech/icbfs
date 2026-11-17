@@ -11,24 +11,25 @@ import (
 	"github.com/resurgentech/icbfs/pkg/drive"
 )
 
-// foldDrive is a drive and a mirror on it: with icbfs's origin index, or,
-// not indexed, behind plainDrive (the generic search).
+// foldDrive is a drive and a mirror on it: icbfs's drive, or, not
+// indexed, behind plainDrive (the paths any backend gets, its lookups
+// checked against the old whole-drive search).
 func foldDrive(t *testing.T, name string, indexed bool) (*Drive, drive.Drive, *drive.Mirror) {
 	t.Helper()
 	idrv := newDrive(t, miniotest.Store(t), icbfs.Settings{Name: name, Size: 1 << 30, RootMode: 0o777}, "")
 	var d drive.Drive = idrv
 	if !indexed {
-		d = plainDrive{idrv}
+		d = plain(t, idrv)
 	}
 	return idrv, d, drive.NewMirror(d, srcDrive)
 }
 
-// eachIndex runs f with icbfs's origin index, then with the search.
+// eachIndex runs f on icbfs's drive, then behind plainDrive.
 func eachIndex(t *testing.T, f func(t *testing.T, indexed bool)) {
 	for _, indexed := range []bool{true, false} {
 		name := "indexed"
 		if !indexed {
-			name = "searched"
+			name = "plain"
 		}
 		t.Run(name, func(t *testing.T) { f(t, indexed) })
 	}
