@@ -118,7 +118,7 @@ func TestSettleRefusedWritesNothing(t *testing.T) {
 	before := versionSnapshot(t, store)
 	for try := 1; try <= 2; try++ {
 		recorded := false
-		_, err := d.SettleFolder(system(), changes, drive.SettleOptions{Record: func(drive.SettleRecord) error { recorded = true; return nil }})
+		_, err := settleAt(d, system(), changes, drive.SettleOptions{Record: func(drive.SettleRecord) error { recorded = true; return nil }})
 		if !errors.Is(err, drive.ErrSettleRefused) {
 			t.Fatalf("try %d: %v, want ErrSettleRefused", try, err)
 		}
@@ -132,11 +132,11 @@ func TestSettleRefusedWritesNothing(t *testing.T) {
 	}
 	bad := append([]drive.LateChange(nil), changes...)
 	bad[0].Until = time.Time{}
-	if _, err := d.SettleFolder(system(), bad, drive.SettleOptions{}); !errors.Is(err, drive.ErrInvalid) {
+	if _, err := settleAt(d, system(), bad, drive.SettleOptions{}); !errors.Is(err, drive.ErrInvalid) {
 		t.Errorf("an add with no until: %v, want ErrInvalid", err)
 	}
 	bad[0].Until = bad[0].At
-	if _, err := d.SettleFolder(system(), bad, drive.SettleOptions{}); !errors.Is(err, drive.ErrInvalid) {
+	if _, err := settleAt(d, system(), bad, drive.SettleOptions{}); !errors.Is(err, drive.ErrInvalid) {
 		t.Errorf("an add with until at its time: %v, want ErrInvalid", err)
 	}
 }
@@ -199,7 +199,7 @@ func TestSettleStoppedByAnOutsideWrite(t *testing.T) {
 			store.mu.Unlock()
 			k := &keeper{}
 			before := ""
-			_, err := d.SettleFolder(system(), changes, k.opts())
+			_, err := settleAt(d, system(), changes, k.opts())
 			store.mu.Lock()
 			store.watch = nil
 			store.mu.Unlock()
@@ -240,7 +240,7 @@ func TestSettleStoppedByAnOutsideWrite(t *testing.T) {
 			if k.held() != nil || k.done != 1 {
 				t.Errorf("stopped before its window: record held %+v, done %d; want released", k.held(), k.done)
 			}
-			if _, err := d.SettleFolder(system(), changes, k.opts()); err != nil {
+			if _, err := settleAt(d, system(), changes, k.opts()); err != nil {
 				t.Fatalf("settled again: %v", err)
 			}
 			if got := liveNames(t, d, folder); got != "b.txt,c.txt,x.txt" {
@@ -261,7 +261,8 @@ func TestSettleStoppedByAnOutsideWrite(t *testing.T) {
 // record never answers ErrFolderGone; the trash wrote the folder, so it
 // stops (ErrSettleStopped) with the record held (round 5, D3). A folder purged with a settle cut: the record's new
 // blocks go, and the record is released. With no record, a folder that
-// is gone answers ErrFolderGone and nothing is written.
+// is gone answers ErrFolderNotAtPath (round 6, LF-13) and nothing is
+// written.
 func TestSettleFinishedByKeyWhenGone(t *testing.T) {
 	store := &cutStore{Store: miniotest.Store(t)}
 	d, changes := cutCase(t, store, "gonewithrecord", Config{DeferLateFolders: true})
@@ -271,7 +272,7 @@ func TestSettleFinishedByKeyWhenGone(t *testing.T) {
 	store.folder, store.cut = folder, 3
 	store.mu.Unlock()
 	k := &keeper{}
-	if _, err := d.SettleFolder(ctx, changes, k.opts()); err == nil {
+	if _, err := settleAt(d, ctx, changes, k.opts()); err == nil {
 		t.Fatalf("a cut settle: no error")
 	}
 	store.mu.Lock()
@@ -283,14 +284,14 @@ func TestSettleFinishedByKeyWhenGone(t *testing.T) {
 	if err := d.Delete(ctx, drive.ByPath("/dir"), true, drive.Condition{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.SettleFolder(ctx, changes, drive.SettleOptions{}); !errors.Is(err, drive.ErrFolderGone) {
-		t.Errorf("gone, with no record: %v, want ErrFolderGone", err)
+	if _, err := d.SettleFolder(ctx, changes, drive.SettleOptions{Path: "/dir"}); !errors.Is(err, drive.ErrFolderNotAtPath) {
+		t.Errorf("gone, with no record: %v, want ErrFolderNotAtPath", err)
 	}
 	// The trash wrote the folder since the cut (outside the caller's
 	// exclusion: the daemon settles a folder before it removes it): the
 	// rerun with the record never answers ErrFolderGone; it stops, erasing
 	// nothing (round 5, D3).
-	if _, err := d.SettleFolder(ctx, changes, k.opts()); !errors.Is(err, drive.ErrSettleStopped) {
+	if _, err := settleAt(d, ctx, changes, k.opts()); !errors.Is(err, drive.ErrSettleStopped) {
 		t.Fatalf("gone, with the record: %v, want ErrSettleStopped", err)
 	}
 	if k.held() == nil {
@@ -304,7 +305,7 @@ func TestSettleFinishedByKeyWhenGone(t *testing.T) {
 	store.folder, store.cut, store.n = folder2, 3, 0
 	store.mu.Unlock()
 	k2 := &keeper{}
-	if _, err := d2.SettleFolder(ctx, changes2, k2.opts()); err == nil {
+	if _, err := settleAt(d2, ctx, changes2, k2.opts()); err == nil {
 		t.Fatalf("a cut settle: no error")
 	}
 	store.mu.Lock()
@@ -320,7 +321,7 @@ func TestSettleFinishedByKeyWhenGone(t *testing.T) {
 	if h, err := store.Store.History(context.Background(), folder2); err != nil || len(liveOfObjects(h)) != 0 {
 		t.Fatalf("purged /dir: its root block still has %d versions (%v)", len(liveOfObjects(h)), err)
 	}
-	if _, err := d2.SettleFolder(ctx, changes2, k2.opts()); err != nil {
+	if _, err := settleAt(d2, ctx, changes2, k2.opts()); err != nil {
 		t.Fatalf("purged, with the record: %v", err)
 	}
 	if k2.held() != nil {

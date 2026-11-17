@@ -59,11 +59,14 @@ var ErrLateChange = fmt.Errorf("this drive does not rewrite a folder's past, so 
 	"write it with no source time, or one at or after the folder's newest state, "+
 	"or through a mirror that defers and settles late changes: %w", ErrInvalid)
 
-// ErrFolderGone is what SettleFolder returns for a folder that is no
-// longer under the drive's root (trashed or purged): nothing was written,
-// and nothing is held; the caller drops the folder's rows. It is an
-// ErrNotFound.
-var ErrFolderGone = fmt.Errorf("the folder is gone (trashed or purged), and its late changes can't be settled: %w", ErrNotFound)
+// ErrFolderNotAtPath is what SettleFolder returns when the folder is not
+// at the path it was given (SettleOptions.Path): nothing is there, or
+// another item is. Nothing was read beyond that path and nothing was
+// written. It does not say the folder is gone: the caller looks the
+// folder up as it looks up any item, and settles again with the path it
+// finds, or drops the folder's changes if it is in no folder. It is not
+// an ErrNotFound.
+var ErrFolderNotAtPath = errors.New("the folder is not at the path given (nothing is there, or another item is), and nothing was written: look the folder up, and settle again with its path")
 
 // ErrSettleRefused is what SettleFolder returns when the folder's states
 // as read and the changes given don't give the folder's states without
@@ -163,13 +166,20 @@ type LateSettler interface {
 	// empty list does nothing. The folder as it is now is not changed.
 	// Changes are played by At, those of one At in the order given.
 	//
-	// Each At and Until is checked: a zero time, one before 1970 or one in
-	// the future is refused, as is an add or removal whose Until is not
-	// after its At (ErrInvalid). The folder must be a directory under the
-	// drive's root, whoever asks; one that is gone (trashed or purged) gets
-	// ErrFolderGone, and nothing is written, unless Cut is given: a settle
-	// with a record is finished by the folder's id wherever it is, and
-	// never answers ErrFolderGone.
+	// Every change is checked before anything is read: a time (At) not
+	// set, before 1970 or in the future, and for an add or a removal an
+	// Until not set, before 1970, in the future or not after its At, a
+	// kind, type, name or item missing, are each refused with an error
+	// that names the change (its index) and that fault (ErrInvalid).
+	//
+	// The folder is the directory at SettleOptions.Path with the folder's
+	// id: required, and the drive never searches its tree for the folder.
+	// Nothing there, or another item there, is ErrFolderNotAtPath, with
+	// nothing written: the caller looks the folder up as it looks up any
+	// item and settles again with the path it finds, or drops the rows of
+	// a folder that is nowhere. A failure to read the way to the path is
+	// that failure. With Cut, a folder not at Path (or no Path) is settled
+	// by its id wherever it is, by the library's own housekeeping only.
 	//
 	// Before it writes anything it proves what it will write: each state is
 	// the state it read there plus exactly the changes that cover it, and
@@ -179,13 +189,29 @@ type LateSettler interface {
 	// The caller's rule, which the drive does not enforce: nothing but the
 	// settle writes the folder from Record to Done (see above). From its
 	// window on (its first write of the folder's .metadata or root block),
-	// a settle goes to its end whatever ctx does, trying a failed request
-	// again before it gives up; each of those writes is conditional on the
-	// version before it, and one that finds a version the settle did not
-	// write stops it (ErrSettleStopped). A settle that gives up after it
-	// handed out its record is finished by settling again with the same
-	// changes and that record (SettleOptions.Cut), in this process or
-	// another, before anything else is written into the folder.
+	// each write is conditional on the version before it, and one that
+	// finds a version the settle did not write stops it
+	// (ErrSettleStopped); a failed request is tried again (three tries)
+	// before the settle gives up.
+	//
+	// ctx is an immediate stop, at every step: canceled, the request in
+	// flight ends and no other begins (no try again, no further write of
+	// the window, its commit or its erases, no further part); the error
+	// is ctx's (errors.Is(err, context.Canceled)), and a record handed out
+	// stays the caller's. A graceful stop is the caller's: it does not
+	// cancel ctx, and the settle runs to its end (Done).
+	//
+	// A settle that gives up or is stopped after it handed out its record
+	// is finished by settling again with that record (SettleOptions.Cut)
+	// and the rows of the part that was cut (or those and more), in this
+	// process or another, before anything else is written into the
+	// folder: exactly as after a kill.
+	//
+	// The caller need never hold all of a folder's rows: successive calls,
+	// each with the next rows in their order (At, then the order stored),
+	// a batch at a time, leave the folder's states exactly as one call
+	// with all of them. Settled.Changes says how many of the changes given,
+	// from the first, are settled when a part fails.
 	SettleFolder(ctx context.Context, changes []LateChange, opts SettleOptions) (Settled, error)
 
 	// FolderWrittenBehind reports whether the folder's root block has a
@@ -221,9 +247,9 @@ type SettleOptions struct {
 	// Folder must be the changes'. Without Cut every stored version is a
 	// state.
 	Cut *SettleRecord
-	// Path, if set, is the folder's path in the drive, where it is looked
-	// for first. Without it, a folder the drive hasn't found this run is
-	// searched for through the drive's tree.
+	// Path is the folder's path in the drive, as the caller holds it:
+	// required (but with Cut). The folder is looked for there and nowhere
+	// else (ErrFolderNotAtPath).
 	Path string
 }
 
@@ -251,5 +277,8 @@ type SettleRecord struct {
 }
 
 // Settled is what a settle did: the states it read, the states it wrote,
-// the versions it erased.
-type Settled struct{ Read, Written, Erased int }
+// the versions it erased, and Changes: how many of the changes it was
+// given, from the first, are settled (all of them when it returns nil;
+// on an error, those of the parts before the one that failed, whose
+// records were Done: the caller deletes those rows and keeps the rest).
+type Settled struct{ Read, Written, Erased, Changes int }

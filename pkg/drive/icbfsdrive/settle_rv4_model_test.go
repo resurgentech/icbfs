@@ -403,7 +403,7 @@ func (m *rvModel) settle() {
 			k = &keeper{}
 			m.keepers[f] = k
 		}
-		s, err := m.d.SettleFolder(system(), m.queue[f], k.opts())
+		s, err := settleAt(m.d, system(), m.queue[f], k.opts())
 		m.counts["settles"]++
 		if err != nil {
 			m.fail("settle %d of %s (%d rows): %v", m.settles, f, len(m.queue[f]), err)
@@ -424,7 +424,7 @@ func (m *rvModel) settle() {
 		delete(m.queue, f)
 	}
 	// A settle with nothing queued.
-	if s, err := m.d.SettleFolder(system(), nil, drive.SettleOptions{}); err != nil || s != (drive.Settled{}) {
+	if s, err := settleAt(m.d, system(), nil, drive.SettleOptions{}); err != nil || s != (drive.Settled{}) {
 		m.fail("a settle with nothing queued: %+v, %v", s, err)
 	}
 	m.check(fmt.Sprintf("after settle %d", m.settles), false, false)

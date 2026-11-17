@@ -55,7 +55,7 @@ func TestLateFolderWithoutItsTime(t *testing.T) {
 	if _, err := d.Write(at(drive.WithLateChanges(ctx, late), 2021), "/dir/old.txt", strings.NewReader("old"), drive.Condition{}, drive.WriteOptions{}); !errors.Is(err, errFailOnce) {
 		t.Fatalf("a late file whose folder's time couldn't be written: %v; want it to fail", err)
 	}
-	if _, err := d.SettleFolder(ctx, late.Take(), drive.SettleOptions{}); err != nil {
+	if _, err := settleAt(d, ctx, late.Take(), drive.SettleOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := names(t, d, "/dir", year(2021).AddDate(0, 6, 0)); got != "old.txt" {
@@ -86,7 +86,7 @@ func TestLateCreateOnANameTakenThen(t *testing.T) {
 	if _, err := d.Write(at(drive.WithLateChanges(ctx, late), 2021), "/dir/x.txt", strings.NewReader("late"), drive.Condition{}, drive.WriteOptions{}); err != nil {
 		t.Fatalf("a late create at a name taken then: %v", err)
 	}
-	if _, err := d.SettleFolder(ctx, late.Take(), drive.SettleOptions{}); err != nil {
+	if _, err := settleAt(d, ctx, late.Take(), drive.SettleOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range []struct {

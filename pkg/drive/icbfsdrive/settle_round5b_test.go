@@ -55,7 +55,7 @@ func TestSettleInParts(t *testing.T) {
 	}
 	store.mu.Unlock()
 	k := &keeper{}
-	if _, err := d.SettleFolder(system(), rows, k.opts()); err == nil {
+	if _, err := settleAt(d, system(), rows, k.opts()); err == nil {
 		t.Fatalf("not cut")
 	}
 	store.mu.Lock()
@@ -65,7 +65,7 @@ func TestSettleInParts(t *testing.T) {
 		t.Fatalf("after a cut in the third part: record held %v, done %d, want held and 2", k.held() != nil, k.done)
 	}
 	d = newDriveWith(t, store, cutCaseSettings("parts"), Config{DeferLateFolders: true})
-	if _, err := d.SettleFolder(system(), rows, k.opts()); err != nil {
+	if _, err := settleAt(d, system(), rows, k.opts()); err != nil {
 		t.Fatalf("the rerun: %v", err)
 	}
 	if k.held() != nil {
@@ -124,7 +124,7 @@ func TestWrittenBehindPutRightByReplace(t *testing.T) {
 		t.Fatalf("a folder written behind: behind %v, %v", behind, err)
 	}
 	rows := r5Write(t, d, "/dir/x.txt", year(2021))
-	if _, err := d.SettleFolder(system(), rows, drive.SettleOptions{}); !errors.Is(err, drive.ErrSettleRefused) {
+	if _, err := settleAt(d, system(), rows, drive.SettleOptions{}); !errors.Is(err, drive.ErrSettleRefused) {
 		t.Fatalf("the settle of a folder written behind: %v, want ErrSettleRefused", err)
 	}
 	hist, err := d.FolderHistory(system(), drive.ByPath("/dir"))
@@ -138,7 +138,7 @@ func TestWrittenBehindPutRightByReplace(t *testing.T) {
 		t.Fatalf("after ReplaceFolderHistory: behind %v, %v", behind, err)
 	}
 	more := r5Write(t, d, "/dir/y.txt", year(2023))
-	if _, err := d.SettleFolder(system(), append(rows, more...), drive.SettleOptions{}); err != nil {
+	if _, err := settleAt(d, system(), append(rows, more...), drive.SettleOptions{}); err != nil {
 		t.Fatalf("the settle after ReplaceFolderHistory: %v", err)
 	}
 	// The past as the views read it (the hand-made 2021 state included),

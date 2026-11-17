@@ -35,21 +35,53 @@ func (d *Drive) SettleFolder(ctx context.Context, changes []drive.LateChange, op
 	if len(changes) == 0 {
 		return drive.Settled{}, nil
 	}
+	// Every row is checked before anything is read: each refusal names its
+	// row and its own fault.
 	folder := changes[0].Folder
+	dirChanges := make([]icbfs.DirChange, len(changes))
 	for i, c := range changes {
 		if c.Folder != folder {
 			return drive.Settled{}, fmt.Errorf("changes of folders %s and %s in one settle: %w", folder, c.Folder, drive.ErrInvalid)
 		}
-		if !icbfs.ValidSettleTime(c.At) {
-			return drive.Settled{}, fmt.Errorf("late change %d at %s: zero, before 1970 or in the future: %w", i, c.At.Format(time.RFC3339Nano), drive.ErrInvalid)
+		row := fmt.Sprintf("late change %d (%s %q at %s, until %s)", i, c.Op, c.Name, c.At.Format(time.RFC3339Nano), c.Until.Format(time.RFC3339Nano))
+		if f := icbfs.SettleTimeFault(c.At); f != "" {
+			return drive.Settled{}, fmt.Errorf("%s: its time (At) %s: %w", row, f, drive.ErrInvalid)
 		}
-		if c.Op != drive.LateTouch && (!icbfs.ValidSettleTime(c.Until) || !c.Until.After(c.At)) {
-			return drive.Settled{}, fmt.Errorf("late change %d at %s until %s: until must be a time after the change's: %w",
-				i, c.At.Format(time.RFC3339Nano), c.Until.Format(time.RFC3339Nano), drive.ErrInvalid)
+		dc := icbfs.DirChange{Dir: folder, At: c.At, Name: c.Name, Item: c.Item}
+		switch c.Op {
+		case drive.LateAdd, drive.LateRemove:
+			if f := icbfs.SettleTimeFault(c.Until); f != "" {
+				return drive.Settled{}, fmt.Errorf("%s: its Until %s: %w", row, f, drive.ErrInvalid)
+			}
+			if !c.Until.After(c.At) {
+				return drive.Settled{}, fmt.Errorf("%s: its Until is not after its time (At): %w", row, drive.ErrInvalid)
+			}
+			typ, ok := entryType(c.Type)
+			switch {
+			case !ok:
+				return drive.Settled{}, fmt.Errorf("%s: its type %q is not a file, folder or link: %w", row, c.Type, drive.ErrInvalid)
+			case c.Name == "":
+				return drive.Settled{}, fmt.Errorf("%s: it names no entry: %w", row, drive.ErrInvalid)
+			case c.Item == "":
+				return drive.Settled{}, fmt.Errorf("%s: it names no item: %w", row, drive.ErrInvalid)
+			}
+			dc.Type, dc.Until = typ, c.Until
+			dc.Op = icbfs.ChangeAdd
+			if c.Op == drive.LateRemove {
+				dc.Op = icbfs.ChangeRemove
+			}
+		case drive.LateTouch:
+			dc.Op = icbfs.ChangeTouch
+		default:
+			return drive.Settled{}, fmt.Errorf("%s: its kind %q is none of add, remove, touch: %w", row, c.Op, drive.ErrInvalid)
 		}
+		dirChanges[i] = dc
 	}
 	if c := opts.Cut; c != nil && c.Folder != folder {
 		return drive.Settled{}, fmt.Errorf("the record of a settle of folder %q settling %s: %w", c.Folder, folder, drive.ErrInvalid)
+	}
+	if opts.Path == "" && opts.Cut == nil {
+		return drive.Settled{}, fmt.Errorf("folder %s: a settle is given the folder's path (SettleOptions.Path): %w", folder, drive.ErrInvalid)
 	}
 	if d.cfg.ReadOnly {
 		return drive.Settled{}, errDriveReadOnly
@@ -64,14 +96,15 @@ func (d *Drive) SettleFolder(ctx context.Context, changes []drive.LateChange, op
 	if err != nil {
 		return drive.Settled{}, err
 	}
-	// The folder is a directory under the drive's root, whoever asks
-	// (opts.Path, if given, is where it is looked for first); anyone but
-	// the library's own housekeeping needs its rights to write its
-	// history, as ReplaceFolderHistory does. A settle with a record is
-	// finished by the folder's key wherever it is, or isn't: a folder
-	// trashed while its settle was cut still holds the cut settle's
-	// writes, and is finished like any other (only by the library's own
-	// housekeeping, which holds such records).
+	// The folder is the directory at opts.Path with the folder's id; the
+	// drive never searches for it (its caller holds where it is, and looks
+	// for it as for any item when it isn't there). Anyone but the
+	// library's own housekeeping needs its rights to write its history, as
+	// ReplaceFolderHistory does. A settle with a record is finished by the
+	// folder's key wherever it is, or isn't: a folder trashed or moved
+	// while its settle was cut still holds the cut settle's writes, and is
+	// finished like any other (only by the library's own housekeeping,
+	// which holds such records).
 	n, err := d.resolveToSettle(ctx, folder, opts.Path)
 	switch {
 	case err == nil:
@@ -86,33 +119,12 @@ func (d *Drive) SettleFolder(ctx context.Context, changes []drive.LateChange, op
 				return drive.Settled{}, err
 			}
 		}
-	case errors.Is(err, drive.ErrFolderGone) && opts.Cut != nil:
+	case errors.Is(err, drive.ErrFolderNotAtPath) && opts.Cut != nil:
 		if !p.System {
-			return drive.Settled{}, fmt.Errorf("folder %s is not under the drive's root, and only the library's own housekeeping finishes its settle: %w", folder, drive.ErrForbidden)
+			return drive.Settled{}, fmt.Errorf("folder %s is not at %q, and only the library's own housekeeping finishes its settle by its key: %w", folder, opts.Path, drive.ErrForbidden)
 		}
 	default:
 		return drive.Settled{}, err
-	}
-	dirChanges := make([]icbfs.DirChange, len(changes))
-	for i, c := range changes {
-		dc := icbfs.DirChange{Dir: folder, At: c.At, Name: c.Name, Item: c.Item}
-		switch c.Op {
-		case drive.LateAdd, drive.LateRemove:
-			typ, ok := entryType(c.Type)
-			if !ok || c.Name == "" || c.Item == "" {
-				return drive.Settled{}, fmt.Errorf("late change %d (%s %q, type %q): %w", i, c.Op, c.Name, c.Type, drive.ErrInvalid)
-			}
-			dc.Type, dc.Until = typ, c.Until
-			dc.Op = icbfs.ChangeAdd
-			if c.Op == drive.LateRemove {
-				dc.Op = icbfs.ChangeRemove
-			}
-		case drive.LateTouch:
-			dc.Op = icbfs.ChangeTouch
-		default:
-			return drive.Settled{}, fmt.Errorf("late change %d: kind %q: %w", i, c.Op, drive.ErrInvalid)
-		}
-		dirChanges[i] = dc
 	}
 	var cut *icbfs.SettleRecord
 	if c := opts.Cut; c != nil {
@@ -122,17 +134,40 @@ func (d *Drive) SettleFolder(ctx context.Context, changes []drive.LateChange, op
 	// at most MaxSettleChanges, oldest first, each a settle of its own:
 	// record, write-out, Done. A part settled already plays again as
 	// nothing, so a rerun after a cut in any part is given every change
-	// and Cut, which the first part takes.
-	sort.SliceStable(dirChanges, func(i, j int) bool { return dirChanges[i].At.Before(dirChanges[j].At) })
+	// and Cut, which the first part takes. An immediate stop between parts
+	// starts no other.
+	order := make([]int, len(dirChanges))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(i, j int) bool { return dirChanges[order[i]].At.Before(dirChanges[order[j]].At) })
+	sorted := make([]icbfs.DirChange, len(order))
+	for i, o := range order {
+		sorted[i] = dirChanges[o]
+	}
 	var s drive.Settled
-	for start := 0; start < len(dirChanges); start += MaxSettleChanges {
-		part := dirChanges[start:min(start+MaxSettleChanges, len(dirChanges))]
-		ps, perr := d.settleDir(ctx, folder, part, opts.Record, opts.Done, cut)
+	settled := 0 // of sorted, the parts that finished
+	for start := 0; start < len(sorted); start += MaxSettleChanges {
+		if err = ctx.Err(); err != nil {
+			break
+		}
+		end := min(start+MaxSettleChanges, len(sorted))
+		ps, perr := d.settleDir(ctx, folder, sorted[start:end], opts.Record, opts.Done, cut)
 		s.Read, s.Written, s.Erased = s.Read+ps.Read, s.Written+ps.Written, s.Erased+ps.Erased
 		cut = nil
 		if err = perr; err != nil {
 			break
 		}
+		settled = end
+	}
+	// Changes: the longest run of the changes as given, from the first,
+	// that are all settled (all of them, given in order by At).
+	done := make([]bool, len(changes))
+	for _, o := range order[:settled] {
+		done[o] = true
+	}
+	for s.Changes < len(done) && done[s.Changes] {
+		s.Changes++
 	}
 	switch {
 	case err == nil:
@@ -161,25 +196,26 @@ func (d *Drive) FolderWrittenBehind(ctx context.Context, folder drive.ItemRef) (
 	return behind, mapErr(err)
 }
 
-// resolveToSettle is the folder a settle is of: a directory under the
-// drive's root, looked for at path first. One that isn't found by a
-// search of the whole tree that read every directory is gone
-// (drive.ErrFolderGone): trashed or purged. A directory the search can't
-// read fails the settle, rather than take the folder for gone.
+// resolveToSettle is the folder a settle is of: the directory at path
+// (drive-relative) whose id is folder. Nothing at path, or another item
+// there, is drive.ErrFolderNotAtPath: the drive never searches its tree
+// for the folder (its caller looks for it as for any item, without a
+// walk). A failure to read the way to path is that failure, never "not
+// there". No path (a settle with a record only) is "not there" too.
 func (d *Drive) resolveToSettle(ctx context.Context, folder, path string) (*node, error) {
-	n, err := d.resolve(ctx, d.fs, drive.ItemRef{ID: folder, Path: path})
-	if err == nil || !errors.Is(err, drive.ErrNotFound) {
-		return n, err
+	if path == "" {
+		return nil, fmt.Errorf("folder %s: no path given: %w", folder, drive.ErrFolderNotAtPath)
 	}
-	paths, err := d.searchPaths(ctx, d.fs, folder, 1, true)
-	if err != nil {
-		return nil, mapErr(err)
+	n, err := d.resolvePath(ctx, d.fs, path)
+	switch {
+	case err == nil && n.key == folder:
+		return n, nil
+	case err == nil:
+		return nil, fmt.Errorf("folder %s: %q is another item (%s): %w", folder, path, n.key, drive.ErrFolderNotAtPath)
+	case errors.Is(err, drive.ErrNotFound), errors.Is(err, drive.ErrNotDir):
+		return nil, fmt.Errorf("folder %s: nothing at %q: %w", folder, path, drive.ErrFolderNotAtPath)
 	}
-	if len(paths) == 0 {
-		return nil, fmt.Errorf("folder %s: %w", folder, drive.ErrFolderGone)
-	}
-	d.idPaths.put(folder, paths[0])
-	return d.resolvePath(ctx, d.fs, paths[0])
+	return nil, err
 }
 
 // lateChanges is changes as a write reports them: its changes to each

@@ -959,9 +959,12 @@ that is not one of the new states (a cut settle's, or one a lost answer
 left) is erased; V0 itself (`.metadata`, then root); the blocks below the
 roots no state reaches any more (or a deletion on top); the other
 versions the new states supersede; the `.version` lines of what is gone;
-and the caller is told the record can go (`SettleOptions.Done`). From
-the window on a settle doesn't stop with its caller, and tries a failed
-request again before it gives up.
+and the caller is told the record can go (`SettleOptions.Done`). A
+failed request of the write-out is tried again before the settle gives
+up. The caller's context is an immediate stop at every step (since round
+6 of T83-1): canceled, the request in flight ends and no other begins,
+the record stays, and a rerun with it finishes the settle as after a
+kill. A graceful stop is the caller's: it lets a settle run to its end.
 
 Nothing about a settle under way is kept by the drive or in the store:
 the record is the caller's, and so is exclusion: from the record to
@@ -983,9 +986,11 @@ no source time (whose root block version no `.version` lists) is a state
 at the time it was stored. A writer outside the exclusion is undefined
 behaviour; a rerun takes its versions after V0 for the cut settle's. A
 settle with a record is finished by the folder's key wherever the folder
-is (a trashed folder too), and never answers `drive.ErrFolderGone`; with
-none, a folder that is gone (trashed or purged) gets
-`drive.ErrFolderGone`, and nothing is written.
+is (a trashed folder too). Without one the folder is looked for only at
+the path its caller gives (`SettleOptions.Path`, required): nothing
+there, or another item there, is `drive.ErrFolderNotAtPath`, and nothing
+is written; the drive never walks its tree for it, and never says it is
+gone (the caller looks it up as any item, round 6 of T83-1).
 
 Round 5 of T83-1 adds, to the late change and the settle:
 
@@ -1032,6 +1037,25 @@ Round 5 of T83-1 adds, to the late change and the settle:
   short) is found by `LateSettler.FolderWrittenBehind` (one listing of
   the root block's history, one read of the `.version`); rewritten from
   its views (`ReplaceFolderHistory`) it settles again.
+
+Round 6 of T83-1 (interloc's `docs/STATES.md`, section 1.3, rows LF-13,
+LF-17, CH-12):
+
+- **An immediate stop** (the caller's context canceled) cuts the window,
+  the commit and the erases where they stand; the record stays.
+- **The folder by its path only** (`drive.ErrFolderNotAtPath`, above).
+- **Rows in batches.** Successive calls, each with the next rows in their
+  order (At, then the order stored), leave the folder exactly as one call
+  with all of them; a cut batch is finished by a rerun with its record
+  and that batch's rows (or more). `Settled.Changes` is how many of the
+  changes given, from the first, are settled when a later part fails.
+- **Each refused row names its fault** (a time not set, before 1970, in
+  the future; an Until not set, before 1970, in the future, or not after
+  its time), before anything is read.
+- **A killed settle's working table** in the history cache is emptied by
+  the next settle on the machine: each run records its process (host and
+  pid); a run whose process is gone, or one of this process that no
+  settle holds, is cleared.
 
 Corrections, for a date the source got wrong, are the caller's:
 `DirHistory` / `ReplaceDirHistory` and `FileHistory` /

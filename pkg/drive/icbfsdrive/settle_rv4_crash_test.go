@@ -63,7 +63,7 @@ func TestRV4CrashLeftover(t *testing.T) {
 				t.Fatal(err)
 			}
 			rows := late.Take()
-			_, serr := d.SettleFolder(system(), rows, (&keeper{}).opts())
+			_, serr := settleAt(d, system(), rows, (&keeper{}).opts())
 			live := rvNamesAt(t, d, "/dir", ztime)
 			now := rvNamesAt(t, d, "/dir", nowish())
 			key := fmt.Sprintf("settle %s, view as of now = present %v", rvSettleClass(serr), live == now)

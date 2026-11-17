@@ -69,7 +69,7 @@ func TestRV4SettleHeap(t *testing.T) {
 		}
 	}()
 	t1 := time.Now()
-	s, err := d.SettleFolder(system(), rows, (&keeper{}).opts())
+	s, err := settleAt(d, system(), rows, (&keeper{}).opts())
 	close(stop)
 	reqs, byts, listed, ops := st.take()
 	mu.Lock()

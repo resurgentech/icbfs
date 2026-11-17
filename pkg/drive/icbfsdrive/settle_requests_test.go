@@ -246,7 +246,7 @@ func measureSettleOf(t *testing.T, raw objstore.Store, states, lateN int, spread
 	}()
 	store.take()
 	store.on.Store(true)
-	settled, err := d.SettleFolder(ctx, changes, drive.SettleOptions{})
+	settled, err := settleAt(d, ctx, changes, drive.SettleOptions{})
 	store.on.Store(false)
 	close(stop)
 	<-sampled

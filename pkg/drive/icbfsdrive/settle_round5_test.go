@@ -108,7 +108,7 @@ func TestKilledWriteLeavesTheFolderSettleable(t *testing.T) {
 					rows := late.Take()
 					rows = append(rows, r5Write(t, d, "/dir/x2.txt", rvMonth(2011, 11, 1))...)
 					rows = append(rows, r5Write(t, d, "/dir/x3.txt", rvMonth(2011, 2, 15))...)
-					if _, err := d.SettleFolder(system(), rows, (&keeper{}).opts()); err != nil {
+					if _, err := settleAt(d, system(), rows, (&keeper{}).opts()); err != nil {
 						t.Fatalf("the settle: %v", err)
 					}
 					present := rvNamesAt(t, d, "/dir", time.Time{})
@@ -198,7 +198,7 @@ func TestSettleKeepsTheFolderRecord(t *testing.T) {
 			}
 			check("before the settle")
 			rows := r5Write(t, d, "/dir/x.txt", rvMonth(2011, 2, 15))
-			if _, err := d.SettleFolder(system(), rows, (&keeper{}).opts()); err != nil {
+			if _, err := settleAt(d, system(), rows, (&keeper{}).opts()); err != nil {
 				t.Fatal(err)
 			}
 			check("after the settle")
@@ -210,7 +210,7 @@ func TestSettleKeepsTheFolderRecord(t *testing.T) {
 			if len(rows) != 1 || !rows[0].Until.Equal(rvMonth(2011, 9, 1)) {
 				t.Errorf("the second late write's rows: %+v, want until 2011-09-01", rows)
 			}
-			if _, err := d.SettleFolder(system(), rows, (&keeper{}).opts()); err != nil {
+			if _, err := settleAt(d, system(), rows, (&keeper{}).opts()); err != nil {
 				t.Fatal(err)
 			}
 			check("after a second settle")
@@ -275,7 +275,7 @@ func TestUndatedThenLate(t *testing.T) {
 				t.Errorf("as of now: %q, want both %s and %s; rows %+v", now, u, l, rows)
 				r5Dump(t, d)
 			}
-			if _, err := d.SettleFolder(system(), rows, (&keeper{}).opts()); err != nil {
+			if _, err := settleAt(d, system(), rows, (&keeper{}).opts()); err != nil {
 				t.Fatalf("the settle: %v", err)
 			}
 			for _, at := range []time.Time{rvMonth(2011, 4, 1), rvMonth(2012, 1, 1), time.Now().Add(time.Second)} {
@@ -349,7 +349,7 @@ func TestRerunStopsOnAWriteSinceTheCut(t *testing.T) {
 			}
 			store.mu.Unlock()
 			k := &keeper{}
-			if _, err := d.SettleFolder(system(), changes, k.opts()); err == nil {
+			if _, err := settleAt(d, system(), changes, k.opts()); err == nil {
 				t.Fatalf("the settle was not cut")
 			}
 			store.mu.Lock()
@@ -360,7 +360,7 @@ func TestRerunStopsOnAWriteSinceTheCut(t *testing.T) {
 			}
 			d2 := newDriveWith(t, store, cutCaseSettings("since"+strings.ReplaceAll(c.name, " ", "")), Config{DeferLateFolders: true})
 			ys := r5Write(t, d2, "/dir/y.txt", year(2023))
-			_, err := d2.SettleFolder(system(), append(changes, ys...), k.opts())
+			_, err := settleAt(d2, system(), append(changes, ys...), k.opts())
 			if !errors.Is(err, drive.ErrSettleStopped) {
 				t.Fatalf("the rerun after a write since the cut: %v, want ErrSettleStopped", err)
 			}
@@ -422,7 +422,7 @@ func TestSettleHeapBounded(t *testing.T) {
 				}
 			}()
 			start := time.Now()
-			s, err := d.SettleFolder(system(), rows, (&keeper{}).opts())
+			s, err := settleAt(d, system(), rows, (&keeper{}).opts())
 			close(stop)
 			<-done
 			reqs, _, _, _ := st.take()

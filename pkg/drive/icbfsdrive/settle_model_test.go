@@ -232,7 +232,7 @@ func (c *mCase) settle() {
 			k = &keeper{}
 			c.keys[folder] = k
 		}
-		if _, err := c.d.SettleFolder(system(), c.queue[folder], k.opts()); err != nil {
+		if _, err := settleAt(c.d, system(), c.queue[folder], k.opts()); err != nil {
 			c.t.Fatalf("settle %d of folder %s (%d changes): %v", c.settles, folder, len(c.queue[folder]), err)
 		}
 		if k.held() != nil {

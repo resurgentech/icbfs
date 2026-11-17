@@ -8,8 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -27,11 +29,14 @@ import (
 // shared by every drive a library opens and every program of one store
 // and credential on a machine (storeflags.History), so two settles may
 // use the database at once, of one directory too, and neither clears
-// the other's rows. A run's rows go when it ends (Clear); a run a
-// process didn't end (killed) is cleared by the next SettleTable of any
-// directory once it is a day old.
+// the other's rows. A run's rows go when it ends (Clear). A run a process
+// didn't end (killed) is cleared by the next SettleTable of any directory
+// on the same machine: each run records its process (host name and pid),
+// and one whose process is no longer running, or one of this process
+// that no settle of it holds, goes. Any run a day old goes too (a pid
+// reused, another machine's).
 //
-//	settle_runs:    each run, its directory and when it started
+//	settle_runs:    each run, its directory, when it started, and its process
 //	settle_entries: one row per entry per lifetime, [from_at, to_at), to_at NULL while open
 //	settle_states:  each state's time, the sum of its entries as read (read = 1) or "" for a
 //	                state a change made, the new keys minted for it, its encoded root block
@@ -48,6 +53,8 @@ var settleSchema = []string{
 		dir     TEXT NOT NULL,
 		started INTEGER NOT NULL
 	)`,
+	// A table an earlier build of this step made has no process columns:
+	// settleRunColumns adds them.
 	`CREATE TABLE IF NOT EXISTS settle_entries (
 		run     TEXT NOT NULL,
 		name    TEXT NOT NULL,
@@ -97,8 +104,25 @@ var settleSchema = []string{
 var settleTables = []string{"settle_entries", "settle_read", "settle_records", "settle_states", "settle_blocks", "settle_runs"}
 
 // settleRunsKeptFor is how long a run's rows are kept if its settle
-// never ends them (its process killed): far longer than a settle takes.
+// never ends them and its process can't be judged (another machine's, a
+// pid reused): far longer than a settle takes.
 const settleRunsKeptFor = 24 * time.Hour
+
+// settleRunColumns are settle_runs' process columns, added to a table an
+// earlier build made without them.
+var settleRunColumns = []string{"host TEXT NOT NULL DEFAULT ''", "pid INTEGER NOT NULL DEFAULT 0"}
+
+// liveRuns is the runs of this process's settles that have not ended.
+var liveRuns = struct {
+	sync.Mutex
+	m map[string]bool
+}{m: map[string]bool{}}
+
+// settleHost is this machine's name, as settle_runs records it.
+var settleHost = sync.OnceValue(func() string {
+	h, _ := os.Hostname()
+	return h
+})
 
 // SettleEntry is one directory entry in the working table.
 type SettleEntry struct {
@@ -149,19 +173,43 @@ func (c *HistoryCache) SettleTable(ctx context.Context, dir string) (*SettleTabl
 			return nil, err
 		}
 	}
-	// What killed runs left, a day on.
-	rows, err := c.db.QueryContext(ctx, `SELECT run FROM settle_runs WHERE started < ?`, nanos(time.Now().Add(-settleRunsKeptFor)))
+	for _, col := range settleRunColumns {
+		name, _, _ := strings.Cut(col, " ")
+		var n int
+		if err := c.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('settle_runs') WHERE name = ?`, name).Scan(&n); err != nil {
+			return nil, err
+		}
+		if n == 0 {
+			if _, err := c.db.ExecContext(ctx, `ALTER TABLE settle_runs ADD COLUMN `+col); err != nil {
+				return nil, err
+			}
+		}
+	}
+	// What killed settles left: a run whose process is gone, a run of this
+	// process no settle holds, any run a day old.
+	rows, err := c.db.QueryContext(ctx, `SELECT run, host, pid, started FROM settle_runs`)
 	if err != nil {
 		return nil, err
 	}
 	var stale []string
+	host, pid, old := settleHost(), os.Getpid(), nanos(time.Now().Add(-settleRunsKeptFor))
 	for rows.Next() {
-		var r string
-		if err := rows.Scan(&r); err != nil {
+		var r, h string
+		var p int
+		var started int64
+		if err := rows.Scan(&r, &h, &p, &started); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		stale = append(stale, r)
+		liveRuns.Lock()
+		live := liveRuns.m[r]
+		liveRuns.Unlock()
+		switch {
+		case started < old,
+			h == host && p == pid && !live,
+			h == host && p != 0 && p != pid && !processAlive(p):
+			stale = append(stale, r)
+		}
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
@@ -173,14 +221,25 @@ func (c *HistoryCache) SettleTable(ctx context.Context, dir string) (*SettleTabl
 		}
 	}
 	t := &SettleTable{db: c.db, dir: dir, run: uuid.NewString()}
-	if _, err := c.db.ExecContext(ctx, `INSERT INTO settle_runs VALUES (?, ?, ?)`, t.run, dir, nanos(time.Now())); err != nil {
+	liveRuns.Lock()
+	liveRuns.m[t.run] = true
+	liveRuns.Unlock()
+	if _, err := c.db.ExecContext(ctx, `INSERT INTO settle_runs (run, dir, started, host, pid) VALUES (?, ?, ?, ?, ?)`,
+		t.run, dir, nanos(time.Now()), host, pid); err != nil {
+		liveRuns.Lock()
+		delete(liveRuns.m, t.run)
+		liveRuns.Unlock()
 		return nil, err
 	}
 	return t, nil
 }
 
-// Clear removes the run's rows: its settle is done.
+// Clear removes the run's rows: its settle is done. A run whose Clear
+// fails is no longer held: the next SettleTable clears it.
 func (t *SettleTable) Clear(ctx context.Context) error {
+	liveRuns.Lock()
+	delete(liveRuns.m, t.run)
+	liveRuns.Unlock()
 	tx, err := t.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

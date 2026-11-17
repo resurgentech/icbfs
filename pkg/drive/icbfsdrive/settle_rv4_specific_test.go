@@ -37,7 +37,7 @@ func TestRV4Specific(t *testing.T) {
 		return late.Take()
 	}
 	settle := func(t *testing.T, d *Drive, rows []drive.LateChange) string {
-		_, err := d.SettleFolder(system(), rows, (&keeper{}).opts())
+		_, err := settleAt(d, system(), rows, (&keeper{}).opts())
 		return errShort(err)
 	}
 	until := func(rows []drive.LateChange) string {

@@ -429,7 +429,7 @@ func TestSettleCutAtEveryRequest(t *testing.T) {
 	_ = changes[0].Folder
 	store.arm(0, false)
 	k := &keeper{}
-	if _, err := d.SettleFolder(system(), changes, k.opts()); err != nil {
+	if _, err := settleAt(d, system(), changes, k.opts()); err != nil {
 		t.Fatal(err)
 	}
 	total, seq := store.disarm()
@@ -470,7 +470,7 @@ func TestSettleCutAtEveryRequest(t *testing.T) {
 				} else {
 					store.arm(cut, false)
 				}
-				_, err := d.SettleFolder(ctx, changes, k.opts())
+				_, err := settleAt(d, ctx, changes, k.opts())
 				_, seq := store.disarm()
 				if cut <= total && err == nil {
 					t.Fatalf("cut at request %d (%s), and no error", cut, seq[len(seq)-1])
@@ -497,7 +497,7 @@ func TestSettleCutAtEveryRequest(t *testing.T) {
 					} else {
 						store.arm(second, false)
 					}
-					_, err := d.SettleFolder(ctx, changes, k.opts())
+					_, err := settleAt(d, ctx, changes, k.opts())
 					store.disarm()
 					cutRecs = append(cutRecs, k.held())
 					if err == nil {
@@ -509,7 +509,7 @@ func TestSettleCutAtEveryRequest(t *testing.T) {
 				if mode == "lost" || cut%2 == 1 || len(seconds) > 0 {
 					d = newDriveWith(t, store, cutCaseSettings(name), cfg)
 				}
-				if _, err := d.SettleFolder(ctx, changes, k.opts()); err != nil {
+				if _, err := settleAt(d, ctx, changes, k.opts()); err != nil {
 					t.Fatalf("settled again (record %+v): %v", k.held(), err)
 				}
 				if k.held() != nil {
@@ -556,17 +556,17 @@ func slicesContain(list []string, s string) bool {
 	return false
 }
 
-// TestSettleOutlivesItsCaller: a settle whose caller goes away inside its
-// window (its context canceled at the window's first request), and one
-// whose store fails the window's first request once, both end with the
-// folder settled: the present as it was, the past with the change, the
-// settle's record released.
-func TestSettleOutlivesItsCaller(t *testing.T) {
+// TestSettleWindowRetried: a settle whose store fails the window's first
+// request once ends with the folder settled: the present as it was, the
+// past with the change, the settle's record released. (Until round 6 a
+// settle whose caller went away inside its window ran on to its end
+// too; now that is an immediate stop: TestST9_LF17_ImmediateStopCutsTheSettle.)
+func TestSettleWindowRetried(t *testing.T) {
 	store := &failStore{Store: miniotest.Store(t)}
 	for _, c := range []struct {
 		name   string
 		cancel bool
-	}{{"outlive", true}, {"retried", false}} {
+	}{{"retried", false}} {
 		t.Run(c.name, func(t *testing.T) {
 			d, changes := cutCase(t, store, c.name, Config{DeferLateFolders: true})
 			folder := changes[0].Folder
@@ -592,7 +592,7 @@ func TestSettleOutlivesItsCaller(t *testing.T) {
 			}
 			store.mu.Unlock()
 			k := &keeper{}
-			_, err := d.SettleFolder(ctx, changes, k.opts())
+			_, err := settleAt(d, ctx, changes, k.opts())
 			store.mu.Lock()
 			store.watch = nil
 			store.mu.Unlock()

@@ -69,8 +69,12 @@ import (
 //     versions the new states supersede; the .version's lines of what is
 //     gone. Then the caller is told the record can go (SettleInput.Done).
 //
-// From the window on, the settle doesn't stop with its caller's context,
-// and a store error is tried again (settleTries) before it gives up.
+// A store error in the write-out is tried again (settleTries) before the
+// settle gives up. The caller's context is an immediate stop at every
+// step: canceled, the request in flight ends, no other begins (not a try
+// again, not the next write, not an erase), and the record stays; the
+// settle is finished by a rerun with it, as after a kill. A graceful stop
+// is the caller's: it lets a settle under way run to its end.
 //
 // Exclusion is the caller's: from the record to Done nothing but the
 // settle writes the directory (a daemon's lock on the folder, held for
@@ -201,8 +205,20 @@ type lowerErase struct {
 // ValidSettleTime reports whether t can be a change's time: not zero,
 // not before the Unix epoch (new keys are minted at it), not in the
 // future.
-func ValidSettleTime(t time.Time) bool {
-	return !t.IsZero() && !t.Before(time.Unix(0, 0)) && !t.After(time.Now().Add(maxSettleAhead))
+func ValidSettleTime(t time.Time) bool { return SettleTimeFault(t) == "" }
+
+// SettleTimeFault is what is wrong with t as a change's time, in a few
+// words ("is not set", "is before 1970", "is in the future"), or "".
+func SettleTimeFault(t time.Time) string {
+	switch {
+	case t.IsZero():
+		return "is not set"
+	case t.Before(time.Unix(0, 0)):
+		return "is before 1970"
+	case t.After(time.Now().Add(maxSettleAhead)):
+		return "is in the future"
+	}
+	return ""
 }
 
 // SettleDir writes directory dirKey's states from the earliest of changes
@@ -228,13 +244,17 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 		if ch.Dir != dirKey {
 			return Settled{}, fmt.Errorf("a change to %s settling %s: %w", ch.Dir, dirKey, ErrInvalidArgument)
 		}
-		if !ValidSettleTime(ch.At) {
-			return Settled{}, fmt.Errorf("a change at %s: not a time a change can have: %w", ch.At.Format(time.RFC3339Nano), ErrInvalidArgument)
+		if f := SettleTimeFault(ch.At); f != "" {
+			return Settled{}, fmt.Errorf("a change at %s: its time (At) %s: %w", ch.At.Format(time.RFC3339Nano), f, ErrInvalidArgument)
 		}
 		switch ch.Op {
 		case ChangeAdd, ChangeRemove:
-			if !ValidSettleTime(ch.Until) || !ch.Until.After(ch.At) {
-				return Settled{}, fmt.Errorf("a change at %s until %s: until must be a time after the change's: %w",
+			if f := SettleTimeFault(ch.Until); f != "" {
+				return Settled{}, fmt.Errorf("a change at %s until %s: its Until %s: %w",
+					ch.At.Format(time.RFC3339Nano), ch.Until.Format(time.RFC3339Nano), f, ErrInvalidArgument)
+			}
+			if !ch.Until.After(ch.At) {
+				return Settled{}, fmt.Errorf("a change at %s until %s: its Until is not after its time (At): %w",
 					ch.At.Format(time.RFC3339Nano), ch.Until.Format(time.RFC3339Nano), ErrInvalidArgument)
 			}
 		case ChangeTouch:
@@ -595,10 +615,13 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 		}
 	}
 
-	// From here on the settle goes to its end whether or not its caller
-	// is still there: stopping inside the window leaves the present as of
-	// an earlier state.
-	wctx := context.WithoutCancel(ctx)
+	// The window, the commit and the erases run under the caller's
+	// context: an immediate stop cuts them where they stand (the request
+	// in flight ends, no other begins), the record stays, and a rerun with
+	// it finishes them. Until then a reader of the present may see an
+	// earlier state (the window) or what is superseded (the erases): what a
+	// kill there leaves too.
+	wctx := ctx
 
 	// --- The window: each state's .metadata and root block, oldest
 	// first, two requests a state and nothing else (a request tried again
@@ -647,7 +670,7 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 
 	// --- The commit ---
 	if writes {
-		if err := settleRetry(nil, func() error {
+		if err := settleRetry(wctx, nil, func() error {
 			_, err := objstore.UpdateDates(wctx, f.store, dirKey, winDates)
 			return err
 		}); err != nil {
@@ -683,7 +706,7 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 	gone := map[string]bool{}
 	eraseRoot := func(list []objstore.Object) error {
 		for _, o := range list {
-			if err := settleRetry(nil, func() error { return eraseGone(wctx, f.store, o.Key, o.VersionID) }); err != nil {
+			if err := settleRetry(wctx, nil, func() error { return eraseGone(wctx, f.store, o.Key, o.VersionID) }); err != nil {
 				return err
 			}
 			gone[o.VersionID] = true
@@ -709,7 +732,7 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 	// leaves them.
 	for i := 0; i+1 < len(written); i++ {
 		for _, k := range keysOf[written[i].at] {
-			if err := settleRetry(nil, func() error {
+			if err := settleRetry(wctx, nil, func() error {
 				err := f.store.Delete(wctx, k)
 				if objstore.IsNotFound(err) {
 					return nil
@@ -736,12 +759,17 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 	}
 	if len(drop) > 0 {
 		sort.Strings(drop)
-		if err := settleRetry(nil, func() error {
+		if err := settleRetry(wctx, nil, func() error {
 			_, err := objstore.UpdateDates(wctx, f.store, dirKey, nil, drop...)
 			return err
 		}); err != nil {
 			return Settled{}, err
 		}
+	}
+	// The past mark is put whatever the context says (markPast): an
+	// immediate stop before it leaves it to the rerun.
+	if err := wctx.Err(); err != nil {
+		return Settled{}, err
 	}
 	if err := f.markPast(wctx); err != nil {
 		return Settled{}, err
@@ -756,13 +784,15 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 		for _, b := range blocks {
 			forget = append(forget, b.Key, b.Key+objstore.VersionSuffix)
 		}
-		if err := in.Forget(wctx, forget); err != nil {
+		// The cache is this process's, not the store: a stop arriving after
+		// the erases leaves no needless rerun.
+		if err := in.Forget(context.WithoutCancel(ctx), forget); err != nil {
 			return Settled{}, err
 		}
 	}
 	if in.Keep != nil {
 		for _, p := range kept {
-			if err := in.Keep(wctx, p.obj, p.data); err != nil {
+			if err := in.Keep(context.WithoutCancel(ctx), p.obj, p.data); err != nil {
 				return Settled{}, err
 			}
 		}
@@ -981,7 +1011,7 @@ func (f *Filesystem) lowerErasures(ctx context.Context, dirKey string, tab *objs
 // eraseLower does le, and reports the versions it erased.
 func (f *Filesystem) eraseLower(ctx context.Context, le lowerErase) (int, error) {
 	if le.whole {
-		if err := settleRetry(nil, func() error { return f.store.EraseAll(ctx, le.key) }); err != nil {
+		if err := settleRetry(ctx, nil, func() error { return f.store.EraseAll(ctx, le.key) }); err != nil {
 			return 0, err
 		}
 		return len(le.ids), nil
@@ -990,7 +1020,7 @@ func (f *Filesystem) eraseLower(ctx context.Context, le lowerErase) (int, error)
 		// No state from now on reaches the key: a deletion on top (before
 		// erasing its newest version, which a store may refuse to erase
 		// while it is current).
-		if err := settleRetry(nil, func() error {
+		if err := settleRetry(ctx, nil, func() error {
 			err := f.store.Delete(ctx, le.key)
 			if objstore.IsNotFound(err) {
 				return nil
@@ -1002,13 +1032,13 @@ func (f *Filesystem) eraseLower(ctx context.Context, le lowerErase) (int, error)
 	}
 	n := 0
 	for _, id := range le.ids {
-		if err := settleRetry(nil, func() error { return eraseGone(ctx, f.store, le.key, id) }); err != nil {
+		if err := settleRetry(ctx, nil, func() error { return eraseGone(ctx, f.store, le.key, id) }); err != nil {
 			return n, err
 		}
 		n++
 	}
 	if len(le.ids) > 0 {
-		if err := settleRetry(nil, func() error {
+		if err := settleRetry(ctx, nil, func() error {
 			_, err := objstore.UpdateDates(ctx, f.store, le.key, nil, le.ids...)
 			return err
 		}); err != nil {
@@ -1027,10 +1057,18 @@ func eraseGone(ctx context.Context, store objstore.Store, key, id string) error 
 }
 
 // settleRetry makes a write-out request, and again on an error, up to
-// settleTries in all; retried, if set, is set when it tries again.
-func settleRetry(retried *bool, do func() error) error {
+// settleTries in all; retried, if set, is set when it tries again. Once
+// ctx is done (an immediate stop) it begins no request and tries none
+// again: its error is ctx's, with the request's.
+func settleRetry(ctx context.Context, retried *bool, do func() error) error {
 	var err error
 	for try := 1; try <= settleTries; try++ {
+		if cerr := ctx.Err(); cerr != nil {
+			if err == nil {
+				return cerr
+			}
+			return fmt.Errorf("%w (the request before: %v)", cerr, err)
+		}
 		if err = do(); err == nil || errors.Is(err, ErrSettleStopped) {
 			return err
 		}
@@ -1038,7 +1076,12 @@ func settleRetry(retried *bool, do func() error) error {
 			*retried = true
 		}
 		if try < settleTries {
-			time.Sleep(time.Duration(try) * settleRetryWait)
+			t := time.NewTimer(time.Duration(try) * settleRetryWait)
+			select {
+			case <-ctx.Done():
+			case <-t.C:
+			}
+			t.Stop()
 		}
 	}
 	return err
@@ -1253,7 +1296,7 @@ func settleDiff(got []objstore.SettleEntry, want map[string]objstore.SettleEntry
 // ErrSettleStopped, and nothing more is written.
 func (f *Filesystem) settlePut(ctx context.Context, key string, data []byte, ifMatch string, retried *bool) (*objstore.Object, error) {
 	var obj *objstore.Object
-	err := settleRetry(retried, func() error {
+	err := settleRetry(ctx, retried, func() error {
 		o, err := f.store.Put(ctx, key, bytes.NewReader(data), nil, ifMatch)
 		if err == nil {
 			obj = o
@@ -1287,7 +1330,7 @@ func (f *Filesystem) settlePut(ctx context.Context, key string, data []byte, ifM
 // settle's error.
 func (f *Filesystem) settleStoppedFirst(ctx context.Context, create []string, rec SettleRecord, done func(SettleRecord) error, stop error) error {
 	for _, k := range create {
-		if err := settleRetry(nil, func() error { return f.store.EraseAll(ctx, k) }); err != nil {
+		if err := settleRetry(ctx, nil, func() error { return f.store.EraseAll(ctx, k) }); err != nil {
 			return errors.Join(stop, err)
 		}
 	}
@@ -1303,9 +1346,9 @@ func (f *Filesystem) settleStoppedFirst(ctx context.Context, create []string, re
 // and .metadata is stored any more: the cut settle's new blocks go, and
 // the caller is told the record can go.
 func (f *Filesystem) settlePurged(ctx context.Context, cut SettleRecord, done func(SettleRecord) error) (Settled, error) {
-	wctx := context.WithoutCancel(ctx)
+	wctx := ctx
 	for _, k := range cut.Create {
-		if err := settleRetry(nil, func() error { return f.store.EraseAll(wctx, k) }); err != nil {
+		if err := settleRetry(wctx, nil, func() error { return f.store.EraseAll(wctx, k) }); err != nil {
 			return Settled{}, err
 		}
 	}

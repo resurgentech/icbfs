@@ -107,7 +107,7 @@ func TestRV4UndatedThenLate(t *testing.T) {
 				hasL := strings.Contains(got, strings.TrimPrefix(tc.late, "/dir/"))
 				t.Logf("UNDATED %s: before the settle, as of %s: %d names, undated file %v, late file %v%s", tc.name, at.Format(time.RFC3339Nano), len(names), hasU, hasL, twice)
 			}
-			_, err := d.SettleFolder(system(), rows, (&keeper{}).opts())
+			_, err := settleAt(d, system(), rows, (&keeper{}).opts())
 			t.Logf("UNDATED %s: settle: %v", tc.name, errShort(err))
 			for _, at := range []time.Time{newest, newest.Add(time.Second), time.Now()} {
 				got := rvNamesAt(t, d, "/dir", at)

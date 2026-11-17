@@ -110,7 +110,7 @@ func TestUndatedWriteIsAState(t *testing.T) {
 					return nil
 				}
 				store.mu.Unlock()
-				if _, err := d.SettleFolder(ctx, changes, k.opts()); !errors.Is(err, errFail) {
+				if _, err := settleAt(d, ctx, changes, k.opts()); !errors.Is(err, errFail) {
 					t.Fatalf("a cut settle: %v", err)
 				}
 				store.mu.Lock()
@@ -121,7 +121,7 @@ func TestUndatedWriteIsAState(t *testing.T) {
 				}
 				d = newDriveWith(t, store, cutCaseSettings(name), Config{DeferLateFolders: true})
 			}
-			if _, err := d.SettleFolder(ctx, changes, k.opts()); err != nil {
+			if _, err := settleAt(d, ctx, changes, k.opts()); err != nil {
 				t.Fatal(err)
 			}
 			if got := liveNames(t, d, folder); got != "a.txt,b.txt,u.txt,v.txt,x.txt" {
@@ -180,7 +180,7 @@ func TestLateWriteThatSplitsABlock(t *testing.T) {
 	}
 	before := map[int]string{2020: "f0.txt,f1.txt,f2.txt,f3.txt,f4.txt", 2021: "f0.txt,f1.txt,f2.txt,f3.txt,f4.txt", 2022: "f0.txt,f1.txt,f2.txt,f3.txt,f4.txt,f5.txt,x.txt"}
 	pastIs(t, d, before)
-	if _, err := d.SettleFolder(ctx, late.Take(), drive.SettleOptions{}); err != nil {
+	if _, err := settleAt(d, ctx, late.Take(), drive.SettleOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := liveNames(t, d, folderID(t, d, "/dir")); got != "f0.txt,f1.txt,f2.txt,f3.txt,f4.txt,f5.txt,x.txt" {
@@ -242,7 +242,7 @@ func TestTwoLateFilesAtOneTime(t *testing.T) {
 		late := &drive.LateChanges{}
 		lateAt(d, late, "/dir/late-a.txt")
 		lateAt(d, late, "/dir/late-b.txt")
-		if _, err := d.SettleFolder(system(), late.Take(), drive.SettleOptions{}); err != nil {
+		if _, err := settleAt(d, system(), late.Take(), drive.SettleOptions{}); err != nil {
 			t.Fatal(err)
 		}
 		check(t, d)
@@ -252,7 +252,7 @@ func TestTwoLateFilesAtOneTime(t *testing.T) {
 		for _, p := range []string{"/dir/late-a.txt", "/dir/late-b.txt"} {
 			late := &drive.LateChanges{}
 			lateAt(d, late, p)
-			if _, err := d.SettleFolder(system(), late.Take(), drive.SettleOptions{}); err != nil {
+			if _, err := settleAt(d, system(), late.Take(), drive.SettleOptions{}); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -304,7 +304,7 @@ func TestSettleLostAnswerInWindow(t *testing.T) {
 			store.key, store.skip = folder, skip
 			store.mu.Unlock()
 			k := &keeper{}
-			if _, err := d.SettleFolder(system(), changes, k.opts()); err != nil {
+			if _, err := settleAt(d, system(), changes, k.opts()); err != nil {
 				t.Fatal(err)
 			}
 			if k.done != 1 || k.held() != nil {
@@ -348,7 +348,7 @@ func cutInWindow(t *testing.T, d *Drive, store *failStore, changes []drive.LateC
 	}
 	store.mu.Unlock()
 	k := &keeper{}
-	_, err := d.SettleFolder(system(), changes, k.opts())
+	_, err := settleAt(d, system(), changes, k.opts())
 	store.mu.Lock()
 	store.watch = nil
 	store.mu.Unlock()
@@ -375,7 +375,7 @@ func TestSettleCutThenAnotherDrive(t *testing.T) {
 		t.Fatalf("the cut left the present as it was: no cut to finish")
 	}
 	b := newDriveWith(t, store, cutCaseSettings("anotherdrive"), Config{DeferLateFolders: true, ID: "another"})
-	if _, err := b.SettleFolder(system(), changes, k.opts()); err != nil {
+	if _, err := settleAt(b, system(), changes, k.opts()); err != nil {
 		t.Fatal(err)
 	}
 	if k.held() != nil {
@@ -414,15 +414,17 @@ func TestCutSettleBlocksNothing(t *testing.T) {
 	}
 	// The delete wrote the folder since the cut (its entries went to the
 	// trash): the rerun stops, never ErrFolderGone (round 5, D3 and rule 7).
-	if _, err := a.SettleFolder(system(), changes, k.opts()); !errors.Is(err, drive.ErrSettleStopped) {
+	if _, err := settleAt(a, system(), changes, k.opts()); !errors.Is(err, drive.ErrSettleStopped) {
 		t.Errorf("the cut settle of a folder deleted since: %v, want ErrSettleStopped", err)
 	}
 }
 
-// TestSettleFolderGone (N5): a deferred late change (x at 2021) whose
-// folder is trashed, or purged, before its settle: SettleFolder says
-// ErrFolderGone (an ErrNotFound, told apart from a failure), writes
-// nothing, hands out no record and holds nothing. What a view of the
+// TestSettleFolderGone (N5; LF-13 since round 6): a deferred late change
+// (x at 2021) whose folder is trashed, or purged, before its settle:
+// SettleFolder, given the path its caller holds, says ErrFolderNotAtPath
+// (not an ErrNotFound: the drive does not search, and the caller decides
+// "gone" by its own lookup), writes nothing, hands out no record and
+// holds nothing. What a view of the
 // trashed folder's past shows, the late change never settled, is pinned:
 // the cost of breaking the caller's rule (a folder's queue settled before
 // the folder is removed).
@@ -449,9 +451,11 @@ func TestSettleFolderGone(t *testing.T) {
 			}
 			before := storeSnapshot(t, store)
 			k := &keeper{}
-			_, err := d.SettleFolder(ctx, changes, k.opts())
-			if !errors.Is(err, drive.ErrFolderGone) || !errors.Is(err, drive.ErrNotFound) {
-				t.Fatalf("the settle of a %s folder: %v, want ErrFolderGone", how, err)
+			opts := k.opts()
+			opts.Path = "/dir"
+			_, err := d.SettleFolder(ctx, changes, opts)
+			if !errors.Is(err, drive.ErrFolderNotAtPath) || errors.Is(err, drive.ErrNotFound) {
+				t.Fatalf("the settle of a %s folder: %v, want ErrFolderNotAtPath", how, err)
 			}
 			if k.held() != nil || k.done != 0 {
 				t.Errorf("a record handed out: %+v", k.held())
@@ -492,7 +496,7 @@ func TestTwoWritersOneFolder(t *testing.T) {
 	if _, err := other.Write(system(), "/dir/byhand.txt", strings.NewReader("h"), drive.Condition{}, drive.WriteOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.SettleFolder(system(), changes, k.opts()); !errors.Is(err, drive.ErrSettleStopped) {
+	if _, err := settleAt(d, system(), changes, k.opts()); !errors.Is(err, drive.ErrSettleStopped) {
 		t.Fatalf("the rerun after a write by hand: %v, want ErrSettleStopped", err)
 	}
 	if got := liveNames(t, d, folder); !strings.Contains(got, "byhand.txt") {

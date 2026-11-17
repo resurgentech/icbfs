@@ -41,7 +41,7 @@ func writeSettled(t *testing.T, d *Drive, ctx context.Context, y int, path strin
 		byFolder[c.Folder] = append(byFolder[c.Folder], c)
 	}
 	for _, f := range order {
-		if _, err := d.SettleFolder(ctx, byFolder[f], drive.SettleOptions{}); err != nil {
+		if _, err := settleAt(d, ctx, byFolder[f], drive.SettleOptions{}); err != nil {
 			t.Fatalf("settle the folder of %s: %v", path, err)
 		}
 	}
@@ -56,7 +56,7 @@ func putSettled(t *testing.T, d *Drive, ctx context.Context, y int, path, body s
 		t.Fatalf("write %s late in %d: %v", path, y, err)
 	}
 	if changes := late.Take(); len(changes) > 0 {
-		if _, err := d.SettleFolder(ctx, changes, drive.SettleOptions{}); err != nil {
+		if _, err := settleAt(d, ctx, changes, drive.SettleOptions{}); err != nil {
 			t.Fatalf("settle the folder of %s: %v", path, err)
 		}
 	}
@@ -126,7 +126,7 @@ func TestDeferredPastAtTheLateDate(t *testing.T) {
 		2023: "a.txt,b.txt",
 		2024: "a.txt,b.txt,c.txt,x.txt",
 	})
-	if _, err := d.SettleFolder(system(), changes, drive.SettleOptions{}); err != nil {
+	if _, err := settleAt(d, system(), changes, drive.SettleOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	pastIs(t, d, map[int]string{2020: "a.txt", 2021: "a.txt,x.txt", 2022: "a.txt,b.txt,x.txt", 2024: "a.txt,b.txt,c.txt,x.txt"})
@@ -178,7 +178,7 @@ func TestSettleLeavesNoMoreThanReplace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := d.SettleFolder(ctx, changes, drive.SettleOptions{})
+	s, err := settleAt(d, ctx, changes, drive.SettleOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,7 +259,7 @@ func TestSettleRemoveOfOneItem(t *testing.T) {
 	folder := folderID(t, d, "/dir")
 	// As a late removal written into the present at 2023 would report it.
 	rm := []drive.LateChange{{Folder: folder, At: year(2021), Until: year(2023), Op: drive.LateRemove, Name: "b.txt", Item: b1.ID, Type: drive.TypeFile}}
-	if _, err := d.SettleFolder(ctx, rm, drive.SettleOptions{}); err != nil {
+	if _, err := settleAt(d, ctx, rm, drive.SettleOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	pastIs(t, d, map[int]string{2020: "a.txt,b.txt", 2021: "a.txt", 2022: "a.txt", 2023: "a.txt,b.txt"})
@@ -275,7 +275,7 @@ func TestSettleRefusesTimes(t *testing.T) {
 	folder := changes[0].Folder
 	for _, when := range []time.Time{{}, time.Date(1960, 1, 1, 0, 0, 0, 0, time.UTC), time.Now().Add(time.Hour)} {
 		bad := append([]drive.LateChange{{Folder: folder, At: when, Op: drive.LateTouch}}, changes...)
-		if _, err := d.SettleFolder(system(), bad, drive.SettleOptions{}); !errors.Is(err, drive.ErrInvalid) {
+		if _, err := settleAt(d, system(), bad, drive.SettleOptions{}); !errors.Is(err, drive.ErrInvalid) {
 			t.Errorf("a change at %v: %v, want ErrInvalid", when, err)
 		}
 	}
@@ -296,15 +296,15 @@ func TestSettleFolderChecksTheFolder(t *testing.T) {
 	}
 	ch := changes[0]
 	ch.Folder = file.ID
-	if _, err := d.SettleFolder(sys, []drive.LateChange{ch}, drive.SettleOptions{}); !errors.Is(err, drive.ErrNotDir) {
+	if _, err := settleAt(d, sys, []drive.LateChange{ch}, drive.SettleOptions{}); !errors.Is(err, drive.ErrNotDir) {
 		t.Errorf("a file's id: %v, want ErrNotDir", err)
 	}
 	writeAt(t, d, sys, 2020, "/other/o.txt")
 	sub := newDriveWith(t, store, icbfs.Settings{Name: "checkfolder"}, Config{Root: "/other", DeferLateFolders: true})
-	if _, err := sub.SettleFolder(sys, changes, drive.SettleOptions{}); !errors.Is(err, drive.ErrNotFound) {
-		t.Errorf("a folder outside the drive's root: %v, want ErrNotFound", err)
+	if _, err := sub.SettleFolder(sys, changes, drive.SettleOptions{Path: "/dir"}); !errors.Is(err, drive.ErrFolderNotAtPath) {
+		t.Errorf("a folder outside the drive's root: %v, want ErrFolderNotAtPath", err)
 	}
-	if _, err := d.SettleFolder(sys, changes, drive.SettleOptions{Path: "/dir"}); err != nil {
+	if _, err := settleAt(d, sys, changes, drive.SettleOptions{Path: "/dir"}); err != nil {
 		t.Errorf("the folder, its path given: %v", err)
 	}
 }
@@ -324,7 +324,7 @@ func TestSettleLowerErasures(t *testing.T) {
 	opts := k.opts()
 	record := opts.Record
 	opts.Record = func(r drive.SettleRecord) error { rec = r; return record(r) }
-	s, err := d.SettleFolder(system(), changes, opts)
+	s, err := settleAt(d, system(), changes, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,7 +405,7 @@ func TestSettleSplitByTheLateWrite(t *testing.T) {
 	if len(keysAfter) <= len(keysBefore) {
 		t.Fatalf("the late write didn't split a block: %d blocks below the root before, %d after", len(keysBefore), len(keysAfter))
 	}
-	if _, err := d.SettleFolder(ctx, late.Take(), drive.SettleOptions{}); err != nil {
+	if _, err := settleAt(d, ctx, late.Take(), drive.SettleOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	all := "f0.txt,f0b.txt,f1.txt,f2.txt,f3.txt,f4.txt,f5.txt,f6.txt,f7.txt"
@@ -453,7 +453,7 @@ func TestSettleLateRemovesAndMovesSplit(t *testing.T) {
 		t.Fatalf("late changes: %+v", byFolder)
 	}
 	for _, f := range []string{dir, other} {
-		if _, err := d.SettleFolder(ctx, byFolder[f], drive.SettleOptions{}); err != nil {
+		if _, err := settleAt(d, ctx, byFolder[f], drive.SettleOptions{}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -500,7 +500,7 @@ func TestSettleSameAtTwoWrites(t *testing.T) {
 	if seqs[0] != 2 {
 		t.Fatalf("two writes, each from 0: %+v", changes)
 	}
-	if _, err := d.SettleFolder(ctx, changes, drive.SettleOptions{}); err != nil {
+	if _, err := settleAt(d, ctx, changes, drive.SettleOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	pastIs(t, d, map[int]string{2021: "a.txt", 2022: "a.txt,b.txt", 2024: "a.txt,b.txt,c.txt"})

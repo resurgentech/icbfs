@@ -192,7 +192,7 @@ func TestRV4Cut(t *testing.T) {
 	st0 := newRVStore(bucket(t))
 	d, rows, mem := rvCutBase(t, st0, "cut0")
 	st0.take()
-	if _, err := d.SettleFolder(system(), rows, (&keeper{}).opts()); err != nil {
+	if _, err := settleAt(d, system(), rows, (&keeper{}).opts()); err != nil {
 		t.Fatal(err)
 	}
 	total, _, _, ops := st0.take()
@@ -216,7 +216,7 @@ func TestRV4Cut(t *testing.T) {
 				}
 				k := &keeper{}
 				st.setFail(cut, mode)
-				_, err := d.SettleFolder(system(), first, k.opts())
+				_, err := settleAt(d, system(), first, k.opts())
 				st.setFail(0, "")
 				if cut > total && variant != "morerows" && err != nil {
 					t.Fatalf("not cut, and %v", err)
@@ -249,7 +249,7 @@ func TestRV4Cut(t *testing.T) {
 				for _, second := range seconds {
 					d = newDriveWith(t, st, icbfs.Settings{Name: name}, Config{DeferLateFolders: true})
 					st.setFail(second, mode)
-					_, err = d.SettleFolder(system(), rows, k.opts())
+					_, err = settleAt(d, system(), rows, k.opts())
 					st.setFail(0, "")
 					res = append(res, rvSettleClass(err))
 					if second != 0 {
@@ -323,7 +323,7 @@ func TestRV4TwoSettlers(t *testing.T) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				_, errs[k] = dd.SettleFolder(system(), rows, (&keeper{}).opts())
+				_, errs[k] = settleAt(dd, system(), rows, (&keeper{}).opts())
 			}()
 		}
 		wg.Wait()

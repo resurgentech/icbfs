@@ -128,7 +128,7 @@ func TestDeferredLateFolder(t *testing.T) {
 		t.Fatalf("/dir now before the settle: %s, want %s", got, present)
 	}
 
-	settled, err := d.SettleFolder(ctx, changes, drive.SettleOptions{})
+	settled, err := settleAt(d, ctx, changes, drive.SettleOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestDeferredLateFolder(t *testing.T) {
 
 	// The same changes again: nothing to write.
 	writesSince(counter)
-	again, err := d.SettleFolder(ctx, changes, drive.SettleOptions{})
+	again, err := settleAt(d, ctx, changes, drive.SettleOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,10 +172,10 @@ func TestDeferredLateFolder(t *testing.T) {
 
 	// Changes of two folders in one call are refused.
 	two := append([]drive.LateChange{{Folder: ids["/other/keep.txt"], At: year(2021), Op: drive.LateTouch}}, changes...)
-	if _, err := d.SettleFolder(ctx, two, drive.SettleOptions{}); !errors.Is(err, drive.ErrInvalid) {
+	if _, err := settleAt(d, ctx, two, drive.SettleOptions{}); !errors.Is(err, drive.ErrInvalid) {
 		t.Errorf("changes of two folders: %v, want ErrInvalid", err)
 	}
-	if s, err := d.SettleFolder(ctx, nil, drive.SettleOptions{}); err != nil || s != (drive.Settled{}) {
+	if s, err := settleAt(d, ctx, nil, drive.SettleOptions{}); err != nil || s != (drive.Settled{}) {
 		t.Errorf("no changes: %+v %v", s, err)
 	}
 
@@ -209,7 +209,7 @@ func TestSettleRecord(t *testing.T) {
 	root, meta := newest(folder), newest(folder+".metadata")
 	writesSince(counter)
 	var seen drive.SettleRecord
-	_, err := d.SettleFolder(ctx, changes, drive.SettleOptions{Record: func(r drive.SettleRecord) error { seen = r; return errStopPlan }})
+	_, err := settleAt(d, ctx, changes, drive.SettleOptions{Record: func(r drive.SettleRecord) error { seen = r; return errStopPlan }})
 	if err == nil || !strings.Contains(err.Error(), errStopPlan.Error()) {
 		t.Fatalf("a record refused: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestSettleRecord(t *testing.T) {
 		Record: func(r drive.SettleRecord) error { recorded = append(recorded, r); return nil },
 		Done:   func(r drive.SettleRecord) error { done = append(done, r); return nil },
 	}
-	s, err := d.SettleFolder(ctx, changes, opts)
+	s, err := settleAt(d, ctx, changes, opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestSettleRecord(t *testing.T) {
 	}
 	// Settled already: no record, nothing done.
 	recorded, done = nil, nil
-	if _, err := d.SettleFolder(ctx, changes, opts); err != nil || len(recorded)+len(done) != 0 {
+	if _, err := settleAt(d, ctx, changes, opts); err != nil || len(recorded)+len(done) != 0 {
 		t.Fatalf("settled again: %v, recorded %+v, done %+v", err, recorded, done)
 	}
 }
@@ -463,7 +463,7 @@ func TestSettleCutThenAgain(t *testing.T) {
 			store.folder, store.cut = changes[0].Folder, cut
 			store.mu.Unlock()
 			k := &keeper{}
-			if _, err := d.SettleFolder(ctx, changes, k.opts()); err == nil || !strings.Contains(err.Error(), errCut.Error()) {
+			if _, err := settleAt(d, ctx, changes, k.opts()); err == nil || !strings.Contains(err.Error(), errCut.Error()) {
 				t.Fatalf("a cut settle: %v", err)
 			}
 			store.mu.Lock()
@@ -472,7 +472,7 @@ func TestSettleCutThenAgain(t *testing.T) {
 			if k.held() == nil {
 				t.Fatalf("a settle cut in its window holds no record")
 			}
-			if _, err := d.SettleFolder(ctx, changes, k.opts()); err != nil {
+			if _, err := settleAt(d, ctx, changes, k.opts()); err != nil {
 				t.Fatalf("settled again: %v", err)
 			}
 			entries, err := d.fs.ReadDir(ctx, changes[0].Folder)
