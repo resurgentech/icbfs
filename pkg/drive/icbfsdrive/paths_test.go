@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/testutil/miniotest"
@@ -90,5 +91,59 @@ func TestBackslashIsNotASeparator(t *testing.T) {
 	d.changed(a)
 	if _, _, err := d.Read(ctx, drive.ByPath("/link/contract.txt"), drive.At{}, nil); !errors.Is(err, drive.ErrNotDir) {
 		t.Fatalf("read through a symlink: %v, want ErrNotDir", err)
+	}
+}
+
+// TestHintedLookupOfOddNames (T82-14 over T82-13): a mirror's hint is a
+// path like any other: "/" alone separates. A held path whose name holds
+// %5C (how the mirrors now write a backslash) finds its item with no
+// walk; so does one whose stored name holds a backslash itself; that
+// path split at the backslash, as the code before T82-14 read it, finds
+// nothing there and falls through to the answer no hint gives. An item
+// the old code mis-filed (at another matter's path) is found where it
+// is, by its hint, for the next pass to move it. A hint never answers
+// for another item (the lookup checks the item's key).
+func TestHintedLookupOfOddNames(t *testing.T) {
+	store := miniotest.Store(t)
+	s := icbfs.Settings{Name: "hintodd", Size: 1 << 30, RootMode: 0o777}
+	ctx := system()
+	d := newDrive(t, store, s, "")
+	m := drive.NewMirror(d, srcDrive)
+	src := &source{}
+	for _, c := range []struct{ id, path string }{
+		{"pct", "/M1/a%5Cb.pdf"},
+		{"bs", `/M1/x\y.txt`},        // a name the drive stores with a backslash
+		{"misfiled", "/M2/real.pdf"}, // where the old code put M1's "..\M2\real.pdf"
+		{"plain", "/M1/plain.txt"},
+	} {
+		if _, err := m.Apply(ctx, src.item(c.id, "1", c.path, mirrorData(c.id), time.Time{})); err != nil {
+			t.Fatalf("%s: %v", c.path, err)
+		}
+	}
+	restart := func() *Drive { return newDrive(t, store, s, "") }
+	lookup := func(d *Drive, id, hint string) (found, int64) {
+		t.Helper()
+		before := d.searches.Load()
+		f := foundOf(d.FindByOriginHint(ctx, srcDrive, id, hint))
+		return f, d.searches.Load() - before
+	}
+	for _, c := range []struct{ id, hint, want string }{
+		{"pct", "/M1/a%5Cb.pdf", "/M1/a%5Cb.pdf"},
+		{"bs", `/M1/x\y.txt`, `/M1/x\y.txt`},
+		{"misfiled", "/M2/real.pdf", "/M2/real.pdf"},
+	} {
+		got, walks := lookup(restart(), c.id, c.hint)
+		if got.path != c.want || got.origin != c.id || walks != 0 {
+			t.Errorf("%s hinted at %s: %+v, %d walks; want it at %s with no walk", c.id, c.hint, got, walks, c.want)
+		}
+	}
+	// The backslash name split as the old code split it: nothing there.
+	noHint, _ := lookup(restart(), "bs", "")
+	if got, _ := lookup(restart(), "bs", "/M1/x/y.txt"); got != noHint {
+		t.Errorf("bs hinted at /M1/x/y.txt: %+v; with no hint %+v", got, noHint)
+	}
+	// Another item's path as a hint: never that item.
+	if got, _ := lookup(restart(), "pct", "/M1/plain.txt"); got.origin != "pct" || got.path != "/M1/a%5Cb.pdf" {
+		t.Errorf("pct hinted at plain's path: %+v", got)
 	}
 }
