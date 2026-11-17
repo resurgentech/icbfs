@@ -419,6 +419,12 @@ func (r *recording) ListPages(ctx context.Context, prefix string, fn func([]Obje
 	return ListEach(ctx, r.Store, prefix, fn)
 }
 
+// VersionsSince reads back only to since if the store under it can: a
+// listing writes nothing.
+func (r *recording) VersionsSince(ctx context.Context, key string, since time.Time) ([]Object, error) {
+	return VersionsSince(ctx, r.Store, key, since)
+}
+
 // note records a version written under a declared time, or dates one
 // written without that DateAll says must be.
 func (r *recording) note(ctx context.Context, key string, obj *Object, err error) error {

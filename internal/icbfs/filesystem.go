@@ -1532,6 +1532,20 @@ func (f *Filesystem) CreateWithStream(ctx context.Context, dirKey, name string, 
 	}, nil)
 }
 
+// CreateWithContent is CreateWith with the content written by put, given
+// the new file's key, before anything else (T82-10 round 4): a put that
+// fails or is cut writes nothing a reader can reach, not even the name.
+// The name is linked only after the content and .metadata are written, so
+// a reader of the folder sees no file, then the whole file. info is read
+// after put returns (its Checksums, if a pointer the caller fills as put
+// goes, are recorded then). A put that lands and a link that then fails
+// leaves the content at a key no folder names (deleted on the way out,
+// best effort), as CreateWithStream does.
+func (f *Filesystem) CreateWithContent(ctx context.Context, dirKey, name string, mode, uid, gid uint32, sddl []byte, info ItemInfo,
+	put func(ctx context.Context, key string) (*objstore.Object, error)) (string, Attr, error) {
+	return f.createWith(ctx, dirKey, name, mode, uid, gid, sddl, info, put, nil)
+}
+
 // createWith is CreateWith with the content's write, put, given the new
 // key (CreateWithRef's writes a stub), and edit, if not nil, recording
 // more in .metadata about the content version put wrote.

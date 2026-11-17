@@ -771,6 +771,46 @@ func (s *Store) List(ctx context.Context, prefix string) ([]objstore.Object, err
 	return out, nil
 }
 
+// VersionsSince is key's versions dated at or after since, newest first
+// (objstore.VersionsSincer). Azure lists one name's versions together but
+// not newest first, so the listing ends at the first blob of another name
+// (key's companions sort after it); only the versions since are held.
+// Markers are passed over.
+func (s *Store) VersionsSince(ctx context.Context, key string, since time.Time) ([]objstore.Object, error) {
+	var out []objstore.Object
+	pager := s.client.NewListBlobsFlatPager(&container.ListBlobsFlatOptions{
+		Prefix:     to.Ptr(s.k(key)),
+		Include:    container.ListBlobsInclude{Versions: true, Metadata: true},
+		MaxResults: to.Ptr(objstore.HistoryPageSize),
+	})
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, azureErr("list versions", key, err)
+		}
+		past := false
+		for _, b := range page.Segment.BlobItems {
+			if strings.TrimPrefix(deref(b.Name), s.keyPrefix) != key {
+				past = true
+				break
+			}
+			if isMarker(b.Metadata) || b.Properties == nil {
+				continue
+			}
+			o := objstore.Object{Key: key, VersionID: deref(b.VersionID), ETag: etagString(b.Properties.ETag),
+				Size: deref(b.Properties.ContentLength), LastModified: deref(b.Properties.LastModified)}
+			if !o.LastModified.Before(since) {
+				out = append(out, o)
+			}
+		}
+		if past {
+			break
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].VersionID > out[j].VersionID })
+	return out, nil
+}
+
 // ListPages is List a page (one listing request, HistoryPageSize blobs,
 // markers left out) at a time (objstore.PageLister).
 func (s *Store) ListPages(ctx context.Context, prefix string, fn func([]objstore.Object) error) error {

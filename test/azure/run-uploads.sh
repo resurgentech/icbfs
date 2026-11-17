@@ -1,7 +1,12 @@
 #!/bin/bash
 # T82-10 review R6: uploads in parts (pkg/drive/icbfsdrive's TestAzureUpload*)
 # against a real Azure Blob Storage container: the copy path MinIO cannot
-# run. The same account and variables as run-conformance.sh.
+# run. The same account and variables as run-conformance.sh. Runs
+# TestAzureUpload* (the copy path, stale blocks, the timed complete),
+# TestAzureWrite* (a write in parts over stale blocks; since T82-10 round 4
+# TestAzureWriteOverCommittedBlocks: the new block ids over a blob committed
+# with the old "icbfs-part-000000" ids and with 8-byte ids) and
+# TestAzureConcurrent* (two writers of one blob).
 #
 #   test/azure/run-uploads.sh [go test flags]
 #   ICBFS_TEST_AZURE_AUTH=login test/azure/run-uploads.sh [go test flags]

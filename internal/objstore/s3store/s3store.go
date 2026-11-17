@@ -594,6 +594,54 @@ func (s *Store) List(ctx context.Context, prefix string) ([]objstore.Object, err
 	return all, nil
 }
 
+// VersionsSince is key's versions dated at or after since, newest first
+// (objstore.VersionsSincer): S3 lists one key's versions newest first and
+// key before its companions (key.metadata sorts after key), so the listing
+// ends at the first version of key older than since, or the first entry
+// of another key. Delete markers are passed over.
+func (s *Store) VersionsSince(ctx context.Context, key string, since time.Time) ([]objstore.Object, error) {
+	var out []objstore.Object
+	var keyMarker, versionMarker *string
+	for {
+		page, err := s.client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+			Bucket:          aws.String(s.bucket),
+			Prefix:          aws.String(s.k(key)),
+			KeyMarker:       keyMarker,
+			VersionIdMarker: versionMarker,
+			MaxKeys:         aws.Int32(objstore.HistoryPageSize),
+		})
+		if err != nil {
+			return nil, s3Error(fmt.Errorf("list versions %s: %w", key, err))
+		}
+		past := false
+		for _, v := range page.Versions {
+			if strings.TrimPrefix(aws.ToString(v.Key), s.keyPrefix) != key {
+				past = true // a companion: key's versions are all listed
+				break
+			}
+			t := aws.ToTime(v.LastModified)
+			if t.Before(since) {
+				past = true
+				break
+			}
+			out = append(out, objstore.Object{Key: key, VersionID: aws.ToString(v.VersionId),
+				ETag: aws.ToString(v.ETag), Size: aws.ToInt64(v.Size), LastModified: t})
+		}
+		for _, m := range page.DeleteMarkers {
+			if strings.TrimPrefix(aws.ToString(m.Key), s.keyPrefix) != key || aws.ToTime(m.LastModified).Before(since) {
+				past = true
+				break
+			}
+		}
+		if past || !aws.ToBool(page.IsTruncated) {
+			break
+		}
+		keyMarker, versionMarker = page.NextKeyMarker, page.NextVersionIdMarker
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].LastModified.After(out[j].LastModified) })
+	return out, nil
+}
+
 // ListPages is List a page (one ListObjectsV2 request, HistoryPageSize
 // keys) at a time (objstore.PageLister).
 func (s *Store) ListPages(ctx context.Context, prefix string, fn func([]objstore.Object) error) error {

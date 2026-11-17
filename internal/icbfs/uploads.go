@@ -376,18 +376,13 @@ func (f *Filesystem) UploadVersion(ctx context.Context, key, id string, since ti
 	if err := CheckUploadID(id); err != nil {
 		return nil, err
 	}
-	hist, err := f.store.History(ctx, key)
+	// Only back to since (T82-10 round 4): the listing stops there, and
+	// holds only the versions since, not the file's whole history.
+	hist, err := objstore.VersionsSince(ctx, f.store, key, since.Add(-uploadClockSlack))
 	if err != nil {
 		return nil, mapNotFound(err)
 	}
-	from := since.Add(-uploadClockSlack)
 	for _, v := range hist {
-		if v.LastModified.Before(from) {
-			break // newest first: the rest are older
-		}
-		if v.Deleted {
-			continue
-		}
 		obj, err := f.store.HeadVersion(ctx, key, v.VersionID)
 		if objstore.IsNotFound(err) {
 			continue

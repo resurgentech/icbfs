@@ -40,6 +40,7 @@ func Run(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	t.Run("EraseAllAcrossPages", func(t *testing.T) { eraseAllAcrossPages(t, newStore) })
 	t.Run("List", func(t *testing.T) { list(t, newStore) })
 	t.Run("ListPagesMatchesList", func(t *testing.T) { listPagesMatchesList(t, newStore) })
+	t.Run("VersionsSince", func(t *testing.T) { versionsSince(t, newStore) })
 	t.Run("ServerTimeIsTheStoresClock", func(t *testing.T) { serverTimeIsTheStoresClock(t, newStore) })
 	t.Run("AsOf", func(t *testing.T) { asOf(t, newStore) })
 	t.Run("HistoryCacheLastsForItsTTL", func(t *testing.T) { historyCacheLastsForItsTTL(t, newStore) })
@@ -1245,5 +1246,59 @@ func mergeDatesFresh(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	}
 	if read, err := objstore.ReadDates(ctx, store, "old"); err != nil || len(read) != 2 {
 		t.Fatalf("read back: %v, %v; want both", read, err)
+	}
+}
+
+// versionsSince: a store reads one key's versions back only to a time
+// (objstore.VersionsSincer), newest first, its companions' versions and
+// its deletions left out, across pages (T82-10 round 4).
+func versionsSince(t *testing.T, newStore func(*testing.T) objstore.Store) {
+	store := newStore(t)
+	ctx := context.Background()
+	defer func(n int32) { objstore.HistoryPageSize = n }(objstore.HistoryPageSize)
+	objstore.HistoryPageSize = 2
+	put := func(key, body string) *objstore.Object {
+		t.Helper()
+		o, err := store.Put(ctx, key, strings.NewReader(body), nil, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return o
+	}
+	for i := 0; i < 3; i++ {
+		put("k", fmt.Sprintf("old%d", i))
+		put("k.metadata", fmt.Sprintf("m%d", i))
+	}
+	pause()
+	since := serverNow(t, store)
+	pause()
+	var want []string
+	for i := 0; i < 3; i++ {
+		want = append([]string{put("k", fmt.Sprintf("new%d", i)).VersionID}, want...)
+		put("k.metadata", fmt.Sprintf("n%d", i))
+	}
+	if _, ok := store.(objstore.VersionsSincer); !ok {
+		t.Fatalf("%T reads a key's whole history: want objstore.VersionsSincer", store)
+	}
+	got, err := objstore.VersionsSince(ctx, store, "k", since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, v := range got {
+		if v.Key != "k" || v.Deleted || v.LastModified.Before(since) {
+			t.Errorf("listed %+v", v)
+		}
+		ids = append(ids, v.VersionID)
+	}
+	if fmt.Sprint(ids) != fmt.Sprint(want) {
+		t.Fatalf("versions since: %v, want the three new ones newest first %v", ids, want)
+	}
+	if err := store.Delete(ctx, "k"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = objstore.VersionsSince(ctx, store, "k", since)
+	if err != nil || len(got) != 3 {
+		t.Fatalf("after a delete: %d versions, %v; want the same three", len(got), err)
 	}
 }

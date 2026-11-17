@@ -373,3 +373,97 @@ func TestAzureConcurrentPutParts(t *testing.T) {
 		t.Fatal("neither write committed")
 	}
 }
+
+// committed stages blocks under the raw ids given and commits them through
+// the SDK, as a write of an earlier icbfs did (its ids
+// "icbfs-part-%06d", 17 bytes), or one a repaired write left (8 bytes):
+// key's blob then holds them committed. It returns the blob's bytes and
+// its etag.
+func (a azureUploads) committed(t *testing.T, key string, raw []string) ([]byte, string) {
+	t.Helper()
+	ctx := context.Background()
+	bb := a.cont.NewBlockBlobClient(a.pfx + key)
+	var ids []string
+	var all []byte
+	for i, r := range raw {
+		id := base64.StdEncoding.EncodeToString([]byte(r))
+		b := uploadData(256<<10, byte(40+i))
+		if _, err := bb.StageBlock(ctx, id, nopCloser{bytes.NewReader(b)}, nil); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+		all = append(all, b...)
+	}
+	resp, err := bb.CommitBlockList(ctx, ids, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return all, string(*resp.ETag)
+}
+
+// TestAzureWriteOverCommittedBlocks (T82-10 round 4, review 3 § 4): the
+// first PutParts in the new id format (a random tag per call, then the
+// block number) over a blob already committed with other ids: those of
+// every large file icbfs wrote before round 3 ("icbfs-part-000000", 17
+// bytes, as the new default), and 8-byte ids, as a write repaired to that
+// length leaves. Each, with If-Match the blob's etag, succeeds with
+// exactly one new version, holding the new bytes whole, and no uncommitted
+// block left; the old version stays in the history, whole.
+func TestAzureWriteOverCommittedBlocks(t *testing.T) {
+	az := azureForUploads(t)
+	ctx := context.Background()
+	for name, raw := range map[string][]string{
+		"old17":  {"icbfs-part-000000", "icbfs-part-000001", "icbfs-part-000002"},
+		"short8": {"abcd0000", "abcd0001", "abcd0002"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			key := "committed/" + name
+			old, etag := az.committed(t, key, raw)
+			before := az.versions(t, key)
+			var parts []objstore.Part
+			var want []byte
+			for i := 0; i < 3; i++ {
+				b := uploadData(1<<20+i, byte(60+i))
+				want = append(want, b...)
+				parts = append(parts, objstore.Part{Size: int64(len(b)), Body: bytes.NewReader(b)})
+			}
+			obj, err := az.store.PutParts(ctx, key, parts, nil, etag)
+			if err != nil {
+				t.Fatalf("PutParts over a blob committed with %q ids, If-Match its etag: %v", raw[0], err)
+			}
+			rc, _, err := az.store.Get(ctx, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, _ := io.ReadAll(rc)
+			rc.Close()
+			if !bytes.Equal(got, want) {
+				t.Fatalf("the blob holds %d bytes, not the new %d whole", len(got), len(want))
+			}
+			if after := az.versions(t, key); after != before+1 {
+				t.Fatalf("%d versions before, %d after: want exactly one new", before, after)
+			}
+			if left := az.uncommitted(t, key); len(left) != 0 {
+				t.Fatalf("%d uncommitted blocks left: %v", len(left), left)
+			}
+			h, err := az.store.History(ctx, key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, v := range h {
+				if v.Deleted || v.VersionID == obj.VersionID {
+					continue
+				}
+				rc, _, err := az.store.GetVersion(ctx, key, v.VersionID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				prev, _ := io.ReadAll(rc)
+				rc.Close()
+				if !bytes.Equal(prev, old) {
+					t.Fatalf("the earlier version holds %d bytes, not the committed %d", len(prev), len(old))
+				}
+			}
+		})
+	}
+}
