@@ -367,6 +367,12 @@ type limitedReadCloser struct {
 // Versions lists a file's versions, newest first, with the names each was
 // current at. A deleted file's versions come from the trash.
 func (d *Drive) Versions(ctx context.Context, ref drive.ItemRef) ([]drive.Version, error) {
+	return d.versions(ctx, ref, true)
+}
+
+// versions is Versions, with each version's Names if withNames (a read
+// of the drive's names) and without them if not (VersionsOf).
+func (d *Drive) versions(ctx context.Context, ref drive.ItemRef, withNames bool) ([]drive.Version, error) {
 	id := ref.ID
 	n, err := d.resolve(ctx, d.fs, ref)
 	switch {
@@ -400,13 +406,6 @@ func (d *Drive) Versions(ctx context.Context, ref drive.ItemRef) ([]drive.Versio
 	if err != nil {
 		return nil, mapErr(err)
 	}
-	// Newest first by effective date (a version written late sorts where
-	// it belongs); the store's order breaks ties.
-	current := ""
-	if len(objs) > 0 {
-		current = objs[0].VersionID
-	}
-	sort.SliceStable(objs, func(i, j int) bool { return dates.Time(&objs[i]).After(dates.Time(&objs[j])) })
 	var sums map[string]icbfs.Checksums
 	var refs map[string]icbfs.Ref
 	if n != nil {
@@ -416,7 +415,25 @@ func (d *Drive) Versions(ctx context.Context, ref drive.ItemRef) ([]drive.Versio
 	} else {
 		refs, _ = d.fs.ContentRefs(ctx, id) // a trashed file's: best effort, as its checksums are
 	}
-	names, _ := d.Names(ctx)
+	var names []drive.Name
+	if withNames {
+		names, _ = d.Names(ctx)
+	}
+	return versionList(objs, dates, sums, refs, names), nil
+}
+
+// versionList is a file's versions (Versions, VersionsOf), newest first,
+// from its history in the store (objs, sorted here), its dates, its
+// checksums and stubs' references by ETag, and the drive's names (nil:
+// no version's Names).
+func versionList(objs []objstore.Object, dates objstore.Dates, sums map[string]icbfs.Checksums, refs map[string]icbfs.Ref, names []drive.Name) []drive.Version {
+	// Newest first by effective date (a version written late sorts where
+	// it belongs); the store's order breaks ties.
+	current := ""
+	if len(objs) > 0 {
+		current = objs[0].VersionID
+	}
+	sort.SliceStable(objs, func(i, j int) bool { return dates.Time(&objs[i]).After(dates.Time(&objs[j])) })
 	var out []drive.Version
 	for i, o := range objs {
 		if o.Deleted {
@@ -445,7 +462,7 @@ func (d *Drive) Versions(ctx context.Context, ref drive.ItemRef) ([]drive.Versio
 	if out == nil {
 		out = []drive.Version{}
 	}
-	return out, nil
+	return out
 }
 
 var _ drive.Checksummer = (*Drive)(nil)

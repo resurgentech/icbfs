@@ -666,7 +666,9 @@ defer d.Close()
   `OpenWith(c, Options{HTTPClient: ...})`, for a host that decides which
   addresses its process may connect to) and administers its
   filesystems: `CreateFilesystem`, `ListFilesystems`,
-  `DescribeFilesystem` (with the bytes used), `Resize`, `Archive` and
+  `FilesystemInfo` (the settings, from the master block alone),
+  `DescribeFilesystem` (with the bytes used: a listing of the
+  filesystem, summed a page at a time), `Resize`, `Archive` and
   `Prune` (archived filesystems only). `DefaultSettings(name)` is a
   filesystem with `icbfs-cli fs create`'s defaults (primary-POSIX, 100 GiB
   declared, root mode 0755), to change what's needed and create.

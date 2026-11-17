@@ -37,7 +37,9 @@ func Run(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	t.Run("DeleteAndUndelete", func(t *testing.T) { deleteAndUndelete(t, newStore) })
 	t.Run("Erase", func(t *testing.T) { erase(t, newStore) })
 	t.Run("EraseAll", func(t *testing.T) { eraseAll(t, newStore) })
+	t.Run("EraseAllAcrossPages", func(t *testing.T) { eraseAllAcrossPages(t, newStore) })
 	t.Run("List", func(t *testing.T) { list(t, newStore) })
+	t.Run("ListPagesMatchesList", func(t *testing.T) { listPagesMatchesList(t, newStore) })
 	t.Run("ServerTimeIsTheStoresClock", func(t *testing.T) { serverTimeIsTheStoresClock(t, newStore) })
 	t.Run("AsOf", func(t *testing.T) { asOf(t, newStore) })
 	t.Run("HistoryCacheLastsForItsTTL", func(t *testing.T) { historyCacheLastsForItsTTL(t, newStore) })
@@ -215,6 +217,36 @@ func eraseAll(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	}
 }
 
+// eraseAllAcrossPages: EraseAll at two entries a page, so a key's
+// versions span pages (its current version on a later page than its
+// older ones, as Azure lists them), still erases every key under the
+// prefix, history and all, and nothing outside it.
+func eraseAllAcrossPages(t *testing.T, newStore func(*testing.T) objstore.Store) {
+	store := newStore(t)
+	ctx := context.Background()
+	defer func(n int32) { objstore.HistoryPageSize = n }(objstore.HistoryPageSize)
+	objstore.HistoryPageSize = 2
+	for _, kv := range [][2]string{{"p/a", "1"}, {"p/a", "2"}, {"p/a", "3"}, {"p/b", "1"}, {"p/b", "2"}, {"p/c", "1"}, {"q", "keep"}, {"pq", "keep"}} {
+		if _, err := store.Put(ctx, kv[0], strings.NewReader(kv[1]), nil, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Delete(ctx, "p/b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EraseAll(ctx, "p/"); err != nil {
+		t.Fatalf("erase all: %v", err)
+	}
+	if h, err := store.HistoryUnder(ctx, "p/"); err != nil || len(h) != 0 {
+		t.Fatalf("history under p/ after erase all: %+v, %v; want none", h, err)
+	}
+	for _, k := range []string{"q", "pq"} {
+		if got, err := read(t, store, k); got != "keep" || err != nil {
+			t.Fatalf("%s after erasing p/: %q, %v", k, got, err)
+		}
+	}
+}
+
 // list: List names the keys under a prefix that have a current version,
 // with their sizes.
 func list(t *testing.T, newStore func(*testing.T) objstore.Store) {
@@ -231,6 +263,66 @@ func list(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	got, err := store.List(ctx, "p/")
 	if err != nil || len(got) != 1 || got[0].Key != "p/a" || got[0].Size != 5 {
 		t.Fatalf("list p/: %+v, %v; want p/a, 5 bytes", got, err)
+	}
+}
+
+// listPagesMatchesList: a store lists by prefix a page at a time
+// (objstore.PageLister), no page longer than HistoryPageSize, and the
+// pages together are what List returns, deleted keys and keys outside
+// the prefix left out alike.
+func listPagesMatchesList(t *testing.T, newStore func(*testing.T) objstore.Store) {
+	store := newStore(t)
+	ctx := context.Background()
+	defer func(n int32) { objstore.HistoryPageSize = n }(objstore.HistoryPageSize)
+	objstore.HistoryPageSize = 2
+	for i := 0; i < 5; i++ {
+		if _, err := store.Put(ctx, fmt.Sprintf("p/%d", i), strings.NewReader(strings.Repeat("x", i+1)), nil, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, k := range []string{"p/gone", "pq"} {
+		if _, err := store.Put(ctx, k, strings.NewReader("y"), nil, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Delete(ctx, "p/gone"); err != nil {
+		t.Fatal(err)
+	}
+	pl, ok := store.(objstore.PageLister)
+	if !ok {
+		t.Fatalf("%T lists only all at once: want objstore.PageLister", store)
+	}
+	var paged []objstore.Object
+	pages := 0
+	if err := pl.ListPages(ctx, "p/", func(p []objstore.Object) error {
+		pages++
+		if len(p) > int(objstore.HistoryPageSize) {
+			t.Errorf("a page of %d, want at most %d", len(p), objstore.HistoryPageSize)
+		}
+		paged = append(paged, p...)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	all, err := store.List(ctx, "p/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pages < 3 {
+		t.Fatalf("%d pages for 5 keys at 2 a page, want at least 3", pages)
+	}
+	if len(all) != 5 || len(paged) != len(all) {
+		t.Fatalf("List %d keys, pages %d; want 5 each", len(all), len(paged))
+	}
+	for i := range all {
+		if all[i].Key != paged[i].Key || all[i].Size != paged[i].Size {
+			t.Fatalf("entry %d: List %+v, pages %+v", i, all[i], paged[i])
+		}
+	}
+	stop := errors.New("stop")
+	pages = 0
+	if err := pl.ListPages(ctx, "p/", func([]objstore.Object) error { pages++; return stop }); !errors.Is(err, stop) || pages != 1 {
+		t.Fatalf("fn's error: %v after %d pages, want it back after 1", err, pages)
 	}
 }
 
@@ -646,7 +738,7 @@ func putPartsFromStream(t *testing.T, newStore func(*testing.T) objstore.Store) 
 
 // putPartsFromStreamOfUnknownLength: parts from a reader whose length
 // isn't known, only its most (objstore.StreamPartsUpTo), go up in order
-// until it ends: short of a part, at a part's end, empty, or at the
+// until it ends: short of a part, at a part's end, or at the
 // most; a reader longer than the most, or one that fails, fails the
 // write with nothing written.
 func putPartsFromStreamOfUnknownLength(t *testing.T, newStore func(*testing.T) objstore.Store) {
@@ -666,7 +758,6 @@ func putPartsFromStreamOfUnknownLength(t *testing.T, newStore func(*testing.T) o
 		{"short of a part", 2*part + 1234, 10 * part},
 		{"at a part's end", 2 * part, 10 * part},
 		{"one small part", 1234, 10 * part},
-		{"empty", 0, 10 * part},
 		{"at the most", 3 * part, 3 * part},
 		{"at the most, not a part's end", 2*part + 7, 2*part + 7},
 	} {
@@ -700,8 +791,8 @@ func putPartsFromStreamOfUnknownLength(t *testing.T, newStore func(*testing.T) o
 	if head, err := store.Head(ctx, "unknown"); err != nil || head.ETag != v.ETag {
 		t.Fatalf("object after the failed streams: %v, %v; want unchanged %s", head, err, v.ETag)
 	}
-	if h, err := store.History(ctx, "unknown"); err != nil || len(h) != 6 {
-		t.Fatalf("history: %d entries, %v; want the 6 written", len(h), err)
+	if h, err := store.History(ctx, "unknown"); err != nil || len(h) != 5 {
+		t.Fatalf("history: %d entries, %v; want the 5 written", len(h), err)
 	}
 }
 

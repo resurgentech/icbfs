@@ -413,6 +413,12 @@ type recording struct {
 	dated func(key string) bool // DateAll's
 }
 
+// ListPages lists a page at a time if the store under it can: a listing
+// writes nothing, so there is nothing to record.
+func (r *recording) ListPages(ctx context.Context, prefix string, fn func([]Object) error) error {
+	return ListEach(ctx, r.Store, prefix, fn)
+}
+
 // note records a version written under a declared time, or dates one
 // written without that DateAll says must be.
 func (r *recording) note(ctx context.Context, key string, obj *Object, err error) error {
