@@ -325,6 +325,28 @@ func NoteNew(ctx context.Context, base string) {
 	}
 }
 
+// ForgetNew tells ctx's Recorder, if it has one, that base, an item the
+// operation made, is gone, every version erased (a create that failed
+// before its name: T82-10 round 5): nothing it wrote under base is dated,
+// so no .version record is written for a key that has nothing.
+func ForgetNew(ctx context.Context, base string) {
+	rec, _ := ctx.Value(recorderKey{}).(*Recorder)
+	if rec == nil {
+		return
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	kept := rec.written[:0]
+	for _, w := range rec.written {
+		if BaseKey(w.Key) != base {
+			kept = append(kept, w)
+		}
+	}
+	rec.written = kept
+	delete(rec.made, base)
+	delete(rec.absent, base)
+}
+
 // Fresh reports whether base likely has no .version record: an item
 // the operation made, or a key it wrote where there was none
 // (PutIfAbsent). A hint for MergeDates, which reads the record after all

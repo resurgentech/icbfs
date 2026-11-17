@@ -6,7 +6,9 @@
 # TestAzureWrite* (a write in parts over stale blocks; since T82-10 round 4
 # TestAzureWriteOverCommittedBlocks: the new block ids over a blob committed
 # with the old "icbfs-part-000000" ids and with 8-byte ids) and
-# TestAzureConcurrent* (two writers of one blob).
+# TestAzureConcurrent* (two writers of one blob) and, since round 5,
+# TestAzureCreateLeavesNothing (a create whose link is refused, and one
+# whose checksum is wrong, leave nothing under the key they minted).
 #
 #   test/azure/run-uploads.sh [go test flags]
 #   ICBFS_TEST_AZURE_AUTH=login test/azure/run-uploads.sh [go test flags]
@@ -25,4 +27,4 @@ if [ "${ICBFS_TEST_AZURE_AUTH:-}" != "login" ]; then
   export ICBFS_TEST_AZURE_KEY
 fi
 cd "$REPO"
-exec go test -count=1 -run 'TestAzure(Upload|Write|Concurrent)' -timeout 30m "$@" ./pkg/drive/icbfsdrive
+exec go test -count=1 -run 'TestAzure(Upload|Write|Concurrent|Create)' -timeout 30m "$@" ./pkg/drive/icbfsdrive

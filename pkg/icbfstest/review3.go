@@ -6,6 +6,7 @@ package icbfstest
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -26,8 +27,22 @@ var R3Hook atomic.Pointer[func(ctx context.Context, key string, md map[string]st
 // store's paged listings (a wrapper loses them unless it says so).
 type r3Store struct{ objstore.Store }
 
+// EnforceIfMatch, if set, has Start's store refuse a conditional PutParts
+// whose key has moved past ifMatch by the time it commits, as AWS and
+// Azure do (the MinIO the tests run does not check If-Match on a
+// multipart commit). Checked just before the store's own PutParts, after
+// R3Hook. A test that sets it clears it when it ends.
+var EnforceIfMatch atomic.Bool
+
 func (s r3Store) PutParts(ctx context.Context, key string, parts []objstore.Part, md map[string]string, ifMatch string) (*objstore.Object, error) {
-	do := func(c context.Context) (*objstore.Object, error) { return s.Store.PutParts(c, key, parts, md, ifMatch) }
+	do := func(c context.Context) (*objstore.Object, error) {
+		if EnforceIfMatch.Load() && ifMatch != "" {
+			if head, err := s.Store.Head(c, key); err == nil && head.ETag != ifMatch {
+				return nil, fmt.Errorf("put parts %s: now %s, not %s: %w", key, head.ETag, ifMatch, objstore.ErrPreconditionFailed)
+			}
+		}
+		return s.Store.PutParts(c, key, parts, md, ifMatch)
+	}
 	if h := R3Hook.Load(); h != nil && md["icbfs_upload"] != "" {
 		return (*h)(ctx, key, md, do)
 	}

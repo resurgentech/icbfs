@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -466,4 +467,88 @@ func TestAzureWriteOverCommittedBlocks(t *testing.T) {
 			}
 		})
 	}
+}
+
+// failLink is a store that refuses the first write after a new file's
+// content and .metadata (the folder's entry: the link), and remembers the
+// content's key.
+type failLink struct {
+	objstore.Store
+	mu      sync.Mutex
+	key     string
+	meta    bool
+	refused bool
+}
+
+func (s *failLink) PutParts(ctx context.Context, key string, parts []objstore.Part, md map[string]string, ifMatch string) (*objstore.Object, error) {
+	o, err := s.Store.PutParts(ctx, key, parts, md, ifMatch)
+	s.mu.Lock()
+	if err == nil && s.key == "" {
+		s.key = key
+	}
+	s.mu.Unlock()
+	return o, err
+}
+
+func (s *failLink) Put(ctx context.Context, key string, body io.Reader, md map[string]string, ifMatch string) (*objstore.Object, error) {
+	s.mu.Lock()
+	refuse := false
+	switch {
+	case s.key != "" && key == s.key+".metadata":
+		s.meta = true
+	case s.key != "" && s.meta && !s.refused && !strings.HasPrefix(key, s.key):
+		s.refused, refuse = true, true
+	}
+	s.mu.Unlock()
+	if refuse {
+		return nil, fmt.Errorf("injected: the link refused: %w", objstore.ErrPreconditionFailed)
+	}
+	return s.Store.Put(ctx, key, body, md, ifMatch)
+}
+
+// TestAzureCreateLeavesNothing (T82-10 round 5, review 4's P1): on a real
+// account, a create of a new file whose content landed and whose link is
+// then refused leaves no version, no marker, of anything under the key it
+// minted; so does a known-length create whose checksum the caller gave
+// wrong (Azure refuses to erase a current version one by one: the whole
+// key is erased).
+func TestAzureCreateLeavesNothing(t *testing.T) {
+	az := azureForUploads(t)
+	ctx := system()
+	nothingUnder := func(t *testing.T, key string) {
+		t.Helper()
+		if key == "" {
+			t.Fatal("no content was written")
+		}
+		left, err := az.store.HistoryUnder(context.Background(), key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(left) != 0 {
+			t.Fatalf("%d versions or markers left under %s: %+v", len(left), key, left)
+		}
+	}
+	data := uploadData(9<<20+3, 7)
+	t.Run("link refused", func(t *testing.T) {
+		st := &failLink{Store: az.store}
+		d := newDrive(t, st, icbfs.Settings{Name: "azlink", Size: 1 << 34, RootMode: 0o755, MaxFileSize: 8 << 30}, "/")
+		_, err := d.WriteFrom(ctx, "/f.bin", bytes.NewReader(data), int64(len(data)), drive.Condition{}, drive.WriteOptions{})
+		if err == nil || !st.refused {
+			t.Fatalf("the create: %v (link refused: %v)", err, st.refused)
+		}
+		if _, err := d.Stat(ctx, drive.ByPath("/f.bin"), drive.At{}); err == nil {
+			t.Fatal("named after its link was refused")
+		}
+		nothingUnder(t, st.key)
+	})
+	t.Run("wrong checksum", func(t *testing.T) {
+		st := &failLink{Store: az.store, refused: true} // nothing refused: only the key remembered
+		d := newDrive(t, st, icbfs.Settings{Name: "azsum", Size: 1 << 34, RootMode: 0o755, MaxFileSize: 8 << 30}, "/")
+		_, err := d.Write(ctx, "/f.bin", io.MultiReader(bytes.NewReader(data)), drive.Condition{},
+			drive.WriteOptions{Size: int64(len(data)), Checksums: &drive.Checksums{SHA256: strings.Repeat("0", 64)}})
+		if !errors.Is(err, drive.ErrChecksum) {
+			t.Fatalf("a wrong checksum: %v", err)
+		}
+		nothingUnder(t, st.key)
+	})
 }

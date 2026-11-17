@@ -471,7 +471,9 @@ func toChecksums(c icbfs.Checksums) *drive.Checksums {
 // spooled or sent as it arrives (put), written first, to the new file's
 // key, and named only once it has landed (icbfs CreateWithContent, T82-10
 // round 4). So a write that fails or is cut (a stop, mid-copy) leaves no
-// name behind: a reader of the folder sees no file until the whole file.
+// name behind: a reader of the folder sees no file until the whole file;
+// and nothing in the store either: every version under the new key is
+// erased (round 5).
 // sums are the content's, or, when late, become known as put sends it, and
 // are checked before the name is made.
 func (d *Drive) create(ctx context.Context, parent *node, name string, data []byte, spool *os.File, put putFunc, late bool, opts drive.WriteOptions, sums *icbfs.Checksums) (*node, error) {
@@ -511,8 +513,9 @@ func (d *Drive) create(ctx context.Context, parent *node, name string, data []by
 			if late {
 				if err := checkSums(opts.Checksums, *sums); err != nil {
 					// Known only now, with the content written to a key no
-					// folder names: it goes, and no name is made.
-					_ = d.fs.Store().Erase(ctx, key, written.VersionID)
+					// folder names: no name is made, and CreateWithContent
+					// erases every version under the key (Azure refuses to
+					// erase a current version one by one).
 					return nil, err
 				}
 			}
