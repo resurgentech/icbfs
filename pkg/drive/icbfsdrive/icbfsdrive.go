@@ -11,6 +11,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/resurgentech/icbfs/internal/block"
@@ -107,8 +108,10 @@ type Drive struct {
 	settle  settling
 	events  broadcaster
 	idPaths idPathCache
-	dirs    *dirCache
-	past    pastMarker
+	// searches counts the walks of the tree for an item by id (findPaths).
+	searches atomic.Int64
+	dirs     *dirCache
+	past     pastMarker
 }
 
 var _ drive.Drive = (*Drive)(nil)
@@ -164,9 +167,15 @@ func (d *Drive) Capabilities() drive.Capabilities {
 
 // --- paths ---
 
-// cleanPath normalizes a path to "" (the top) or "/a/b".
+// cleanPath normalizes a path to "" (the top) or "/a/b". "/" is the only
+// separator: a backslash is a character of a name (T82-14). Turning it
+// into "/" here, after a caller (icbfs-git, a mirror) had checked the
+// path with "/" alone, let "..\" climb out of a Draft's folder and a
+// Clio name land in another matter. "." and ".." are still tidied, as
+// before, within the drive's root: Drafts and mirrors refuse them
+// themselves (drive.SplitPath) before they call the drive.
 func cleanPath(p string) string {
-	p = path.Clean("/" + strings.ReplaceAll(p, `\`, "/"))
+	p = path.Clean("/" + p)
 	if p == "/" {
 		return ""
 	}
@@ -345,6 +354,12 @@ func (d *Drive) resolve(ctx context.Context, fsys *icbfs.Filesystem, ref drive.I
 	return d.resolvePath(ctx, fsys, paths[0])
 }
 
+// Walks is how many walks of the drive's tree for an item by id it has
+// made since it was opened (findPaths: an id it doesn't remember, with no
+// path, record or hint that finds it; a read a folder, up to the whole
+// tree; and the settle's strict search). For tests and diagnostics.
+func (d *Drive) Walks() int64 { return d.searches.Load() }
+
 // findPaths is up to max (0: all) drive-relative paths naming id. A
 // directory it can't read is passed over.
 func (d *Drive) findPaths(ctx context.Context, fsys *icbfs.Filesystem, id string, max int) ([]string, error) {
@@ -354,6 +369,7 @@ func (d *Drive) findPaths(ctx context.Context, fsys *icbfs.Filesystem, id string
 // searchPaths is findPaths; strict, a directory it can't read (but for
 // one gone meanwhile) fails it.
 func (d *Drive) searchPaths(ctx context.Context, fsys *icbfs.Filesystem, id string, max int, strict bool) ([]string, error) {
+	d.searches.Add(1)
 	type dir struct{ key, path string }
 	var out []string
 	queue := []dir{{d.rootKey, "/"}}

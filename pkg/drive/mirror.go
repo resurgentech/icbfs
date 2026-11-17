@@ -34,9 +34,13 @@ import (
 // daemon needn't cap how much a pass may remove to limit the damage of a
 // bad listing.
 type Mirror struct {
-	d           Drive
-	finder      OriginFinder // d, which finds an item by its origin
-	err         error        // why the mirror refuses to work, if it does
+	d      Drive
+	finder OriginFinder // d, which finds an item by its origin
+	// hinted is d, if it takes a hint where an item is; hints is the
+	// daemon's word on where a source item's copy is (WithHints).
+	hinted      HintedOriginFinder
+	hints       func(ctx context.Context, sourceID string) string
+	err         error // why the mirror refuses to work, if it does
 	source      string
 	sourceTimes bool
 	// contents is the content map the mirror uses; hashes is the same
@@ -72,6 +76,7 @@ func NewMirror(d Drive, source string) *Mirror {
 	}}
 	if f, ok := d.(OriginFinder); ok {
 		m.finder = f
+		m.hinted, _ = d.(HintedOriginFinder)
 	} else {
 		m.err = fmt.Errorf("drive: %T doesn't find an item by its origin (no FindByOrigin): %w", d, ErrNoOriginFinder)
 	}
@@ -127,6 +132,30 @@ func born(src SourceItem) time.Time {
 // deleted, its trash entry. Neither: ErrNotFound.
 type OriginFinder interface {
 	FindByOrigin(ctx context.Context, originDrive, originID string) (Item, *TrashEntry, error)
+}
+
+// HintedOriginFinder is an OriginFinder that can be told where the
+// caller believes the item is: hint, a path on the drive (a daemon's own
+// record of where it put the item). The hint is tried, never trusted: the
+// item at hint is the answer only if it is the one FindByOrigin would
+// find; otherwise the lookup is FindByOrigin's, and the hint cost one
+// resolve of a path. An empty hint is no hint. The answers are
+// FindByOrigin's, whatever the hint.
+type HintedOriginFinder interface {
+	OriginFinder
+	FindByOriginHint(ctx context.Context, originDrive, originID, hint string) (Item, *TrashEntry, error)
+}
+
+// WithHints gives the mirror the daemon's word on where each source
+// item's copy is on the drive: hints returns its path there, or "" if the
+// daemon doesn't know. Every lookup (Known, Apply, Remove) passes it to a
+// drive that takes a hint (HintedOriginFinder); on one that doesn't, hints
+// is never called. A hint never changes an answer, only what it costs: on
+// icbfs, an item under a folder moved since its record was written, in a
+// process that doesn't remember it, is found without a walk of the tree.
+func (m *Mirror) WithHints(hints func(ctx context.Context, sourceID string) string) *Mirror {
+	m.hints = hints
+	return m
 }
 
 // ErrNoOriginFinder is a mirror's answer when its destination drive
@@ -1189,8 +1218,14 @@ func (m *Mirror) Undo(ctx context.Context, pass string) (int, error) {
 }
 
 // find is the drive's item, or trash entry, for the source item: a
-// lookup (OriginFinder), never a listing of the drive.
+// lookup (OriginFinder), with the daemon's hint if it has one
+// (WithHints), never a listing of the drive.
 func (m *Mirror) find(ctx context.Context, sourceID string) (Item, *TrashEntry, error) {
+	if m.hinted != nil && m.hints != nil {
+		if hint := m.hints(ctx, sourceID); hint != "" {
+			return m.hinted.FindByOriginHint(ctx, m.source, sourceID, hint)
+		}
+	}
 	return m.finder.FindByOrigin(ctx, m.source, sourceID)
 }
 
