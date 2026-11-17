@@ -1,0 +1,11 @@
+--- a/pkg/drive/icbfsdrive/settle.go
++++ b/pkg/drive/icbfsdrive/settle.go
+@@ -224,7 +224,7 @@
+ 	case errors.Is(err, drive.ErrNotFound), errors.Is(err, drive.ErrNotDir):
+ 		return nil, fmt.Errorf("folder %s: nothing at %q: %w", folder, path, drive.ErrFolderNotAtPath)
+ 	}
+-	return nil, err
++	return nil, fmt.Errorf("%v: %w", err, drive.ErrFolderNotAtPath)
+ }
+ 
+ // lateChanges is changes as a write reports them: its changes to each

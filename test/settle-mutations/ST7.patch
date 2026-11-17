@@ -1,0 +1,11 @@
+--- a/internal/icbfs/settle.go
++++ b/internal/icbfs/settle.go
+@@ -1352,7 +1352,7 @@
+ 		if gerr != nil {
+ 			return gerr
+ 		}
+-		if bytes.Equal(have, data) {
++		if false && bytes.Equal(have, data) {
+ 			obj = cur // ours, its answer lost
+ 			return nil
+ 		}

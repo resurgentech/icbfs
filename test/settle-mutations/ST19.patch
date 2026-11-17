@@ -1,0 +1,26 @@
+--- a/pkg/drive/icbfsdrive/settle.go
++++ b/pkg/drive/icbfsdrive/settle.go
+@@ -83,14 +83,17 @@
+ 	if opts.ProveOnly && opts.Cut != nil {
+ 		return drive.Settled{}, fmt.Errorf("folder %s: a settle that only proves is not given the record of a cut one (SettleOptions.Cut): %w", folder, drive.ErrInvalid)
+ 	}
++	if d.cfg.ReadOnly {
++		return drive.Settled{}, errDriveReadOnly
++	}
++	if err := d.fs.Refresh(ctx); err != nil {
++		return drive.Settled{}, mapErr(err)
++	}
++	if _, err := d.resolvePath(ctx, d.fs, "/"); err != nil {
++		return drive.Settled{}, err
++	}
+ 	if opts.Path == "" && opts.Cut == nil {
+ 		return drive.Settled{}, fmt.Errorf("folder %s: a settle is given the folder's path (SettleOptions.Path): %w", folder, drive.ErrInvalid)
+-	}
+-	if d.cfg.ReadOnly {
+-		return drive.Settled{}, errDriveReadOnly
+-	}
+-	if err := d.fs.Refresh(ctx); err != nil {
+-		return drive.Settled{}, mapErr(err)
+ 	}
+ 	if d.fs.Archived() {
+ 		return drive.Settled{}, fmt.Errorf("the filesystem is archived: %w", drive.ErrReadOnly)

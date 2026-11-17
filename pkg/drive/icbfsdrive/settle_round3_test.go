@@ -294,6 +294,7 @@ func (s *lostStore) Put(ctx context.Context, key string, body io.Reader, md map[
 // date can tell it from the present) goes: the present and the past are
 // right, nothing newer than the present before is left but the final
 // states, and a later settle of the folder goes right too.
+// STATES: ST-7
 func TestSettleLostAnswerInWindow(t *testing.T) {
 	for skip := 0; skip < 3; skip++ {
 		t.Run(fmt.Sprint(skip), func(t *testing.T) {

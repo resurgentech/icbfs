@@ -49,6 +49,8 @@ func midYear(y int) time.Time { return year(y).AddDate(0, 6, 0) }
 // into the past at its time and after, the present the same throughout; the
 // same changes settled again write nothing. A late write with no
 // LateChanges in its context is refused (nowhere to report it).
+// STATES: CH-1
+// STATES: CH-2
 func TestDeferredLateFolder(t *testing.T) {
 	counter := &requestCounter{Store: miniotest.Store(t), n: map[string]int{}}
 	d := newDriveWith(t, counter, icbfs.Settings{Name: "deferred", Size: 1 << 30, RootMode: 0o777, Created: year(2015)}, Config{DeferLateFolders: true})
@@ -194,6 +196,7 @@ func TestDeferredLateFolder(t *testing.T) {
 // it may clear), and an error from Record stops it with nothing written;
 // a settle that goes through tells Done the record it handed out, once;
 // one that has nothing to do hands out none.
+// STATES: ST-3
 func TestSettleRecord(t *testing.T) {
 	counter := &requestCounter{Store: miniotest.Store(t), n: map[string]int{}}
 	d, changes := splitCase(t, counter, "settlerecord", Config{DeferLateFolders: true})

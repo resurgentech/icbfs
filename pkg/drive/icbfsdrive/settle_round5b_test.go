@@ -21,6 +21,7 @@ import (
 // TestSettleInParts: more changes than MaxSettleChanges are settled in
 // parts, each its own settle (record, write-out, Done); one cut in a
 // later part is finished by a rerun given every change and the record.
+// STATES: ST-18
 func TestSettleInParts(t *testing.T) {
 	saved := MaxSettleChanges
 	MaxSettleChanges = 3

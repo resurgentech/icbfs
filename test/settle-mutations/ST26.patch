@@ -1,0 +1,11 @@
+--- a/internal/objstore/settletable.go
++++ b/internal/objstore/settletable.go
+@@ -259,7 +259,7 @@
+ 	if err := t.db.QueryRowContext(ctx, `SELECT count(*) FROM settle_runs WHERE run = ?`, t.run).Scan(&n); err != nil {
+ 		return err
+ 	}
+-	if n == 0 {
++	if false && n == 0 {
+ 		return fmt.Errorf("directory %s: %w", t.dir, ErrSettleTableGone)
+ 	}
+ 	return nil

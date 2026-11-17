@@ -216,8 +216,10 @@ func TestSettleTable(t *testing.T) {
 	}
 }
 
-// TestSettleTableRunsReaped: a run nobody ended (its process killed) is
-// cleared by the next table opened once it is a day old, and not before.
+// TestSettleTableRunsReaped: a run nobody ended that this machine can't
+// judge (another machine's) is cleared by the next table opened once it
+// is a day old, and not before; a live run of this process never is
+// (ST-26).
 func TestSettleTableRunsReaped(t *testing.T) {
 	ctx := context.Background()
 	c := settleCache(t, clockStore{})
@@ -235,6 +237,18 @@ func TestSettleTableRunsReaped(t *testing.T) {
 		t.Fatalf("a run of an hour ago cleared: %v", es)
 	}
 	if _, err := c.db.ExecContext(ctx, `UPDATE settle_runs SET started = ? WHERE run = ?`, nanos(time.Now().Add(-25*time.Hour)), left.run); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.SettleTable(ctx, "d2"); err != nil {
+		t.Fatal(err)
+	}
+	// Its process (this one) is alive and its settle holds it: kept,
+	// however old (ST-26).
+	if es, _ := left.EntriesAt(ctx, tm(1)); entriesString(es) != "z:Z" {
+		t.Fatalf("a live run a day old cleared: %v", es)
+	}
+	// Left by another machine, which this one can't judge: a day old, it goes.
+	if _, err := c.db.ExecContext(ctx, `UPDATE settle_runs SET host = 'another-machine' WHERE run = ?`, left.run); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.SettleTable(ctx, "d2"); err != nil {

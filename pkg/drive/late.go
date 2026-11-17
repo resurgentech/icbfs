@@ -146,7 +146,13 @@ type lateChangesKey struct{}
 // WithLateChanges has the writes made under ctx, on a drive that defers
 // late folders (a LateSettler configured to), report their late changes
 // to c instead of being refused: the caller settles them later
-// (SettleFolder).
+// (SettleFolder). A write that fails reports the changes it left in a
+// folder's present all the same (one that failed part way; one whose
+// dating and undo both failed): the caller keeps them as it keeps a
+// successful write's. A late change to a folder's own record (its mode,
+// times, app data or origin) is written into the folder's present, dated
+// at its newest state, and reports nothing: the states before keep the
+// record they had.
 func WithLateChanges(ctx context.Context, c *LateChanges) context.Context {
 	return context.WithValue(ctx, lateChangesKey{}, c)
 }
@@ -194,12 +200,19 @@ type LateSettler interface {
 	// (ErrSettleStopped); a failed request is tried again (three tries)
 	// before the settle gives up.
 	//
-	// ctx is an immediate stop, at every step: canceled, the request in
-	// flight ends and no other begins (no try again, no further write of
-	// the window, its commit or its erases, no further part); the error
-	// is ctx's (errors.Is(err, context.Canceled)), and a record handed out
-	// stays the caller's. A graceful stop is the caller's: it does not
-	// cancel ctx, and the settle runs to its end (Done).
+	// ctx is an immediate stop, at every step: canceled, or its deadline
+	// passed, the request in flight ends and no other begins (no try
+	// again, no further write of the window, its commit or its erases, no
+	// further part); the error is ctx's (errors.Is(err, context.Canceled),
+	// or context.DeadlineExceeded; with ErrSettleStopped too when the stop
+	// came while a stopped settle erased its own new blocks), and a record
+	// handed out stays the caller's. A graceful stop is the caller's: it
+	// does not cancel ctx, and the settle runs to its end (Done).
+	//
+	// A settle whose working table (the history cache's, which several
+	// processes may share) is emptied under it fails with an error that is
+	// neither ErrSettleRefused nor ErrSettleStopped, before it proves or
+	// writes anything from what is left; a record already handed out stays.
 	//
 	// A settle that gives up or is stopped after it handed out its record
 	// is finished by settling again with that record (SettleOptions.Cut)
@@ -251,6 +264,13 @@ type SettleOptions struct {
 	// required (but with Cut). The folder is looked for there and nowhere
 	// else (ErrFolderNotAtPath).
 	Path string
+	// ProveOnly runs the settle's first two steps only: its reads, then
+	// the play and the proof. It writes nothing, hands out no record and
+	// tells Done nothing; it answers nil if the settle would be done,
+	// ErrSettleRefused if it would be refused. For a pair settled as one
+	// (a late move's two folders): each proved before either is written.
+	// Not with Cut (ErrInvalid).
+	ProveOnly bool
 }
 
 // SettleRecord is what a settle is about to change, for its caller to

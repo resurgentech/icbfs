@@ -94,6 +94,7 @@ func TestLateWriteIntoThePresent(t *testing.T) {
 // hand) gets ErrSettleRefused, with no record handed out and nothing
 // written; asked again, the same. Changes whose Until is missing or not
 // after their time are refused as invalid before anything is read.
+// STATES: ST-2
 func TestSettleRefusedWritesNothing(t *testing.T) {
 	store := miniotest.Store(t)
 	d, changes := cutCase(t, store, "refused", Config{DeferLateFolders: true})

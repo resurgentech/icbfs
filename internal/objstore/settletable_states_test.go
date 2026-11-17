@@ -2,6 +2,7 @@ package objstore
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -88,4 +89,103 @@ func TestST14_AKilledSettlesTableIsEmptiedByTheNext(t *testing.T) {
 	if es, _ := live.EntriesAt(ctx, tm(1)); entriesString(es) != "y:Y" {
 		t.Errorf("a live settle's rows cleared by another's table: %v", es)
 	}
+}
+
+// TestST26_ALiveRunIsNeverEmptied (ST-26, ST-14): a run whose process is
+// alive on this machine keeps its rows however old it is: this process's
+// own live settle and another live process's. A dead process's run on
+// this machine goes at once; another machine's, or one with no process
+// recorded, after a day.
+func TestST26_ALiveRunIsNeverEmptied(t *testing.T) {
+	ctx := context.Background()
+	c, err := OpenHistoryCache(ctx, clockStore{}, filepath.Join(t.TempDir(), "history.db"), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	own, err := c.SettleTable(ctx, "own")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { own.Clear(ctx) })
+	alive := exec.Command("sleep", "120")
+	if err := alive.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { alive.Process.Kill(); alive.Wait() })
+	dead := exec.Command("true")
+	if err := dead.Run(); err != nil {
+		t.Fatal(err)
+	}
+	old, recent := nanos(time.Now().Add(-48*time.Hour)), nanos(time.Now().Add(-time.Minute))
+	if _, err := c.db.ExecContext(ctx, `UPDATE settle_runs SET started = ? WHERE run = ?`, old, own.run); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []struct {
+		run, host string
+		pid       int
+		started   int64
+	}{
+		{"alive-old", settleHost(), alive.Process.Pid, old},
+		{"dead-recent", settleHost(), dead.Process.Pid, recent},
+		{"elsewhere-recent", "another-machine", 4242, recent},
+		{"elsewhere-old", "another-machine", 4242, old},
+		{"unknown-old", "", 0, old},
+	} {
+		if _, err := c.db.ExecContext(ctx, `INSERT INTO settle_runs (run, dir, started, host, pid) VALUES (?, 'd', ?, ?, ?)`, r.run, r.started, r.host, r.pid); err != nil {
+			t.Fatal(err)
+		}
+	}
+	next, err := c.SettleTable(ctx, "next")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { next.Clear(ctx) })
+	rows, err := c.db.QueryContext(ctx, `SELECT run FROM settle_runs`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kept := map[string]bool{}
+	for rows.Next() {
+		var r string
+		if err := rows.Scan(&r); err != nil {
+			t.Fatal(err)
+		}
+		kept[r] = true
+	}
+	rows.Close()
+	for run, want := range map[string]bool{own.run: true, "alive-old": true, "dead-recent": false, "elsewhere-recent": true, "elsewhere-old": false, "unknown-old": false, next.run: true} {
+		if kept[run] != want {
+			t.Errorf("run %s: kept %v, want %v", run, kept[run], want)
+		}
+	}
+	if err := own.Held(ctx); err != nil {
+		t.Errorf("this process's live run, two days old: %v", err)
+	}
+}
+
+// TestST26_HeldSaysWhenTheTableWasEmptied (ST-26): a table whose run's
+// rows were emptied under it (by another process that took it for dead)
+// says so (ErrSettleTableGone); one that holds its rows says nothing.
+func TestST26_HeldSaysWhenTheTableWasEmptied(t *testing.T) {
+	ctx := context.Background()
+	c, err := OpenHistoryCache(ctx, clockStore{}, filepath.Join(t.TempDir(), "history.db"), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	tab, err := c.SettleTable(ctx, "d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tab.Held(ctx); err != nil {
+		t.Fatalf("a fresh table: %v", err)
+	}
+	if _, err := c.db.ExecContext(ctx, `DELETE FROM settle_runs WHERE run = ?`, tab.run); err != nil {
+		t.Fatal(err)
+	}
+	if err := tab.Held(ctx); !errors.Is(err, ErrSettleTableGone) {
+		t.Errorf("emptied: %v, want ErrSettleTableGone", err)
+	}
+	tab.Clear(ctx)
 }

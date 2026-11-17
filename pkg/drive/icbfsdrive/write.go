@@ -973,10 +973,13 @@ const datingTries = 3
 // finishDated dates what a change in a source's time wrote, and puts
 // right anything written behind its item's current state: the item's
 // current version back on top, and a directory changed behind its newest
-// state reported for the caller to settle (reportLateFolders). Both are part of the change: one whose
-// writes can't be dated is undone, each version it wrote that is still
-// its key's newest erased, and fails. Undated, a version would be taken
-// for a write that never finished.
+// state reported for the caller to settle (reportLateFolders). Both are
+// part of the change: one whose writes can't be dated is undone, each
+// version it wrote that is still its key's newest erased, and fails.
+// Undated, a version would be taken for a write that never finished. A
+// directory written into its present (dated at its newest state) that the
+// undo could not take back whole still holds the change: its late changes
+// are reported all the same (LF-28), as for a write that failed part way.
 func (d *Drive) finishDated(ctx context.Context, rec *objstore.Recorder, changes *icbfs.DirChanges) error {
 	var restored map[string]bool
 	var err error
@@ -986,7 +989,15 @@ func (d *Drive) finishDated(ctx context.Context, rec *objstore.Recorder, changes
 		}
 	}
 	if err != nil {
-		d.undo(ctx, rec)
+		left := d.undo(ctx, rec)
+		d.reportPresentDated(ctx, changes, func(dir string) bool {
+			for _, w := range left {
+				if w.Dir == dir || objstore.BaseKey(w.Key) == dir {
+					return true
+				}
+			}
+			return false
+		})
 		return fmt.Errorf("the change is undone: dating what it wrote: %w", err)
 	}
 	return d.reportLateFolders(ctx, rec, restored, changes)
@@ -994,15 +1005,24 @@ func (d *Drive) finishDated(ctx context.Context, rec *objstore.Recorder, changes
 
 // undo erases what rec recorded written, newest first, where it's still
 // its key's newest version: one something has written over since stays.
-func (d *Drive) undo(ctx context.Context, rec *objstore.Recorder) {
+// It returns what it did not erase (written over, or the store failed).
+func (d *Drive) undo(ctx context.Context, rec *objstore.Recorder) (left []objstore.Written) {
 	ctx = context.WithoutCancel(objstore.WithoutDeclaredTime(ctx))
 	written := rec.Written()
 	for i := len(written) - 1; i >= 0; i-- {
 		w := written[i]
-		if head, err := d.fs.Store().Head(ctx, w.Key); err == nil && head.VersionID == w.VersionID {
-			_ = d.fs.Store().Erase(ctx, w.Key, w.VersionID)
+		head, err := d.fs.Store().Head(ctx, w.Key)
+		switch {
+		case objstore.IsNotFound(err):
+			continue // gone: nothing of it stays
+		case err == nil && head.VersionID == w.VersionID:
+			if err := d.fs.Store().Erase(ctx, w.Key, w.VersionID); err == nil || objstore.IsNotFound(err) {
+				continue
+			}
 		}
+		left = append(left, w)
 	}
+	return left
 }
 
 // undoRefused undoes a change refused as late (icbfs.LateChangeError)

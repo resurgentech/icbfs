@@ -1,0 +1,11 @@
+--- a/internal/objstore/dates.go
++++ b/internal/objstore/dates.go
+@@ -725,7 +725,7 @@
+ 		return metadata
+ 	}
+ 	t, dated := DeclaredTime(ctx)
+-	if _, had := metadata[PutAtKey]; !dated && !had {
++	if !dated {
+ 		return metadata
+ 	}
+ 	out := make(map[string]string, len(metadata)+1)

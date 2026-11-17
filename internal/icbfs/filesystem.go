@@ -2095,7 +2095,10 @@ type ItemInfo struct {
 // daemon's write costs one metadata write, not one per field. A time or
 // a mode is a change to the item and moves ctime; app data and checksums
 // are icbfs's bookkeeping and don't. It returns no attributes, so it
-// costs no stat: a caller that wants them asks.
+// costs no stat: a caller that wants them asks. A directory's record
+// changed under a declared time behind its newest state is written into
+// its present, dated at that state, where ctx asks for it
+// (recordDating).
 func (f *Filesystem) SetItemInfo(ctx context.Context, uuid string, typ EntryType, info ItemInfo) error {
 	if err := f.checkWritable(); err != nil {
 		return err
@@ -2104,6 +2107,12 @@ func (f *Filesystem) SetItemInfo(ctx context.Context, uuid string, typ EntryType
 		return nil
 	}
 	statusChange := info.Mtime != nil || info.Btime != nil || info.Mode != nil || info.WindowsAttrs != nil
+	if typ == TypeDir {
+		var err error
+		if ctx, err = f.recordDating(ctx, uuid); err != nil {
+			return err
+		}
+	}
 	return f.writeMetadata(ctx, uuid, statusChange, func(a *Attr) { info.apply(a, typ) })
 }
 
@@ -2120,6 +2129,12 @@ func (f *Filesystem) SetInfoWith(ctx context.Context, key string, typ EntryType,
 		info.ContentETag = current.ETag
 	}
 	statusChange := info.Mtime != nil || info.Btime != nil || info.Mode != nil || info.WindowsAttrs != nil
+	if typ == TypeDir {
+		var err error
+		if ctx, err = f.recordDating(ctx, key); err != nil {
+			return Attr{}, err
+		}
+	}
 	data, obj, err := f.writeMetadataRead(ctx, key, statusChange, func(a *Attr) bool { info.apply(a, typ); return true })
 	if err != nil {
 		return Attr{}, err

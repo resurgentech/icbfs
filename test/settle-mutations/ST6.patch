@@ -1,0 +1,11 @@
+--- a/internal/icbfs/settle.go
++++ b/internal/icbfs/settle.go
+@@ -677,7 +677,7 @@
+ 			data []byte
+ 		}{{meta, sctx, metaData}, {dirKey, objstore.AsBlock(sctx, dirKey), rootData}} {
+ 			obj, err := f.settlePut(p.pctx, p.key, p.data, etag[p.key], &retried)
+-			if errors.Is(err, ErrSettleStopped) && i == 0 && j == 0 && in.Cut == nil {
++			if errors.Is(err, ErrSettleStopped) && in.Cut == nil && j >= 0 {
+ 				// Nothing of the window is written: the settle's own new
+ 				// blocks go, and the record with them, so the next settle
+ 				// starts from the present the other writer left.

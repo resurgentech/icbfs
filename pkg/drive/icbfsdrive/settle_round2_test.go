@@ -374,6 +374,7 @@ func TestSettleLowerErasures(t *testing.T) {
 // full blocks below its root, a late write lands in a full block and
 // splits it (a key no dated state reaches); the settle puts the file in
 // the past from its time, keeps the present, and leaves nothing behind.
+// STATES: CH-11
 func TestSettleSplitByTheLateWrite(t *testing.T) {
 	d := newDriveWith(t, miniotest.Store(t), icbfs.Settings{Name: "latesplit", Size: 1 << 30, RootMode: 0o777, Created: year(2015), DirBlockEntries: 4}, Config{DeferLateFolders: true})
 	ctx := system()
@@ -410,9 +411,13 @@ func TestSettleSplitByTheLateWrite(t *testing.T) {
 	}
 	all := "f0.txt,f0b.txt,f1.txt,f2.txt,f3.txt,f4.txt,f5.txt,f6.txt,f7.txt"
 	pastIs(t, d, map[int]string{
+		2016: "f0.txt",
+		2017: "f0.txt,f1.txt",
 		2018: "f0.txt,f1.txt,f2.txt",
 		2019: "f0.txt,f0b.txt,f1.txt,f2.txt,f3.txt",
 		2020: "f0.txt,f0b.txt,f1.txt,f2.txt,f3.txt,f4.txt",
+		2021: "f0.txt,f0b.txt,f1.txt,f2.txt,f3.txt,f4.txt,f5.txt",
+		2022: "f0.txt,f0b.txt,f1.txt,f2.txt,f3.txt,f4.txt,f5.txt,f6.txt",
 		2023: all,
 	})
 	if got := liveNames(t, d, folder); got != all {

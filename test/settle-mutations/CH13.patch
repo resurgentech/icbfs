@@ -1,0 +1,11 @@
+--- a/internal/icbfs/dirchanges.go
++++ b/internal/icbfs/dirchanges.go
+@@ -218,7 +218,7 @@
+ 	if err != nil {
+ 		return ctx, err
+ 	}
+-	if !newest.After(at) {
++	if !newest.After(at) || true {
+ 		return ctx, nil
+ 	}
+ 	return objstore.WithDeclaredTime(ctx, newest), nil

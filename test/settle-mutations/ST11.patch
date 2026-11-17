@@ -1,0 +1,12 @@
+--- a/internal/icbfs/settle.go
++++ b/internal/icbfs/settle.go
+@@ -1154,6 +1154,9 @@
+ // nothing is erased. An undated version is the settle's (its window
+ // before the commit, or a put whose answer was lost).
+ func cutLeftoversOurs(dirKey string, root, meta []objstore.Object, dates objstore.Dates, times []time.Time) error {
++	if true {
++		return nil
++	}
+ 	for _, h := range [][]objstore.Object{root, meta} {
+ 		var dated []time.Time
+ 		for _, o := range h {

@@ -85,6 +85,12 @@ test-settle:
     RV4_SEEDS=4229-4230 RV4_K=3 RV4_ENTRIES=4 RV4_OPS=120 go test -count=1 -timeout 30m -run 'TestRV4Model$' ./pkg/drive/icbfsdrive
     RV4_SEEDS=5201 RV4_K=3 RV4_ENTRIES=0 RV4_N0=300 RV4_OPS=150 go test -count=1 -timeout 40m -run 'TestRV4Model$' ./pkg/drive/icbfsdrive
 
+# T83-1's slow settle checks, not in ci (about an hour; before a change to the settle merges): an immediate stop at every request of a settle (one folder, then a split one), and the mutations, each of which must turn its row's test red (test/settle-mutations/run.sh)
+test-settle-review:
+    T83_SWEEP=1 go test -count=1 -timeout 30m -run 'TestST9_ImmediateStopAtEveryRequest$' ./pkg/drive/icbfsdrive
+    T83_SWEEP=1 FR_CASE=split go test -count=1 -timeout 50m -run 'TestST9_ImmediateStopAtEveryRequest$' ./pkg/drive/icbfsdrive
+    test/settle-mutations/run.sh
+
 # Tag HEAD as VERSION (vX.Y.Z, new; tree clean, on origin/main, CI green) and build bin/; the tag's push is printed, not done
 release VERSION:
     #!/usr/bin/env bash

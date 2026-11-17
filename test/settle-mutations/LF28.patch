@@ -1,0 +1,11 @@
+--- a/pkg/drive/icbfsdrive/write.go
++++ b/pkg/drive/icbfsdrive/write.go
+@@ -989,7 +989,7 @@
+ 		}
+ 	}
+ 	if err != nil {
+-		left := d.undo(ctx, rec)
++		left := d.undo(ctx, rec)[:0]
+ 		d.reportPresentDated(ctx, changes, func(dir string) bool {
+ 			for _, w := range left {
+ 				if w.Dir == dir || objstore.BaseKey(w.Key) == dir {

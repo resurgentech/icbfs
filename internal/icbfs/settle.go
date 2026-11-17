@@ -167,6 +167,11 @@ type SettleInput struct {
 	// Keep, if set, is given each block and .metadata version the settle
 	// wrote, with its content, after Forget: a cache's to keep.
 	Keep func(ctx context.Context, o *objstore.Object, content []byte) error
+	// ProveOnly stops the settle after its proof: it reads, plays and
+	// proves, and writes nothing, hands out no record and tells Done
+	// nothing. nil: the settle would be done; ErrSettleRefused: it would be
+	// refused. Not with Cut.
+	ProveOnly bool
 }
 
 // SettleRecord is what a settle hands its caller before it writes
@@ -261,6 +266,9 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 		default:
 			return Settled{}, fmt.Errorf("change %q: %w", ch.Op, ErrInvalidArgument)
 		}
+	}
+	if in.ProveOnly && in.Cut != nil {
+		return Settled{}, fmt.Errorf("a settle that only proves, given the record of a cut one: %w", ErrInvalidArgument)
 	}
 	history := in.History
 	if history == nil {
@@ -428,8 +436,17 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 	}
 
 	// --- Proof ---
-	if err := f.settleProof(ctx, tab, changes, t0, present, attr); err != nil {
+	// A table emptied under the settle (another process that took its run
+	// for dead) is no proof of anything, refused or not.
+	perr := f.settleProof(ctx, tab, changes, t0, present, attr)
+	if err := tab.Held(ctx); err != nil {
 		return Settled{}, err
+	}
+	if perr != nil {
+		return Settled{}, perr
+	}
+	if in.ProveOnly {
+		return Settled{Read: read}, nil
 	}
 
 	// --- Write-out: what to write ---
@@ -473,6 +490,11 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 	}
 	lower, err := f.lowerErasures(ctx, dirKey, tab, cutKeys, writes, tb, tw)
 	if err != nil {
+		return Settled{}, err
+	}
+	// What to write and to erase came from the table: whole still, or the
+	// settle stops here, before its record.
+	if err := tab.Held(ctx); err != nil {
 		return Settled{}, err
 	}
 	// The store has it all already. A cut settle's rerun goes on all the
@@ -613,6 +635,11 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 		if _, err := objstore.MergeDates(ctx, f.store, base, d, recorder.Fresh(base)); err != nil {
 			return Settled{}, err
 		}
+	}
+	// The states the window puts were made from the table: whole still, or
+	// the settle stops before its window (the record stays: a rerun).
+	if err := tab.Held(ctx); err != nil {
+		return Settled{}, err
 	}
 
 	// The window, the commit and the erases run under the caller's
@@ -895,7 +922,18 @@ func (f *Filesystem) settlePresentNow(ctx context.Context, dirKey string, root, 
 			return nil, nil, Attr{}, err
 		}
 		attr, err := f.statDir(ctx, dirKey)
-		return entries, keys, attr, err
+		if err != nil {
+			return nil, nil, Attr{}, err
+		}
+		// Read last, the present must be the root the settle listed as its
+		// present (V0): another writer's version since (during the reads)
+		// makes what was read no proof of anything (ST-22). One after this
+		// read is the window's first put's to find.
+		if cur, ok := attr.ContentVersion(); ok && cur.VersionID != root.VersionID {
+			return nil, nil, Attr{}, fmt.Errorf("directory %s was written while the settle read it (its root block is version %s, not %s): %w",
+				dirKey, cur.VersionID, root.VersionID, ErrSettleRefused)
+		}
+		return entries, keys, attr, nil
 	}
 	getVersion := func(key, id string) ([]byte, *objstore.Object, error) {
 		body, obj, err := f.store.GetVersion(ctx, key, id)

@@ -1,0 +1,11 @@
+--- a/internal/objstore/settletable.go
++++ b/internal/objstore/settletable.go
+@@ -212,6 +212,8 @@
+ 		live := liveRuns.m[r]
+ 		liveRuns.Unlock()
+ 		switch {
++		case started < old:
++			stale = append(stale, r)
+ 		case h == host && p == pid:
+ 			if !live {
+ 				stale = append(stale, r)

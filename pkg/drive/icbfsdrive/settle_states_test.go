@@ -266,6 +266,7 @@ func TestST12_DoneFailsTheRerunOnlyDropsTheRecord(t *testing.T) {
 // says how many of the changes those were (Settled.Changes), so the
 // caller deletes those rows and keeps the rest; settling the rest then
 // finishes.
+// STATES: ST-17
 func TestST13_PartKFailsTheEarlierPartsStaySettled(t *testing.T) {
 	saved := MaxSettleChanges
 	MaxSettleChanges = 2
@@ -340,6 +341,11 @@ func TestST13_PartKFailsTheEarlierPartsStaySettled(t *testing.T) {
 	if !errors.Is(err, context.Canceled) || s.Changes != 2 || k.done != 1 || len(after) > 0 {
 		t.Errorf("stopped as part 1 ended: %v, Changes %d, done %d, requests after %v; want canceled, 2, 1, none", err, s.Changes, k.done, after)
 	}
+	// ST-17: the part done is settled (m0, m1 from their dates); the next
+	// part's rows (m2 from 2017-05-02 on) are not.
+	if got := sortedAt(t, d, "/dir", time.Date(2017, 6, 1, 0, 0, 0, 0, time.UTC)); !strings.Contains(got, "m0.txt") || !strings.Contains(got, "m1.txt") || strings.Contains(got, "m2.txt") {
+		t.Errorf("stopped as part 1 ended: 2017-06 is %s; want m0 and m1 settled, m2 not", got)
+	}
 }
 
 // TestCH12_EachInvalidRowNamesItsFault (CH-12): a row with no time, a
@@ -400,6 +406,7 @@ func TestCH12_EachInvalidRowNamesItsFault(t *testing.T) {
 // and nothing outside that path is read (no walk of the drive). Given
 // its new path it settles. No path, and no record: ErrInvalid. A store
 // error on the way is that error, never "not there".
+// STATES: ST-20
 func TestLF13_FolderNotAtItsPathSaysSo(t *testing.T) {
 	store := &failStore{Store: miniotest.Store(t)}
 	cfg := Config{DeferLateFolders: true}
@@ -439,8 +446,13 @@ func TestLF13_FolderNotAtItsPathSaysSo(t *testing.T) {
 	notThere(t, d, "/nothing")
 	notThere(t, d, "/o/p3")
 	notThere(t, d, "/o/p3/f.txt")
-	if _, err := d.SettleFolder(system(), changes, drive.SettleOptions{}); !errors.Is(err, drive.ErrInvalid) {
-		t.Errorf("no path: %v, want ErrInvalid", err)
+	// ST-19: no path, and no record: refused before anything is read.
+	var noPath []string
+	store.setWatch(func(op, key string) error { noPath = append(noPath, op+" "+key); return nil })
+	_, err := d.SettleFolder(system(), changes, drive.SettleOptions{})
+	store.setWatch(nil)
+	if !errors.Is(err, drive.ErrInvalid) || len(noPath) > 0 {
+		t.Errorf("no path: %v after %d requests %v; want ErrInvalid before any", err, len(noPath), noPath)
 	}
 	// Moved: not at the old path; at the new one, settled.
 	if _, err := d.Move(system(), drive.ByPath("/dir"), "/o/p5/dir", false); err != nil {

@@ -1,0 +1,11 @@
+--- a/internal/icbfs/settle.go
++++ b/internal/icbfs/settle.go
+@@ -541,7 +541,7 @@
+ 	}
+ 	if in.Record != nil {
+ 		if err := in.Record(rec); err != nil {
+-			return Settled{}, err
++			_ = err
+ 		}
+ 	}
+ 

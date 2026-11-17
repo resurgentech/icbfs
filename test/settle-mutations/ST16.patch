@@ -1,0 +1,11 @@
+--- a/pkg/drive/icbfsdrive/settle.go
++++ b/pkg/drive/icbfsdrive/settle.go
+@@ -179,7 +179,7 @@
+ 		return s, fmt.Errorf("%s: %w", strings.TrimSuffix(err.Error(), ": "+icbfs.ErrSettleRefused.Error()), drive.ErrSettleRefused)
+ 	case errors.Is(err, icbfs.ErrSettleStopped):
+ 		stopped := fmt.Errorf("%s: %w", strings.TrimSuffix(err.Error(), ": "+icbfs.ErrSettleStopped.Error()), drive.ErrSettleStopped)
+-		if cerr := ctx.Err(); cerr != nil && errors.Is(err, cerr) {
++		if cerr := ctx.Err(); false && cerr != nil && errors.Is(err, cerr) {
+ 			// Stopped, then cut by the caller's stop while it cleaned up (ST-16):
+ 			// both, so the caller sees its stop too.
+ 			stopped = fmt.Errorf("%w (%w)", stopped, cerr)

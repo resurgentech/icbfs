@@ -627,6 +627,7 @@ func TestModelRandom128(t *testing.T) {
 // past from 2022 to 2023 and at no other date, and its content reads
 // through a view of 2022. In a folder of one block and of many, the two
 // changes in one settle and in two.
+// STATES: CH-3
 func TestModelLateFileThatNeverReachedThePresent(t *testing.T) {
 	t.Parallel()
 	bucket := newBuckets(t)

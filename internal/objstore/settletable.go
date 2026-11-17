@@ -33,8 +33,11 @@ import (
 // didn't end (killed) is cleared by the next SettleTable of any directory
 // on the same machine: each run records its process (host name and pid),
 // and one whose process is no longer running, or one of this process
-// that no settle of it holds, goes. Any run a day old goes too (a pid
-// reused, another machine's).
+// that no settle of it holds, goes; one whose process is alive on this
+// machine never does, however old. A run this machine can't judge
+// (another machine's, or one an earlier build left with no process) goes
+// a day old. A settle whose rows were emptied under it all the same
+// notices (Held) and stops.
 //
 //	settle_runs:    each run, its directory, when it started, and its process
 //	settle_entries: one row per entry per lifetime, [from_at, to_at), to_at NULL while open
@@ -104,8 +107,8 @@ var settleSchema = []string{
 var settleTables = []string{"settle_entries", "settle_read", "settle_records", "settle_states", "settle_blocks", "settle_runs"}
 
 // settleRunsKeptFor is how long a run's rows are kept if its settle
-// never ends them and its process can't be judged (another machine's, a
-// pid reused): far longer than a settle takes.
+// never ends them and its process can't be judged (another machine's, or
+// none recorded): far longer than a settle takes.
 const settleRunsKeptFor = 24 * time.Hour
 
 // settleRunColumns are settle_runs' process columns, added to a table an
@@ -185,8 +188,12 @@ func (c *HistoryCache) SettleTable(ctx context.Context, dir string) (*SettleTabl
 			}
 		}
 	}
-	// What killed settles left: a run whose process is gone, a run of this
-	// process no settle holds, any run a day old.
+	// What killed settles left: a run of this machine whose process is
+	// gone, a run of this process no settle holds; a run this machine
+	// can't judge (another machine's, or one with no process recorded) a
+	// day old. A run whose process is alive on this machine is never
+	// cleared, however old (a pid since reused keeps a dead run's rows
+	// until that process ends too).
 	rows, err := c.db.QueryContext(ctx, `SELECT run, host, pid, started FROM settle_runs`)
 	if err != nil {
 		return nil, err
@@ -205,9 +212,15 @@ func (c *HistoryCache) SettleTable(ctx context.Context, dir string) (*SettleTabl
 		live := liveRuns.m[r]
 		liveRuns.Unlock()
 		switch {
-		case started < old,
-			h == host && p == pid && !live,
-			h == host && p != 0 && p != pid && !processAlive(p):
+		case h == host && p == pid:
+			if !live {
+				stale = append(stale, r)
+			}
+		case h == host && p != 0:
+			if !processAlive(p) {
+				stale = append(stale, r)
+			}
+		case started < old:
 			stale = append(stale, r)
 		}
 	}
@@ -232,6 +245,24 @@ func (c *HistoryCache) SettleTable(ctx context.Context, dir string) (*SettleTabl
 		return nil, err
 	}
 	return t, nil
+}
+
+// ErrSettleTableGone is a settle whose working table was emptied under
+// it (another process sharing the cache file took its run for dead): it
+// stops, before it proves anything from what is left.
+var ErrSettleTableGone = errors.New("the settle's working table was emptied under it by another process; nothing was proved from it")
+
+// Held is nil while the run's rows are the run's own (its settle_runs
+// row is there), ErrSettleTableGone once they were emptied under it.
+func (t *SettleTable) Held(ctx context.Context) error {
+	var n int
+	if err := t.db.QueryRowContext(ctx, `SELECT count(*) FROM settle_runs WHERE run = ?`, t.run).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("directory %s: %w", t.dir, ErrSettleTableGone)
+	}
+	return nil
 }
 
 // Clear removes the run's rows: its settle is done. A run whose Clear

@@ -1,0 +1,11 @@
+--- a/internal/objstore/settletable.go
++++ b/internal/objstore/settletable.go
+@@ -217,7 +217,7 @@
+ 				stale = append(stale, r)
+ 			}
+ 		case h == host && p != 0:
+-			if !processAlive(p) {
++			if true {
+ 				stale = append(stale, r)
+ 			}
+ 		case started < old:

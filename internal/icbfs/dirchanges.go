@@ -187,6 +187,43 @@ func (f *Filesystem) lateDating(ctx context.Context, dirKey string, root *objsto
 	return objstore.WithDeclaredTime(ctx, newest), nil
 }
 
+// recordDating is ctx for a change to directory dirKey's own record (its
+// .metadata: its mode, its times, its app data, the origin a mirror
+// keeps there). Under WithPresentDating, a declared time behind the
+// directory's newest state is moved to that state: the change is written
+// into the present, dated at that state, as a late entry change is, and
+// so the present and every later state have it; it makes no DirChange
+// (nothing for a settle to play: the states before keep the record they
+// had, which a settle keeps too). Otherwise, or with no declared time,
+// ctx as it is: under RefuseLateChanges a late record change is written
+// at its own time and the record that should be current put back on top
+// (RecordDates), as before.
+func (f *Filesystem) recordDating(ctx context.Context, dirKey string) (context.Context, error) {
+	p, _ := ctx.Value(presentDatesKey{}).(*presentDates)
+	if p == nil || !f.sourceTime.Load() {
+		return ctx, nil
+	}
+	at, ok := objstore.DeclaredTime(ctx)
+	if !ok {
+		return ctx, nil
+	}
+	if t, ok := presentDate(ctx, dirKey); ok {
+		return objstore.WithDeclaredTime(ctx, t), nil // dated so by this operation already
+	}
+	rec := objstore.RecorderFrom(ctx)
+	if rec != nil && rec.IsNew(dirKey) {
+		return ctx, nil // made by this change: no state before it
+	}
+	newest, err := f.newestState(ctx, dirKey, rec, nil)
+	if err != nil {
+		return ctx, err
+	}
+	if !newest.After(at) {
+		return ctx, nil
+	}
+	return objstore.WithDeclaredTime(ctx, newest), nil
+}
+
 // newestState is the time of directory dirKey's newest state: the latest
 // date in its .version record, what rec (if set) recorded of this
 // operation's own writes left out. The rule is RecordDates': a directory

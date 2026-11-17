@@ -17,6 +17,7 @@ import (
 // is the present: a table holding anything else (an entry no change
 // says, a change not played or played where it doesn't belong, a present
 // the states read don't end in) is ErrSettleRefused.
+// STATES: ST-2
 func TestSettleProof(t *testing.T) {
 	ctx := context.Background()
 	cache, err := objstore.OpenHistoryCache(ctx, nil, filepath.Join(t.TempDir(), "history.db"), time.Hour)
