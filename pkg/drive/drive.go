@@ -75,6 +75,29 @@ type LatestStater interface {
 	LatestState(ctx context.Context, item ItemRef) (time.Time, error)
 }
 
+// A LeftoverDater is a drive that can finish the dating of a write in
+// source time (WithSourceTime) that was killed after it stored its
+// versions and before it dated them: the present has the change, and,
+// until this, the views of the past from the change's own date do not
+// (interloc docs/STATES.md IT-28). A daemon's recovery calls it for the
+// items and folders a write it recorded in flight may have changed.
+type LeftoverDater interface {
+	// DateLeftovers lists, at the date its own write declared, every
+	// current version of each item (and, for a folder, of its own record
+	// and entries) that the drive's dates do not list yet. items name
+	// each by ID and Type; other fields are not read, and nothing is
+	// looked up by path or searched. Writes nothing when nothing is
+	// unlisted; run again, finds nothing. Only a system profile may.
+	DateLeftovers(ctx context.Context, items []Item) (LeftoversDated, error)
+}
+
+// LeftoversDated is what DateLeftovers did: the versions it dated, and
+// the unlisted ones it could not (they carry no date of their own:
+// written by older code), which views take at their store's time.
+type LeftoversDated struct {
+	Dated, Undatable int
+}
+
 // FolderHistorian is a drive whose folders' history can be read and
 // written over: for a caller (a mirror) correcting a folder's past, say
 // for a date its source got wrong. A change that merely arrives late is

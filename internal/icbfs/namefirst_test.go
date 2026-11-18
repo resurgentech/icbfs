@@ -93,3 +93,58 @@ func TestLinkNameFirst(t *testing.T) {
 		t.Fatalf("nlink %d (%v), want 1: one short, never one over", a.Nlink, err)
 	}
 }
+
+// TestIT29_RenameAskedAgainFinishesAStoppedRename: a rename stopped
+// between its two names (the item under both, counting one link) is
+// finished when it is asked again: the old name goes, the item stays,
+// whole, under the new one, and nothing goes to the trash
+// (docs/STATES.md IT-29: a move onto an item that already has the target
+// name still removes the old name). A directory likewise.
+func TestIT29_RenameAskedAgainFinishesAStoppedRename(t *testing.T) {
+	f, store := stoppingFilesystem(t)
+	ctx := context.Background()
+	root := f.RootKey()
+	from, _, err := f.Mkdir(ctx, root, "from", 0o755, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	to, _, err := f.Mkdir(ctx, root, "to", 0o755, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := writeNew(t, ctx, f, from, "a.txt", "a")
+	sub, _, err := f.Mkdir(ctx, from, "sub", 0o755, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a.txt", "sub"} {
+		store.arm(1)
+		if err := f.Rename(ctx, from, name, to, name, false); !errors.Is(err, errStopped) {
+			t.Fatalf("%s: a rename that stopped: %v; want it to fail", name, err)
+		}
+		store.armed.Store(false)
+		if err := f.Rename(ctx, from, name, to, name, false); err != nil {
+			t.Fatalf("%s: the rename asked again: %v", name, err)
+		}
+		if _, ok, err := f.findInTree(ctx, from, name); err != nil || ok {
+			t.Fatalf("%s: the old name is still there (%v)", name, err)
+		}
+		e, ok, err := f.findInTree(ctx, to, name)
+		if err != nil || !ok {
+			t.Fatalf("%s: the new name is gone (%v)", name, err)
+		}
+		want := map[string]string{"a.txt": key, "sub": sub}[name]
+		if e.UUID != want {
+			t.Fatalf("%s: the new name names %s, want %s", name, e.UUID, want)
+		}
+	}
+	if got := readName(t, ctx, f, to, "a.txt"); got != "a" {
+		t.Fatalf("a.txt under its new name: %q", got)
+	}
+	if a, err := f.Stat(ctx, key, TypeFile); err != nil || a.Nlink != 1 {
+		t.Fatalf("nlink %d (%v), want 1", a.Nlink, err)
+	}
+	if es, err := f.ListTrash(ctx, TrashOptions{}); err != nil || len(es) != 0 {
+		t.Fatalf("the trash: %v (%v), want nothing", es, err)
+	}
+}

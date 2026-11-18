@@ -652,7 +652,11 @@ its content, as on a local disk):
   a client that dies there leaves it so, and deleting either name sends
   it to the trash, so it is never unreachable. A rename that fails takes
   the new name back, and says so if it can't. A name differing only in
-  case in the same directory would clash, so it goes the other way.
+  case in the same directory would clash, so it goes the other way. The
+  same rename asked again finishes it: two names for one object that
+  counts one link (a directory, always) are a rename stopped between its
+  two writes, and the old name goes (`finishRename`); two names of a file
+  with two links of its own stay, as rename(2) says.
 - **A hard link** adds its name, then counts it. One that dies between
   leaves the count one short: deleting the last counted name sends the
   item to the trash. Counting first would leave it one over, and the
@@ -872,6 +876,17 @@ the filesystem's history goes:
   fails. An item's first `.version` lists the versions it had before, at
   the store's times. Locks, streams and directory blocks aren't listed;
   the directory's history is its blocks' (above);
+- every version written under a declared time carries that time in its
+  store metadata (`icbfsat`: blocks and `.metadata` since T83-1, content
+  and origin records since T84-18). A dated operation killed after its
+  puts and before its dating leaves them unlisted, and a view would take
+  them at their store's time: the next write on top lists them at that
+  date (`RecordDates`), and a mirror daemon's start lists them for the
+  items and folders its record of the killed write names
+  (`Filesystem.DateLeftovers`, the drive's `DateLeftovers`), so the views
+  from the change's own date show it at once. A version that carries no
+  date (written before writes carried one) is left at its store's time,
+  and counted;
 - a new item's key is minted at the time, so that's its creation time; a
   directory's mtime becomes it; a trash entry is deleted at it. ctime
   stays icbfs's own clock;

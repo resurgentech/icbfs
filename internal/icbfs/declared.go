@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/resurgentech/icbfs/internal/block"
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/internal/pb"
 )
@@ -668,4 +669,241 @@ func CheckPastMark(ctx context.Context, live *Filesystem, cache *objstore.Histor
 		return mark, false, err
 	}
 	return mark, true, cache.SetNote(ctx, note, mark)
+}
+
+// LeftoverItem is one item DateLeftovers looks at: its key and its type.
+type LeftoverItem struct {
+	Key  string
+	Type EntryType
+}
+
+// Leftovers is what DateLeftovers found: the versions it listed, and
+// those it found unlisted and could not date (they carry no date of
+// their own: written before writes carried one, or by a writer that
+// stores none).
+type Leftovers struct {
+	Dated, Undatable int
+}
+
+// DateLeftovers finishes the dating of a dated write that was killed
+// after its puts and before its dating (RecordDates): every current
+// version of the items' objects that no .version lists and that carries
+// the date its own write declared (objstore.PutAt) is listed at that
+// date, and, for an item's content or record written behind its current
+// state, what should be current is put back on top, as the write's
+// dating would have done (restoreCurrent). For a directory: its
+// .metadata and every block of its tree (the root, and the blocks it
+// links to: one read of each). For a file: its content and .metadata; a
+// content version that carries no date of its own takes the date of its
+// .metadata's, when that is the same write's leftover too.
+//
+// The views of the past go by the .version records: a version a killed
+// write left unlisted is taken at its store's time (Dates.Time), which,
+// in a filesystem written in a source's time, is not the change's: from
+// the write's own date until the store's time those views lack it. This
+// puts them right (interloc docs/STATES.md IT-28). A version with no
+// date of its own is left as it is, and counted: its store's time is
+// what views take.
+//
+// It writes nothing when every current version is listed. Run twice, the
+// second finds nothing. Killed part way, a run again finishes it. In a
+// filesystem not written in a source's time it does nothing: no write
+// there is dated other than by its store, so a version is in the views
+// from the time it was stored, which is its write's own.
+func (f *Filesystem) DateLeftovers(ctx context.Context, items []LeftoverItem) (Leftovers, error) {
+	ctx = undeclared(ctx)
+	var out Leftovers
+	if !f.sourceTime.Load() {
+		return out, nil
+	}
+	rec := &objstore.Recorder{}
+	// unlisted is key's current version if no .version lists it, with
+	// the date its write declared (ok false: none).
+	unlisted := func(key string) (*objstore.Object, time.Time, bool, error) {
+		head, err := f.store.Head(ctx, key)
+		if objstore.IsNotFound(err) {
+			return nil, time.Time{}, false, nil
+		}
+		if err != nil {
+			return nil, time.Time{}, false, err
+		}
+		dates, err := objstore.ReadDates(ctx, f.store, objstore.BaseKey(key))
+		if err != nil {
+			return nil, time.Time{}, false, err
+		}
+		if _, listed := dates[head.VersionID]; listed {
+			return nil, time.Time{}, false, nil
+		}
+		if _, ok := objstore.PutAt(head); !ok {
+			if h, err := f.store.HeadVersion(ctx, key, head.VersionID); err == nil {
+				head = h
+			}
+		}
+		t, ok := objstore.PutAt(head)
+		return head, t, ok, nil
+	}
+	seen := map[string]bool{}
+	for len(items) > 0 {
+		it := items[0]
+		items = items[1:]
+		if it.Key == "" || seen[it.Key] {
+			continue
+		}
+		seen[it.Key] = true
+		meta := metadataObjectKey(it.Key)
+		mo, mt, mok, err := unlisted(meta)
+		if err != nil {
+			return out, err
+		}
+		if mo != nil {
+			if mok {
+				rec.Note(objstore.Written{Key: meta, VersionID: mo.VersionID, At: mt})
+			} else {
+				out.Undatable++
+			}
+		}
+		if it.Type == TypeDir {
+			n, u, added, err := f.dateLeftoverTree(ctx, it.Key)
+			out.Dated += n
+			out.Undatable += u
+			if err != nil {
+				return out, err
+			}
+			// The entries the killed write added (a new item's own objects,
+			// written with it and dated with it): looked at too.
+			items = append(items, added...)
+			continue
+		}
+		co, ct, cok, err := unlisted(it.Key)
+		if err != nil {
+			return out, err
+		}
+		if co == nil {
+			continue
+		}
+		if !cok && mo != nil && mok {
+			ct, cok = mt, true // the same write's content: its record's date
+		}
+		if !cok {
+			out.Undatable++
+			continue
+		}
+		rec.Note(objstore.Written{Key: it.Key, VersionID: co.VersionID, At: ct})
+	}
+	if len(rec.Written()) == 0 {
+		return out, nil
+	}
+	out.Dated += len(rec.Written())
+	if _, err := f.RecordDates(ctx, rec); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+// dateLeftoverTree lists, at the date each carries, every current block
+// of directory key's tree that no .version lists: the root and the blocks
+// it links to, each read once. A block with no date of its own is
+// counted, and left. added is the entries a block so dated has that its
+// state before had not (blockBefore: one read): the items the killed
+// write added, whose own objects it wrote and did not date either.
+func (f *Filesystem) dateLeftoverTree(ctx context.Context, key string) (dated, undatable int, added []LeftoverItem, err error) {
+	seen := map[string]bool{}
+	keys := []string{key}
+	for len(keys) > 0 {
+		k := keys[0]
+		keys = keys[1:]
+		if k == "" || seen[k] {
+			continue
+		}
+		seen[k] = true
+		body, obj, err := f.store.Get(ctx, k)
+		if objstore.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return dated, undatable, added, err
+		}
+		data, err := io.ReadAll(body)
+		body.Close()
+		if err != nil {
+			return dated, undatable, added, err
+		}
+		blk, err := block.Decode(data)
+		if err != nil {
+			return dated, undatable, added, err
+		}
+		keys = append(keys, blockLinks(blk)...)
+		dates, err := objstore.ReadDates(ctx, f.store, k)
+		if err != nil {
+			return dated, undatable, added, err
+		}
+		if _, listed := dates[obj.VersionID]; listed {
+			continue
+		}
+		if _, ok := objstore.PutAt(obj); !ok {
+			if h, err := f.store.HeadVersion(ctx, k, obj.VersionID); err == nil {
+				obj = h
+			}
+		}
+		t, ok := objstore.PutAt(obj)
+		if !ok {
+			undatable++
+			continue
+		}
+		if _, _, err := objstore.MergeDatesOver(ctx, f.store, k, objstore.Dates{}, objstore.Dates{obj.VersionID: t}, false); err != nil {
+			return dated, undatable, added, err
+		}
+		dated++
+		if blk.Kind != block.Leaf {
+			continue
+		}
+		before, err := f.blockBefore(ctx, k, obj.VersionID, dates)
+		if err != nil {
+			return dated, undatable, added, err
+		}
+		for _, e := range blk.Entries {
+			if !before[e.UUID] {
+				added = append(added, LeftoverItem{Key: e.UUID, Type: e.Type})
+			}
+		}
+	}
+	return dated, undatable, added, nil
+}
+
+// blockBefore is the items block k named in its state before the
+// unlisted version: the version its .version (dates) dates latest, other
+// than versionID, read once; none for a block with no dated version (a
+// new block). No listing of the block's versions: the cost is one read,
+// whatever the block's history.
+func (f *Filesystem) blockBefore(ctx context.Context, k, versionID string, dates objstore.Dates) (map[string]bool, error) {
+	out := map[string]bool{}
+	prev, prevAt := "", time.Time{}
+	for id, t := range dates {
+		if id != versionID && (prev == "" || t.After(prevAt) || t.Equal(prevAt) && id > prev) {
+			prev, prevAt = id, t
+		}
+	}
+	if prev == "" {
+		return out, nil
+	}
+	body, _, err := f.store.GetVersion(ctx, k, prev)
+	if objstore.IsNotFound(err) {
+		return out, nil // erased since: every entry is taken for the write's
+	}
+	if err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(body)
+	body.Close()
+	if err != nil {
+		return nil, err
+	}
+	blk, err := block.Decode(data)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range blk.Entries {
+		out[e.UUID] = true
+	}
+	return out, nil
 }

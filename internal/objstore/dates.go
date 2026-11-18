@@ -620,6 +620,10 @@ func (r *Recorder) Dates() map[string]Dates {
 	return out
 }
 
+// Note records w as written: for a caller that dates, after the fact,
+// what a write left undated (icbfs's DateLeftovers).
+func (r *Recorder) Note(w Written) { r.add(w) }
+
 func (r *Recorder) add(w Written) {
 	r.mu.Lock()
 	r.written = append(r.written, w)
@@ -724,8 +728,8 @@ func (r *recording) note(ctx context.Context, key string, obj *Object, err error
 	return nil
 }
 
-// PutAtKey is the store metadata a directory block's or a .metadata
-// version written under a declared time carries: that time. A version a
+// PutAtKey is the store metadata every version written under a declared
+// time carries (withPutAt): that time. A version a
 // write left and never dated (the write was killed between its put and
 // its dating) says its date itself, to the write made on top of it
 // (RecordDates), which lists it there.
@@ -744,14 +748,14 @@ func PutAt(o *Object) (time.Time, bool) {
 	return t, err == nil
 }
 
-// withPutAt is metadata for a write of key under ctx: a directory's block
-// or a .metadata says its declared time, or, written with none, says none
-// (a copy of what the version before said is not its).
+// withPutAt is metadata for a write of key under ctx: every version
+// written under a declared time (a directory's block, a .metadata, an
+// item's content, an origin record) says that time, or, written with
+// none, says none (a copy of what the version before said is not its).
+// Content says it since interloc T84-18 (a write killed before its
+// dating is dated from it at the next start: icbfs DateLeftovers);
+// blocks and .metadata since T83-1.
 func withPutAt(ctx context.Context, key string, metadata map[string]string) map[string]string {
-	dir, _ := ctx.Value(blockKey{}).(string)
-	if dir == "" && !strings.HasSuffix(key, ".metadata") {
-		return metadata
-	}
 	t, dated := DeclaredTime(ctx)
 	if _, had := metadata[PutAtKey]; !dated && !had {
 		return metadata

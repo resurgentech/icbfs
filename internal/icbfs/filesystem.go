@@ -2479,8 +2479,10 @@ func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, 
 		if existing.UUID == entry.UUID {
 			// Two names for the same object (or, in one directory, the same
 			// entry): rename(2) does nothing and succeeds, whatever replace
-			// says.
-			return nil
+			// says. Unless the two names are a rename stopped between them
+			// (moveEntry adds the new name first): then the rename is
+			// finished, and the old name goes (finishRename).
+			return f.finishRename(ctx, entry, oldDirKey, oldName, newDirKey, newName)
 		}
 		if !replace {
 			return ErrExists
@@ -2562,6 +2564,47 @@ func (f *Filesystem) Rename(ctx context.Context, oldDirKey, oldName, newDirKey, 
 		}
 	}
 	f.touchCtime(ctx, entry.UUID) // as Linux filesystems do
+	return nil
+}
+
+// finishRename is Rename onto a name that already names entry's object.
+// Two entries for one object that counts fewer links than that are a
+// rename (or a move) stopped after its new name was written and before
+// its old one went (moveEntry: the process killed between the two
+// writes; docs/STATES.md IT-29 in interloc): asked again, the rename is
+// finished, and the old name goes, written as the rename would have
+// written it (dated, under a declared time, as any change). A directory
+// has one name, always; a file with two links of its own (Link) keeps
+// rename(2)'s answer: nothing is done. Two names for one entry in one
+// directory (a name and its case) are the same entry: nothing is done.
+func (f *Filesystem) finishRename(ctx context.Context, entry block.Entry, oldDirKey, oldName, newDirKey, newName string) error {
+	if oldDirKey == newDirKey && block.EqualFold(oldName, newName) {
+		return nil
+	}
+	if entry.Type != TypeDir {
+		a, err := f.Stat(ctx, entry.UUID, entry.Type)
+		if err != nil {
+			return err
+		}
+		if a.Nlink > 1 {
+			return nil // two links of its own: rename(2)'s no-op
+		}
+	}
+	if _, err := f.removeEntryIf(ctx, oldDirKey, oldName, func(e block.Entry) error {
+		if e.UUID != entry.UUID {
+			return ErrExists // the old name names another object now: not ours to remove
+		}
+		return nil
+	}); err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil // gone meanwhile: the rename is whole
+		}
+		return err
+	}
+	if err := f.touchDir(ctx, oldDirKey); err != nil {
+		return err
+	}
+	f.touchCtime(ctx, entry.UUID)
 	return nil
 }
 
