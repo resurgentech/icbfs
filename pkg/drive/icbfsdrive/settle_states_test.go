@@ -495,6 +495,9 @@ func TestLF13_FolderNotAtItsPathSaysSo(t *testing.T) {
 // finished by a rerun with its record given that batch's rows alone, or
 // that batch's and every later one's at once; the rest follow.
 func TestBound16_BatchesInOrderSettleAsOneCall(t *testing.T) {
+	if os.Getenv("ICBFS_PRE_MERGE") == "" {
+		t.Skip("about 90 s under -race: set ICBFS_PRE_MERGE=1 (just pre-merge); in ci, TestST13_PartKFailsTheEarlierPartsStaySettled and TestSettleInParts settle in parts")
+	}
 	store := &failStore{Store: miniotest.Store(t)}
 	cfg := Config{DeferLateFolders: true}
 	settings := icbfs.Settings{Name: "bound16", Size: 1 << 30, RootMode: 0o777, Created: year(2015), DirBlockEntries: 4}

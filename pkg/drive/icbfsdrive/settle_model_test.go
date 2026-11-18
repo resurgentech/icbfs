@@ -501,6 +501,9 @@ func TestModelMatrix(t *testing.T) {
 // nodes split), late writes around the tree, a late removal, on-time
 // writes between, settled once.
 func TestModelTwoLevels(t *testing.T) {
+	if os.Getenv("ICBFS_PRE_MERGE") == "" {
+		t.Skip("about 60 s under -race: set ICBFS_PRE_MERGE=1 (just pre-merge); in ci, TestSettleSplitByTheLateWrite and TestModelMatrix settle split folders")
+	}
 	t.Parallel()
 	c := newModelCase(t, newBuckets(t)(t), "twolevels", 4)
 	for i := 0; i < 20; i++ {

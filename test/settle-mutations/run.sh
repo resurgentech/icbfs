@@ -41,7 +41,7 @@ for m in "${names[@]}"; do
   p="$dir/$m.patch"
   git apply "$p" || { echo "== $m: the patch does not apply"; missed=1; continue; }
   applied=$p
-  T83_SWEEP=1 go test -count=1 -timeout 30m -run "${TESTS[$m]}" ./pkg/drive/icbfsdrive ./internal/objstore >"$out/$m.txt" 2>&1
+  ICBFS_PRE_MERGE=1 go test -count=1 -timeout 30m -run "${TESTS[$m]}" ./pkg/drive/icbfsdrive ./internal/objstore >"$out/$m.txt" 2>&1
   rc=$?
   git apply -R "$p"
   applied=""

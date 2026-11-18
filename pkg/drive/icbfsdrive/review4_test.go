@@ -51,7 +51,9 @@ func r4Drive(t *testing.T, srv miniotest.Server, name string, wrap func(objstore
 	if wrap != nil {
 		st = wrap(st)
 	}
-	return newDriveWith(t, st, icbfs.Settings{Name: name, Size: 1 << 36, RootMode: 0o755, MaxFileSize: 8 << 30}, Config{Root: "/"}), p
+	// Created in 2020: the cases written in their source's time (2021) are
+	// on time in it (T83-1: a drive that does not defer refuses a late one).
+	return newDriveWith(t, st, icbfs.Settings{Name: name, Size: 1 << 36, RootMode: 0o755, MaxFileSize: 8 << 30, Created: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)}, Config{Root: "/"}), p
 }
 
 type r4Ver struct {
@@ -188,7 +190,14 @@ func TestReview4CreateObjects(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			d, p := r4Drive(t, srv, fmt.Sprintf("r4c%d", i), nil)
 			sys := system()
-			if _, err := d.Mkdir(sys, "/a", false); err != nil {
+			// A write in its source's time goes into a folder dated
+			// before it: one dated after (made undated, now) would make the
+			// write late, refused by a drive that does not defer (T83-1).
+			mctx := sys
+			if _, dated := drive.SourceTime(c.ctx()); dated {
+				mctx = drive.WithSourceTime(sys, srcTime.Add(-time.Hour))
+			}
+			if _, err := d.Mkdir(mctx, "/a", false); err != nil {
 				t.Fatal(err)
 			}
 			do := c.do

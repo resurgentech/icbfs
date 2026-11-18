@@ -51,8 +51,8 @@ just rows                     # the docs/STATES.md rows (interloc) whose tests a
 
 | recipe | what it runs | how long (lab runner) | when |
 |---|---|---|---|
-| `just ci` | gofmt, `go mod tidy`, vet (Linux and Windows), build, `test-ci`: every package under `-race`, `pkg/drive/icbfsdrive` in four processes and `internal/icbfs` in two, split by test name, checked to have run each test once | 6 min (2026-11-17); up to 11 when the lab host is busy | while working, and before a commit |
-| `just pre-merge` | `ci`; then `test-erase-full` (`EraseAll` at 100,000 entries on S3 and Azure fakes); then under `-race` with `ICBFS_PRE_MERGE=1`: `TestTreeMemory` (a walk and a hash rebuild over 30,000 items hold one folder), `TestZZFanout` at 2,000 files; then `TestMountSmallWritesAreQuick` alone (a timing test); then `just rows` | `ci` and about 10 min more (erase 2.5, the two `-race` tests 7, the timing test seconds) | once, before a merge that touches icbfs |
+| `just ci` | gofmt, `go mod tidy`, vet (Linux and Windows), build, `test-ci`: every package under `-race`, `pkg/drive/icbfsdrive` in six processes (the settle's `TestSettle*` and `TestST*` a process each) and `internal/icbfs` in two, split by test name, checked to have run each test once; the settle's short cases (`TestST9_LF17_ImmediateStopCutsTheSettle` for the sweeps, `TestST27_…` at three reads, the rows' own tests) | CI_TIME | while working, and before a commit |
+| `just pre-merge` | `ci`; then `test-erase-full` (`EraseAll` at 100,000 entries on S3 and Azure fakes); then under `-race` with `ICBFS_PRE_MERGE=1`: `TestTreeMemory` (a walk and a hash rebuild over 30,000 items hold one folder), `TestZZFanout` at 2,000 files; then the settle's long tests under `-race` with `ICBFS_PRE_MERGE=1` (`TestBound16_…` batches against one call, `TestModelTwoLevels`, `TestST27_…` at every read); then `TestMountSmallWritesAreQuick` alone (a timing test); then `just rows`. Before the body: `test-settle` (the settle's request and heap gates, cut sweeps, killed-write sweep and models, without `-race`) and `test-settle-review` (an immediate stop at every request, in one folder and a split one; the mutations) | PM_TIME | once, before a merge that touches icbfs |
 | the VM suites below | pjdfstest, xfstests, several machines, winfsp-tests, sync | hours | before a release, or a change to the mount |
 
 Where a new test belongs:
@@ -67,12 +67,12 @@ Where a new test belongs:
   at every request, anything of minutes. It skips in `ci` unless
   `ICBFS_PRE_MERGE` is set and is named in the `pre-merge` recipe, or has
   a recipe of its own that `pre-merge` depends on (the settle's
-  `test-settle` on branch `t83-1` goes there at its merge).
+  `test-settle` and `test-settle-review`).
 - **A timing test** (a bound in wall time) runs only in `pre-merge`,
   alone, after the rest. A wait for something to happen is a wait on a
   condition with a generous bound, not a fixed sleep and a tight one.
 
-`pkg/drive/icbfsdrive` (four) and `internal/icbfs` (two) run in `ci` as `go test` processes split by
+`pkg/drive/icbfsdrive` (six) and `internal/icbfs` (two) run in `ci` as `go test` processes split by
 test name (`scripts/split-gotest.sh`): the last process runs every test
 the other patterns do not match, so a new test always runs, and the
 script fails unless the tests `go test -list` names are exactly the ones
@@ -98,7 +98,7 @@ CI runs `just ci` on every push to `main` and every pull request, on GitHub's Li
 runners (Docker and FUSE available), and `just build-windows` and
 `just test-windows` on Windows runners.
 
-`just test-settle-review` (not in `ci`; about an hour, run before a change to the late-change settle merges) proves rows ST-1, ST-9, ST-15 and LF-17 of interloc's `docs/STATES.md` at every request of a settle (`TestST9_ImmediateStopAtEveryRequest`, in one folder and in a split one), and that the tests of rows ST-3, ST-5, ST-6, ST-7, ST-9, ST-11, ST-14, ST-16, ST-19, ST-20, ST-22, ST-24, ST-27, ST-26, LF-2 (`icbfsat`), LF-27, LF-28, CH-4, CH-5 (a record of many app keys) and CH-13 each fail when that row is broken (`test/settle-mutations/run.sh`).
+`just test-settle-review` (in `pre-merge`, not in `ci`) proves rows ST-1, ST-9, ST-15 and LF-17 of interloc's `docs/STATES.md` at every request of a settle (`TestST9_ImmediateStopAtEveryRequest`, in one folder and in a split one), and that the tests of rows ST-3, ST-5, ST-6, ST-7, ST-9, ST-11, ST-14, ST-16, ST-19, ST-20, ST-22, ST-24, ST-27, ST-26, LF-2 (`icbfsat`), LF-27, LF-28, CH-4, CH-5 (a record of many app keys) and CH-13 each fail when that row is broken (`test/settle-mutations/run.sh`).
 
 - Each test that needs storage starts its own MinIO container through
   testcontainers (`internal/testutil/miniotest`), with a fresh versioned

@@ -106,3 +106,20 @@ func (s *noteWrites) EraseAll(ctx context.Context, prefix string) error {
 	defer noteErasedUnder(ctx, prefix)
 	return s.Store.EraseAll(ctx, prefix)
 }
+
+// AbortCopy, ListPages and ListPagesAfter pass the store's through, as
+// dropOnWrite does (objstore.CopyAborter, PageLister, AfterLister): an
+// abort ends no version, a listing writes nothing. Without them the
+// filesystem would never end a store copy, and would list a prefix
+// whole (the trash among them).
+func (s *noteWrites) AbortCopy(ctx context.Context, key, id string) error {
+	return objstore.AbortCopy(ctx, s.Store, key, id)
+}
+
+func (s *noteWrites) ListPages(ctx context.Context, prefix string, fn func([]objstore.Object) error) error {
+	return objstore.ListEach(ctx, s.Store, prefix, fn)
+}
+
+func (s *noteWrites) ListPagesAfter(ctx context.Context, prefix, after string, fn func([]objstore.Object) error) error {
+	return objstore.ListEachAfter(ctx, s.Store, prefix, after, fn)
+}

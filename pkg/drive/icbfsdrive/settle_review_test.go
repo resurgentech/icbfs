@@ -62,11 +62,11 @@ func (s *pastSpy) take() int {
 // after the one in flight (the past-changed mark included), the error is
 // context.Canceled, the record is held, and a rerun with it from a new
 // Drive finishes the settle: the past right, nothing left behind.
-// T83_SWEEP=1 runs it; FR_CASE=split runs splitCase (blocks of four) instead of cutCase;
+// ICBFS_PRE_MERGE=1 (or T83_SWEEP=1) runs it; FR_CASE=split runs splitCase (blocks of four) instead of cutCase;
 // FR_STRIDE=n cancels at every n-th request only.
 func TestST9_ImmediateStopAtEveryRequest(t *testing.T) {
-	if os.Getenv("T83_SWEEP") == "" {
-		t.Skip("a sweep, one folder per request: just test-settle-review (T83_SWEEP=1)")
+	if os.Getenv("ICBFS_PRE_MERGE") == "" && os.Getenv("T83_SWEEP") == "" {
+		t.Skip("a sweep, one folder per request: set ICBFS_PRE_MERGE=1 (just pre-merge, test-settle-review); its short case in ci is TestST9_LF17_ImmediateStopCutsTheSettle")
 	}
 	spy := &pastSpy{Store: miniotest.Store(t)}
 	store := &failStore{Store: spy}

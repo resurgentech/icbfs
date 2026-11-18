@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -984,7 +985,9 @@ func TestCH16_ProveOnlyPartByPart(t *testing.T) {
 // TestST27_AnotherWriterChangesOnlyTheRecordDuringTheReads (ST-27): as
 // ST-22's test, the other writer changing only the folder's own record
 // (its app data, on time): refused before any record, at every read but
-// the last (where ST-5 may take it), nothing of the settle written.
+// the last (where ST-5 may take it), nothing of the settle written. In
+// ci at three reads (the root's listing, a middle one, the last); every
+// read with ICBFS_PRE_MERGE=1.
 func TestST27_AnotherWriterChangesOnlyTheRecordDuringTheReads(t *testing.T) {
 	raw := miniotest.Store(t)
 	store := &failStore{Store: raw}
@@ -1002,7 +1005,14 @@ func TestST27_AnotherWriterChangesOnlyTheRecordDuringTheReads(t *testing.T) {
 		t.Fatalf("the probe: %v", err)
 	}
 	store.setWatch(nil)
-	for k := 2; k <= reads; k++ {
+	ks := []int{2, reads / 2, reads}
+	if os.Getenv("ICBFS_PRE_MERGE") != "" {
+		ks = nil // every read but the first (just pre-merge)
+		for k := 2; k <= reads; k++ {
+			ks = append(ks, k)
+		}
+	}
+	for _, k := range ks {
 		t.Run(fmt.Sprintf("written at read %d of %d", k, reads), func(t *testing.T) {
 			name := fmt.Sprintf("st27%d", k)
 			d, changes := cutCase(t, store, name, cfg)

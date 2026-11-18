@@ -38,14 +38,14 @@ test-short *args:
     go test -short {{args}} ./...
 
 # The -timeout is explicit because Go cuts a test package at 10 minutes by default, and internal/icbfs takes 5 on a quiet machine.
-# pkg/drive/icbfsdrive took 7 to 12 minutes alone and internal/icbfs 6 (2026-11-17), so scripts/split-gotest.sh runs their tests in processes split by name (four and two; the last of each takes every test the others do not), beside the rest, and fails unless each test go test -list names ran exactly once.
+# pkg/drive/icbfsdrive took 7 to 12 minutes alone and internal/icbfs 6 (2026-11-17), so scripts/split-gotest.sh runs their tests in processes split by name (six and two: in icbfsdrive the settle's tests are mostly TestSettle* and TestST*, a process each; the last of each takes every test the others do not), beside the rest, and fails unless each test go test -list names ran exactly once.
 # The Go tests CI runs, with the race detector
 test-ci:
     #!/usr/bin/env bash
     set -uo pipefail
     d=github.com/resurgentech/icbfs/pkg/drive/icbfsdrive i=github.com/resurgentech/icbfs/internal/icbfs
     go test -race -timeout 25m $(go list ./... | grep -vx -e "$d" -e "$i") & p1=$!
-    scripts/split-gotest.sh ./pkg/drive/icbfsdrive '^Test[A-J]' '^Test[KL]' '^TestM' & p2=$!
+    scripts/split-gotest.sh ./pkg/drive/icbfsdrive '^Test[A-J]' '^Test[KL]' '^TestM' '^TestS[a-z]' '^TestS[A-Z]' & p2=$!
     scripts/split-gotest.sh ./internal/icbfs '^Test[A-N]' & p3=$!
     rc=0
     for p in $p1 $p2 $p3; do wait $p || rc=1; done
@@ -86,6 +86,7 @@ ci: fmt-check tidy-check vet build test-ci
 # ci, then every long test ci leaves out (ICBFS_PRE_MERGE=1, the 100,000-entry erase, the timing test alone), then the docs/STATES.md rows the tests prove: once, before a merge that touches icbfs
 pre-merge: ci test-erase-full test-settle test-settle-review
     ICBFS_PRE_MERGE=1 go test -race -count=1 -timeout 30m -run '^(TestTreeMemory|TestZZFanout)$' ./pkg/drive/icbfsdrive ./internal/icbfs
+    ICBFS_PRE_MERGE=1 go test -race -count=1 -timeout 30m -run '^(TestBound16_BatchesInOrderSettleAsOneCall|TestModelTwoLevels|TestST27_AnotherWriterChangesOnlyTheRecordDuringTheReads)$' ./pkg/drive/icbfsdrive
     ICBFS_PRE_MERGE=1 go test -race -count=1 -run '^TestMountSmallWritesAreQuick$' ./internal/fuseserver
     @just rows
 
@@ -106,8 +107,8 @@ test-settle:
 
 # T83-1's slow settle checks, not in ci (about an hour; before a change to the settle merges): an immediate stop at every request of a settle (one folder, then a split one), and the mutations, each of which must turn its row's test red (test/settle-mutations/run.sh)
 test-settle-review:
-    T83_SWEEP=1 go test -count=1 -timeout 30m -run 'TestST9_ImmediateStopAtEveryRequest$' ./pkg/drive/icbfsdrive
-    T83_SWEEP=1 FR_CASE=split go test -count=1 -timeout 50m -run 'TestST9_ImmediateStopAtEveryRequest$' ./pkg/drive/icbfsdrive
+    ICBFS_PRE_MERGE=1 go test -count=1 -timeout 30m -run 'TestST9_ImmediateStopAtEveryRequest$' ./pkg/drive/icbfsdrive
+    ICBFS_PRE_MERGE=1 FR_CASE=split go test -count=1 -timeout 50m -run 'TestST9_ImmediateStopAtEveryRequest$' ./pkg/drive/icbfsdrive
     test/settle-mutations/run.sh
 
 # Tag HEAD as VERSION (vX.Y.Z, new; tree clean, on origin/main, CI green) and build bin/; the tag's push is printed, not done
