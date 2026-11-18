@@ -652,12 +652,22 @@ func (s *Store) VersionsSince(ctx context.Context, key string, since time.Time) 
 // ListPages is List a page (one ListObjectsV2 request, HistoryPageSize
 // keys) at a time (objstore.PageLister).
 func (s *Store) ListPages(ctx context.Context, prefix string, fn func([]objstore.Object) error) error {
-	var token *string
+	return s.ListPagesAfter(ctx, prefix, "", fn)
+}
+
+// ListPagesAfter is ListPages from the first key after after
+// (objstore.AfterLister: StartAfter).
+func (s *Store) ListPagesAfter(ctx context.Context, prefix, after string, fn func([]objstore.Object) error) error {
+	var token, start *string
+	if after != "" {
+		start = aws.String(s.k(after))
+	}
 	for {
 		out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket:            aws.String(s.bucket),
 			Prefix:            aws.String(s.k(prefix)),
 			ContinuationToken: token,
+			StartAfter:        start,
 			MaxKeys:           aws.Int32(objstore.HistoryPageSize),
 		})
 		if err != nil {

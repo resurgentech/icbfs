@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path"
 	"reflect"
 	"runtime"
@@ -559,10 +560,17 @@ func mib[T int64 | uint64](n T) string { return fmt.Sprintf("%.1f MiB", float64(
 
 // TestTreeMemory builds a tree of 30,000 items once, on one drive, for
 // the tests of what a pass over all of it holds: a walk (walkMemory) and
-// a mirror's rebuild of its hash map (rebuildMemory).
+// a mirror's rebuild of its hash map (rebuildMemory). About five minutes
+// under -race, so only in just pre-merge (ICBFS_PRE_MERGE=1); a smaller
+// tree would not tell one folder's hold from the tree's, so just ci has
+// no short case of it (TestWalk and TestMirrorRebuildHashes cover what
+// the walk and the rebuild do).
 func TestTreeMemory(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds a tree of 30,000 items")
+	}
+	if os.Getenv("ICBFS_PRE_MERGE") == "" {
+		t.Skip("builds a tree of 30,000 items: set ICBFS_PRE_MERGE=1 (just pre-merge)")
 	}
 	store := miniotest.Store(t)
 	d := newDrive(t, store, icbfs.Settings{Name: "treemem", Size: 1 << 40, RootMode: 0o777}, "")

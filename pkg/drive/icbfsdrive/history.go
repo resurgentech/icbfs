@@ -127,8 +127,15 @@ func (d *Drive) toTrash(e icbfs.TrashEntry) (drive.TrashEntry, bool) {
 	return out, true
 }
 
-// Trash lists what was deleted from this drive, newest first.
+// Trash lists what was deleted from this drive, newest first, a page of
+// opts.Limit at a time (0: all of it): the filesystem's listing stops at
+// the limit (icbfs.Filesystem.ListTrashPage), and Next carries on exactly
+// after the page, so pages to the end read the trash once, not once a
+// page.
 func (d *Drive) Trash(ctx context.Context, opts drive.TrashOptions) (drive.TrashPage, error) {
+	if !icbfs.ValidTrashCursor(opts.Cursor) {
+		return drive.TrashPage{}, fmt.Errorf("trash cursor %q: %w", opts.Cursor, drive.ErrInvalid) // LK-24
+	}
 	root, err := d.rootNode(ctx, d.fs)
 	if err != nil {
 		return drive.TrashPage{}, err
@@ -140,20 +147,17 @@ func (d *Drive) Trash(ctx context.Context, opts drive.TrashOptions) (drive.Trash
 	if opts.Path != "" {
 		prefix = d.fsPath(opts.Path)
 	}
-	entries, err := d.fs.ListTrash(ctx, icbfs.TrashOptions{PathPrefix: prefix, After: opts.Cursor, Pass: opts.Pass})
+	keep := func(e icbfs.TrashEntry) bool {
+		te, ok := d.toTrash(e)
+		return ok && originMatches(te.Origin, opts)
+	}
+	entries, next, err := d.fs.ListTrashPage(ctx, icbfs.TrashOptions{PathPrefix: prefix, After: opts.Cursor, Pass: opts.Pass, Limit: max(opts.Limit, 0), Keep: keep})
 	if err != nil {
 		return drive.TrashPage{}, mapErr(err)
 	}
-	page := drive.TrashPage{Entries: []drive.TrashEntry{}}
+	page := drive.TrashPage{Entries: make([]drive.TrashEntry, 0, len(entries)), Next: next}
 	for _, e := range entries {
-		te, ok := d.toTrash(e)
-		if !ok || !originMatches(te.Origin, opts) {
-			continue
-		}
-		if opts.Limit > 0 && len(page.Entries) == opts.Limit {
-			page.Next = page.Entries[len(page.Entries)-1].ID
-			break
-		}
+		te, _ := d.toTrash(e)
 		page.Entries = append(page.Entries, te)
 	}
 	return page, nil
@@ -171,21 +175,24 @@ func originMatches(o *drive.Origin, opts drive.TrashOptions) bool {
 	return (opts.OriginDrive == "" || o.Drive == opts.OriginDrive) && (opts.OriginID == "" || o.ID == opts.OriginID)
 }
 
-// trashEntry finds a trash entry of this drive by its id.
+// trashEntry finds a trash entry of this drive by its id, reading the
+// trash a page at a time until it is found (eachTrashed).
 func (d *Drive) trashEntry(ctx context.Context, id string) (icbfs.TrashEntry, drive.TrashEntry, error) {
-	entries, err := d.fs.ListTrash(ctx, icbfs.TrashOptions{})
+	var found icbfs.TrashEntry
+	var out drive.TrashEntry
+	claimed := false
+	ok, err := d.eachTrashed(ctx, func(e icbfs.TrashEntry) bool { return e.EntryID == id }, func(e icbfs.TrashEntry) bool {
+		found = e
+		out, claimed = d.toTrash(e) // another drive's: not found here
+		return true
+	})
 	if err != nil {
 		return icbfs.TrashEntry{}, drive.TrashEntry{}, mapErr(err)
 	}
-	for _, e := range entries {
-		if e.EntryID == id {
-			if te, ok := d.toTrash(e); ok {
-				return e, te, nil
-			}
-			break
-		}
+	if !ok || !claimed {
+		return icbfs.TrashEntry{}, drive.TrashEntry{}, fmt.Errorf("trash entry %s: %w", id, drive.ErrNotFound)
 	}
-	return icbfs.TrashEntry{}, drive.TrashEntry{}, fmt.Errorf("trash entry %s: %w", id, drive.ErrNotFound)
+	return found, out, nil
 }
 
 // trashedItem is the newest trash entry of this drive for an item id,
@@ -202,6 +209,32 @@ func (d *Drive) trashedItem(ctx context.Context, itemID string) (drive.TrashEntr
 		return te, nil
 	}
 	return drive.TrashEntry{}, fmt.Errorf("id %s: %w", itemID, drive.ErrNotFound)
+}
+
+// trashScanPage is how many entries eachTrashed holds at a time.
+const trashScanPage = 500
+
+// eachTrashed hands found, newest first, each entry of the filesystem's
+// trash that match keeps (asked before an entry's item is checked for
+// being live), until found answers true: ok. It reads the trash a page
+// at a time and holds one page: what a whole listing held before
+// (interloc T84). It still reads every entry up to the one found.
+func (d *Drive) eachTrashed(ctx context.Context, match, found func(icbfs.TrashEntry) bool) (ok bool, err error) {
+	for cursor := ""; ; {
+		entries, next, err := d.fs.ListTrashPage(ctx, icbfs.TrashOptions{After: cursor, Limit: trashScanPage, Keep: match})
+		if err != nil {
+			return false, err
+		}
+		for _, e := range entries {
+			if found(e) {
+				return true, nil
+			}
+		}
+		if next == "" {
+			return false, nil
+		}
+		cursor = next
+	}
 }
 
 // Restore brings a deleted item back: to where it was, or to opts.To.
