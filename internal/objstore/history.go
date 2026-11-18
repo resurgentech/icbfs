@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite" // the "sqlite" database/sql driver, pure Go
@@ -36,13 +37,20 @@ const DefaultHistoryTTL = 30 * 24 * time.Hour
 // on a mark the purge leaves); and everything is fetched again once it's
 // older than the cache's TTL, so nothing lingers in it longer than that.
 //
-// Several processes can share one database (WAL, with a busy timeout):
-// a mount as of some time and a program browsing history, say.
+// Several processes can share one database (WAL), a mount as of some
+// time and a program browsing history, say, and several handles in one
+// process share its one connection (historyFile). Writers take turns in
+// order; no operation waits longer than HistoryWait, and past it the
+// cache answers as a miss, never "database is locked" (historywait.go).
 type HistoryCache struct {
 	store Store
-	db    *sql.DB
+	f     *historyFile
+	db    *sql.DB // f's
 	ttl   time.Duration
-	temp  string // the directory Close removes, for OpenTempHistoryCache's
+	temp  string        // the directory Close removes, for OpenTempHistoryCache's
+	wait  time.Duration // HistoryWait; shorter in tests
+
+	misses *atomic.Int64 // ContendedMisses; shared with UpTo's
 
 	mu       sync.Mutex
 	offset   time.Duration // the store's clock minus ours
@@ -96,34 +104,53 @@ func OpenHistoryCache(ctx context.Context, store Store, path string, ttl time.Du
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	// Transactions take the write lock as they begin (_txlock=immediate):
-	// one that read first and then wrote would fail outright, not wait,
-	// if another process wrote in between.
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_txlock=immediate")
+	f, first, err := openHistoryFile(path)
 	if err != nil {
 		return nil, err
 	}
-	// One connection serializes this process's access; other processes
-	// wait on the busy timeout.
-	db.SetMaxOpenConns(1)
-	c := &HistoryCache{store: store, db: db, ttl: ttl}
-	// Opening the database can find it busy beyond what the busy timeout
-	// covers (another process switching it to WAL, or creating it): try
-	// again for a while.
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		err := c.init(ctx)
-		if err == nil {
-			return c, nil
+	c := &HistoryCache{store: store, f: f, db: f.db, ttl: ttl, wait: HistoryWait, misses: new(atomic.Int64)}
+	if !first {
+		select {
+		case <-f.ready:
+		case <-ctx.Done():
+			f.release()
+			return nil, ctx.Err()
 		}
-		if !isBusy(err) || time.Now().After(deadline) {
-			db.Close()
-			return nil, fmt.Errorf("history cache %s: %w", path, err)
+		if f.initErr != nil {
+			f.release()
+			return nil, f.initErr
+		}
+		return c, nil
+	}
+	err = c.openFirst(ctx, path)
+	f.initDone(err)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// openFirst inits the database for the first handle of this process.
+// Opening it can find it busy for longer than one wait (another process
+// switching it to WAL, or creating it): try again for a while.
+func (c *HistoryCache) openFirst(ctx context.Context, path string) error {
+	deadline := time.Now().Add(2 * HistoryWait)
+	for {
+		done, err := c.write(ctx, c.init)
+		switch {
+		case err != nil:
+			c.f.release()
+			return fmt.Errorf("history cache %s: %w", path, err)
+		case done:
+			return nil
+		case time.Now().After(deadline):
+			c.f.release()
+			return fmt.Errorf("history cache %s: database is locked: no turn in %v", path, 2*HistoryWait)
 		}
 		select {
 		case <-ctx.Done():
-			db.Close()
-			return nil, ctx.Err()
+			c.f.release()
+			return ctx.Err()
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
@@ -183,9 +210,14 @@ func removeStaleTempCaches(parent string) {
 // Store is the store this cache is of.
 func (c *HistoryCache) Store() Store { return c.store }
 
-// Close closes the database, and removes a temporary cache.
+// Close closes the database (when no other handle of this process has it
+// open), and removes a temporary cache. A forget still pending is tried
+// once more first, within HistoryWait.
 func (c *HistoryCache) Close() error {
-	err := c.db.Close()
+	if len(c.f.pendingNow()) > 0 {
+		_, _ = c.write(context.Background(), func(context.Context, *sql.Tx) error { return nil })
+	}
+	err := c.f.release()
 	if c.temp != "" {
 		if rmErr := os.RemoveAll(c.temp); err == nil {
 			err = rmErr
@@ -202,12 +234,7 @@ func (c *HistoryCache) Close() error {
 // notes, values the caller keeps with the cache (ForgetUnder's marks).
 // fetched times, by this machine's clock, are what the TTL is counted
 // from.
-func (c *HistoryCache) init(ctx context.Context) error {
-	tx, err := c.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
+func (c *HistoryCache) init(ctx context.Context, tx *sql.Tx) error {
 	var layout int
 	if err := tx.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&layout); err != nil {
 		return err
@@ -261,7 +288,7 @@ func (c *HistoryCache) init(ctx context.Context) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // StoreNow is the store's clock now, from an offset measured every
@@ -308,12 +335,12 @@ func (c *HistoryCache) history(ctx context.Context, key string, at time.Time) ([
 }
 
 func (c *HistoryCache) fullHistory(ctx context.Context, key string, at time.Time) ([]Object, error) {
-	ok, err := c.covers(ctx, `(whole = 1 AND prefix = ?1) OR (whole = 0 AND substr(?1, 1, length(prefix)) = prefix)`, key, at)
-	if err != nil {
-		return nil, err
-	}
-	if ok {
-		return c.read(ctx, `SELECT key, version, etag, size, modified, deleted FROM versions WHERE key = ? ORDER BY pos`, key)
+	if !c.f.pendingOn(key, false) {
+		list, hit, err := c.cached(ctx, `(whole = 1 AND prefix = ?1) OR (whole = 0 AND substr(?1, 1, length(prefix)) = prefix)`, key, at,
+			`SELECT key, version, etag, size, modified, deleted FROM versions WHERE key = ? ORDER BY pos`, key)
+		if err != nil || hit {
+			return list, err
+		}
 	}
 	upto, err := c.upto(ctx, at)
 	if err != nil {
@@ -329,13 +356,13 @@ func (c *HistoryCache) fullHistory(ctx context.Context, key string, at time.Time
 // historyUnder is the history of every key starting with prefix, keys in
 // order and each newest first, complete at least up to at.
 func (c *HistoryCache) historyUnder(ctx context.Context, prefix string, at time.Time) ([]Object, error) {
-	ok, err := c.covers(ctx, `whole = 0 AND substr(?1, 1, length(prefix)) = prefix`, prefix, at)
-	if err != nil {
-		return nil, err
-	}
-	if ok {
+	if !c.f.pendingOn(prefix, true) {
 		where, args := underPrefix(prefix)
-		return c.read(ctx, `SELECT key, version, etag, size, modified, deleted FROM versions WHERE `+where+` ORDER BY key, pos`, args...)
+		list, hit, err := c.cached(ctx, `whole = 0 AND substr(?1, 1, length(prefix)) = prefix`, prefix, at,
+			`SELECT key, version, etag, size, modified, deleted FROM versions WHERE `+where+` ORDER BY key, pos`, args...)
+		if err != nil || hit {
+			return list, err
+		}
 	}
 	upto, err := c.upto(ctx, at)
 	if err != nil {
@@ -348,17 +375,29 @@ func (c *HistoryCache) historyUnder(ctx context.Context, prefix string, at time.
 	return list, c.save(ctx, prefix, false, list, upto)
 }
 
-// covers reports whether a covered row matching match (with ?1 the key
-// or prefix asked for) is complete up to at and within the TTL.
-func (c *HistoryCache) covers(ctx context.Context, match, keyOrPrefix string, at time.Time) (bool, error) {
-	var n int
-	err := c.db.QueryRowContext(ctx, `SELECT count(*) FROM covered WHERE (`+match+`) AND upto >= ?2 AND fetched >= ?3`,
-		keyOrPrefix, at.UnixNano(), time.Now().Add(-c.ttl).UnixNano()).Scan(&n)
-	return n > 0, err
+// cached is what query reads, if a covered row matching match (with ?1
+// the key or prefix asked for) is complete up to at and within the TTL
+// (hit); a miss if not, or if the database was not this handle's within
+// the bound.
+func (c *HistoryCache) cached(ctx context.Context, match, keyOrPrefix string, at time.Time, query string, args ...any) (list []Object, hit bool, err error) {
+	ok, err := c.query(ctx, func(ctx context.Context, conn *sql.Conn) error {
+		var n int
+		if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM covered WHERE (`+match+`) AND upto >= ?2 AND fetched >= ?3`,
+			keyOrPrefix, at.UnixNano(), time.Now().Add(-c.ttl).UnixNano()).Scan(&n); err != nil || n == 0 {
+			return err
+		}
+		list, err = readObjects(ctx, conn, query, args...)
+		hit = err == nil
+		return err
+	})
+	if !ok {
+		return nil, false, err
+	}
+	return list, hit, nil
 }
 
-func (c *HistoryCache) read(ctx context.Context, query string, args ...any) ([]Object, error) {
-	rows, err := c.db.QueryContext(ctx, query, args...)
+func readObjects(ctx context.Context, conn *sql.Conn, query string, args ...any) ([]Object, error) {
+	rows, err := conn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -377,13 +416,16 @@ func (c *HistoryCache) read(ctx context.Context, query string, args ...any) ([]O
 }
 
 // save replaces what's cached for key (whole) or under prefix with list,
-// complete up to upto.
+// complete up to upto; not at all if the database was not this handle's
+// within the bound.
 func (c *HistoryCache) save(ctx context.Context, keyOrPrefix string, whole bool, list []Object, upto time.Time) error {
-	tx, err := c.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
+	_, err := c.write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		return saveTx(ctx, tx, keyOrPrefix, whole, list, upto)
+	})
+	return err
+}
+
+func saveTx(ctx context.Context, tx *sql.Tx, keyOrPrefix string, whole bool, list []Object, upto time.Time) error {
 	where, args := `key = ?`, []any{keyOrPrefix}
 	if !whole {
 		where, args = underPrefix(keyOrPrefix)
@@ -402,65 +444,74 @@ func (c *HistoryCache) save(ctx context.Context, keyOrPrefix string, whole bool,
 			return err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO covered VALUES (?, ?, ?, ?)`, keyOrPrefix, whole, upto.UnixNano(), fetched); err != nil {
-		return err
-	}
-	return tx.Commit()
+	_, err = tx.ExecContext(ctx, `INSERT OR REPLACE INTO covered VALUES (?, ?, ?, ?)`, keyOrPrefix, whole, upto.UnixNano(), fetched)
+	return err
 }
 
 // forget drops key's cached history, and anything that claims to cover
 // it, so the next look at it asks the store: for a key with a cached
-// version the store no longer has (erased by a purge).
+// version the store no longer has (erased by a purge). If the database
+// is not this handle's within the bound, the forget is held pending
+// (pendingForget): this process reads the key as a miss until a later
+// write applies it.
 func (c *HistoryCache) forget(ctx context.Context, key string) error {
-	tx, err := c.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, table := range []string{"versions", "blobs"} {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE key = ?`, key); err != nil {
-			return err
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM covered WHERE (whole = 1 AND prefix = ?1) OR (whole = 0 AND substr(?1, 1, length(prefix)) = prefix)`, key); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return c.forgetOrHold(ctx, pendingForget{key: key})
 }
 
 // ForgetUnder drops everything cached for keys starting with prefix, and
 // anything that claims to cover them: for what a purge may have erased.
+// Held pending as forget is, past the bound.
 func (c *HistoryCache) ForgetUnder(ctx context.Context, prefix string) error {
-	tx, err := c.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
+	return c.forgetOrHold(ctx, pendingForget{key: prefix, under: true})
+}
+
+func (c *HistoryCache) forgetOrHold(ctx context.Context, p pendingForget) error {
+	done, err := c.write(ctx, func(ctx context.Context, tx *sql.Tx) error { return forgetTx(ctx, tx, p) })
+	if err == nil && !done {
+		c.f.addPending(p)
 	}
-	defer tx.Rollback()
-	where, args := underPrefix(prefix)
+	return err
+}
+
+// forgetTx deletes what p names.
+func forgetTx(ctx context.Context, tx *sql.Tx, p pendingForget) error {
+	where, args := `key = ?`, []any{p.key}
+	// A covered row is about a key if it is the key's own, or a prefix of
+	// it; about a prefix, if either starts with the other.
+	covered := `(whole = 1 AND prefix = ?1) OR (whole = 0 AND substr(?1, 1, length(prefix)) = prefix)`
+	if p.under {
+		where, args = underPrefix(p.key)
+		covered = `substr(prefix, 1, length(?1)) = ?1 OR (whole = 0 AND substr(?1, 1, length(prefix)) = prefix)`
+	}
 	for _, table := range []string{"versions", "blobs"} {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE `+where, args...); err != nil {
 			return err
 		}
 	}
-	// A covered row is about prefix if either starts with the other.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM covered WHERE substr(prefix, 1, length(?1)) = ?1 OR (whole = 0 AND substr(?1, 1, length(prefix)) = prefix)`, prefix); err != nil {
-		return err
-	}
-	return tx.Commit()
+	_, err := tx.ExecContext(ctx, `DELETE FROM covered WHERE `+covered, p.key)
+	return err
 }
 
 // Note is the value kept under name ("" if none), and SetNote keeps one.
+// Past the bound, Note answers "" (nothing kept: the caller does what it
+// would for a cache that has seen nothing) and SetNote keeps nothing.
 func (c *HistoryCache) Note(ctx context.Context, name string) (string, error) {
 	var v string
-	err := c.db.QueryRowContext(ctx, `SELECT value FROM notes WHERE name = ?`, name).Scan(&v)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
+	_, err := c.query(ctx, func(ctx context.Context, conn *sql.Conn) error {
+		err := conn.QueryRowContext(ctx, `SELECT value FROM notes WHERE name = ?`, name).Scan(&v)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	})
 	return v, err
 }
 
 func (c *HistoryCache) SetNote(ctx context.Context, name, value string) error {
-	_, err := c.db.ExecContext(ctx, `INSERT OR REPLACE INTO notes VALUES (?, ?)`, name, value)
+	_, err := c.write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO notes VALUES (?, ?)`, name, value)
+		return err
+	})
 	return err
 }
 
@@ -480,15 +531,24 @@ func cachingContent(ctx context.Context) bool {
 }
 
 // blob is a cached version: its Object, and its content if kept.
+// A miss, too, past the bound or under a pending forget.
 func (c *HistoryCache) blob(ctx context.Context, key, versionID string, wantContent bool) (*Object, []byte, bool, error) {
-	var object string
-	var content []byte
-	err := c.db.QueryRowContext(ctx, `SELECT object, content FROM blobs WHERE key = ? AND version = ? AND fetched >= ?`,
-		key, versionID, time.Now().Add(-c.ttl).UnixNano()).Scan(&object, &content)
-	if errors.Is(err, sql.ErrNoRows) || (err == nil && wantContent && content == nil) {
+	if c.f.pendingOn(key, false) {
 		return nil, nil, false, nil
 	}
-	if err != nil {
+	var object string
+	var content []byte
+	found := false
+	ok, err := c.query(ctx, func(ctx context.Context, conn *sql.Conn) error {
+		err := conn.QueryRowContext(ctx, `SELECT object, content FROM blobs WHERE key = ? AND version = ? AND fetched >= ?`,
+			key, versionID, time.Now().Add(-c.ttl).UnixNano()).Scan(&object, &content)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		found = err == nil
+		return err
+	})
+	if !ok || !found || (wantContent && content == nil) {
 		return nil, nil, false, err
 	}
 	var o Object
@@ -499,16 +559,20 @@ func (c *HistoryCache) blob(ctx context.Context, key, versionID string, wantCont
 }
 
 // keepBlob caches a version's Object, and content unless it's nil; a
-// content-less row never replaces one with content.
+// content-less row never replaces one with content. Nothing is kept if
+// the database is not this handle's within the bound.
 func (c *HistoryCache) keepBlob(ctx context.Context, o *Object, content []byte) error {
 	object, err := json.Marshal(o)
 	if err != nil {
 		return err
 	}
-	_, err = c.db.ExecContext(ctx, `INSERT INTO blobs VALUES (?, ?, ?, ?, ?)
-		ON CONFLICT (key, version) DO UPDATE SET object = excluded.object,
-			content = coalesce(excluded.content, blobs.content), fetched = excluded.fetched`,
-		o.Key, o.VersionID, string(object), content, time.Now().UnixNano())
+	_, err = c.write(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO blobs VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT (key, version) DO UPDATE SET object = excluded.object,
+				content = coalesce(excluded.content, blobs.content), fetched = excluded.fetched`,
+			o.Key, o.VersionID, string(object), content, time.Now().UnixNano())
+		return err
+	})
 	return err
 }
 
