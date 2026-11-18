@@ -70,8 +70,9 @@ type historyFile struct {
 }
 
 // fetching waits until no fetch of name is under way in this process (or
-// ctx is done), then marks one as under way until done is called.
-func (f *historyFile) fetching(ctx context.Context, name string) (done func(), err error) {
+// ctx is done), then marks one as under way until done is called; waited
+// reports whether another's was under way when it asked.
+func (f *historyFile) fetching(ctx context.Context, name string) (done func(), waited bool, err error) {
 	for {
 		f.mu.Lock()
 		ch, busy := f.inflight[name]
@@ -87,13 +88,14 @@ func (f *historyFile) fetching(ctx context.Context, name string) (done func(), e
 				delete(f.inflight, name)
 				f.mu.Unlock()
 				close(ch)
-			}, nil
+			}, waited, nil
 		}
 		f.mu.Unlock()
+		waited = true
 		select {
 		case <-ch:
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, true, ctx.Err()
 		}
 	}
 }

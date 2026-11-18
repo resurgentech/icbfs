@@ -376,7 +376,7 @@ func (c *HistoryCache) fetchOnce(ctx context.Context, name string, at time.Time,
 		return list, err
 	}
 	wait, cancel := context.WithTimeout(ctx, c.wait)
-	done, err := c.f.fetching(wait, name)
+	done, waited, err := c.f.fetching(wait, name)
 	cancel()
 	switch {
 	case err == nil:
@@ -386,8 +386,11 @@ func (c *HistoryCache) fetchOnce(ctx context.Context, name string, at time.Time,
 	default:
 		// The fetch under way took longer than the wait: fetch alongside.
 	}
-	if list, hit, err := kept(); err != nil || hit {
-		return list, err
+	if waited {
+		// What the fetch waited for kept, unless its keep was skipped.
+		if list, hit, err := kept(); err != nil || hit {
+			return list, err
+		}
 	}
 	upto, err := c.upto(ctx, at)
 	if err != nil {
