@@ -818,7 +818,9 @@ it was written under a source time (see below).
   counted (`ContendedMisses`). The cache never answers "database is
   locked". A settle's working table, in the same file, writes in the
   same turn; it cannot be skipped, so after 10 s without its turn it
-  goes on with SQLite's own wait, as before.
+  goes on with SQLite's own wait (`HistoryWait`). That wait is set once,
+  at open; an operation with no contention runs its statements on the
+  caller's context and costs what it did before the turn.
 - The cache keeps what each version says, too, which never changes: its
   metadata, and the content of the reads icbfs marks as metadata (its
   directory blocks, `.metadata` objects, symlink targets and the master

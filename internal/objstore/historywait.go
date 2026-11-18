@@ -25,11 +25,21 @@ import (
 // store.
 const HistoryWait = 5 * time.Second
 
-// historyBusyTimeout is SQLite's busy wait for statements on the file
-// that are not the cache's own (the settle table's, SettleTable): as it
-// was before HistoryWait. The cache's operations set their own, to what
-// is left of their bound, and put this back.
-const historyBusyTimeout = 10 * time.Second
+// The connection's busy wait (SQLite's own, for a lock held by a writer
+// that takes no turn: another process's settle table, an older binary) is
+// HistoryWait, set once at open. An operation that has already spent part
+// of its bound waiting (for its turn, or the connection) sets it to what
+// is left, and back: one that has not, and that is every operation with
+// no contention, runs its statements as they are, on the caller's
+// context. So no operation waits longer than HistoryWait and
+// historyBusyMargin, and an uncontended one costs what it did before the
+// turn.
+const historyBusyMargin = 50 * time.Millisecond
+
+// settleTurnWait is how long a write of the settle's working table waits
+// for the write turn before it goes ahead on SQLite's own busy wait
+// (inTurn).
+const settleTurnWait = 10 * time.Second
 
 // historyFile is one history cache database, open once in this process
 // and shared by every HistoryCache opened on its path: several drives of
@@ -93,7 +103,7 @@ func openHistoryFile(path string) (f *historyFile, first bool, err error) {
 	// Transactions take the write lock as they begin (_txlock=immediate):
 	// one that read first and then wrote would fail outright, not wait,
 	// if another process wrote in between.
-	db, err := sql.Open("sqlite", fmt.Sprintf("%s?_pragma=busy_timeout(%d)&_pragma=journal_mode(WAL)&_txlock=immediate", path, historyBusyTimeout.Milliseconds()))
+	db, err := sql.Open("sqlite", fmt.Sprintf("%s?_pragma=busy_timeout(%d)&_pragma=journal_mode(WAL)&_txlock=immediate", path, HistoryWait.Milliseconds()))
 	if err != nil {
 		return nil, false, err
 	}
@@ -197,14 +207,14 @@ func (f *historyFile) take(ctx context.Context) (release func(), err error) {
 // inTurn runs fn, a write of the settle's working table (SettleTable) on
 // this file, in the same write turn as the cache's writes, so that
 // neither kind passes the other over. A settle's write is not a cache's
-// and cannot be skipped: it waits for its turn up to historyBusyTimeout
-// and then goes ahead without it, on SQLite's own busy wait, as it did
-// before the turn existed; the turn never holds it longer than that.
+// and cannot be skipped: it waits for its turn up to settleTurnWait and
+// then goes ahead without it, on SQLite's own busy wait (HistoryWait), as
+// it did before the turn existed; the turn never holds it longer.
 func (f *historyFile) inTurn(ctx context.Context, fn func() error) error {
 	if f == nil {
 		return fn()
 	}
-	turnCtx, cancel := context.WithTimeout(ctx, historyBusyTimeout)
+	turnCtx, cancel := context.WithTimeout(ctx, settleTurnWait)
 	release, err := f.take(turnCtx)
 	cancel()
 	if err != nil {
@@ -275,21 +285,26 @@ func (f *historyFile) pendingOn(key string, under bool) bool {
 	return false
 }
 
-// withConn runs fn on the file's connection, got before ctx (which has a
-// deadline) is done, with SQLite's busy wait set to what is left of
-// ctx's time.
-func (f *historyFile) withConn(ctx context.Context, fn func(*sql.Conn) error) error {
-	conn, err := f.db.Conn(ctx)
+// withConn runs fn on the file's connection, got before bounded (which
+// has a deadline) is done. SQLite's busy wait stays HistoryWait unless
+// less than that, by more than historyBusyMargin, is left of bounded's
+// time: then it is set to what is left for fn, and back after.
+func (f *historyFile) withConn(bounded context.Context, fn func(*sql.Conn) error) error {
+	conn, err := f.db.Conn(bounded)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	d, _ := ctx.Deadline()
-	ms := max(time.Until(d).Milliseconds(), 1)
-	if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA busy_timeout = %d`, ms)); err != nil {
-		return err
+	d, _ := bounded.Deadline()
+	if left := time.Until(d); left < HistoryWait-historyBusyMargin {
+		// Statements that set the wait never wait themselves: no context
+		// to watch.
+		ms := max(left.Milliseconds(), 1)
+		if _, err := conn.ExecContext(context.Background(), fmt.Sprintf(`PRAGMA busy_timeout = %d`, ms)); err != nil {
+			return err
+		}
+		defer conn.ExecContext(context.Background(), fmt.Sprintf(`PRAGMA busy_timeout = %d`, HistoryWait.Milliseconds()))
 	}
-	defer conn.ExecContext(context.WithoutCancel(ctx), fmt.Sprintf(`PRAGMA busy_timeout = %d`, historyBusyTimeout.Milliseconds()))
 	return fn(conn)
 }
 
@@ -314,18 +329,23 @@ func (c *HistoryCache) settle(ctx, bounded context.Context, err error) (bool, er
 	return false, err
 }
 
-// query runs fn, a read, within the bound. ok false with no error is a
+// query runs fn, a read, within the bound: the wait for the connection
+// is bounded by the deadline, and fn's statements, run on the caller's
+// ctx (a statement under a deadline costs the driver a watch of its
+// own), by SQLite's busy wait (withConn). ok false with no error is a
 // miss.
 func (c *HistoryCache) query(ctx context.Context, fn func(context.Context, *sql.Conn) error) (bool, error) {
 	bounded, cancel := context.WithTimeout(ctx, c.wait)
 	defer cancel()
-	err := c.f.withConn(bounded, func(conn *sql.Conn) error { return fn(bounded, conn) })
+	err := c.f.withConn(bounded, func(conn *sql.Conn) error { return fn(ctx, conn) })
 	return c.settle(ctx, bounded, err)
 }
 
 // write runs fn in a write transaction when its turn comes, within the
-// bound, after the forgets still pending. ok false with no error: it did
-// not get the database, and nothing was written.
+// bound, after the forgets still pending: the waits for the turn and the
+// connection are bounded by the deadline, the transaction's statements
+// (on the caller's ctx) by SQLite's busy wait, as query's. ok false with
+// no error: it did not get the database, and nothing was written.
 func (c *HistoryCache) write(ctx context.Context, fn func(context.Context, *sql.Tx) error) (bool, error) {
 	bounded, cancel := context.WithTimeout(ctx, c.wait)
 	defer cancel()
@@ -333,18 +353,18 @@ func (c *HistoryCache) write(ctx context.Context, fn func(context.Context, *sql.
 	release, err := c.f.take(bounded)
 	if err == nil {
 		err = c.f.withConn(bounded, func(conn *sql.Conn) error {
-			tx, err := conn.BeginTx(bounded, nil)
+			tx, err := conn.BeginTx(ctx, nil)
 			if err != nil {
 				return err
 			}
 			defer tx.Rollback()
 			p := c.f.pendingNow()
 			for _, f := range p {
-				if err := forgetTx(bounded, tx, f); err != nil {
+				if err := forgetTx(ctx, tx, f); err != nil {
 					return err
 				}
 			}
-			if err := fn(bounded, tx); err != nil {
+			if err := fn(ctx, tx); err != nil {
 				return err
 			}
 			if err := tx.Commit(); err != nil {

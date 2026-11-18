@@ -325,3 +325,27 @@ func TestHistoryCacheSettleTableWritesTakeTheTurn(t *testing.T) {
 		t.Fatalf("states %v, %v: want the one written", states, err)
 	}
 }
+
+// A writer that takes no turn (another process's settle table, an older
+// binary) holds the file while an operation that waited for nothing runs
+// its statements on the caller's context: SQLite's own busy wait, set once
+// at open to HistoryWait, bounds it, and the keep is a miss, counted, no
+// error, back within HistoryWait and its margin.
+func TestHistoryCacheOutsideWriterBoundsTheUncontendedPath(t *testing.T) {
+	ctx := context.Background()
+	c, _, other, _ := heldOpen(t)
+	c.wait = HistoryWait
+	release := holdWriter(t, other)
+	defer release()
+	start := time.Now()
+	if err := c.SetNote(ctx, "n", "v"); err != nil {
+		t.Fatalf("set note against a writer outside the turn: %v", err)
+	}
+	took := time.Since(start)
+	if took < HistoryWait-time.Second || took > HistoryWait+historyBusyMargin+time.Second {
+		t.Fatalf("set note took %v, want about HistoryWait (%v)", took, HistoryWait)
+	}
+	if n := c.ContendedMisses(); n != 1 {
+		t.Fatalf("contended misses %d, want 1", n)
+	}
+}
