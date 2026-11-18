@@ -1,0 +1,11 @@
+--- a/internal/icbfs/settle.go
++++ b/internal/icbfs/settle.go
+@@ -881,7 +881,7 @@
+ // changes that land on first together play in the order of their own
+ // dates, then as given (CH-17).
+ func fromFirstState(changes []DirChange, first time.Time) []DirChange {
+-	if first.IsZero() {
++	if first.IsZero() || true { // mutation: the clip removed
+ 		return changes
+ 	}
+ 	out := changes[:0:0]

@@ -281,7 +281,6 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 			err = cerr
 		}
 	}()
-	t0 := changes[0].At
 	meta := metadataObjectKey(dirKey)
 
 	// --- Build ---
@@ -357,6 +356,21 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 	ms, _ := objstore.NotStates(metaH, dates)
 	for id := range ms {
 		shadowed[id] = true
+	}
+	// No state of a directory is written from before its first (rule
+	// 1.6-8): a change dated before it is played from it, into [first,
+	// Until) only (ST-29), in the order of its own date still (CH-17); one
+	// whose span is then empty is settled with nothing to play (ST-30).
+	// Each was checked as stored above (CH-12).
+	changes = fromFirstState(changes, firstState(dates, shadowed, rootH, metaH))
+	if len(changes) == 0 && in.Cut == nil {
+		return Settled{}, nil
+	}
+	var t0 time.Time
+	if len(changes) > 0 {
+		t0 = changes[0].At
+	} else {
+		t0 = firstState(dates, shadowed, rootH, metaH)
 	}
 	times := map[time.Time]bool{}
 	var tb time.Time
@@ -838,6 +852,51 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 }
 
 // liveOf is list without its deletions.
+// firstState is the time of the directory's first state: the earliest
+// date of its root block's and .metadata's versions that are states
+// (live, not shadowed). Zero if it has none, or rule 1.6-8 is off.
+func firstState(dates objstore.Dates, shadowed map[string]bool, hists ...[]objstore.Object) time.Time {
+	if !firstStateRule.Load() {
+		return time.Time{}
+	}
+	var first time.Time
+	for _, h := range hists {
+		for i := range h {
+			o := &h[i]
+			if o.Deleted || shadowed[o.VersionID] {
+				continue
+			}
+			if t := dates.Time(o).UTC(); first.IsZero() || t.Before(first) {
+				first = t
+			}
+		}
+	}
+	return first
+}
+
+// fromFirstState is changes, in the order of their own dates (as
+// given: sorted by At), each dated before first played from first: a
+// touch at first, an add or a removal into [first, Until), and one whose
+// span is then empty left out (ST-29, ST-30). The order is kept, so
+// changes that land on first together play in the order of their own
+// dates, then as given (CH-17).
+func fromFirstState(changes []DirChange, first time.Time) []DirChange {
+	if first.IsZero() {
+		return changes
+	}
+	out := changes[:0:0]
+	for _, ch := range changes {
+		if ch.At.Before(first) {
+			if ch.Op != ChangeTouch && !ch.Until.After(first) {
+				continue
+			}
+			ch.At = first
+		}
+		out = append(out, ch)
+	}
+	return out
+}
+
 func liveOf(list []objstore.Object) []objstore.Object {
 	var out []objstore.Object
 	for _, o := range list {

@@ -914,7 +914,19 @@ the filesystem's history goes:
   no source time, one at or after the folder's newest state, or a mirror
   that settles). Before T83-1 such a write rewrote the folder's later
   states inside the write; that is gone, and is why a late write through
-  those drives now fails. In a filesystem
+  those drives now fails. No entry of a directory is dated before the
+  directory's first state F (the earliest date in its `.version`, from
+  the same read that finds T): a change dated D before F (an item older
+  than its folder, made earlier and moved in later; a folder older than
+  its parent, the root included, whose first state is the filesystem's
+  `Settings.Created`) is taken as dated F. A directory with no state
+  after F (one a replay or a first pass is building) takes it on time,
+  dated F, through any drive: no report, nothing to settle, not refused.
+  One with later states takes it as any late change (the report keeps D;
+  the settle plays it from F). The item's own objects keep D either way,
+  and no view of any date differs from what the change and its settle
+  gave before this rule (T83-8), but that nothing shows in a directory
+  before its first state. In a filesystem
   written in a source's time,
   whose items list every version, a change dated no earlier than every
   version its item lists is current with nothing more to read; only one
@@ -945,7 +957,12 @@ cache; nothing is left out but a cut settle's versions and, as in every
 view, a version shadowed by a newer one dated alike; nothing is judged
 late by its date) into a working table in the history cache's SQLite
 file, as entry lifetimes, with a copy as read; the changes are played
-into it by time (those of one time in the order given). A root block
+into it by time (those of one time in the order given). No state is
+written from before the directory's first: a change dated before it is
+played from it, into [first, `Until`) only, still in the order of its own
+date; one whose span is then empty (a row an older build stored, or a
+crashed write's rebuilt row) is settled with nothing to play and is
+reported settled, not refused (a row invalid as stored still is). A root block
 version stored behind a later-dated one (a writer not following the rule
 above) is refused. Before anything is written the settle proves what it
 will write: every state from the earliest change on must be the state

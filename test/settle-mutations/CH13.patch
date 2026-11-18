@@ -1,8 +1,8 @@
 --- a/internal/icbfs/dirchanges.go
 +++ b/internal/icbfs/dirchanges.go
-@@ -218,7 +218,7 @@
- 	if err != nil {
- 		return ctx, err
+@@ -297,7 +297,7 @@
+ 		}
+ 		return ctx, nil
  	}
 -	if !newest.After(at) {
 +	if !newest.After(at) || true {

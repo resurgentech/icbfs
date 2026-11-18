@@ -1,0 +1,11 @@
+--- a/internal/icbfs/dirchanges.go
++++ b/internal/icbfs/dirchanges.go
+@@ -241,7 +241,7 @@
+ 	if err != nil {
+ 		return ctx, err
+ 	}
+-	if first.After(at) && !newest.After(first) {
++	if first.After(at) && !newest.After(first) && false { // mutation: no later state taken as late
+ 		return datedAtFirst(ctx, dirKey, first), nil // LF-36, LF-39: on time, at the first state
+ 	}
+ 	if !newest.After(at) {

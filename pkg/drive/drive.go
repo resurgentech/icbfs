@@ -75,6 +75,18 @@ type LatestStater interface {
 	LatestState(ctx context.Context, item ItemRef) (time.Time, error)
 }
 
+// A StateSpanner is a LatestStater that also says when an item's first
+// state is dated. No entry of a folder is dated before the folder's first
+// state (interloc docs/STATES.md rule 1.6-8): a change in source time
+// before it is dated at it, and, if the folder has no later state (one
+// being built), is on time there: not late, no row, nothing to settle.
+type StateSpanner interface {
+	LatestStater
+	// StateSpan is item's first and newest states' dates, as the drive
+	// dates its writes: zero if nothing of it is dated.
+	StateSpan(ctx context.Context, item ItemRef) (first, latest time.Time, err error)
+}
+
 // A LeftoverDater is a drive that can finish the dating of a write in
 // source time (WithSourceTime) that was killed after it stored its
 // versions and before it dated them: the present has the change, and,

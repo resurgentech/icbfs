@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/resurgentech/icbfs/internal/objstore"
@@ -83,7 +84,7 @@ type refuseLateKey struct{}
 // put the change into the directory's later states (SettleDir) refuses
 // it rather than leave them without it.
 func RefuseLateChanges(ctx context.Context) context.Context {
-	return context.WithValue(ctx, refuseLateKey{}, true)
+	return context.WithValue(withFirstDates(ctx), refuseLateKey{}, true)
 }
 
 // A directory is never written behind its newest state. An entry change
@@ -103,6 +104,19 @@ func RefuseLateChanges(ctx context.Context) context.Context {
 // stored in the order of their dates, and a view of any time, which
 // resolves each object on its own (objstore.AsOf), sees a state the
 // directory really had.
+//
+// Under either, no entry of a directory is dated before the directory's
+// first state, and no state of it is written from before it (interloc
+// docs/STATES.md rule 1.6-8): nothing can be seen in a directory before
+// it existed. A change dated D before the first state F (the earliest
+// date in the directory's .version: an item older than its folder, made
+// earlier and moved in later; a folder older than its parent) is taken
+// as dated F. If the directory has no state after F (one being built),
+// that is on time: written dated F, not refused, not noted
+// (PresentDated), nothing to settle (LF-36, LF-39). If it has later
+// states, the change is late as any other: refused, or written into the
+// present and noted with its own D (LF-37), which SettleDir plays from F
+// on only (ST-29). The item's own objects keep D.
 
 // presentDates is a WithPresentDating context's: the date each directory
 // written behind its newest state was written at.
@@ -117,8 +131,38 @@ type presentDatesKey struct{}
 // time behind its directory's newest state written into the directory's
 // present, dated at that state (see above), and noted (PresentDated).
 func WithPresentDating(ctx context.Context) context.Context {
-	return context.WithValue(ctx, presentDatesKey{}, &presentDates{m: map[string]time.Time{}})
+	return context.WithValue(withFirstDates(ctx), presentDatesKey{}, &presentDates{m: map[string]time.Time{}})
 }
+
+// firstDates is the directories the changes under a context that dates
+// (WithPresentDating, RefuseLateChanges) wrote on time dated at their
+// first state, the change's own date being before it (rule 1.6-8), and
+// that state's time.
+type firstDates struct {
+	mu sync.Mutex
+	m  map[string]time.Time
+}
+
+type firstDatesKey struct{}
+
+// withFirstDates is ctx keeping firstDates, if it doesn't yet.
+func withFirstDates(ctx context.Context) context.Context {
+	if _, ok := ctx.Value(firstDatesKey{}).(*firstDates); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, firstDatesKey{}, &firstDates{m: map[string]time.Time{}})
+}
+
+// firstStateRule is rule 1.6-8 (above) on: off gives the code before it
+// (T83-8), for the tests that compare the two (SetFirstStateRule).
+var firstStateRule atomic.Bool
+
+func init() { firstStateRule.Store(true) }
+
+// SetFirstStateRule turns rule 1.6-8 off (false) or on, and returns what
+// it was: for the tests that build the same folders both ways and
+// compare every view. Nothing but a test calls it.
+func SetFirstStateRule(on bool) bool { return firstStateRule.Swap(on) }
 
 // PresentDated is the directories the changes under ctx wrote dated at
 // their newest state, and that state's time.
@@ -137,23 +181,45 @@ func PresentDated(ctx context.Context) map[string]time.Time {
 }
 
 // presentDate is the date ctx's changes write directory dirKey at, if
-// they write it dated at its newest state.
+// they write it dated at its newest state, or on time at its first
+// (rule 1.6-8).
 func presentDate(ctx context.Context, dirKey string) (time.Time, bool) {
-	p, _ := ctx.Value(presentDatesKey{}).(*presentDates)
-	if p == nil {
-		return time.Time{}, false
+	if p, _ := ctx.Value(presentDatesKey{}).(*presentDates); p != nil {
+		p.mu.Lock()
+		t, ok := p.m[dirKey]
+		p.mu.Unlock()
+		if ok {
+			return t, true
+		}
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	t, ok := p.m[dirKey]
-	return t, ok
+	if fd, _ := ctx.Value(firstDatesKey{}).(*firstDates); fd != nil {
+		fd.mu.Lock()
+		defer fd.mu.Unlock()
+		t, ok := fd.m[dirKey]
+		return t, ok
+	}
+	return time.Time{}, false
+}
+
+// datedAtFirst notes that ctx's changes write directory dirKey on time,
+// dated at its first state first, and is ctx so dated.
+func datedAtFirst(ctx context.Context, dirKey string, first time.Time) context.Context {
+	if fd, _ := ctx.Value(firstDatesKey{}).(*firstDates); fd != nil {
+		fd.mu.Lock()
+		fd.m[dirKey] = first
+		fd.mu.Unlock()
+	}
+	return objstore.WithDeclaredTime(ctx, first)
 }
 
 // lateDating is ctx for an entry change to dirKey: if ctx has a declared
-// time behind the directory's newest state, the change is refused
+// time before the directory's first state and the directory has no later
+// one, ctx dated at the first (on time: rule 1.6-8); else, if the time is
+// behind the directory's newest state, the change is refused
 // (RefuseLateChanges) or ctx is dated at that state (WithPresentDating);
 // otherwise ctx as it is. One read of the directory's .version record,
-// made only under one of the two and a declared time.
+// made only under one of the two and a declared time: both states come
+// from it.
 func (f *Filesystem) lateDating(ctx context.Context, dirKey string, root *objstore.Object) (context.Context, error) {
 	refuse, _ := ctx.Value(refuseLateKey{}).(bool)
 	p, _ := ctx.Value(presentDatesKey{}).(*presentDates)
@@ -171,9 +237,12 @@ func (f *Filesystem) lateDating(ctx context.Context, dirKey string, root *objsto
 	if rec != nil && rec.IsNew(dirKey) {
 		return ctx, nil // made by this change: no state before it
 	}
-	newest, err := f.newestState(ctx, dirKey, rec, root)
+	newest, first, err := f.dirStates(ctx, dirKey, rec, root)
 	if err != nil {
 		return ctx, err
+	}
+	if first.After(at) && !newest.After(first) {
+		return datedAtFirst(ctx, dirKey, first), nil // LF-36, LF-39: on time, at the first state
 	}
 	if !newest.After(at) {
 		return ctx, nil
@@ -194,13 +263,17 @@ func (f *Filesystem) lateDating(ctx context.Context, dirKey string, root *objsto
 // into the present, dated at that state, as a late entry change is, and
 // so the present and every later state have it; it makes no DirChange
 // (nothing for a settle to play: the states before keep the record they
-// had, which a settle keeps too). Otherwise, or with no declared time,
-// ctx as it is: under RefuseLateChanges a late record change is written
-// at its own time and the record that should be current put back on top
-// (RecordDates), as before.
+// had, which a settle keeps too). Under RefuseLateChanges a declared
+// time before the directory's first state is moved to that state (rule
+// 1.6-8: no state of a directory is written from before it); a late
+// record change is then written at its time and the record that should
+// be current put back on top (RecordDates), as before. With no declared
+// time, or under neither, ctx as it is. The .version record read is the
+// one the dating after the write reads (objstore.DatesRead): no added
+// request.
 func (f *Filesystem) recordDating(ctx context.Context, dirKey string) (context.Context, error) {
 	p, _ := ctx.Value(presentDatesKey{}).(*presentDates)
-	if p == nil || !f.sourceTime.Load() {
+	if p == nil && !refusing(ctx) || !f.sourceTime.Load() {
 		return ctx, nil
 	}
 	at, ok := objstore.DeclaredTime(ctx)
@@ -214,9 +287,15 @@ func (f *Filesystem) recordDating(ctx context.Context, dirKey string) (context.C
 	if rec != nil && rec.IsNew(dirKey) {
 		return ctx, nil // made by this change: no state before it
 	}
-	newest, err := f.newestState(ctx, dirKey, rec, nil)
+	newest, first, err := f.dirStates(ctx, dirKey, rec, nil)
 	if err != nil {
 		return ctx, err
+	}
+	if p == nil {
+		if first.After(at) {
+			return objstore.WithDeclaredTime(ctx, first), nil
+		}
+		return ctx, nil
 	}
 	if !newest.After(at) {
 		return ctx, nil
@@ -224,9 +303,21 @@ func (f *Filesystem) recordDating(ctx context.Context, dirKey string) (context.C
 	return objstore.WithDeclaredTime(ctx, newest), nil
 }
 
-// newestState is the time of directory dirKey's newest state: the latest
-// date in its .version record, what rec (if set) recorded of this
-// operation's own writes left out. The rule is RecordDates': a directory
+// refusing reports whether ctx's late changes are refused
+// (RefuseLateChanges) and rule 1.6-8 is on.
+func refusing(ctx context.Context) bool {
+	refuse, _ := ctx.Value(refuseLateKey{}).(bool)
+	return refuse && firstStateRule.Load()
+}
+
+// dirStates is the times of directory dirKey's newest state and of its
+// first: the latest and the earliest date in its .version record, what
+// rec (if set) recorded of this operation's own writes left out. The
+// first is zero if the record lists nothing else, or rule 1.6-8 is off.
+// A directory's key is its own for good: a move or a rename changes its
+// parents' entries (and adds a version of its .metadata, later), and a
+// trashed and restored directory keeps its key and its record, so its
+// first state stays where it was. The rule is RecordDates': a directory
 // changed behind its latest state is one whose table dates a version
 // after the change. The record is read through ctx's objstore.DatesRead,
 // so the dating after the write (RecordDates) reads it no more: a dated
@@ -241,7 +332,7 @@ func (f *Filesystem) recordDating(ctx context.Context, dirKey string) (context.C
 // root, if set, is the root block's version the change read: one no record
 // lists (an undated write's, or a write's killed before it was dated)
 // counts at its store's second, so the change is never stored behind it.
-func (f *Filesystem) newestState(ctx context.Context, dirKey string, rec *objstore.Recorder, root *objstore.Object) (time.Time, error) {
+func (f *Filesystem) dirStates(ctx context.Context, dirKey string, rec *objstore.Recorder, root *objstore.Object) (newest, first time.Time, err error) {
 	ours := map[string]bool{}
 	if rec != nil {
 		for _, w := range rec.Written() {
@@ -250,13 +341,21 @@ func (f *Filesystem) newestState(ctx context.Context, dirKey string, rec *objsto
 	}
 	dates, _, err := objstore.StoreDatesRead(undeclared(ctx), f.store, dirKey)
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, time.Time{}, err
 	}
-	var newest time.Time
 	for id, t := range dates {
-		if !ours[id] && t.After(newest) {
+		if ours[id] {
+			continue
+		}
+		if t.After(newest) {
 			newest = t
 		}
+		if first.IsZero() || t.Before(first) {
+			first = t
+		}
+	}
+	if !firstStateRule.Load() {
+		first = time.Time{}
 	}
 	if root != nil && !root.Deleted && !ours[root.VersionID] {
 		if _, listed := dates[root.VersionID]; !listed {
@@ -271,7 +370,7 @@ func (f *Filesystem) newestState(ctx context.Context, dirKey string, rec *objsto
 			}
 		}
 	}
-	return newest, nil
+	return newest, first, nil
 }
 
 // noteDirChange records an entry change made under ctx, if it has a

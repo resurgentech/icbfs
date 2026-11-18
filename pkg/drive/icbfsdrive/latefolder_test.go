@@ -42,8 +42,16 @@ func TestLateFolderWithoutItsTime(t *testing.T) {
 	store := &failOnce{Store: miniotest.Store(t)}
 	d := newDriveWith(t, store, icbfs.Settings{Name: "latefolder", Size: 1 << 30, RootMode: 0o777, Created: year(2015)}, Config{DeferLateFolders: true})
 	ctx := system()
-	if _, err := d.Write(at(ctx, 2022), "/dir/new.txt", strings.NewReader("new"), drive.Condition{}, drive.WriteOptions{Parents: true}); err != nil {
-		t.Fatal(err)
+	// /dir made in 2020, a later state in 2022: a file of 2021 is late
+	// (one of 2019, older than the folder, would be on time at its first
+	// state while it had no later one: T83-8, LF-36).
+	for _, w := range []struct {
+		y int
+		p string
+	}{{2020, "/dir/first.txt"}, {2022, "/dir/new.txt"}} {
+		if _, err := d.Write(at(ctx, w.y), w.p, strings.NewReader(w.p), drive.Condition{}, drive.WriteOptions{Parents: true}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	dir, err := d.Stat(ctx, drive.ByPath("/dir"), drive.At{})
 	if err != nil {
@@ -58,8 +66,8 @@ func TestLateFolderWithoutItsTime(t *testing.T) {
 	if _, err := settleAt(d, ctx, late.Take(), drive.SettleOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if got := names(t, d, "/dir", year(2021).AddDate(0, 6, 0)); got != "old.txt" {
-		t.Fatalf("/dir as of mid-2021: %q, want old.txt", got)
+	if got := sortedAt(t, d, "/dir", year(2021).AddDate(0, 6, 0)); got != "first.txt,old.txt" {
+		t.Fatalf("/dir as of mid-2021: %q, want first.txt,old.txt", got)
 	}
 }
 
