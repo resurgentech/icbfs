@@ -166,6 +166,17 @@ func FilesystemInfo(ctx context.Context, store Store, name string) (Info, error)
 	return core.DescribeFilesystem(ctx, store, name)
 }
 
+// FilesystemUID is the filesystem's own id (Info.UID): written once when
+// it is made, and shared with no other filesystem, not even one erased
+// and made again under the same name. One made before icbfs wrote it is
+// given one here, once, by a write conditional on the master block's
+// version (a second caller reads the first's); a store that refuses the
+// write gives its error. One read of the master block when the id is
+// there. ErrNotFound if there is no filesystem called name.
+func FilesystemUID(ctx context.Context, store Store, name string) (string, error) {
+	return core.FilesystemUID(ctx, store, name)
+}
+
 // DescribeFilesystem is one filesystem's settings, with its disk usage:
 // the usage lists every current object the filesystem owns (one listing
 // request per thousand objects, summed a page at a time), so it takes

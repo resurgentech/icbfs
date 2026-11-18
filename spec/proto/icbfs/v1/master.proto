@@ -41,6 +41,15 @@ message FilesystemEntry {
   // or at its first change made under a source time. Every item's
   // .version then lists all versions of its content and .metadata.
   bool source_time = 9;
+  // uid: the filesystem's own id, 32 lowercase hex digits from 16 random
+  // bytes, written once when the filesystem is registered and never
+  // changed: no two filesystems share one, not even one pruned or erased
+  // and made again under the same name in the same slot (its id above is
+  // the slot's position, and is reused). A filesystem registered before
+  // this field has none until FilesystemUID gives it one, once. Code that
+  // predates the field keeps it when it rewrites the master block: an
+  // unknown field survives a decode and encode.
+  string uid = 10;
 }
 
 // MasterBlock is the body of the one, fixed, well-known master-block

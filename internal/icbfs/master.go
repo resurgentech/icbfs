@@ -3,6 +3,8 @@ package icbfs
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -126,7 +128,11 @@ func registerFilesystem(ctx context.Context, store objstore.Store, entry *pb.Fil
 			idx = len(mb.Filesystems)
 			mb.Filesystems = append(mb.Filesystems, &pb.FilesystemEntry{})
 		}
-		created := &pb.FilesystemEntry{Name: name, Size: entry.Size, PrimaryWindows: entry.PrimaryWindows, MaxFileSize: entry.MaxFileSize, DirBlockEntries: entry.DirBlockEntries, Created: entry.Created, FormatVersion: FormatVersion}
+		uid, err := newFilesystemUID()
+		if err != nil {
+			return "", nil, false, err
+		}
+		created := &pb.FilesystemEntry{Name: name, Size: entry.Size, PrimaryWindows: entry.PrimaryWindows, MaxFileSize: entry.MaxFileSize, DirBlockEntries: entry.DirBlockEntries, Created: entry.Created, FormatVersion: FormatVersion, Uid: uid}
 		mb.Filesystems[idx] = created
 
 		data, err := encodeMaster(mb)
@@ -143,6 +149,66 @@ func registerFilesystem(ctx context.Context, store objstore.Store, entry *pb.Fil
 		return fsID(idx), created, false, nil
 	}
 	return "", nil, false, fmt.Errorf("register filesystem %q: exceeded %d retries", name, maxTreeRetries)
+}
+
+// newFilesystemUID is a new filesystem's own id (FilesystemEntry.uid):
+// 16 random bytes as 32 lowercase hex digits.
+func newFilesystemUID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("making the filesystem's id: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
+}
+
+// FilesystemUID is the filesystem name's own id (Info.UID), giving it one
+// first if it was registered before icbfs wrote one (interloc
+// docs/STATES.md DB-18). The one write is conditional on the version of
+// the master block it read: if anyone changed the block meanwhile, it is
+// read again and the id another caller gave is taken; the write is never
+// made over a block it did not read. A store that refuses the write (one
+// opened read-only) gives its error, never an id that is not stored.
+// ErrNotFound if there is no filesystem called name.
+func FilesystemUID(ctx context.Context, store objstore.Store, name string) (string, error) {
+	for attempt := 0; attempt < maxTreeRetries; attempt++ {
+		retryPause(ctx, attempt)
+		mb, obj, err := readMaster(ctx, store)
+		if err != nil {
+			if errors.Is(mapNotFound(err), ErrNotFound) {
+				return "", fmt.Errorf("no filesystem %q in this bucket: %w", name, ErrNotFound)
+			}
+			return "", err
+		}
+		var e *pb.FilesystemEntry
+		for _, x := range mb.Filesystems {
+			if x.Name == name {
+				e = x
+				break
+			}
+		}
+		if e == nil {
+			return "", fmt.Errorf("no filesystem %q in this bucket: %w", name, ErrNotFound)
+		}
+		if e.Uid != "" {
+			return e.Uid, nil
+		}
+		if e.Uid, err = newFilesystemUID(); err != nil {
+			return "", err
+		}
+		data, err := encodeMaster(mb)
+		if err != nil {
+			return "", err
+		}
+		_, err = store.Put(ctx, masterBlockKey, bytes.NewReader(data), nil, obj.ETag)
+		if objstore.IsPreconditionFailed(err) {
+			continue // changed since it was read: read it again
+		}
+		if err != nil {
+			return "", fmt.Errorf("giving filesystem %q its id: %w", name, err)
+		}
+		return e.Uid, nil
+	}
+	return "", fmt.Errorf("giving filesystem %q its id: exceeded %d retries", name, maxTreeRetries)
 }
 
 // MaxFilesystems is how many filesystems one bucket holds at once: as

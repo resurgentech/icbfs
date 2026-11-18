@@ -475,7 +475,7 @@ func printInfos(all []icbfs.Info, asJSON bool) {
 		return
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tID\tMODE\tSIZE\tMAX FILE\tARCHIVED\tCREATED")
+	fmt.Fprintln(w, "NAME\tID\tMODE\tSIZE\tMAX FILE\tARCHIVED\tCREATED\tUID")
 	for _, fs := range all {
 		mode := "posix"
 		if fs.PrimaryWindows {
@@ -485,7 +485,7 @@ func printInfos(all []icbfs.Info, asJSON bool) {
 		if !fs.Created.IsZero() {
 			created = fs.Created.Format(time.RFC3339)
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%v\t%s\n", fs.Name, fs.ID, mode, fs.Size, fs.MaxFileSize, fs.Archived, created)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%v\t%s\t%s\n", fs.Name, fs.ID, mode, fs.Size, fs.MaxFileSize, fs.Archived, created, fs.UID)
 	}
 	w.Flush()
 }

@@ -43,8 +43,12 @@ type Settings struct {
 
 // Info describes one filesystem in a bucket.
 type Info struct {
-	Name            string
-	ID              string
+	Name string
+	ID   string // the slot's position: reused after a prune
+	// UID is the filesystem's own id, written once when it is made and
+	// shared with no other filesystem (FilesystemEntry.uid); "" for one
+	// made before icbfs wrote it, until FilesystemUID gives it one.
+	UID             string
 	Size            uint64
 	PrimaryWindows  bool
 	MaxFileSize     int64
@@ -214,7 +218,7 @@ func DescribeFilesystem(ctx context.Context, store objstore.Store, name string) 
 
 func infoOf(id string, e *pb.FilesystemEntry) Info {
 	info := Info{Name: e.Name, ID: id, Size: e.Size, PrimaryWindows: e.PrimaryWindows, Archived: e.Archived, MaxFileSize: DefaultMaxFileSize,
-		DirBlockEntries: dirBlockEntries(e), FormatVersion: int(e.FormatVersion)}
+		DirBlockEntries: dirBlockEntries(e), FormatVersion: int(e.FormatVersion), UID: e.Uid}
 	if e.MaxFileSize != 0 && e.MaxFileSize <= DefaultMaxFileSize {
 		info.MaxFileSize = int64(e.MaxFileSize)
 	}
