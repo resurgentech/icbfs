@@ -42,7 +42,34 @@ just test                     # go test ./... (needs Docker; the FUSE tests need
 just test-short               # skips the code-generator check
 just test-ci                  # with -race, as CI does
 just test-windows             # the packages that run on Windows without Docker
+just ci                       # the everyday gate: checks, build, test-ci
+just pre-merge                # ci, then every long test ci leaves out, then the rows the tests prove
+just rows                     # the docs/STATES.md rows (interloc) whose tests are here
 ```
+
+### Which gate when
+
+| recipe | what it runs | how long (lab runner) | when |
+|---|---|---|---|
+| `just ci` | gofmt, `go mod tidy`, vet (Linux and Windows), build, `test-ci`: every package under `-race`, `pkg/drive/icbfsdrive` in two processes split by test name | 6 min (2026-11-17); up to 11 when the lab host is busy | while working, and before a commit |
+| `just pre-merge` | `ci`; then `test-erase-full` (`EraseAll` at 100,000 entries on S3 and Azure fakes); then under `-race` with `ICBFS_PRE_MERGE=1`: `TestTreeMemory` (a walk and a hash rebuild over 30,000 items hold one folder), `TestZZFanout` at 2,000 files; then `TestMountSmallWritesAreQuick` alone (a timing test); then `just rows` | `ci` and about 10 min more (erase 2.5, the two `-race` tests 7, the timing test seconds) | once, before a merge that touches icbfs |
+| the VM suites below | pjdfstest, xfstests, several machines, winfsp-tests, sync | hours | before a release, or a change to the mount |
+
+A test that takes more than a few seconds under `-race` does not go in
+`ci` as it is: it reads `ICBFS_PRE_MERGE` and either runs a short case
+in `ci` (say which, in its comment) and its full size in `pre-merge`, or
+skips in `ci` and is added to the `pre-merge` recipe by name. A timing
+test runs only in `pre-merge`, alone.
+
+A test that proves a row of interloc's `docs/STATES.md` carries the
+row's id at the start of its name (`TestLF4_KilledBetweenTheWriteAndItsRows`,
+`TestPL2_PL3_…` for two); `just rows`, the last step of `pre-merge`, lists
+them and the rows they prove.
+
+On Ubuntu 25.04 and later the AppArmor profile of `fusermount3` allows
+FUSE mounts only under `$HOME`, `/mnt`, `/media`, `/run/user` and `/tmp`:
+with `TMPDIR` elsewhere (`/var/tmp`, say) `internal/fuseserver`'s tests
+fail at the mount ("fusermount3: mount failed: Permission denied").
 
 CI runs `just ci` on every push to `main` and every pull request, on GitHub's Linux
 runners (Docker and FUSE available), and `just build-windows` and
