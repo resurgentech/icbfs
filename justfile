@@ -39,8 +39,14 @@ test-short *args:
 
 # The -timeout is explicit because Go cuts a test package at 10 minutes by default, and internal/icbfs takes 5 on a quiet machine.
 # The Go tests CI runs, with the race detector
+# pkg/drive/icbfsdrive (about 23 minutes under -race) runs as two processes: its settle tests, then every other test (-skip, the same pattern), so no test is left out.
 test-ci:
-    go test -race -timeout 25m ./...
+    go test -race -timeout 25m $(go list ./... | grep -v '/pkg/drive/icbfsdrive$')
+    go test -race -timeout 25m -run '{{drive_settle_tests}}' ./pkg/drive/icbfsdrive
+    go test -race -timeout 25m -skip '{{drive_settle_tests}}' ./pkg/drive/icbfsdrive
+
+# pkg/drive/icbfsdrive's settle tests, by name: test-ci's first half of that package.
+drive_settle_tests := '^Test(Settle|ST[0-9]|CH[0-9]|LF[0-9]|RV4|Model|FR_|Bound16|Rerun|Undated|Killed|Late|Deferred|TwoLate)'
 
 # The Go tests that run on Windows (no Docker there)
 test-windows:
