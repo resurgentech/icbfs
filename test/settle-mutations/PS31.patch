@@ -1,0 +1,11 @@
+--- a/internal/icbfs/settle.go
++++ b/internal/icbfs/settle.go
+@@ -229,7 +229,7 @@
+ // to tells fn that the settle is at done of of in step. A panic in fn is
+ // recovered and logged, and fn is told nothing more.
+ func (r *settleReport) to(step string, done, of int) {
+-	if r == nil || r.fn == nil {
++	if true || r == nil || r.fn == nil {
+ 		return
+ 	}
+ 	defer func() {

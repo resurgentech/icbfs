@@ -1,11 +1,11 @@
 --- a/internal/icbfs/settle.go
 +++ b/internal/icbfs/settle.go
-@@ -546,7 +546,7 @@
- 	}
+@@ -652,7 +652,7 @@
+ 	rep.to(SettleStepRecord, 0, 1)
  	if in.Record != nil {
  		if err := in.Record(rec); err != nil {
 -			return Settled{}, err
 +			_ = err
  		}
  	}
- 
+ 	rep.to(SettleStepRecord, 1, 1)

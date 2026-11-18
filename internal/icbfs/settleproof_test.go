@@ -102,7 +102,7 @@ func TestSettleProof(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			tab := build(t, c.play)
-			err := f.settleProof(ctx, tab, c.changes, yr(2021), c.present, Attr{})
+			err := f.settleProof(ctx, tab, c.changes, yr(2021), c.present, Attr{}, nil)
 			if c.ok && err != nil {
 				t.Fatalf("refused: %v", err)
 			}

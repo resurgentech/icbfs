@@ -271,6 +271,79 @@ type SettleOptions struct {
 	// (a late move's two folders): each proved before either is written.
 	// Not with Cut (ErrInvalid).
 	ProveOnly bool
+	// Progress, if set, is told each time the settle moves, so that a
+	// caller can show how far it is and know it is at work: each state read
+	// as it builds, each change played, each state proved, each state and
+	// block looked at for what to write and erase, the record, each state's
+	// blocks stored, each state written, the commit, each version erased,
+	// the end of each part; and before and after each store call that can
+	// run long (a history's listing, a block's whole erase), never inside
+	// one: a single store call carries no report however long it takes. A
+	// rerun with Cut reports the same way.
+	//
+	// It is a plain call, on the settle's goroutine, while the drive holds
+	// its settle lock: it returns at once, makes no request and does not
+	// call back into the drive (one that blocks holds the settle; one that
+	// calls into the drive may deadlock it). Every report is made before
+	// SettleFolder returns. A panic in it is recovered and logged once, and
+	// that settle makes no further report; the settle carries on and its
+	// result is as without it. nil costs nothing.
+	Progress func(SettleProgress)
+}
+
+// The steps a settle reports (SettleProgress.Step), in the order it runs
+// them in each part. SettlePlan is the reads between the proof and the
+// record (what to write, what to erase).
+const (
+	SettleBuild     = "build"
+	SettlePlay      = "play"
+	SettleProve     = "prove"
+	SettlePlan      = "plan"
+	SettleRecordIt  = "record"
+	SettleNewBlocks = "new blocks"
+	SettleWindow    = "window"
+	SettleCommit    = "commit"
+	SettleErase     = "erase"
+	SettleDone      = "done"
+)
+
+// SettleProgress is where a settle stands (SettleOptions.Progress).
+type SettleProgress struct {
+	// Part is the part being settled (from 1) of Parts, the parts of at
+	// most the drive's part size the call settles its changes in.
+	Part, Parts int
+	Step        string // a Settle* step
+	// Done and Of are the step's units done and how many it has (Of 0:
+	// not known): states read (build), changes played (play), states
+	// proved (prove), states and blocks looked at (plan), states whose
+	// blocks are stored, then .version records merged (new blocks),
+	// states written (window), versions erased (erase).
+	Done, Of int
+	// Written is the states the part has written, of ToWrite, the states
+	// it writes (0 until its plan knows them).
+	Written, ToWrite int
+}
+
+// String is p in a few words, for a status: "part 1 of 1: window, 340 of
+// 1001 states written".
+func (p SettleProgress) String() string {
+	unit := map[string]string{
+		SettleBuild: "states read", SettlePlay: "changes played", SettleProve: "states proved",
+		SettlePlan: "looked at", SettleNewBlocks: "stored", SettleWindow: "states written",
+		SettleErase: "versions erased",
+	}[p.Step]
+	s := fmt.Sprintf("part %d of %d: %s", p.Part, p.Parts, p.Step)
+	switch {
+	case unit == "":
+	case p.Of > 0:
+		s += fmt.Sprintf(", %d of %d %s", p.Done, p.Of, unit)
+	default:
+		s += fmt.Sprintf(", %d %s", p.Done, unit)
+	}
+	if p.ToWrite > 0 && p.Step != SettleWindow {
+		s += fmt.Sprintf(" (%d of %d states written)", p.Written, p.ToWrite)
+	}
+	return s
 }
 
 // SettleRecord is what a settle is about to change, for its caller to

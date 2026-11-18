@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -150,12 +151,14 @@ func (d *Drive) SettleFolder(ctx context.Context, changes []drive.LateChange, op
 	}
 	var s drive.Settled
 	settled := 0 // of sorted, the parts that finished
+	parts := (len(sorted) + MaxSettleChanges - 1) / MaxSettleChanges
+	report := settleReporter(opts.Progress, parts)
 	for start := 0; start < len(sorted); start += MaxSettleChanges {
 		if err = ctx.Err(); err != nil {
 			break
 		}
 		end := min(start+MaxSettleChanges, len(sorted))
-		ps, perr := d.settleDir(ctx, folder, sorted[start:end], opts, cut)
+		ps, perr := d.settleDir(ctx, folder, sorted[start:end], opts, cut, report(start/MaxSettleChanges+1))
 		s.Read, s.Written, s.Erased = s.Read+ps.Read, s.Written+ps.Written, s.Erased+ps.Erased
 		cut = nil
 		if err = perr; err != nil {
@@ -227,6 +230,31 @@ func (d *Drive) resolveToSettle(ctx context.Context, folder, path string) (*node
 	return nil, err
 }
 
+// settleReporter is fn (SettleOptions.Progress) for each part of a call
+// of parts parts: report(part) is that part's icbfs.SettleInput.Progress,
+// nil when fn is. A panic in fn is recovered and logged, and no part of
+// the call reports again (PS-31).
+func settleReporter(fn func(drive.SettleProgress), parts int) func(part int) func(icbfs.SettleProgress) {
+	if fn == nil {
+		return func(int) func(icbfs.SettleProgress) { return nil }
+	}
+	dead := false
+	return func(part int) func(icbfs.SettleProgress) {
+		return func(p icbfs.SettleProgress) {
+			if dead {
+				return
+			}
+			defer func() {
+				if r := recover(); r != nil {
+					dead = true
+					log.Printf("icbfs: a settle's progress function panicked (%v); the settle goes on without reporting", r)
+				}
+			}()
+			fn(drive.SettleProgress{Part: part, Parts: parts, Step: p.Step, Done: p.Done, Of: p.Of, Written: p.Written, ToWrite: p.ToWrite})
+		}
+	}
+}
+
 // lateChanges is changes as a write reports them: its changes to each
 // folder numbered in order from 0.
 func lateChanges(changes []icbfs.DirChange) []drive.LateChange {
@@ -271,7 +299,7 @@ type swapStore struct{ objstore.Store }
 // holds the views' histories. When it's done, the views forget the
 // directory's keys and keep what it wrote. opts is the caller's (its
 // Record, Done and ProveOnly), cut the record of a cut settle.
-func (d *Drive) settleDir(ctx context.Context, dirKey string, changes []icbfs.DirChange, opts drive.SettleOptions, cut *icbfs.SettleRecord) (drive.Settled, error) {
+func (d *Drive) settleDir(ctx context.Context, dirKey string, changes []icbfs.DirChange, opts drive.SettleOptions, cut *icbfs.SettleRecord, progress func(icbfs.SettleProgress)) (drive.Settled, error) {
 	record, done := opts.Record, opts.Done
 	d.settle.mu.Lock()
 	defer d.settle.mu.Unlock()
@@ -327,6 +355,7 @@ func (d *Drive) settleDir(ctx context.Context, dirKey string, changes []icbfs.Di
 		},
 		Keep:      cache.Keep,
 		ProveOnly: opts.ProveOnly,
+		Progress:  progress,
 	}
 	if record != nil {
 		in.Record = func(r icbfs.SettleRecord) error { return record(toDrive(r)) }
