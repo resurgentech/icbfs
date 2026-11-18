@@ -151,17 +151,11 @@ func (f *Filesystem) Open(ctx context.Context, key string) (*OpenFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The cache keeps the file's bytes under key and the stub's ETag when
-	// it's a stub: the ETag names the content key's version, whatever its
-	// bytes are.
-	fetch := func(ctx context.Context) (io.ReadCloser, error) {
-		body, _, err := GetContent(ctx, f.store, key)
-		if err != nil {
-			return nil, mapNotFound(err)
-		}
-		return body, nil
-	}
-	file, size, err := f.cache.seedScratch(ctx, key, head.ETag, fetch)
+	// The cache keeps the file's bytes under key and the version the Head
+	// named (a stub's own version when it's a stub: it names its target's
+	// bytes for good), and the fetch reads exactly that version, never
+	// the key's current one, which may have moved since the Head.
+	file, size, err := f.cache.seedScratch(ctx, key, head.VersionID, f.fetchVersion(key, head.VersionID))
 	if err != nil {
 		return nil, err
 	}
@@ -579,14 +573,7 @@ func (c *content) rebaseLocked(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	fetch := func(ctx context.Context) (io.ReadCloser, error) {
-		body, _, err := GetContent(ctx, c.fsys.store, c.key)
-		if err != nil {
-			return nil, mapNotFound(err)
-		}
-		return body, nil
-	}
-	fresh, size, err := c.fsys.cache.seedScratch(ctx, c.key, head.ETag, fetch)
+	fresh, size, err := c.fsys.cache.seedScratch(ctx, c.key, head.VersionID, c.fsys.fetchVersion(c.key, head.VersionID))
 	if err != nil {
 		return err
 	}
@@ -748,7 +735,7 @@ func (c *content) uploadLocked(ctx context.Context) (Attr, error) {
 	c.touched.clear()
 	c.dirty = false
 	c.truncated = false
-	c.updateSharedCacheLocked(obj.ETag)
+	c.updateSharedCacheLocked(obj.VersionID)
 	if t := c.setMtime; !t.IsZero() {
 		c.setMtime = time.Time{}
 		return c.fsys.updateFileMetadata(ctx, c.key, func(a *Attr) {
@@ -807,11 +794,31 @@ func (c *content) lostBaseLocked(err error) bool {
 // updateSharedCacheLocked puts what was just written in the shared cache,
 // so the next Open of this key needn't fetch it. Best effort: a failure
 // only costs that Open a fetch.
-func (c *content) updateSharedCacheLocked(newETag string) {
+func (c *content) updateSharedCacheLocked(newVersion string) {
 	if c.file == nil {
 		return
 	}
-	_ = c.fsys.cache.updateSharedFrom(c.key, newETag, c.file, c.size)
+	_ = c.fsys.cache.updateSharedFrom(c.key, newVersion, c.file, c.size)
+}
+
+// fetchVersion is the read cache's fetch of key's content at store
+// version version (through a stub): exactly that version, so the bytes
+// cached under it are its own. With no version (a store that keeps none)
+// it is the current content, which is then not cached.
+func (f *Filesystem) fetchVersion(key, version string) func(ctx context.Context) (io.ReadCloser, error) {
+	return func(ctx context.Context) (io.ReadCloser, error) {
+		var body io.ReadCloser
+		var err error
+		if version != "" {
+			body, _, err = GetContentVersion(ctx, f.store, key, version)
+		} else {
+			body, _, err = GetContent(ctx, f.store, key)
+		}
+		if err != nil {
+			return nil, mapNotFound(err)
+		}
+		return body, nil
+	}
 }
 
 // TryAcquireLockRange, TryAcquireSharedLockRange, AcquireLockRange,

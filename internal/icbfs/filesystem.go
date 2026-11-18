@@ -19,6 +19,7 @@ import (
 	"github.com/resurgentech/icbfs/internal/notify"
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/internal/pb"
+	"github.com/resurgentech/icbfs/pkg/readcache"
 )
 
 // maxTreeRetries bounds the retry loop of the tree and metadata helpers
@@ -158,11 +159,25 @@ func (f *Filesystem) ownHolder(holder string) bool {
 // SetCacheOptions sets the local disk cache's directory and size budget
 // (the mounts' -cache-dir and -cache-size). Without it, New's default is a
 // fresh temp directory and 512 MiB. It affects only files opened afterward.
+//
+// The directory keeps its entries across restarts (pkg/readcache): Close
+// lets go of this process's part of it and leaves the entries.
 func (f *Filesystem) SetCacheOptions(dir string, maxBytes int64) {
 	if f.ownCache {
 		_ = f.cache.close() // nothing was opened yet: nothing to remove
 	}
-	f.cache, f.ownCache = newDiskCache(dir, maxBytes), false
+	f.cache, f.ownCache = newDiskCache(dir, maxBytes), true
+}
+
+// SetReadCache makes rc, a cache the caller opened and closes, this
+// Filesystem's read cache: several Filesystems (the drives of one
+// program) share one directory and one bound. It affects only files
+// opened afterward; Close leaves rc open.
+func (f *Filesystem) SetReadCache(rc *readcache.Cache) {
+	if f.ownCache {
+		_ = f.cache.close()
+	}
+	f.cache, f.ownCache = &diskCache{dir: rc.Dir(), maxBytes: rc.MaxBytes(), rc: rc}, false
 }
 
 // EnableLocking turns locking on for this Filesystem; it's off by default
@@ -379,8 +394,8 @@ func (f *Filesystem) BootstrapViewOf(ctx context.Context, live *Filesystem) erro
 	f.sourceTime.Store(live.sourceTime.Load())
 	f.maxFileSize, f.dirBlockEntries = live.maxFileSize, live.dirBlockEntries
 	// A view reads through the live Filesystem's disk cache (entries are
-	// by key and ETag, so a past version is never taken for the present
-	// one): views make no cache directory of their own, and the live
+	// by key and store version id, so a past version is never taken for
+	// the present one): views make no cache directory of their own, and the live
 	// one's Close removes the one there is (T82-16).
 	if f.cache != live.cache {
 		if f.ownCache {
@@ -3050,9 +3065,10 @@ func mapNotFound(err error) error {
 
 // Close lets go of what the Filesystem holds on this machine: its own
 // cache directory (made by its first open file in the temp directory) is
-// removed (T82-16). A directory given with SetCacheOptions is not
-// touched, nor is a cache shared from the live Filesystem a view of the
-// past was made from (BootstrapViewOf). The caller closes the open files
+// removed (T82-16). A directory given with SetCacheOptions keeps its
+// entries (only this process's working part of it goes), and one given
+// with SetReadCache is the caller's to close, as is a cache shared from
+// the live Filesystem a view of the past was made from (BootstrapViewOf). The caller closes the open files
 // first: nothing may be in flight on a Filesystem when it is closed.
 // After Close an open needing the disk cache fails; Close again does
 // nothing.

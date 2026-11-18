@@ -19,6 +19,7 @@ import (
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/pkg/drive"
+	"github.com/resurgentech/icbfs/pkg/readcache"
 )
 
 // Config says which drive: Filesystem in Store, from its directory Root
@@ -42,6 +43,13 @@ type Config struct {
 	// CacheDir holds the drive's temporary files ("" for the temp
 	// directory).
 	CacheDir string
+	// ReadCache, if set, is the read cache of file contents (pkg/readcache)
+	// the drive's Read goes through, now and as of a time: a version
+	// read once is not fetched again while it is in the cache. Entries
+	// are by key and store version id, so one cache serves several
+	// drives, of one filesystem or of several. The caller opens and
+	// closes it; the drive's own files opened for a write use it too.
+	ReadCache *readcache.Cache
 	// ReadOnly makes every change through this drive fail with
 	// drive.ErrReadOnly, whatever the actor's profile and the item's
 	// permissions: a host serving a filesystem something else writes (a
@@ -153,6 +161,9 @@ func New(ctx context.Context, cfg Config) (*Drive, error) {
 		return nil, mapErr(err)
 	}
 	fsys.EnableLocking(!cfg.NoLocking)
+	if cfg.ReadCache != nil {
+		fsys.SetReadCache(cfg.ReadCache)
+	}
 	d := &Drive{cfg: cfg, fs: fsys, windows: fsys.PrimaryWindows(), dirs: dirs}
 	d.root = cleanPath(cfg.Root)
 	d.views.d = d

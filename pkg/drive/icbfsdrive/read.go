@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -338,9 +339,30 @@ func (d *Drive) Read(ctx context.Context, ref drive.ItemRef, at drive.At, rng *d
 	// Through a stub: its target's bytes.
 	store := fsys.Store()
 	var body io.ReadCloser
-	if it.Version != nil && it.Version.ID != "" {
+	switch {
+	case it.Version != nil && it.Version.ID != "" && d.cfg.ReadCache != nil:
+		// Through the read cache: this version's bytes, fetched once.
+		version := it.Version.ID
+		var f *os.File
+		var n int64
+		f, n, err = d.cfg.ReadCache.Get(ctx, it.ID, version, -1, func(ctx context.Context) (io.ReadCloser, error) {
+			b, _, err := icbfs.GetContentVersion(ctx, store, it.ID, version)
+			return b, err
+		})
+		if err == nil && rng != nil && rng.Offset > 0 {
+			if rng.Offset > n {
+				f.Close()
+				return nil, drive.Item{}, fmt.Errorf("range past the end: %w", drive.ErrInvalid)
+			}
+			if _, err = f.Seek(rng.Offset, io.SeekStart); err != nil {
+				f.Close()
+			}
+			rng = &drive.Range{Length: rng.Length}
+		}
+		body = f
+	case it.Version != nil && it.Version.ID != "":
 		body, _, err = icbfs.GetContentVersion(ctx, store, it.ID, it.Version.ID)
-	} else {
+	default:
 		body, _, err = icbfs.GetContent(ctx, store, it.ID)
 	}
 	if err != nil {

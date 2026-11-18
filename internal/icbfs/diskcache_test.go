@@ -8,10 +8,11 @@ import (
 
 // TestDiskCacheSkipsContentBiggerThanItsBudget: caching a file bigger
 // than the whole cache would only evict everything else and then itself;
-// it's skipped, and an older entry for the same key is dropped.
+// it's skipped. An entry of another version of the same key stays: its
+// bytes are still exactly that version's (pkg/readcache keys by version).
 func TestDiskCacheSkipsContentBiggerThanItsBudget(t *testing.T) {
-	dir := t.TempDir()
-	c := newDiskCache(dir, 10)
+	c := newDiskCache(filepath.Join(t.TempDir(), "c"), 10)
+	t.Cleanup(func() { c.close() })
 	write := func(name string, n int) *os.File {
 		f, err := os.Create(filepath.Join(t.TempDir(), name))
 		if err != nil {
@@ -31,7 +32,7 @@ func TestDiskCacheSkipsContentBiggerThanItsBudget(t *testing.T) {
 	if err := c.updateSharedFrom("k", "v1", small, 8); err != nil {
 		t.Fatalf("cache 8 bytes: %v", err)
 	}
-	if !c.validLocked("k", "v1") {
+	if !c.rc.Has("k", "v1") {
 		t.Fatal("8-byte entry wasn't cached")
 	}
 
@@ -40,11 +41,11 @@ func TestDiskCacheSkipsContentBiggerThanItsBudget(t *testing.T) {
 	if err := c.updateSharedFrom("k", "v2", big, 20); err != nil {
 		t.Fatalf("cache 20 bytes: %v", err)
 	}
-	if c.validLocked("k", "v1") || c.validLocked("k", "v2") {
-		t.Fatal("an entry for k survived content bigger than the cache")
+	if c.rc.Has("k", "v2") {
+		t.Fatal("content bigger than the cache was cached")
 	}
-	if c.totalBytes != 0 {
-		t.Fatalf("cache holds %d bytes, want 0", c.totalBytes)
+	if !c.rc.Has("k", "v1") || c.rc.Stats().Bytes != 8 {
+		t.Fatalf("the 8-byte entry of v1: %v, %d bytes", c.rc.Has("k", "v1"), c.rc.Stats().Bytes)
 	}
 	if pos, _ := big.Seek(0, 1); pos != 0 {
 		t.Fatalf("content left at offset %d, want 0", pos)
