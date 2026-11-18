@@ -51,7 +51,7 @@ just rows                     # the docs/STATES.md rows (interloc) whose tests a
 
 | recipe | what it runs | how long (lab runner) | when |
 |---|---|---|---|
-| `just ci` | gofmt, `go mod tidy`, vet (Linux and Windows), build, `test-ci`: every package under `-race`, `pkg/drive/icbfsdrive` in two processes split by test name, checked to have run each test once | 6 min (2026-11-17); up to 11 when the lab host is busy | while working, and before a commit |
+| `just ci` | gofmt, `go mod tidy`, vet (Linux and Windows), build, `test-ci`: every package under `-race`, `pkg/drive/icbfsdrive` in four processes and `internal/icbfs` in two, split by test name, checked to have run each test once | 6 min (2026-11-17); up to 11 when the lab host is busy | while working, and before a commit |
 | `just pre-merge` | `ci`; then `test-erase-full` (`EraseAll` at 100,000 entries on S3 and Azure fakes); then under `-race` with `ICBFS_PRE_MERGE=1`: `TestTreeMemory` (a walk and a hash rebuild over 30,000 items hold one folder), `TestZZFanout` at 2,000 files; then `TestMountSmallWritesAreQuick` alone (a timing test); then `just rows` | `ci` and about 10 min more (erase 2.5, the two `-race` tests 7, the timing test seconds) | once, before a merge that touches icbfs |
 | the VM suites below | pjdfstest, xfstests, several machines, winfsp-tests, sync | hours | before a release, or a change to the mount |
 
@@ -72,7 +72,7 @@ Where a new test belongs:
   alone, after the rest. A wait for something to happen is a wait on a
   condition with a generous bound, not a fixed sleep and a tight one.
 
-`pkg/drive/icbfsdrive` runs in `ci` as two `go test` processes split by
+`pkg/drive/icbfsdrive` (four) and `internal/icbfs` (two) run in `ci` as `go test` processes split by
 test name (`scripts/split-gotest.sh`): the last process runs every test
 the other patterns do not match, so a new test always runs, and the
 script fails unless the tests `go test -list` names are exactly the ones
