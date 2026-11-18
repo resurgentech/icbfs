@@ -1,6 +1,6 @@
 --- a/internal/icbfs/settle.go
 +++ b/internal/icbfs/settle.go
-@@ -929,7 +929,7 @@
+@@ -930,7 +930,7 @@
  		// present (V0): another writer's version since (during the reads)
  		// makes what was read no proof of anything (ST-22). One after this
  		// read is the window's first put's to find.

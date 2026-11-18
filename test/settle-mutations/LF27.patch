@@ -1,6 +1,6 @@
 --- a/internal/icbfs/settle.go
 +++ b/internal/icbfs/settle.go
-@@ -340,7 +340,7 @@
+@@ -341,7 +341,7 @@
  	// state, which no writer of this rule does: its views are no state the
  	// directory had, and a settle can't tell which is right.
  	shadowed, late := objstore.NotStates(rootH, dates)

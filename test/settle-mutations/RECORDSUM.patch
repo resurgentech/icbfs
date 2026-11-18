@@ -1,0 +1,11 @@
+--- a/internal/icbfs/settle.go
++++ b/internal/icbfs/settle.go
+@@ -1199,7 +1199,7 @@
+ 	// order of their own, so that one record always has one sum (the
+ 	// default marshal orders a map at random, and a record with two app
+ 	// keys was refused as "not the one read" now and then).
+-	data, err := proto.MarshalOptions{Deterministic: true}.Marshal(fileMetadataMsg(context.Background(), a))
++	data, err := proto.MarshalOptions{Deterministic: false}.Marshal(fileMetadataMsg(context.Background(), a))
+ 	if err != nil {
+ 		return "", err
+ 	}

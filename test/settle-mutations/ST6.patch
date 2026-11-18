@@ -1,6 +1,6 @@
 --- a/internal/icbfs/settle.go
 +++ b/internal/icbfs/settle.go
-@@ -677,7 +677,7 @@
+@@ -678,7 +678,7 @@
  			data []byte
  		}{{meta, sctx, metaData}, {dirKey, objstore.AsBlock(sctx, dirKey), rootData}} {
  			obj, err := f.settlePut(p.pctx, p.key, p.data, etag[p.key], &retried)

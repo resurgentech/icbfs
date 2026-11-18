@@ -27,10 +27,11 @@ declare -A TESTS=(
   [LF28]='TestLF28_DatingAndUndoFailTheRowsAreReported$'
   [CH4]='TestCH4_ProveOnlyWritesNothing$'
   [CH13]='TestCH13_LateChangeToTheFolderRecord$'
+  [RECORDSUM]='TestCH5_SettleKeepsARecordOfManyAppKeys$'
   [ICBFSAT]='TestFR_Icbfsat$|TestUndatedThenLate$'
 )
 names=("$@")
-[ ${#names[@]} -eq 0 ] && names=(ST3 ST5 ST6 ST7 ST9 ST11 ST14b ST16 ST19 ST20 ST22 ST26 ST26AGE LF27 LF28 CH4 CH13 ICBFSAT)
+[ ${#names[@]} -eq 0 ] && names=(ST3 ST5 ST6 ST7 ST9 ST11 ST14b ST16 ST19 ST20 ST22 ST26 ST26AGE LF27 LF28 CH4 CH13 RECORDSUM ICBFSAT)
 out=$(mktemp -d)
 applied=""
 trap '[ -n "$applied" ] && git apply -R "$applied"' EXIT

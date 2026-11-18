@@ -1,6 +1,6 @@
 --- a/internal/icbfs/settle.go
 +++ b/internal/icbfs/settle.go
-@@ -1367,7 +1367,7 @@
+@@ -1372,7 +1372,7 @@
  // takes the other writer's version for the settle's own. stop is the
  // settle's error.
  func (f *Filesystem) settleStoppedFirst(ctx context.Context, create []string, rec SettleRecord, done func(SettleRecord) error, stop error) error {
