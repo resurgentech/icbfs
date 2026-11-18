@@ -199,6 +199,34 @@ type VersionsSincer interface {
 	VersionsSince(ctx context.Context, key string, since time.Time) ([]Object, error)
 }
 
+// HistorySampler is a Store that reads the first entries of a prefix's
+// history in one request: HistoryUnderFirst returns up to n (at most
+// HistoryPageSize) of the versions and deletions HistoryUnder lists, from
+// the first keys in the store's order, with no Metadata filled in and no
+// order promised among one key's entries. It answers "is anything here, or
+// was it ever" without listing all of it. S3Store and AzureStore have it; a
+// wrapper of a Store does not unless it says so.
+type HistorySampler interface {
+	HistoryUnderFirst(ctx context.Context, prefix string, n int32) ([]Object, error)
+}
+
+// HistoryUnderFirst is s's HistoryUnderFirst when it has one, and the first
+// n entries of HistoryUnder when it does not (which lists all of it).
+func HistoryUnderFirst(ctx context.Context, s Store, prefix string, n int32) ([]Object, error) {
+	n = max(1, min(n, HistoryPageSize))
+	if hs, ok := s.(HistorySampler); ok {
+		return hs.HistoryUnderFirst(ctx, prefix, n)
+	}
+	all, err := s.HistoryUnder(ctx, prefix)
+	if err != nil {
+		return nil, err
+	}
+	if int32(len(all)) > n {
+		all = all[:n]
+	}
+	return all, nil
+}
+
 // VersionsSince is s's VersionsSince when it has one, and History's
 // versions dated at or after since when it does not.
 func VersionsSince(ctx context.Context, s Store, key string, since time.Time) ([]Object, error) {

@@ -41,6 +41,14 @@ type (
 var (
 	ErrNotFound = core.ErrNotFound
 	ErrExists   = core.ErrExists
+	// ErrLeftovers: CreateFilesystem found an earlier filesystem's
+	// versions under the names the new one would take (one removed
+	// outside icbfs: a plain delete keeps every version), and wrote
+	// nothing. Its message says what is there and the ways out.
+	ErrLeftovers = core.ErrLeftovers
+	// ErrMadeOverLeftovers: RootLeftovers found that a filesystem was
+	// made over an earlier one's versions of its root.
+	ErrMadeOverLeftovers = core.ErrMadeOverLeftovers
 )
 
 // DefaultMaxFileSize is a new filesystem's max file size unless given.
@@ -215,6 +223,25 @@ func Prune(ctx context.Context, store Store, name string) error {
 		return ErrNotArchived
 	}
 	return core.Prune(ctx, store, name)
+}
+
+// RootLeftovers is nil, or an error wrapping ErrMadeOverLeftovers that says, for
+// an operator, that filesystem name was made over an earlier
+// filesystem's versions of its root (by a build before CreateFilesystem
+// refused that), what that does to its past and to the settle of its
+// root, and the way out. Known only for a filesystem dated in its
+// source's time (Settings.Created); nil for any other. Two history
+// listings and two reads; nothing is written.
+func RootLeftovers(ctx context.Context, store Store, name string) error {
+	f := core.New(store, name)
+	if err := f.Attach(ctx); err != nil {
+		return err
+	}
+	left, err := f.RootLeftovers(ctx)
+	if err != nil || len(left) == 0 {
+		return err
+	}
+	return core.LeftoversError(name, left)
 }
 
 // ErrNotArchived: prune needs an archived filesystem.

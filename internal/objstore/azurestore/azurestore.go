@@ -392,6 +392,38 @@ func (s *Store) HistoryUnder(ctx context.Context, prefix string) ([]objstore.Obj
 	return s.listVersions(ctx, prefix)
 }
 
+// HistoryUnderFirst is one listing request of up to n versions under
+// prefix (objstore.HistorySampler). A name whose versions are all
+// previous ones (its blob deleted by something other than Delete, such as
+// azcopy remove) is listed by those versions.
+func (s *Store) HistoryUnderFirst(ctx context.Context, prefix string, n int32) ([]objstore.Object, error) {
+	pager := s.client.NewListBlobsFlatPager(&container.ListBlobsFlatOptions{
+		Prefix:     to.Ptr(s.k(prefix)),
+		Include:    container.ListBlobsInclude{Versions: true, Metadata: true},
+		MaxResults: to.Ptr(n),
+	})
+	if !pager.More() {
+		return nil, nil
+	}
+	page, err := pager.NextPage(ctx)
+	if err != nil {
+		return nil, azureErr("list versions", prefix, err)
+	}
+	var out []objstore.Object
+	for _, b := range page.Segment.BlobItems {
+		o := objstore.Object{Key: strings.TrimPrefix(deref(b.Name), s.keyPrefix), VersionID: deref(b.VersionID), Deleted: isMarker(b.Metadata)}
+		if b.Properties != nil && !o.Deleted {
+			o.ETag = etagString(b.Properties.ETag)
+			o.Size = deref(b.Properties.ContentLength)
+		}
+		if b.Properties != nil {
+			o.LastModified = deref(b.Properties.LastModified)
+		}
+		out = append(out, o)
+	}
+	return out, nil
+}
+
 // listVersions lists every version under prefix: per key, newest first
 // (version IDs are timestamps, so their order is the versions'), with
 // markers as delete markers, and a key with no current version whose
