@@ -136,3 +136,50 @@ func TestHashMapRebuild(t *testing.T) {
 		t.Fatalf("count %d after the commit, want 2", n)
 	}
 }
+
+// TestHashMapPlaces (T82-13): an entry's place is a hint, not part of
+// what it is. The same version again with a place records the place; one
+// without leaves it; a lesser version takes over with its own place; Drop
+// forgets the version whatever place it is given; and the place survives
+// the map's JSON.
+func TestHashMapPlaces(t *testing.T) {
+	ctx := context.Background()
+	h := drive.NewHashMap()
+	c := h.ContentMap()
+	b := drive.HashEntry{ID: "b", Version: "1", Size: 3}
+	if err := c.Add(ctx, sha("a"), b); err != nil {
+		t.Fatal(err)
+	}
+	at := b
+	at.Path = "/m/b.txt"
+	c.Add(ctx, sha("a"), at)
+	if e, _, _ := c.Lookup(ctx, sha("a")); e != at {
+		t.Fatalf("the place wasn't recorded: %+v", e)
+	}
+	c.Add(ctx, sha("a"), b) // no place: the recorded one stays
+	if e, _, _ := c.Lookup(ctx, sha("a")); e != at {
+		t.Fatalf("an add with no place dropped it: %+v", e)
+	}
+	data, err := h.MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2 := drive.NewHashMap()
+	if err := h2.UnmarshalJSON(data); err != nil {
+		t.Fatal(err)
+	}
+	if e, _ := h2.Lookup(sha("a")); e != at {
+		t.Fatalf("the place didn't survive the JSON: %+v", e)
+	}
+	a := drive.HashEntry{ID: "a", Version: "1", Size: 3, Path: "/m/a.txt"}
+	c.Add(ctx, sha("a"), a) // the lesser, with its own place
+	if e, _, _ := c.Lookup(ctx, sha("a")); e != a {
+		t.Fatalf("the lesser didn't take over: %+v", e)
+	}
+	moved := a
+	moved.Path = "/elsewhere/a.txt"
+	c.Drop(ctx, sha("a"), moved) // another place, the same version
+	if _, ok, _ := c.Lookup(ctx, sha("a")); ok {
+		t.Fatal("a drop given another place left the version")
+	}
+}

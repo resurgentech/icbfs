@@ -361,9 +361,18 @@ func (d *Drive) refTarget(ctx context.Context, r drive.Ref, want *drive.Checksum
 	unavailable := func(why string, args ...any) error {
 		return fmt.Errorf("%s version %s: %s: %w", r.ID, r.Version, fmt.Sprintf(why, args...), drive.ErrRefUnavailable)
 	}
-	n, err := d.resolve(ctx, d.fs, drive.ByID(r.ID))
+	// r.Path is where the caller believes the item is (a mirror's
+	// recorded place): tried first, and taken only for the item r.ID
+	// names (resolve checks it); else the lookup by id, as without it.
+	n, err := d.resolve(ctx, d.fs, drive.ItemRef{ID: r.ID, Path: r.Path})
 	if errors.Is(err, drive.ErrNotFound) {
 		return nil, unavailable("not an item of this drive") // another drive's or filesystem's, or gone
+	}
+	if errors.Is(err, drive.ErrNotSearched) && ctx.Err() == nil {
+		// Not found within the search's budget, or the tree changed under
+		// it: the caller writes the bytes in full (LC-3). A cut context is
+		// a stop, which ends the write too.
+		return nil, unavailable("could not be searched for: %v", err)
 	}
 	if err != nil {
 		return nil, err

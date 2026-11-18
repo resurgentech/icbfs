@@ -187,6 +187,9 @@ func (d *Drive) findByOrigin(ctx context.Context, originDrive, originID, hint st
 		return drive.Item{}, nil, mapErr(err)
 	}
 	n, err := d.resolve(ctx, d.fs, drive.ByID(rec.ItemID))
+	if errors.Is(err, drive.ErrNotSearched) {
+		return drive.Item{}, nil, fmt.Errorf("source item %s: %w", originID, err) // not searched to the end: not gone
+	}
 	if err != nil {
 		// Neither live nor in the trash: purged, or outside this drive.
 		return drive.Item{}, nil, fmt.Errorf("source item %s: %w", originID, drive.ErrNotFound)
