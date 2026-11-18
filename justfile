@@ -38,17 +38,16 @@ test-short *args:
     go test -short {{args}} ./...
 
 # The -timeout is explicit because Go cuts a test package at 10 minutes by default, and internal/icbfs takes 5 on a quiet machine.
-# pkg/drive/icbfsdrive took 7 to 12 minutes alone (2026-11-17), so its tests run in two processes split by name beside the rest: every test still runs.
+# pkg/drive/icbfsdrive took 7 to 12 minutes alone (2026-11-17), so scripts/split-gotest.sh runs its tests in two processes split by name (the second takes every test the first does not), beside the rest, and fails unless each test go test -list names ran exactly once.
 # The Go tests CI runs, with the race detector
 test-ci:
     #!/usr/bin/env bash
     set -uo pipefail
     d=github.com/resurgentech/icbfs/pkg/drive/icbfsdrive
     go test -race -timeout 25m $(go list ./... | grep -vx "$d") & p1=$!
-    go test -race -timeout 25m -run '^Test[A-M]' ./pkg/drive/icbfsdrive & p2=$!
-    go test -race -timeout 25m -run '^Test[^A-M]' ./pkg/drive/icbfsdrive & p3=$!
+    scripts/split-gotest.sh ./pkg/drive/icbfsdrive '^Test[A-M]' & p2=$!
     rc=0
-    for p in $p1 $p2 $p3; do wait $p || rc=1; done
+    for p in $p1 $p2; do wait $p || rc=1; done
     exit $rc
 
 # The Go tests that run on Windows (no Docker there)
@@ -89,9 +88,9 @@ pre-merge: ci test-erase-full
     ICBFS_PRE_MERGE=1 go test -race -count=1 -run '^TestMountSmallWritesAreQuick$' ./internal/fuseserver
     @just rows
 
-# The docs/STATES.md rows this module's tests prove: each test named for its row (TestLF4_...)
+# The docs/STATES.md row ids this module's tests carry: in a test's name (TestLF4_..., TestPL2_PL3_...) or a // STATES: comment beside it
 rows:
-    @{ grep -rhoE 'func Test(AS|BR|CH|CP|DB|GD|IT|KS|LC|LF|LK|LO|ME|PL|PS|PT|RD|RT|SP|ST|UP)[0-9]+[A-Za-z]?_[A-Za-z0-9_]*' --include='*_test.go' cmd internal pkg || true; } | sed 's/^func //' | sort -uV | awk '{ print; n++; m = split($0, p, "_"); sub(/^Test/, "", p[1]); for (i = 1; i <= m; i++) { if (p[i] !~ /^(AS|BR|CH|CP|DB|GD|IT|KS|LC|LF|LK|LO|ME|PL|PS|PT|RD|RT|SP|ST|UP)[0-9]+[a-z]?$/) break; if (!(p[i] in s)) { s[p[i]] = 1; r = r " " p[i]; k++ } } } END { print n+0 " tests carry a docs/STATES.md row id; " k+0 " rows:" r }'
+    @{ grep -rhoE 'func Test([A-Z]{2,3}[0-9]+_)+' --include='*_test.go' cmd internal pkg | sed -E 's/^func Test//; s/_/\n/g'; grep -rhE '//[[:space:]]*STATES:' --include='*_test.go' cmd internal pkg | grep -oE '[A-Z]{2,3}-[0-9]+' | tr -d '-'; } | grep -E '^[A-Z]{2,3}[0-9]+$' | sed -E 's/^([A-Z]+)([0-9]+)$/\1-\2/' | sort -uV | awk '{ r = r " " $0; k++ } END { print k+0 " docs/STATES.md row ids carried by this module'"'"'s tests:" r }'
 
 # Tag HEAD as VERSION (vX.Y.Z, new; tree clean, on origin/main, CI green) and build bin/; the tag's push is printed, not done
 release VERSION:

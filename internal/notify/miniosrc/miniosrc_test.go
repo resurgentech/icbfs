@@ -8,7 +8,6 @@ import (
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
-	testminio "github.com/testcontainers/testcontainers-go/modules/minio"
 
 	"github.com/resurgentech/icbfs/internal/testutil"
 	"github.com/resurgentech/icbfs/internal/testutil/minioimage"
@@ -19,7 +18,7 @@ import (
 func TestMinIOSourceReceivesRealNotification(t *testing.T) {
 	ctx := context.Background()
 
-	container, err := testminio.Run(ctx, minioimage.Image())
+	container, err := minioimage.Run(ctx)
 	if err != nil {
 		t.Fatalf("start minio container: %v", err)
 	}
@@ -43,7 +42,7 @@ func TestMinIOSourceReceivesRealNotification(t *testing.T) {
 	}
 
 	const bucket = "icbfs-notify-test"
-	testutil.RetryUntilReady(t, 10*time.Second, func() error {
+	testutil.RetryUntilReady(t, time.Minute, func() error {
 		return client.MakeBucket(ctx, bucket, minio.MakeBucketOptions{})
 	})
 
