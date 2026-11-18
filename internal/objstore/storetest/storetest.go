@@ -50,6 +50,55 @@ func Run(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	t.Run("AsOfByVersionDates", func(t *testing.T) { asOfByVersionDates(t, newStore) })
 	t.Run("MergeDatesFresh", func(t *testing.T) { mergeDatesFresh(t, newStore) })
 	t.Run("ListedTimeIsTheWritesToTheSecond", func(t *testing.T) { listedTimeIsTheWritesToTheSecond(t, newStore) })
+	t.Run("HistoryUnderFirstSeesWhatADeleteKept", func(t *testing.T) { historyUnderFirstSeesWhatADeleteKept(t, newStore) })
+}
+
+// historyUnderFirstSeesWhatADeleteKept: the store's own one-request
+// sample of a prefix's history (objstore.HistorySampler) is empty for a
+// prefix nothing was ever written under, and finds the versions a plain
+// delete of every current object kept, at most n of them, and only under
+// the prefix.
+func historyUnderFirstSeesWhatADeleteKept(t *testing.T, newStore func(*testing.T) objstore.Store) {
+	store := newStore(t)
+	ctx := context.Background()
+	if _, ok := store.(objstore.HistorySampler); !ok {
+		t.Fatalf("%T has no HistoryUnderFirst", store)
+	}
+	if h, err := objstore.HistoryUnderFirst(ctx, store, "p/", 10); err != nil || len(h) != 0 {
+		t.Fatalf("an empty prefix: %+v, %v; want none", h, err)
+	}
+	for _, kv := range [][2]string{{"p/a", "1"}, {"p/a", "2"}, {"p/b", "1"}, {"pq", "keep"}} {
+		if _, err := store.Put(ctx, kv[0], strings.NewReader(kv[1]), nil, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, k := range []string{"p/a", "p/b"} {
+		if err := store.Delete(ctx, k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if l, err := store.List(ctx, "p/"); err != nil || len(l) != 0 {
+		t.Fatalf("p/ lists %+v, %v after the deletes; want nothing current", l, err)
+	}
+	h, err := objstore.HistoryUnderFirst(ctx, store, "p/", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	versions := 0
+	for _, o := range h {
+		if !strings.HasPrefix(o.Key, "p/") {
+			t.Fatalf("%s listed under p/", o.Key)
+		}
+		if !o.Deleted {
+			versions++
+		}
+	}
+	if versions != 3 {
+		t.Fatalf("p/ after the deletes: %+v; want its 3 versions", h)
+	}
+	if h, err := objstore.HistoryUnderFirst(ctx, store, "p/", 1); err != nil || len(h) != 1 {
+		t.Fatalf("n=1: %+v, %v; want one entry", h, err)
+	}
 }
 
 // pause lets the store's clock pass a whole second, so a time taken

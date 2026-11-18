@@ -179,6 +179,15 @@ func (f *Filesystem) check(ctx context.Context, repair bool) (CheckReport, error
 	if err := f.checkUnreachable(ctx, items, blocks, &r); err != nil {
 		return r, err
 	}
+	// An earlier filesystem's versions under the root's names (made over
+	// by a build before ErrLeftovers): reported, never repaired here.
+	left, err := f.RootLeftovers(ctx)
+	if err != nil {
+		return r, err
+	}
+	if len(left) > 0 {
+		problem("root-leftovers", f.RootKey(), "/", "%s", leftoversSaid(left))
+	}
 	return r, nil
 }
 

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
+	"strings"
 	"time"
 
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -100,12 +102,9 @@ func CreateFilesystem(ctx context.Context, store objstore.Store, s Settings) (In
 	if !s.Created.IsZero() {
 		created = s.Created
 	}
-	id, entry, existed, err := registerFilesystem(ctx, store, &pb.FilesystemEntry{
-		Name: s.Name, Size: s.Size, PrimaryWindows: s.PrimaryWindows, MaxFileSize: s.MaxFileSize,
-		DirBlockEntries: s.DirBlockEntries,
-		Created:         timestamppb.New(created),
-		SourceTime:      !s.Created.IsZero(),
-	})
+	e := entryOf(s)
+	e.Created = timestamppb.New(created)
+	id, entry, existed, err := registerFilesystem(ctx, store, e)
 	if err != nil {
 		return Info{}, err
 	}
@@ -117,7 +116,11 @@ func CreateFilesystem(ctx context.Context, store objstore.Store, s Settings) (In
 		if _, err := store.Head(ctx, f.RootKey()); err == nil {
 			return Info{}, fmt.Errorf("filesystem %q: %w", s.Name, ErrExists)
 		}
-		// registered, but the root never landed: finish creating it
+		// registered, but the root never landed: finish creating it;
+		// unless it did, and was removed outside icbfs since
+		if err := rootRemovedOutside(ctx, store, s.Name, f.RootKey()); err != nil {
+			return Info{}, err
+		}
 	}
 	attr := Attr{Mode: s.RootMode, Uid: s.RootUid, Gid: s.RootGid}
 	if s.PrimaryWindows && s.RootSDDL != "" {
@@ -135,6 +138,172 @@ func CreateFilesystem(ctx context.Context, store objstore.Store, s Settings) (In
 		return Info{}, err
 	}
 	return infoOf(id, entry), nil
+}
+
+// entryOf is the master-block entry s asks for (Created only when s gives
+// one).
+func entryOf(s Settings) *pb.FilesystemEntry {
+	e := &pb.FilesystemEntry{
+		Name: s.Name, Size: s.Size, PrimaryWindows: s.PrimaryWindows, MaxFileSize: s.MaxFileSize,
+		DirBlockEntries: s.DirBlockEntries,
+		SourceTime:      !s.Created.IsZero(),
+	}
+	if !s.Created.IsZero() {
+		e.Created = timestamppb.New(s.Created)
+	}
+	return e
+}
+
+// ErrLeftovers is CreateFilesystem's refusal to make a filesystem where
+// the store holds history under the names it would take: an earlier
+// filesystem's, removed outside icbfs (a plain delete of a versioned
+// store's objects ends each one and keeps every version). A filesystem
+// made there would share that history: its root, its root's .metadata
+// and .version, its past-changed mark, its origin records and app
+// objects have fixed names, so its views of the past would show the
+// earlier filesystem, and a settle of its root would be refused for good.
+// Nothing was written.
+var ErrLeftovers = errors.New("the store holds an earlier filesystem's versions under the names this one would take; nothing was written")
+
+// slotClean is nil if nothing in store has ever been under the names a
+// new filesystem name in slot id takes: its prefix, and its uploads'
+// (what Prune erases). One listing request a prefix, of one entry. Else
+// ErrLeftovers, saying what is there and the ways out; noMaster says the
+// bucket has no master block (removed with the rest).
+func slotClean(ctx context.Context, store objstore.Store, name, id string, noMaster bool) error {
+	for _, prefix := range []string{id + "-", id + ".upload-", uploadMarks + id} {
+		found, err := objstore.HistoryUnderFirst(ctx, store, prefix, 1)
+		if err != nil {
+			return fmt.Errorf("filesystem %q: looking for an earlier filesystem's versions under %q: %w", name, prefix, err)
+		}
+		if len(found) == 0 {
+			continue
+		}
+		// Which filesystems they were: the roots' names, by one more
+		// listing (a root is <id>-root-<name>).
+		roots := map[string]time.Time{}
+		if rs, err := objstore.HistoryUnderFirst(ctx, store, id+"-root-", objstore.HistoryPageSize); err == nil {
+			for _, o := range rs {
+				k := objstore.BaseKey(o.Key)
+				if o.LastModified.After(roots[k]) {
+					roots[k] = o.LastModified
+				}
+			}
+		}
+		var what []string
+		for k, t := range roots {
+			what = append(what, fmt.Sprintf("the root %s, its last version stored %s", k, t.UTC().Format(time.RFC3339)))
+		}
+		sort.Strings(what)
+		if len(what) == 0 {
+			what = []string{fmt.Sprintf("such as %s", found[0].Key)}
+		}
+		gone := "a filesystem that was in slot " + id
+		if noMaster {
+			gone += " of a bucket whose master block went with it"
+		}
+		return fmt.Errorf("filesystem %q would take slot %s, but the store holds versions under %q (%s): %s, removed outside icbfs "+
+			"(a plain delete, such as azcopy remove or aws s3 rm, ends each object and the store keeps its versions); "+
+			"a filesystem made here would share their history, and its past would show theirs. "+
+			"Make it in an empty container or bucket, or erase every version under %q, %q and %q first "+
+			"(icbfs-cli fs prune erases a filesystem only while it is registered; fs archive then fs prune is how to discard one before a rebuild): %w",
+			name, id, prefix, strings.Join(what, "; "), gone, id+"-", id+".upload-", uploadMarks+id, ErrLeftovers)
+	}
+	return nil
+}
+
+// rootRemovedOutside is ErrLeftovers for a registered filesystem whose
+// root is not there but has history: removed outside icbfs (a create cut
+// before its root landed leaves the root no history at all).
+func rootRemovedOutside(ctx context.Context, store objstore.Store, name, rootKey string) error {
+	h, err := store.History(ctx, rootKey)
+	if err != nil {
+		return fmt.Errorf("filesystem %q: reading its root's history: %w", name, err)
+	}
+	if len(h) == 0 {
+		return nil
+	}
+	return fmt.Errorf("filesystem %q is registered, and its root %s is not there but the store holds %d version(s) of it, the last stored %s: "+
+		"it was removed outside icbfs (a plain delete keeps every version), and a root made now would share their history. "+
+		"Discard it with icbfs's own erase (icbfs-cli fs archive -fs %s, then icbfs-cli fs prune -fs %s -yes: every version goes) and create it again, "+
+		"or use another name: %w",
+		name, rootKey, len(h), h[0].LastModified.UTC().Format(time.RFC3339), name, name, ErrLeftovers)
+}
+
+// leftoversSaid is what RootLeftovers found, said for an operator: what
+// it is, what it does, and the way out.
+func leftoversSaid(left []objstore.Object) string {
+	var last time.Time
+	for _, o := range left {
+		if o.LastModified.After(last) {
+			last = o.LastModified
+		}
+	}
+	return fmt.Sprintf("the root block and its .metadata hold %d version(s) stored before this filesystem was created, the last %s: "+
+		"an earlier filesystem of this name, removed outside icbfs (which keeps every version), that this one was made over. "+
+		"Its views of the past show that filesystem's entries at those times and nothing before them, "+
+		"and a settle of / that writes behind them is refused every time. "+
+		"Rebuild it: with every writer stopped, discard this filesystem with icbfs's own erase "+
+		"(icbfs-cli fs archive, then fs prune -yes: every version under its prefix goes, the earlier filesystem's too) and make it again; "+
+		"or rebuild under another name or in an empty container",
+		len(left), last.UTC().Format(time.RFC3339))
+}
+
+// ErrMadeOverLeftovers is RootLeftovers' finding as an error: the
+// filesystem was made over an earlier one's versions of its root.
+var ErrMadeOverLeftovers = errors.New("this filesystem was made over an earlier filesystem's versions of its root")
+
+// LeftoversError is leftoversSaid for filesystem name, as an error
+// wrapping ErrMadeOverLeftovers.
+func LeftoversError(name string, left []objstore.Object) error {
+	return fmt.Errorf("filesystem %q: %s: %w", name, leftoversSaid(left), ErrMadeOverLeftovers)
+}
+
+// RootLeftovers is the versions of the root block and of its .metadata
+// stored before this filesystem's creation wrote its own: an earlier
+// filesystem's of the same slot and name, removed outside icbfs, over
+// which a build before ErrLeftovers made this one. They are the root's
+// first states as every view and every settle reads them, dated at the
+// times the store wrote them: its views of the past show the earlier
+// filesystem's entries at those times and none before, and a settle of
+// the root that would write behind them is refused, every time.
+//
+// It is known only for a filesystem created at a declared date
+// (Settings.Created, as a mirror's is): its creation is its root's oldest
+// stored version dated, in the root's .version, at the filesystem's
+// creation date. A filesystem created now has its root dated by the
+// store, to the second, never at its creation's instant: nil. One read
+// of the master block and of the root's .version, two history listings.
+func (f *Filesystem) RootLeftovers(ctx context.Context) ([]objstore.Object, error) {
+	info, err := DescribeFilesystem(ctx, f.store, f.fsName)
+	if err != nil || info.Created.IsZero() {
+		return nil, err
+	}
+	root := f.RootKey()
+	dates, err := objstore.ReadDates(ctx, f.store, root)
+	if err != nil {
+		return nil, err
+	}
+	var out []objstore.Object
+	for _, key := range []string{root, metadataObjectKey(root)} {
+		h, err := f.store.History(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		c := -1 // the creation's version: the oldest stored dated at the creation
+		for i := len(h) - 1; i >= 0; i-- {
+			if !h[i].Deleted && dates.Time(&h[i]).Equal(info.Created) {
+				c = i
+				break
+			}
+		}
+		for i := c + 1; c >= 0 && i < len(h); i++ {
+			if !h[i].Deleted {
+				out = append(out, h[i])
+			}
+		}
+	}
+	return out, nil
 }
 
 // Attach opens an existing filesystem for use, failing with ErrNotFound

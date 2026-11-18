@@ -96,14 +96,20 @@ func readMaster(ctx context.Context, store objstore.Store) (*pb.MasterBlock, *ob
 // The ID is the slot's position as 4 hex digits, not a stored field. The
 // list only ever grows, never shrinks or reorders, so a slot's position,
 // and the prefix every object of that filesystem carries, never changes.
+//
+// Before a new slot is written into the master block, its prefix is
+// looked at (slotClean): a slot whose names hold history in the store is
+// refused with ErrLeftovers, and nothing is written, the master block
+// included (a bucket with no master block gets its first one only with
+// the entry, by one PutIfAbsent).
 func registerFilesystem(ctx context.Context, store objstore.Store, entry *pb.FilesystemEntry) (id string, stored *pb.FilesystemEntry, existed bool, err error) {
-	if err := bootstrapMaster(ctx, store); err != nil {
-		return "", nil, false, err
-	}
 	name := entry.Name
 	for attempt := 0; attempt < maxTreeRetries; attempt++ {
 		retryPause(ctx, attempt)
 		mb, obj, err := readMaster(ctx, store)
+		if objstore.IsNotFound(err) {
+			mb, obj, err = &pb.MasterBlock{}, nil, nil // written below with the entry, or not at all
+		}
 		if err != nil {
 			return "", nil, false, err
 		}
@@ -128,6 +134,9 @@ func registerFilesystem(ctx context.Context, store objstore.Store, entry *pb.Fil
 			idx = len(mb.Filesystems)
 			mb.Filesystems = append(mb.Filesystems, &pb.FilesystemEntry{})
 		}
+		if err := slotClean(ctx, store, name, fsID(idx), obj == nil); err != nil {
+			return "", nil, false, err
+		}
 		uid, err := newFilesystemUID()
 		if err != nil {
 			return "", nil, false, err
@@ -139,7 +148,11 @@ func registerFilesystem(ctx context.Context, store objstore.Store, entry *pb.Fil
 		if err != nil {
 			return "", nil, false, err
 		}
-		_, err = store.Put(ctx, masterBlockKey, bytes.NewReader(data), nil, obj.ETag)
+		if obj == nil {
+			_, err = store.PutIfAbsent(ctx, masterBlockKey, bytes.NewReader(data), nil)
+		} else {
+			_, err = store.Put(ctx, masterBlockKey, bytes.NewReader(data), nil, obj.ETag)
+		}
 		if objstore.IsPreconditionFailed(err) {
 			continue
 		}

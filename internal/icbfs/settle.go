@@ -422,6 +422,12 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 			ids = append(ids, id)
 		}
 		sort.Strings(ids)
+		if dirKey == f.RootKey() {
+			if left, lerr := f.RootLeftovers(ctx); lerr == nil && len(left) > 0 {
+				return Settled{}, fmt.Errorf("directory %s: %s; its root block has %d version(s) stored behind a later-dated one (%v): %w",
+					dirKey, leftoversSaid(left), len(ids), ids, ErrSettleRefused)
+			}
+		}
 		return Settled{}, fmt.Errorf("directory %s: its root block has %d version(s) stored behind a later-dated one (%v): %w",
 			dirKey, len(ids), ids, ErrSettleRefused)
 	}

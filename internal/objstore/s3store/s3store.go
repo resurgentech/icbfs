@@ -370,6 +370,29 @@ func (s *Store) HistoryUnder(ctx context.Context, prefix string) ([]objstore.Obj
 	return all, nil
 }
 
+// HistoryUnderFirst is one ListObjectVersions request of up to n entries
+// under prefix (objstore.HistorySampler).
+func (s *Store) HistoryUnderFirst(ctx context.Context, prefix string, n int32) ([]objstore.Object, error) {
+	out, err := s.client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+		Bucket:  aws.String(s.bucket),
+		Prefix:  aws.String(s.k(prefix)),
+		MaxKeys: aws.Int32(n),
+	})
+	if err != nil {
+		return nil, s3Error(fmt.Errorf("list versions under %q: %w", prefix, err))
+	}
+	var all []objstore.Object
+	for _, v := range out.Versions {
+		all = append(all, objstore.Object{Key: strings.TrimPrefix(aws.ToString(v.Key), s.keyPrefix), VersionID: aws.ToString(v.VersionId),
+			ETag: aws.ToString(v.ETag), Size: aws.ToInt64(v.Size), LastModified: aws.ToTime(v.LastModified)})
+	}
+	for _, m := range out.DeleteMarkers {
+		all = append(all, objstore.Object{Key: strings.TrimPrefix(aws.ToString(m.Key), s.keyPrefix), VersionID: aws.ToString(m.VersionId),
+			LastModified: aws.ToTime(m.LastModified), Deleted: true})
+	}
+	return all, nil
+}
+
 // listVersions pages through every version and delete marker under
 // prefix. S3 reports a page's versions and delete markers as two separate
 // lists, each newest first per key; they're merged back into one history
