@@ -3,6 +3,7 @@ package objstore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync/atomic"
@@ -390,5 +391,104 @@ func TestHistoryCacheOneFetchOfAKeyAtATime(t *testing.T) {
 	}
 	if n := store.n.Load(); n != 1 {
 		t.Fatalf("store asked %d times for one key looked up twice at once, want 1", n)
+	}
+}
+
+// scriptedStore is fixedStore whose first History waits for gate and
+// then answers firstErr, or, with firstErr nil, waits until its caller's
+// context is done; every later History answers at once.
+type scriptedStore struct {
+	fixedStore
+	n        *atomic.Int64
+	gate     chan struct{}
+	firstErr error
+}
+
+func (s scriptedStore) History(ctx context.Context, key string) ([]Object, error) {
+	if s.n.Add(1) == 1 {
+		if s.firstErr != nil {
+			<-s.gate
+			return nil, s.firstErr
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return s.fixedStore.History(ctx, key)
+}
+
+// oneFetchCase opens a cache on s, starts a first lookup of "k" with
+// ctx1, and once it is in the store a second with its own context; it
+// returns the two results' channels.
+func oneFetchCase(t *testing.T, s scriptedStore, ctx1 context.Context, wait time.Duration) (*HistoryCache, chan error, chan error) {
+	t.Helper()
+	c, err := OpenHistoryCache(context.Background(), s, filepath.Join(t.TempDir(), "history.db"), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	c.wait = wait
+	look := func(ctx context.Context, out chan error) {
+		h, err := c.history(ctx, "k", heldAt)
+		if err == nil && (len(h) != 1 || h[0].VersionID != "v1") {
+			err = fmt.Errorf("history %v", h)
+		}
+		out <- err
+	}
+	first, second := make(chan error, 1), make(chan error, 1)
+	go look(ctx1, first)
+	for s.n.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+	go look(context.Background(), second)
+	time.Sleep(50 * time.Millisecond) // the second waits for the first's fetch
+	return c, first, second
+}
+
+// The first lookup's fetch fails: its caller gets the error, and the
+// second, which waited for it, fetches itself and answers.
+func TestHistoryCacheOneFetchFirstFailsSecondFetches(t *testing.T) {
+	s := scriptedStore{n: new(atomic.Int64), gate: make(chan struct{}), firstErr: errors.New("the store failed")}
+	_, first, second := oneFetchCase(t, s, context.Background(), 5*time.Second)
+	close(s.gate)
+	if err := <-first; err == nil {
+		t.Fatal("the first lookup: no error from a failed fetch")
+	}
+	if err := <-second; err != nil {
+		t.Fatalf("the second lookup after the first's fetch failed: %v", err)
+	}
+	if n := s.n.Load(); n != 2 {
+		t.Fatalf("store asked %d times, want 2", n)
+	}
+}
+
+// The first caller is cancelled while its fetch is under way: the second
+// still gets its answer.
+func TestHistoryCacheOneFetchFirstCancelledSecondAnswers(t *testing.T) {
+	s := scriptedStore{n: new(atomic.Int64)}
+	ctx1, cancel := context.WithCancel(context.Background())
+	_, first, second := oneFetchCase(t, s, ctx1, 5*time.Second)
+	cancel()
+	if err := <-first; !errors.Is(err, context.Canceled) {
+		t.Fatalf("the first lookup: %v, want context.Canceled", err)
+	}
+	if err := <-second; err != nil {
+		t.Fatalf("the second lookup after the first was cancelled: %v", err)
+	}
+}
+
+// The first fetch does not finish: the second waits the cache's wait,
+// then fetches alongside and answers.
+func TestHistoryCacheOneFetchSlowFirstSecondWaitsItsBound(t *testing.T) {
+	s := scriptedStore{n: new(atomic.Int64)}
+	ctx1, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wait := 300 * time.Millisecond
+	start := time.Now()
+	_, _, second := oneFetchCase(t, s, ctx1, wait)
+	if err := <-second; err != nil {
+		t.Fatalf("the second lookup behind a fetch that does not finish: %v", err)
+	}
+	if took := time.Since(start); took < wait || took > wait+2*time.Second {
+		t.Fatalf("the second lookup took %v, want about the wait %v", took, wait)
 	}
 }

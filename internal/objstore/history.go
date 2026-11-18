@@ -364,18 +364,28 @@ func (c *HistoryCache) historyUnder(ctx context.Context, prefix string, at time.
 // fetchOnce is what kept answers, or else the store's answer (fetch),
 // kept (keep) as complete up to now. In one process one fetch of a name
 // is in flight at a time: a caller that finds one waits for it and then
-// asks kept again, so two lookups of one key at once ask the store once
-// (when the first's keep was done; else the second fetches too).
+// asks kept again, so two lookups of one key at once ask the store once.
+// The second fetches itself when the first's fetch failed (its error is
+// the first caller's alone: a cancelled first caller cancels nothing of
+// the second's), when the first's keep was skipped, or when the first
+// has not finished within the cache's wait (HistoryWait): then it fetches
+// alongside, and waits no longer.
 func (c *HistoryCache) fetchOnce(ctx context.Context, name string, at time.Time, kept func() ([]Object, bool, error),
 	fetch func(context.Context) ([]Object, error), keep func([]Object, time.Time) error) ([]Object, error) {
 	if list, hit, err := kept(); err != nil || hit {
 		return list, err
 	}
-	done, err := c.f.fetching(ctx, name)
-	if err != nil {
-		return nil, err
+	wait, cancel := context.WithTimeout(ctx, c.wait)
+	done, err := c.f.fetching(wait, name)
+	cancel()
+	switch {
+	case err == nil:
+		defer done()
+	case ctx.Err() != nil:
+		return nil, ctx.Err()
+	default:
+		// The fetch under way took longer than the wait: fetch alongside.
 	}
-	defer done()
 	if list, hit, err := kept(); err != nil || hit {
 		return list, err
 	}
