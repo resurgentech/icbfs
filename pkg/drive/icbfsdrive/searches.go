@@ -71,6 +71,14 @@ type stoppedSearches struct {
 	gen uint64
 }
 
+// reset drops every kept search and every "not there" (Close). Searches
+// under way end as they would.
+func (s *stoppedSearches) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m, s.absent, s.dirs = nil, nil, 0
+}
+
 // generation is the past's generation now.
 func (s *stoppedSearches) generation() uint64 {
 	s.mu.Lock()

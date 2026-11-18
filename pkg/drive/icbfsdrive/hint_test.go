@@ -167,12 +167,7 @@ func TestIDPathCacheBound(t *testing.T) {
 }
 
 // forget empties the memory, as a start of the process does.
-func (c *idPathCache) forget() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.m = nil
-	c.lru.Init()
-}
+func (c *idPathCache) forget() { c.reset() }
 
 // TestStubTargetPlaceAfterRestart (T82-13, option 2): a mirror that
 // writes a document as a stub of content it already holds tells the drive

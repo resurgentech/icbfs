@@ -149,6 +149,7 @@ func New(ctx context.Context, cfg Config) (*Drive, error) {
 	dirs := newDirCache(cfg.TrustFor, cfg.DirCacheBytes)
 	fsys := icbfs.New(&noteWrites{Store: &dropOnWrite{Store: cfg.Store, dirs: dirs}}, cfg.Filesystem)
 	if err := fsys.Attach(ctx); err != nil {
+		fsys.Close()
 		return nil, mapErr(err)
 	}
 	fsys.EnableLocking(!cfg.NoLocking)
@@ -161,9 +162,11 @@ func New(ctx context.Context, cfg Config) (*Drive, error) {
 	for _, part := range splitPath(d.root) {
 		e, _, err := d.lookup(ctx, fsys, key, part)
 		if err != nil {
+			fsys.Close()
 			return nil, fmt.Errorf("drive root %s: %w", cfg.Root, mapErr(err))
 		}
 		if e.Type != icbfs.TypeDir {
+			fsys.Close()
 			return nil, fmt.Errorf("drive root %s: %w", cfg.Root, drive.ErrNotDir)
 		}
 		key = e.UUID
@@ -175,11 +178,20 @@ func New(ctx context.Context, cfg Config) (*Drive, error) {
 // Filesystem is the drive's icbfs filesystem.
 func (d *Drive) Filesystem() *icbfs.Filesystem { return d.fs }
 
-// Close sends a past-changed mark still put off (pastMarker), and
-// releases the drive's as-of views and its temporary history cache.
+// Close sends a past-changed mark still put off (pastMarker), releases
+// the drive's as-of views and its temporary history cache, and closes its
+// filesystem, which removes its cache directory (T82-16). Nothing may be
+// in flight on the drive when it is closed: the host closes a drive only
+// once no request holds it.
 func (d *Drive) Close() {
 	d.past.flush()
 	d.views.closeAll()
+	// Its memories and kept searches go (ME-6): a handle kept past the
+	// close (an upload's erase, which reaches the store alone) holds
+	// none of them.
+	d.idPaths.reset()
+	d.stopped.reset()
+	d.fs.Close()
 }
 
 // Capabilities: everything.
@@ -783,6 +795,14 @@ type idPathCache struct {
 }
 
 type idPath struct{ id, path string }
+
+// reset empties the memory (Close).
+func (c *idPathCache) reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.m = nil
+	c.lru.Init()
+}
 
 func (c *idPathCache) get(id string) (string, bool) {
 	c.mu.Lock()

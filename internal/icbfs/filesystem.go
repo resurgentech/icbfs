@@ -10,7 +10,6 @@ import (
 	"log"
 	"math/rand/v2"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -112,6 +111,9 @@ type Filesystem struct {
 	// session seeds its own private scratch file from — set by New's own default, overridable via
 	// SetCacheOptions before Bootstrap.
 	cache *diskCache
+	// ownCache: cache is this Filesystem's own, in a temp directory it
+	// makes and Close removes (not a caller's, not a shared one).
+	ownCache bool
 
 	// opens is this process's open files; see openSessions.
 	openMu sync.Mutex
@@ -129,19 +131,16 @@ type Filesystem struct {
 func New(store objstore.Store, fsName string) *Filesystem {
 	// Every OpenFile goes through the cache, so there's always one. A fresh
 	// temp directory each, so Filesystems in one process (tests) don't
-	// share one.
-	cacheDir, err := os.MkdirTemp("", "icbfs-cache-")
-	if err != nil {
-		// Only if the temp directory isn't writable: fall back to a fixed
-		// directory rather than make New fallible.
-		cacheDir = filepath.Join(os.TempDir(), "icbfs-cache-fallback")
-	}
+	// share one; made by the first open that needs it, removed by Close
+	// (cachedir.go). The first New of a process removes the directories
+	// processes that died left.
+	sweepDeadCacheDirsOnce()
 	mountID, err := NewUUIDv7()
 	if err != nil {
 		mountID = fmt.Sprintf("mount-%d-%d", os.Getpid(), time.Now().UnixNano())
 	}
 	// The store records what's written under a declared time (RecordDates).
-	f := &Filesystem{store: objstore.Recording(store), fsName: fsName, cache: newDiskCache(cacheDir, defaultCacheMaxBytes), mountID: mountID}
+	f := &Filesystem{store: objstore.Recording(store), fsName: fsName, cache: newOwnedDiskCache(defaultCacheMaxBytes), ownCache: true, mountID: mountID}
 	objstore.DateAll(f.store, f.dated)
 	return f
 }
@@ -160,7 +159,10 @@ func (f *Filesystem) ownHolder(holder string) bool {
 // (the mounts' -cache-dir and -cache-size). Without it, New's default is a
 // fresh temp directory and 512 MiB. It affects only files opened afterward.
 func (f *Filesystem) SetCacheOptions(dir string, maxBytes int64) {
-	f.cache = newDiskCache(dir, maxBytes)
+	if f.ownCache {
+		_ = f.cache.close() // nothing was opened yet: nothing to remove
+	}
+	f.cache, f.ownCache = newDiskCache(dir, maxBytes), false
 }
 
 // EnableLocking turns locking on for this Filesystem; it's off by default
@@ -376,6 +378,16 @@ func (f *Filesystem) BootstrapViewOf(ctx context.Context, live *Filesystem) erro
 	f.archived.Store(live.archived.Load())
 	f.sourceTime.Store(live.sourceTime.Load())
 	f.maxFileSize, f.dirBlockEntries = live.maxFileSize, live.dirBlockEntries
+	// A view reads through the live Filesystem's disk cache (entries are
+	// by key and ETag, so a past version is never taken for the present
+	// one): views make no cache directory of their own, and the live
+	// one's Close removes the one there is (T82-16).
+	if f.cache != live.cache {
+		if f.ownCache {
+			_ = f.cache.close()
+		}
+		f.cache, f.ownCache = live.cache, false
+	}
 	if _, err := f.store.Head(ctx, f.RootKey()); err != nil {
 		return fmt.Errorf("filesystem %q root: %w", f.fsName, mapNotFound(err))
 	}
@@ -3034,4 +3046,19 @@ func mapNotFound(err error) error {
 		return fmt.Errorf("%w: %v", ErrNotFound, err)
 	}
 	return err
+}
+
+// Close lets go of what the Filesystem holds on this machine: its own
+// cache directory (made by its first open file in the temp directory) is
+// removed (T82-16). A directory given with SetCacheOptions is not
+// touched, nor is a cache shared from the live Filesystem a view of the
+// past was made from (BootstrapViewOf). The caller closes the open files
+// first: nothing may be in flight on a Filesystem when it is closed.
+// After Close an open needing the disk cache fails; Close again does
+// nothing.
+func (f *Filesystem) Close() error {
+	if !f.ownCache {
+		return nil
+	}
+	return f.cache.close()
 }

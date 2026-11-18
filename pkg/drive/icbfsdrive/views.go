@@ -346,6 +346,7 @@ func (c *viewCache) closeAll() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	clear(c.views)
+	clear(c.mems)
 	if c.ownHist {
 		c.history.Close()
 	}

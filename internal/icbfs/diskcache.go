@@ -23,6 +23,13 @@ type diskCache struct {
 	dir      string // lazily created on first real use
 	maxBytes int64
 
+	// own: dir is made by the first use, in the temp directory, locked
+	// while the cache lives, and removed by close (cachedir.go); dir is ""
+	// until then.
+	own    bool
+	lock   *os.File
+	closed bool
+
 	entries    map[string]*cacheEntry
 	lru        []string // oldest-first; a key's position is refreshed (moved to the end) on every touch
 	totalBytes int64
@@ -35,6 +42,48 @@ type cacheEntry struct {
 
 func newDiskCache(dir string, maxBytes int64) *diskCache {
 	return &diskCache{dir: dir, maxBytes: maxBytes, entries: map[string]*cacheEntry{}}
+}
+
+// newOwnedDiskCache is a Filesystem's own cache: its directory is made
+// in the temp directory by the first use and removed by close.
+func newOwnedDiskCache(maxBytes int64) *diskCache {
+	return &diskCache{own: true, maxBytes: maxBytes, entries: map[string]*cacheEntry{}}
+}
+
+// ready makes an own cache's directory if it has none yet; an error for
+// a closed cache.
+func (c *diskCache) ready() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return errCacheClosed
+	}
+	if c.own && c.dir == "" {
+		dir, lock, err := makeOwnedCacheDir()
+		if err != nil {
+			return err
+		}
+		c.dir, c.lock = dir, lock
+	}
+	return nil
+}
+
+// close removes an own cache's directory, once; later uses fail.
+func (c *diskCache) close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
+	c.closed = true
+	clear(c.entries)
+	c.lru, c.totalBytes = nil, 0
+	if !c.own || c.dir == "" {
+		return nil
+	}
+	err := releaseOwnedCacheDir(c.dir, c.lock)
+	c.lock = nil
+	return err
 }
 
 func (c *diskCache) sharedDir() string  { return filepath.Join(c.dir, "shared") }
@@ -90,6 +139,9 @@ func (c *diskCache) validLocked(key, wantETag string) bool {
 // newScratchFile creates a private scratch file for one session, which the
 // session removes (OpenFile.Close).
 func (c *diskCache) newScratchFile() (*os.File, error) {
+	if err := c.ready(); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(c.scratchDir(), 0700); err != nil {
 		return nil, err
 	}
@@ -178,6 +230,9 @@ func (c *diskCache) updateSharedFrom(key, etag string, content *os.File, size in
 	if size > c.maxBytes {
 		c.invalidate(key)
 		_, err := content.Seek(0, io.SeekStart)
+		return err
+	}
+	if err := c.ready(); err != nil { // never makes again a closed cache's directory
 		return err
 	}
 	if err := os.MkdirAll(c.sharedDir(), 0700); err != nil {
