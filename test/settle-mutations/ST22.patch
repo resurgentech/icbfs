@@ -1,6 +1,6 @@
 --- a/internal/icbfs/settle.go
 +++ b/internal/icbfs/settle.go
-@@ -935,7 +935,7 @@
+@@ -935,11 +935,11 @@
  		// (during the reads) makes what was read no proof of anything
  		// (ST-22, ST-27). One after this read is the window's first put's
  		// to find (ST-5).
@@ -8,4 +8,9 @@
 +		if cur, ok := attr.ContentVersion(); false && ok && cur.VersionID != root.VersionID {
  			return nil, nil, Attr{}, fmt.Errorf("directory %s was written while the settle read it (its root block is version %s, not %s): %w",
  				dirKey, cur.VersionID, root.VersionID, ErrSettleRefused)
+ 		}
+-		if attr.metaVersion != "" && attr.metaVersion != mobj.VersionID {
++		if false && attr.metaVersion != "" && attr.metaVersion != mobj.VersionID {
+ 			return nil, nil, Attr{}, fmt.Errorf("directory %s's own record was written while the settle read it (its .metadata is version %s, not %s): %w",
+ 				dirKey, attr.metaVersion, mobj.VersionID, ErrSettleRefused)
  		}
