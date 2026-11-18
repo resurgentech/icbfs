@@ -244,6 +244,21 @@ type ConditionalAppObjects interface {
 	AppObjectAt(ctx context.Context, name, version string) ([]byte, error)
 }
 
+// AppObjectHeader is a drive that tells an app object's current version
+// without reading it: a reader that keeps what it read checks it is
+// still current with one HEAD. None is ErrNotFound.
+type AppObjectHeader interface {
+	AppObjectHead(ctx context.Context, name string) (version string, err error)
+}
+
+// PastMarker is a drive that tells the version of its filesystem's
+// past-changed mark ("" for none): it moves whenever the past changes (a
+// purge, a change dated under an earlier time), so what a reader kept of
+// the past stays right while the mark stays where it was.
+type PastMarker interface {
+	PastMark(ctx context.Context) (string, error)
+}
+
 // Locker is a drive whose files can be locked against others' writes: a
 // whole-file, exclusive, leased lock, the same lock a mount's flock or
 // fcntl takes, so a file locked either way is locked to both. A tool

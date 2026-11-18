@@ -25,6 +25,7 @@ import (
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/pkg/fslog"
 	pkgicbfs "github.com/resurgentech/icbfs/pkg/icbfs"
+	"github.com/resurgentech/icbfs/pkg/readcache"
 	"github.com/resurgentech/icbfs/pkg/storeflags"
 )
 
@@ -145,6 +146,9 @@ func main() {
 
 	fsys := icbfs.New(store, *fsName)
 	if *cacheDir != "" {
+		if w := cacheDirWarning(*cacheDir); w != "" {
+			log.Print(w)
+		}
 		fsys.SetCacheOptions(*cacheDir, int64(*cacheSize))
 	}
 	if view != nil {
@@ -319,4 +323,18 @@ func resolveDir(ctx context.Context, fsys *icbfs.Filesystem, p string) (string, 
 		key = e.UUID
 	}
 	return key, nil
+}
+
+// cacheDirWarning is the line icbfs mount logs when -cache-dir names a
+// directory that icbfs-gitd would refuse (another user's, or one group or
+// other can write: readcache.CheckDir), or "". icbfs mount uses it as
+// before; the line only says so.
+func cacheDirWarning(dir string) string {
+	if _, err := os.Stat(dir); err != nil {
+		return "" // made at the first open, 0700
+	}
+	if err := readcache.CheckDir(dir); err != nil {
+		return "icbfs mount: warning: -cache-dir " + dir + ": " + err.Error() + "; used anyway (other users may read or change what it caches)"
+	}
+	return ""
 }

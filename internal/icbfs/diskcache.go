@@ -4,71 +4,76 @@ import (
 	"context"
 	"io"
 	"os"
-	"path/filepath"
 	"sync"
+
+	"github.com/resurgentech/icbfs/pkg/readcache"
 )
 
 // defaultCacheMaxBytes is the read cache's default size, 512 MiB. Every
 // open file goes through the cache, so there's always one; a deployment
 // sizes it with SetCacheOptions (the mounts' -cache-size).
-const defaultCacheMaxBytes = 512 << 20
+const defaultCacheMaxBytes = readcache.DefaultMaxBytes
 
-// diskCache is a shared LRU cache on local disk of fetched content, one
-// version per key. Sessions never use its files directly: each gets a
-// private scratch file copied from it (seedScratch), so the cache's files
-// are never written once made, and one session's unflushed edits never
-// reach another's, which re-applying after a lost race depends on.
+// diskCache is a Filesystem's read cache: pkg/readcache (entries by key
+// and store version id, an index read from the directory at start,
+// fetches in flight shared, safe for several processes on one directory)
+// in a directory a caller gave (SetCacheOptions) or in one of its own,
+// made in the temp directory by the first use and removed by close
+// (cachedir.go). Sessions never use an entry's file directly: each gets a
+// private scratch file copied from it (seedScratch), so one session's
+// unflushed edits never reach another's, which re-applying after a lost
+// race depends on.
 type diskCache struct {
 	mu       sync.Mutex
-	dir      string // lazily created on first real use
+	dir      string // the directory; for an own cache "" until the first use
 	maxBytes int64
-
-	// own: dir is made by the first use, in the temp directory, locked
-	// while the cache lives, and removed by close (cachedir.go); dir is ""
-	// until then.
-	own    bool
-	lock   *os.File
-	closed bool
-
-	entries    map[string]*cacheEntry
-	lru        []string // oldest-first; a key's position is refreshed (moved to the end) on every touch
-	totalBytes int64
-}
-
-type cacheEntry struct {
-	etag string
-	size int64
+	own      bool
+	lock     *os.File // an own directory's lock (cachedir.go)
+	closed   bool
+	rc       *readcache.Cache
 }
 
 func newDiskCache(dir string, maxBytes int64) *diskCache {
-	return &diskCache{dir: dir, maxBytes: maxBytes, entries: map[string]*cacheEntry{}}
+	return &diskCache{dir: dir, maxBytes: maxBytes}
 }
 
 // newOwnedDiskCache is a Filesystem's own cache: its directory is made
 // in the temp directory by the first use and removed by close.
 func newOwnedDiskCache(maxBytes int64) *diskCache {
-	return &diskCache{own: true, maxBytes: maxBytes, entries: map[string]*cacheEntry{}}
+	return &diskCache{own: true, maxBytes: maxBytes}
 }
 
-// ready makes an own cache's directory if it has none yet; an error for
-// a closed cache.
-func (c *diskCache) ready() error {
+// ready opens the cache's directory at its first use (an own cache makes
+// it first); an error for a closed cache.
+func (c *diskCache) ready() (*readcache.Cache, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
-		return errCacheClosed
+		return nil, errCacheClosed
+	}
+	if c.rc != nil {
+		return c.rc, nil
 	}
 	if c.own && c.dir == "" {
 		dir, lock, err := makeOwnedCacheDir()
 		if err != nil {
-			return err
+			return nil, err
 		}
 		c.dir, c.lock = dir, lock
 	}
-	return nil
+	// icbfs mount's -cache-dir is not held to the owner-only check
+	// (readcache.Options.OwnDir): a setup that worked before still does;
+	// cmd/icbfs warns instead.
+	rc, err := readcache.Open(c.dir, readcache.Options{MaxBytes: c.maxBytes})
+	if err != nil {
+		return nil, err
+	}
+	c.rc = rc
+	return rc, nil
 }
 
-// close removes an own cache's directory, once; later uses fail.
+// close lets go of the cache, and removes an own cache's directory, once;
+// later uses fail. A given directory keeps its entries for the next start.
 func (c *diskCache) close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -76,217 +81,78 @@ func (c *diskCache) close() error {
 		return nil
 	}
 	c.closed = true
-	clear(c.entries)
-	c.lru, c.totalBytes = nil, 0
-	if !c.own || c.dir == "" {
-		return nil
+	var err error
+	if c.rc != nil {
+		err = c.rc.Close()
+		c.rc = nil
 	}
-	err := releaseOwnedCacheDir(c.dir, c.lock)
+	if !c.own || c.dir == "" {
+		return err
+	}
+	err = releaseOwnedCacheDir(c.dir, c.lock)
 	c.lock = nil
 	return err
-}
-
-func (c *diskCache) sharedDir() string  { return filepath.Join(c.dir, "shared") }
-func (c *diskCache) scratchDir() string { return filepath.Join(c.dir, "scratch") }
-
-func (c *diskCache) sharedPath(key string) string {
-	return filepath.Join(c.sharedDir(), key)
-}
-
-// touchLocked moves key to the most-recently-used end of the LRU
-// order, adding it if not already tracked.
-func (c *diskCache) touchLocked(key string) {
-	for i, k := range c.lru {
-		if k == key {
-			c.lru = append(c.lru[:i], c.lru[i+1:]...)
-			break
-		}
-	}
-	c.lru = append(c.lru, key)
-}
-
-// evictLocked removes the oldest entries, and their files, until the cache
-// is within budget, sparing newKey, the entry it's making room for.
-func (c *diskCache) evictLocked(newKey string) {
-	for c.totalBytes > c.maxBytes && len(c.lru) > 0 {
-		oldest := c.lru[0]
-		if oldest == newKey {
-			if len(c.lru) == 1 {
-				break
-			}
-			oldest = c.lru[1]
-			c.lru = append(c.lru[:1], c.lru[2:]...)
-		} else {
-			c.lru = c.lru[1:]
-		}
-		entry, ok := c.entries[oldest]
-		if !ok {
-			continue
-		}
-		_ = os.Remove(c.sharedPath(oldest))
-		c.totalBytes -= entry.size
-		delete(c.entries, oldest)
-	}
-}
-
-// validLocked reports whether key's shared cache entry, if any,
-// already reflects wantETag.
-func (c *diskCache) validLocked(key, wantETag string) bool {
-	entry, ok := c.entries[key]
-	return ok && entry.etag == wantETag
 }
 
 // newScratchFile creates a private scratch file for one session, which the
 // session removes (OpenFile.Close).
 func (c *diskCache) newScratchFile() (*os.File, error) {
-	if err := c.ready(); err != nil {
+	rc, err := c.ready()
+	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(c.scratchDir(), 0700); err != nil {
-		return nil, err
-	}
-	return os.CreateTemp(c.scratchDir(), "scratch-*")
+	return rc.NewScratch()
 }
 
-// seedScratch returns a new scratch file holding key's content as of
-// wantETag: copied from the cache if it has that version, else fetched
-// (fetch is called at most once) into both the scratch file and the cache.
-// The content is streamed to disk, never held in memory.
-func (c *diskCache) seedScratch(ctx context.Context, key, wantETag string, fetch func(ctx context.Context) (io.ReadCloser, error)) (*os.File, int64, error) {
-	scratch, err := c.newScratchFile()
+// seedScratch returns a new scratch file holding key's content at store
+// version version: copied from the cache if it has that version, else
+// fetched (fetch must read exactly that version; it is called at most
+// once, and an Open of the same version at the same time waits for it)
+// into both the scratch file and the cache. With no version (a store that
+// keeps none) nothing is cached. The content is streamed to disk, never
+// held in memory.
+func (c *diskCache) seedScratch(ctx context.Context, key, version string, fetch func(ctx context.Context) (io.ReadCloser, error)) (*os.File, int64, error) {
+	rc, err := c.ready()
 	if err != nil {
 		return nil, 0, err
 	}
-
-	c.mu.Lock()
-	hit := c.validLocked(key, wantETag)
-	c.mu.Unlock()
-
-	if hit {
-		if shared, err := os.Open(c.sharedPath(key)); err == nil {
-			size, copyErr := io.Copy(scratch, shared)
-			shared.Close()
-			if copyErr == nil {
-				c.mu.Lock()
-				c.touchLocked(key)
-				c.mu.Unlock()
-				if _, err := scratch.Seek(0, io.SeekStart); err != nil {
-					scratch.Close()
-					_ = os.Remove(scratch.Name())
-					return nil, 0, err
-				}
+	if version != "" {
+		return rc.Seed(ctx, key, version, -1, fetch)
+	}
+	scratch, err := rc.NewScratch()
+	if err != nil {
+		return nil, 0, err
+	}
+	body, err := fetch(ctx)
+	if err == nil {
+		var size int64
+		size, err = io.Copy(scratch, body)
+		body.Close()
+		if err == nil {
+			if _, err = scratch.Seek(0, io.SeekStart); err == nil {
 				return scratch, size, nil
 			}
-			// The cached copy didn't read back (evicted meanwhile): fetch
-			// instead. The cache only saves work.
-			if _, err := scratch.Seek(0, io.SeekStart); err != nil {
-				scratch.Close()
-				_ = os.Remove(scratch.Name())
-				return nil, 0, err
-			}
-			if err := scratch.Truncate(0); err != nil {
-				scratch.Close()
-				_ = os.Remove(scratch.Name())
-				return nil, 0, err
-			}
 		}
 	}
-
-	body, err := fetch(ctx)
-	if err != nil {
-		scratch.Close()
-		_ = os.Remove(scratch.Name())
-		return nil, 0, err
-	}
-	size, err := io.Copy(scratch, body)
-	body.Close()
-	if err != nil {
-		scratch.Close()
-		_ = os.Remove(scratch.Name())
-		return nil, 0, err
-	}
-	if _, err := scratch.Seek(0, io.SeekStart); err != nil {
-		scratch.Close()
-		_ = os.Remove(scratch.Name())
-		return nil, 0, err
-	}
-	if err := c.updateSharedFrom(key, wantETag, scratch, size); err != nil {
-		// A failure to fill the cache doesn't fail the fetch; the next Open
-		// just fetches again.
-		_, _ = scratch.Seek(0, io.SeekStart)
-	}
-	return scratch, size, nil
+	scratch.Close()
+	_ = os.Remove(scratch.Name())
+	return nil, 0, err
 }
 
-// updateSharedFrom puts size bytes of content (from its current position)
-// in the cache as key's entry, replacing any, and seeks content back to the
-// start. seedScratch uses it after a fetch, and OpenFile.Flush after a
-// write, so the next Open needn't fetch.
-//
-// Content larger than the whole budget isn't cached (it would evict
-// everything else and then itself); key's older entry is dropped instead,
-// since it no longer matches.
-func (c *diskCache) updateSharedFrom(key, etag string, content *os.File, size int64) error {
-	if size > c.maxBytes {
-		c.invalidate(key)
-		_, err := content.Seek(0, io.SeekStart)
-		return err
-	}
-	if err := c.ready(); err != nil { // never makes again a closed cache's directory
-		return err
-	}
-	if err := os.MkdirAll(c.sharedDir(), 0700); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(c.sharedDir(), "tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	if _, err := io.Copy(tmp, content); err != nil {
-		tmp.Close()
-		_ = os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	if _, err := content.Seek(0, io.SeekStart); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	if err := os.Rename(tmpName, c.sharedPath(key)); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-
-	c.mu.Lock()
-	if old, ok := c.entries[key]; ok {
-		c.totalBytes -= old.size
-	}
-	c.entries[key] = &cacheEntry{etag: etag, size: size}
-	c.totalBytes += size
-	c.touchLocked(key)
-	c.evictLocked(key)
-	c.mu.Unlock()
-	return nil
-}
-
-// invalidate drops key's entry, when a failed write leaves nothing
-// trustworthy to cache.
-func (c *diskCache) invalidate(key string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if entry, ok := c.entries[key]; ok {
-		_ = os.Remove(c.sharedPath(key))
-		c.totalBytes -= entry.size
-		delete(c.entries, key)
-		for i, k := range c.lru {
-			if k == key {
-				c.lru = append(c.lru[:i], c.lru[i+1:]...)
-				break
-			}
+// updateSharedFrom puts size bytes of content in the cache as key's
+// entry at store version version, and seeks content back to the start:
+// OpenFile.Flush after a write, so the next Open of that version needn't
+// fetch. Content larger than the whole budget isn't cached. Best effort.
+func (c *diskCache) updateSharedFrom(key, version string, content *os.File, size int64) error {
+	var err error
+	if version != "" {
+		var rc *readcache.Cache
+		if rc, err = c.ready(); err == nil {
+			err = rc.Put(key, version, content, size)
 		}
 	}
+	if _, serr := content.Seek(0, io.SeekStart); err == nil {
+		err = serr
+	}
+	return err
 }

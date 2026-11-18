@@ -529,6 +529,19 @@ func (f *Filesystem) copyBytesOnTop(ctx context.Context, key string, want objsto
 // the filesystem when it moves (ForgetChangedPast).
 func (f *Filesystem) pastKey() string { return f.id + "-past" }
 
+// PastMark is the version of the filesystem's past-changed mark (one
+// HEAD), "" if none was ever sent.
+func (f *Filesystem) PastMark(ctx context.Context) (string, error) {
+	obj, err := f.store.Head(ctx, f.pastKey())
+	switch {
+	case err == nil:
+		return obj.VersionID, nil
+	case objstore.IsNotFound(err):
+		return "", nil
+	}
+	return "", err
+}
+
 // MarkPastChanged tells history caches that this filesystem's past has
 // changed (see pastKey). The library calls it after a purge; a caller
 // that writes under a declared time calls it after doing so.
