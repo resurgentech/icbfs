@@ -766,7 +766,7 @@ func TestST22_AnotherWriterDuringTheReadsIsRefused(t *testing.T) {
 	pd, pchanges := cutCase(t, store, "st22p", cfg)
 	reads, precorded, pstarted := 0, false, false
 	store.setWatch(func(op, key string) error {
-		if !precorded && (pstarted || op == "HISTORY" && key == pchanges[0].Folder) {
+		if !precorded && (pstarted || op == "HISTORY" && strings.TrimSuffix(key, ".metadata") == pchanges[0].Folder) {
 			pstarted = true
 			reads++
 		}
@@ -791,7 +791,7 @@ func TestST22_AnotherWriterDuringTheReadsIsRefused(t *testing.T) {
 				if recorded || wrote {
 					return nil
 				}
-				if started || op == "HISTORY" && key == folder {
+				if started || op == "HISTORY" && strings.TrimSuffix(key, ".metadata") == folder {
 					started = true
 					if i++; i == k {
 						wrote = true
@@ -824,6 +824,231 @@ func TestST22_AnotherWriterDuringTheReadsIsRefused(t *testing.T) {
 			}
 			if got := liveNames(t, d, folder); !strings.Contains(got, "zz.txt") {
 				t.Errorf("the other writer's zz.txt is gone: %s", got)
+			}
+		})
+	}
+}
+
+// TestCH6_TheSameChangeAgain (CH-6): a retried item writes the same late
+// file again (the same name, the same date): it is already in the
+// present, so no row is reported; the rows of the first write, settled,
+// and then settled again, write nothing the second time.
+func TestCH6_TheSameChangeAgain(t *testing.T) {
+	counter := &requestCounter{Store: miniotest.Store(t), n: map[string]int{}}
+	d := newDriveWith(t, counter, cutCaseSettings("ch6"), Config{DeferLateFolders: true})
+	ctx := system()
+	writeAt(t, d, ctx, 2020, "/dir/a.txt")
+	writeAt(t, d, ctx, 2024, "/dir/c.txt")
+	rows := r5Write(t, d, "/dir/x.txt", year(2021))
+	if len(rows) != 1 || rows[0].Op != drive.LateAdd {
+		t.Fatalf("the first write: rows %s", rowsUntil(rows))
+	}
+	if again := r5Write(t, d, "/dir/x.txt", year(2021)); len(again) != 0 {
+		t.Errorf("the same change again: rows %s, want none", rowsUntil(again))
+	}
+	if _, err := d.SettleFolder(ctx, rows, drive.SettleOptions{Path: "/dir"}); err != nil {
+		t.Fatal(err)
+	}
+	writesSince(counter)
+	s, err := d.SettleFolder(ctx, rows, drive.SettleOptions{Path: "/dir", Record: func(drive.SettleRecord) error {
+		t.Errorf("settled again: a record handed out")
+		return nil
+	}})
+	if n, all := writesSince(counter); err != nil || n != 0 || s.Written != 0 {
+		t.Errorf("settled again: %v, %+v, %d writes:%s", err, s, n, all)
+	}
+	pastIs(t, d, map[int]string{2020: "a.txt", 2021: "a.txt,x.txt", 2024: "a.txt,c.txt,x.txt"})
+}
+
+// TestCH7_TwoLateChangesToOneNameByDate (CH-7): x added late at 2022 and
+// removed late at 2023 (the folder's newest state 2024), the rows given
+// to the settle in the reverse of their dates: played by date, x is in
+// 2022 only. (Two changes to one name at one time, in the order of the
+// write: TestSettleSameAtTwoWrites.)
+func TestCH7_TwoLateChangesToOneNameByDate(t *testing.T) {
+	d := newDriveWith(t, miniotest.Store(t), cutCaseSettings("ch7"), Config{DeferLateFolders: true})
+	ctx := system()
+	writeAt(t, d, ctx, 2020, "/dir/a.txt")
+	writeAt(t, d, ctx, 2024, "/dir/c.txt")
+	add := r5Write(t, d, "/dir/x.txt", year(2022))
+	late := &drive.LateChanges{}
+	if err := d.Delete(at(drive.WithLateChanges(ctx, late), 2023), drive.ByPath("/dir/x.txt"), false, drive.Condition{}); err != nil {
+		t.Fatal(err)
+	}
+	rm := late.Take()
+	if len(add) != 1 || len(rm) != 1 {
+		t.Fatalf("rows: add %s, remove %s", rowsUntil(add), rowsUntil(rm))
+	}
+	if _, err := d.SettleFolder(ctx, append(rm, add...), drive.SettleOptions{Path: "/dir"}); err != nil {
+		t.Fatal(err)
+	}
+	pastIs(t, d, map[int]string{2021: "a.txt", 2022: "a.txt,x.txt", 2023: "a.txt", 2024: "a.txt,c.txt"})
+}
+
+// TestCH9_RowsWithDifferentUntil (CH-9): x written late at 2021 when the
+// folder's newest state was 2022 (Until 2022), x then removed on time in
+// 2023, and y written late at 2021-06 when the newest was 2024 (Until
+// 2024). Settled in one call, each only into its own [At, Until): x in
+// 2021 (and, written, 2022), never 2023 or after; y from 2021-06 on.
+func TestCH9_RowsWithDifferentUntil(t *testing.T) {
+	d := newDriveWith(t, miniotest.Store(t), cutCaseSettings("ch9"), Config{DeferLateFolders: true})
+	ctx := system()
+	writeAt(t, d, ctx, 2020, "/dir/a.txt")
+	writeAt(t, d, ctx, 2022, "/dir/b.txt")
+	x := r5Write(t, d, "/dir/x.txt", year(2021))
+	if err := d.Delete(at(ctx, 2023), drive.ByPath("/dir/x.txt"), false, drive.Condition{}); err != nil {
+		t.Fatal(err)
+	}
+	writeAt(t, d, ctx, 2024, "/dir/c.txt")
+	y := r5Write(t, d, "/dir/y.txt", rvMonth(2021, 6, 1))
+	if len(x) != 1 || len(y) != 1 || !x[0].Until.Equal(year(2022)) || !y[0].Until.Equal(year(2024)) {
+		t.Fatalf("rows: x %s, y %s; want Until 2022 and 2024", rowsUntil(x), rowsUntil(y))
+	}
+	if _, err := d.SettleFolder(ctx, append(x, y...), drive.SettleOptions{Path: "/dir"}); err != nil {
+		t.Fatal(err)
+	}
+	pastIs(t, d, map[int]string{2020: "a.txt", 2021: "a.txt,x.txt,y.txt", 2022: "a.txt,b.txt,x.txt,y.txt",
+		2023: "a.txt,b.txt,y.txt", 2024: "a.txt,b.txt,c.txt,y.txt"})
+}
+
+// TestCH15_ALateChangeToAFilesRecord (CH-15): a late change to a file's
+// own record is written with its date, as before this design: the states
+// from its date until the file's next version have it; the present keeps
+// the record it had; no row.
+func TestCH15_ALateChangeToAFilesRecord(t *testing.T) {
+	d := newDriveWith(t, miniotest.Store(t), cutCaseSettings("ch15"), Config{DeferLateFolders: true})
+	ctx := system()
+	r5Write(t, d, "/dir/f.txt", rvMonth(2021, 1, 1))
+	r5Write(t, d, "/dir/f.txt", rvMonth(2021, 9, 1))
+	late := &drive.LateChanges{}
+	if _, err := d.SetInfo(drive.WithSourceTime(drive.WithLateChanges(ctx, late), rvMonth(2021, 5, 1)), drive.ByPath("/dir/f.txt"),
+		drive.ItemInfo{App: map[string][]byte{"clio.k": []byte("may")}}); err != nil {
+		t.Fatal(err)
+	}
+	if rows := late.Take(); len(rows) != 0 {
+		t.Errorf("rows %s, want none", rowsUntil(rows))
+	}
+	for _, c := range []struct {
+		at   time.Time
+		want string
+	}{{rvMonth(2021, 4, 1), ""}, {rvMonth(2021, 6, 1), "may"}, {time.Time{}, ""}} {
+		it, err := d.Stat(ctx, drive.ByPath("/dir/f.txt"), drive.At{Time: c.at})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := string(it.App["clio.k"]); got != c.want {
+			t.Errorf("f.txt's clio.k as of %v: %q, want %q", c.at.Format("2006-01"), got, c.want)
+		}
+	}
+}
+
+// TestCH16_ProveOnlyPartByPart (CH-16): more rows than one part, proved
+// only: each part is proved against the store as it is, nothing written
+// between them; then settled, the same rows go through.
+func TestCH16_ProveOnlyPartByPart(t *testing.T) {
+	saved := MaxSettleChanges
+	MaxSettleChanges = 2
+	t.Cleanup(func() { MaxSettleChanges = saved })
+	store := &failStore{Store: miniotest.Store(t)}
+	d := newDriveWith(t, store, cutCaseSettings("ch16"), Config{DeferLateFolders: true})
+	for i, y := range []int{2016, 2018, 2020, 2024} {
+		r5Write(t, d, fmt.Sprintf("/dir/f%d.txt", i), year(y))
+	}
+	var rows []drive.LateChange
+	for i := 0; i < 5; i++ {
+		rows = append(rows, r5Write(t, d, fmt.Sprintf("/dir/l%d.txt", i), year(2016).AddDate(0, i*5, 1))...)
+	}
+	parts, writes := 0, 0
+	store.setWatch(func(op, key string) error {
+		if op == "HISTORY" && key == rows[0].Folder {
+			parts++
+		}
+		if isWrite(op) {
+			writes++
+		}
+		return nil
+	})
+	s, err := d.SettleFolder(system(), rows, drive.SettleOptions{Path: "/dir", ProveOnly: true})
+	store.setWatch(nil)
+	if err != nil || s.Changes != 5 || parts != 3 || writes != 0 {
+		t.Fatalf("prove only in parts: %v, Changes %d, parts %d, writes %d; want nil, 5, 3, 0", err, s.Changes, parts, writes)
+	}
+	if _, err := d.SettleFolder(system(), rows, drive.SettleOptions{Path: "/dir"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := sortedAt(t, d, "/dir", year(2018).AddDate(0, 3, 0)); got != "f0.txt,f1.txt,l0.txt,l1.txt,l2.txt,l3.txt,l4.txt" {
+		t.Errorf("2018-04 after the settle: %s", got)
+	}
+}
+
+// TestST27_AnotherWriterChangesOnlyTheRecordDuringTheReads (ST-27): as
+// ST-22's test, the other writer changing only the folder's own record
+// (its app data, on time): refused before any record, at every read but
+// the last (where ST-5 may take it), nothing of the settle written.
+func TestST27_AnotherWriterChangesOnlyTheRecordDuringTheReads(t *testing.T) {
+	raw := miniotest.Store(t)
+	store := &failStore{Store: raw}
+	cfg := Config{DeferLateFolders: true}
+	pd, pchanges := cutCase(t, store, "st27p", cfg)
+	reads, precorded, pstarted := 0, false, false
+	store.setWatch(func(op, key string) error {
+		if !precorded && (pstarted || op == "HISTORY" && strings.TrimSuffix(key, ".metadata") == pchanges[0].Folder) {
+			pstarted = true
+			reads++
+		}
+		return nil
+	})
+	if _, err := pd.SettleFolder(system(), pchanges, drive.SettleOptions{Path: "/dir", Record: func(drive.SettleRecord) error { precorded = true; return nil }}); err != nil {
+		t.Fatalf("the probe: %v", err)
+	}
+	store.setWatch(nil)
+	for k := 2; k <= reads; k++ {
+		t.Run(fmt.Sprintf("written at read %d of %d", k, reads), func(t *testing.T) {
+			name := fmt.Sprintf("st27%d", k)
+			d, changes := cutCase(t, store, name, cfg)
+			folder := changes[0].Folder
+			other := newDriveWith(t, raw, cutCaseSettings(name), Config{})
+			recorded, started, i, wrote := false, false, 0, false
+			var settleWrites []string
+			store.setWatch(func(op, key string) error {
+				if wrote && isWrite(op) {
+					settleWrites = append(settleWrites, op+" "+key)
+				}
+				if recorded || wrote {
+					return nil
+				}
+				if started || op == "HISTORY" && strings.TrimSuffix(key, ".metadata") == folder {
+					started = true
+					if i++; i == k {
+						wrote = true
+						if _, err := other.SetInfo(drive.WithSourceTime(system(), year(2026)), drive.ByPath("/dir"), drive.ItemInfo{App: map[string][]byte{"clio.k": []byte("other")}}); err != nil {
+							return fmt.Errorf("the other writer: %v", err)
+						}
+					}
+				}
+				return nil
+			})
+			kp := &keeper{}
+			opts := kp.opts()
+			opts.Path = "/dir"
+			rec := opts.Record
+			opts.Record = func(r drive.SettleRecord) error { recorded = true; return rec(r) }
+			_, err := d.SettleFolder(system(), changes, opts)
+			store.setWatch(nil)
+			if !wrote {
+				t.Fatalf("the other writer never wrote: %v", err)
+			}
+			switch {
+			case k == reads && errors.Is(err, drive.ErrSettleStopped):
+				if kp.held() != nil || kp.done != 1 || len(settleWrites) != 1 {
+					t.Errorf("stopped at its first put: record held %v, done %d, writes %v", kp.held() != nil, kp.done, settleWrites)
+				}
+			case !errors.Is(err, drive.ErrSettleRefused) || recorded || len(settleWrites) > 0:
+				t.Errorf("the record changed during the reads: %v, record %v, the settle's writes %v; want refused, none", err, recorded, settleWrites)
+			}
+			it, serr := d.Stat(system(), drive.ByPath("/dir"), drive.At{})
+			if serr != nil || string(it.App["clio.k"]) != "other" {
+				t.Errorf("the other writer's record is gone: %v %q", serr, it.App["clio.k"])
 			}
 		})
 	}

@@ -414,6 +414,7 @@ var cutCaseAfter = map[int]string{
 // settles' new blocks that nothing reaches gone, and the record released
 // (Done). Before the reruns and between them, every view is a state the
 // folder really had.
+// STATES: ST-10
 func TestSettleCutAtEveryRequest(t *testing.T) {
 	if raceOn {
 		t.Skip("measured without the race detector: `just test-settle`")

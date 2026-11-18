@@ -48,7 +48,7 @@ CI runs `just ci` on every push to `main` and every pull request, on GitHub's Li
 runners (Docker and FUSE available), and `just build-windows` and
 `just test-windows` on Windows runners.
 
-`just test-settle-review` (not in `ci`; about an hour, run before a change to the late-change settle merges) proves rows ST-1, ST-9, ST-15 and LF-17 of interloc's `docs/STATES.md` at every request of a settle (`TestST9_ImmediateStopAtEveryRequest`, in one folder and in a split one), and that the tests of rows ST-3, ST-5, ST-6, ST-7, ST-9, ST-11, ST-14, ST-16, ST-19, ST-20, ST-22, ST-24, ST-26, LF-2 (`icbfsat`), LF-27, LF-28, CH-4, CH-5 (a record of many app keys) and CH-13 each fail when that row is broken (`test/settle-mutations/run.sh`).
+`just test-settle-review` (not in `ci`; about an hour, run before a change to the late-change settle merges) proves rows ST-1, ST-9, ST-15 and LF-17 of interloc's `docs/STATES.md` at every request of a settle (`TestST9_ImmediateStopAtEveryRequest`, in one folder and in a split one), and that the tests of rows ST-3, ST-5, ST-6, ST-7, ST-9, ST-11, ST-14, ST-16, ST-19, ST-20, ST-22, ST-24, ST-27, ST-26, LF-2 (`icbfsat`), LF-27, LF-28, CH-4, CH-5 (a record of many app keys) and CH-13 each fail when that row is broken (`test/settle-mutations/run.sh`).
 
 - Each test that needs storage starts its own MinIO container through
   testcontainers (`internal/testutil/miniotest`), with a fresh versioned

@@ -142,6 +142,9 @@ type Attr struct {
 	// content that version as the store described it (ContentVersion).
 	contentETag string
 	content     objstore.Object
+	// metaVersion is the version of the .metadata a directory's stat read
+	// (statDir), for a settle's check that the folder is as it listed it.
+	metaVersion string
 
 	// dated says the item has a .version record (see Dated).
 	dated bool

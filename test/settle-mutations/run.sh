@@ -21,6 +21,7 @@ declare -A TESTS=(
   [ST19]='TestLF13_FolderNotAtItsPathSaysSo$'
   [ST20]='TestLF13_FolderNotAtItsPathSaysSo$'
   [ST22]='TestST22_AnotherWriterDuringTheReadsIsRefused$'
+  [ST27]='TestST27_AnotherWriterChangesOnlyTheRecordDuringTheReads$'
   [ST26]='TestST26_TableEmptiedUnderASettleFails$|TestST26_HeldSaysWhenTheTableWasEmptied$'
   [ST26AGE]='TestST26_ALiveRunIsNeverEmptied$'
   [LF27]='TestSettleRefusedWritesNothing$'
@@ -31,7 +32,7 @@ declare -A TESTS=(
   [ICBFSAT]='TestFR_Icbfsat$|TestUndatedThenLate$'
 )
 names=("$@")
-[ ${#names[@]} -eq 0 ] && names=(ST3 ST5 ST6 ST7 ST9 ST11 ST14b ST16 ST19 ST20 ST22 ST26 ST26AGE LF27 LF28 CH4 CH13 RECORDSUM ICBFSAT)
+[ ${#names[@]} -eq 0 ] && names=(ST3 ST5 ST6 ST7 ST9 ST11 ST14b ST16 ST19 ST20 ST22 ST27 ST26 ST26AGE LF27 LF28 CH4 CH13 RECORDSUM ICBFSAT)
 out=$(mktemp -d)
 applied=""
 trap '[ -n "$applied" ] && git apply -R "$applied"' EXIT

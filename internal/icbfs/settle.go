@@ -289,11 +289,15 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 	if err != nil {
 		return Settled{}, err
 	}
-	rootHist, err := history(ctx, dirKey)
+	// The .metadata's history before the root block's: a writer between
+	// the two listings left a root after the root listed, or a .metadata
+	// after the one listed, and the present read last finds either (ST-22,
+	// ST-27; settlePresentNow).
+	metaHist, err := history(ctx, meta)
 	if err != nil {
 		return Settled{}, err
 	}
-	metaHist, err := history(ctx, meta)
+	rootHist, err := history(ctx, dirKey)
 	if err != nil {
 		return Settled{}, err
 	}
@@ -926,13 +930,18 @@ func (f *Filesystem) settlePresentNow(ctx context.Context, dirKey string, root, 
 		if err != nil {
 			return nil, nil, Attr{}, err
 		}
-		// Read last, the present must be the root the settle listed as its
-		// present (V0): another writer's version since (during the reads)
-		// makes what was read no proof of anything (ST-22). One after this
-		// read is the window's first put's to find.
+		// Read last, the present must be the root block and .metadata the
+		// settle listed as its present (V0): another writer's version since
+		// (during the reads) makes what was read no proof of anything
+		// (ST-22, ST-27). One after this read is the window's first put's
+		// to find (ST-5).
 		if cur, ok := attr.ContentVersion(); ok && cur.VersionID != root.VersionID {
 			return nil, nil, Attr{}, fmt.Errorf("directory %s was written while the settle read it (its root block is version %s, not %s): %w",
 				dirKey, cur.VersionID, root.VersionID, ErrSettleRefused)
+		}
+		if attr.metaVersion != "" && attr.metaVersion != mobj.VersionID {
+			return nil, nil, Attr{}, fmt.Errorf("directory %s's own record was written while the settle read it (its .metadata is version %s, not %s): %w",
+				dirKey, attr.metaVersion, mobj.VersionID, ErrSettleRefused)
 		}
 		return entries, keys, attr, nil
 	}

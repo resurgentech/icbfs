@@ -653,6 +653,9 @@ func (f *Filesystem) statDirWith(ctx context.Context, key string, withBlock bool
 		return Attr{}, metaErr
 	}
 	attr, err := combineDirAttr(key, metaData, metaLastModified, blockObj)
+	if err == nil && metaObj != nil {
+		attr.metaVersion = metaObj.VersionID
+	}
 	if err == nil && blk != nil {
 		attr.held = &heldBlock{key: key, blk: blk, obj: blockObj, meta: metaData, metaObj: metaObj}
 	}

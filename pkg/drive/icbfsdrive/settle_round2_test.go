@@ -484,6 +484,7 @@ func TestSettleLateRemovesAndMovesSplit(t *testing.T) {
 // TestSettleSameAtTwoWrites (review finding 8): two late writes at one
 // time into one folder, each numbering its changes from 0, settled in
 // one call in the order reported: both in the past from that time.
+// STATES: CH-7
 func TestSettleSameAtTwoWrites(t *testing.T) {
 	d := newDriveWith(t, miniotest.Store(t), icbfs.Settings{Name: "sameat", Size: 1 << 30, RootMode: 0o777, Created: year(2015)}, Config{DeferLateFolders: true})
 	ctx := system()

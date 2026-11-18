@@ -1,0 +1,11 @@
+--- a/internal/icbfs/settle.go
++++ b/internal/icbfs/settle.go
+@@ -939,7 +939,7 @@
+ 			return nil, nil, Attr{}, fmt.Errorf("directory %s was written while the settle read it (its root block is version %s, not %s): %w",
+ 				dirKey, cur.VersionID, root.VersionID, ErrSettleRefused)
+ 		}
+-		if attr.metaVersion != "" && attr.metaVersion != mobj.VersionID {
++		if false && attr.metaVersion != "" && attr.metaVersion != mobj.VersionID {
+ 			return nil, nil, Attr{}, fmt.Errorf("directory %s's own record was written while the settle read it (its .metadata is version %s, not %s): %w",
+ 				dirKey, attr.metaVersion, mobj.VersionID, ErrSettleRefused)
+ 		}

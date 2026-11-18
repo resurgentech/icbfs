@@ -1,6 +1,6 @@
 --- a/internal/icbfs/settle.go
 +++ b/internal/icbfs/settle.go
-@@ -649,7 +649,7 @@
+@@ -653,7 +653,7 @@
  	// it finishes them. Until then a reader of the present may see an
  	// earlier state (the window) or what is superseded (the erases): what a
  	// kill there leaves too.
