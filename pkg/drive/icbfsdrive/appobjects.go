@@ -54,6 +54,30 @@ func (d *Drive) AppObjectVersion(ctx context.Context, name string) ([]byte, stri
 	return data, obj.VersionID, nil
 }
 
+// AppObjectHead is app object name's current version, without its
+// content: one HEAD after the same access check as AppObjectVersion. A
+// reader that holds what it read can tell from it alone whether anyone
+// wrote the object since. None is ErrNotFound.
+func (d *Drive) AppObjectHead(ctx context.Context, name string) (string, error) {
+	if err := d.appObjectAccess(ctx, name, false); err != nil {
+		return "", err
+	}
+	obj, err := d.fs.HeadAppObject(ctx, name)
+	if err != nil {
+		return "", mapErr(err)
+	}
+	return obj.VersionID, nil
+}
+
+// PastMark is the version of the filesystem's past-changed mark ("" if
+// it has none): it moves whenever the filesystem's past changes (a purge,
+// a change dated under an earlier time), so a reader that keeps what it
+// read of the past can tell, with one HEAD, whether it may still keep
+// it. It is the mark itself, not whether this drive's views saw it.
+func (d *Drive) PastMark(ctx context.Context) (string, error) {
+	return d.fs.PastMark(ctx)
+}
+
 // SetAppObject writes app object name.
 func (d *Drive) SetAppObject(ctx context.Context, name string, data []byte) error {
 	_, err := d.SetAppObjectIf(ctx, name, data, drive.Condition{})
