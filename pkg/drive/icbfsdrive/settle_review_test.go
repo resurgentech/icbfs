@@ -105,6 +105,11 @@ func TestST9_ImmediateStopAtEveryRequest(t *testing.T) {
 			}()
 			name := fmt.Sprintf("fr9%v%d", split, k)
 			d, changes, after, settings := mk(name)
+			// The case's own dated writes marked the past, the last of
+			// them put off by up to a second (pastMarker): sent now, so
+			// that it cannot land after the stop and be taken for one of
+			// the settle's.
+			d.past.flush()
 			folder := changes[0].Folder
 			before := liveNames(t, d, folder)
 			ctx, cancel := context.WithCancel(system())
