@@ -814,8 +814,11 @@ it was written under a source time (see below).
   `objstore.HistoryWait` (5 s); past it a read is a miss and the caller
   reads the store, a keep is skipped, and a forget is held in the
   process (what it names reads as a miss) until the next write applies
-  it. Each is counted (`ContendedMisses`). The cache never answers
-  "database is locked".
+  it; past 256 held, they fold into one forget of everything. Each is
+  counted (`ContendedMisses`). The cache never answers "database is
+  locked". A settle's working table, in the same file, writes in the
+  same turn; it cannot be skipped, so after 10 s without its turn it
+  goes on with SQLite's own wait, as before.
 - The cache keeps what each version says, too, which never changes: its
   metadata, and the content of the reads icbfs marks as metadata (its
   directory blocks, `.metadata` objects, symlink targets and the master

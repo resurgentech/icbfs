@@ -162,6 +162,7 @@ func SettleSum(entries []SettleEntry) string {
 // own, for directory dir.
 type SettleTable struct {
 	db  *sql.DB
+	f   *historyFile // the cache's file: writes take its write turn (inTurn)
 	dir string
 	run string
 }
@@ -171,22 +172,27 @@ type SettleTable struct {
 // A history cache opened by an older build has the tables made here on
 // first use.
 func (c *HistoryCache) SettleTable(ctx context.Context, dir string) (*SettleTable, error) {
-	for _, stmt := range settleSchema {
-		if _, err := c.db.ExecContext(ctx, stmt); err != nil {
-			return nil, err
-		}
-	}
-	for _, col := range settleRunColumns {
-		name, _, _ := strings.Cut(col, " ")
-		var n int
-		if err := c.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('settle_runs') WHERE name = ?`, name).Scan(&n); err != nil {
-			return nil, err
-		}
-		if n == 0 {
-			if _, err := c.db.ExecContext(ctx, `ALTER TABLE settle_runs ADD COLUMN `+col); err != nil {
-				return nil, err
+	if err := c.f.inTurn(ctx, func() error {
+		for _, stmt := range settleSchema {
+			if _, err := c.db.ExecContext(ctx, stmt); err != nil {
+				return err
 			}
 		}
+		for _, col := range settleRunColumns {
+			name, _, _ := strings.Cut(col, " ")
+			var n int
+			if err := c.db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('settle_runs') WHERE name = ?`, name).Scan(&n); err != nil {
+				return err
+			}
+			if n == 0 {
+				if _, err := c.db.ExecContext(ctx, `ALTER TABLE settle_runs ADD COLUMN `+col); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	// What killed settles left: a run of this machine whose process is
 	// gone, a run of this process no settle holds; a run this machine
@@ -229,15 +235,15 @@ func (c *HistoryCache) SettleTable(ctx context.Context, dir string) (*SettleTabl
 		return nil, err
 	}
 	for _, r := range stale {
-		if err := (&SettleTable{db: c.db, run: r}).Clear(ctx); err != nil {
+		if err := (&SettleTable{db: c.db, f: c.f, run: r}).Clear(ctx); err != nil {
 			return nil, err
 		}
 	}
-	t := &SettleTable{db: c.db, dir: dir, run: uuid.NewString()}
+	t := &SettleTable{db: c.db, f: c.f, dir: dir, run: uuid.NewString()}
 	liveRuns.Lock()
 	liveRuns.m[t.run] = true
 	liveRuns.Unlock()
-	if _, err := c.db.ExecContext(ctx, `INSERT INTO settle_runs (run, dir, started, host, pid) VALUES (?, ?, ?, ?, ?)`,
+	if err := t.exec(ctx, `INSERT INTO settle_runs (run, dir, started, host, pid) VALUES (?, ?, ?, ?, ?)`,
 		t.run, dir, nanos(time.Now()), host, pid); err != nil {
 		liveRuns.Lock()
 		delete(liveRuns.m, t.run)
@@ -271,17 +277,27 @@ func (t *SettleTable) Clear(ctx context.Context) error {
 	liveRuns.Lock()
 	delete(liveRuns.m, t.run)
 	liveRuns.Unlock()
-	tx, err := t.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, table := range settleTables {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE run = ?`, t.run); err != nil {
+	return t.f.inTurn(ctx, func() error {
+		tx, err := t.db.BeginTx(ctx, nil)
+		if err != nil {
 			return err
 		}
-	}
-	return tx.Commit()
+		defer tx.Rollback()
+		for _, table := range settleTables {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE run = ?`, t.run); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	})
+}
+
+// exec is one write statement, in the write turn.
+func (t *SettleTable) exec(ctx context.Context, query string, args ...any) error {
+	return t.f.inTurn(ctx, func() error {
+		_, err := t.db.ExecContext(ctx, query, args...)
+		return err
+	})
 }
 
 func nanos(t time.Time) int64 { return t.UnixNano() }
@@ -296,6 +312,14 @@ func fromNanos(n int64) time.Time { return time.Unix(0, n).UTC() }
 // before. A state the same as the one before, entries and record, is not
 // recorded (kept false).
 func (t *SettleTable) ReadState(ctx context.Context, at time.Time, entries []SettleEntry, rec []byte, recSum string) (kept bool, err error) {
+	err = t.f.inTurn(ctx, func() error {
+		kept, err = t.readState(ctx, at, entries, rec, recSum)
+		return err
+	})
+	return kept, err
+}
+
+func (t *SettleTable) readState(ctx context.Context, at time.Time, entries []SettleEntry, rec []byte, recSum string) (kept bool, err error) {
 	sum := SettleSum(entries)
 	var last string
 	err = t.db.QueryRowContext(ctx, `SELECT sum FROM settle_states WHERE run = ? AND read = 1 ORDER BY at DESC LIMIT 1`, t.run).Scan(&last)
@@ -386,7 +410,7 @@ func (t *SettleTable) AddBlocks(ctx context.Context, at time.Time, keys ...strin
 		arg = 1
 	}
 	for _, k := range keys {
-		if _, err := t.db.ExecContext(ctx, stmt, t.run, k, arg); err != nil {
+		if err := t.exec(ctx, stmt, t.run, k, arg); err != nil {
 			return err
 		}
 	}
@@ -426,8 +450,7 @@ func (t *SettleTable) Blocks(ctx context.Context) ([]SettleBlock, error) {
 // EnsureState makes sure there's a state at at: one a change made, if
 // none was read there.
 func (t *SettleTable) EnsureState(ctx context.Context, at time.Time) error {
-	_, err := t.db.ExecContext(ctx, `INSERT OR IGNORE INTO settle_states (run, at, sum, read) VALUES (?, ?, '', 0)`, t.run, nanos(at))
-	return err
+	return t.exec(ctx, `INSERT OR IGNORE INTO settle_states (run, at, sum, read) VALUES (?, ?, '', 0)`, t.run, nanos(at))
 }
 
 // lifetime is one row of settle_entries.
@@ -464,6 +487,10 @@ func (t *SettleTable) Add(ctx context.Context, at, until time.Time, e SettleEntr
 	if !until.After(at) {
 		return fmt.Errorf("an add at %s until %s: until must be after at", at.Format(time.RFC3339Nano), until.Format(time.RFC3339Nano))
 	}
+	return t.f.inTurn(ctx, func() error { return t.add(ctx, at, until, e) })
+}
+
+func (t *SettleTable) add(ctx context.Context, at, until time.Time, e SettleEntry) error {
 	tx, err := t.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -510,6 +537,10 @@ func (t *SettleTable) Remove(ctx context.Context, at, until time.Time, name, ite
 	if !until.After(at) {
 		return fmt.Errorf("a removal at %s until %s: until must be after at", at.Format(time.RFC3339Nano), until.Format(time.RFC3339Nano))
 	}
+	return t.f.inTurn(ctx, func() error { return t.remove(ctx, at, until, name, item) })
+}
+
+func (t *SettleTable) remove(ctx context.Context, at, until time.Time, name, item string) error {
 	tx, err := t.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -623,15 +654,13 @@ func (t *SettleTable) RecordAt(ctx context.Context, at time.Time) (rec []byte, s
 // SetNewKeys records the keys minted for the blocks below the root of the
 // state at at.
 func (t *SettleTable) SetNewKeys(ctx context.Context, at time.Time, keys []string) error {
-	_, err := t.db.ExecContext(ctx, `UPDATE settle_states SET lower_keys = ? WHERE run = ? AND at = ?`, strings.Join(keys, " "), t.run, nanos(at))
-	return err
+	return t.exec(ctx, `UPDATE settle_states SET lower_keys = ? WHERE run = ? AND at = ?`, strings.Join(keys, " "), t.run, nanos(at))
 }
 
 // SetEncoded keeps the state at at's encoded root block and .metadata,
 // for the write-out to put with nothing to make.
 func (t *SettleTable) SetEncoded(ctx context.Context, at time.Time, root, meta []byte) error {
-	_, err := t.db.ExecContext(ctx, `UPDATE settle_states SET root = ?, meta = ? WHERE run = ? AND at = ?`, root, meta, t.run, nanos(at))
-	return err
+	return t.exec(ctx, `UPDATE settle_states SET root = ?, meta = ? WHERE run = ? AND at = ?`, root, meta, t.run, nanos(at))
 }
 
 // Encoded is what SetEncoded kept for the state at at.

@@ -3,6 +3,7 @@ package objstore
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"sync/atomic"
 	"testing"
@@ -241,5 +242,86 @@ func TestHistoryCacheHandlesShareOneFile(t *testing.T) {
 	}
 	if v, err := c.Note(ctx, "n"); err != nil || v != "v" {
 		t.Fatalf("note %q, %v", v, err)
+	}
+}
+
+// Forgets held pending past maxPendingForgets fold into one forget of
+// everything: memory stays bounded, every read in the process is a miss
+// until a write applies it, and then nothing is pending.
+func TestHistoryCachePendingForgetsAreBounded(t *testing.T) {
+	ctx := context.Background()
+	c, store, other, _ := heldOpen(t)
+	mustHistory(t, c)
+	c.wait = 5 * time.Millisecond
+	release := holdWriter(t, other)
+	for i := 0; i <= maxPendingForgets; i++ {
+		if err := c.forget(ctx, fmt.Sprintf("key-%d", i)); err != nil {
+			t.Fatalf("forget %d: %v", i, err)
+		}
+	}
+	p := c.f.pendingNow()
+	if len(p) != 1 || p[0].key != "" || !p[0].under {
+		t.Fatalf("pending %d forgets (first %+v), want one forget of everything", len(p), p[0])
+	}
+	if !c.f.pendingOn("k", false) || !c.f.pendingOn("any/prefix", true) {
+		t.Fatal("a forget of everything must make every read a miss")
+	}
+	release()
+	c.wait = 5 * time.Second
+	mustHistory(t, c) // a miss (the store answers), and its keep applies the forget
+	if n := store.n.Load(); n != 2 {
+		t.Fatalf("store asked %d times, want 2", n)
+	}
+	if p := c.f.pendingNow(); len(p) != 0 {
+		t.Fatalf("still pending after a write: %d", len(p))
+	}
+	mustHistory(t, c)
+	if n := store.n.Load(); n != 2 {
+		t.Fatalf("store asked %d times, want 2: kept again", n)
+	}
+}
+
+// A settle's working table writes in the cache's write turn: while
+// another process has the turn, a settle's write waits in it (it is not
+// passed over and does not fail), and goes on once the turn is let go.
+func TestHistoryCacheSettleTableWritesTakeTheTurn(t *testing.T) {
+	ctx := context.Background()
+	c, _, _, path := heldOpen(t)
+	if c.f.lock == nil {
+		t.Skip("no file locks here")
+	}
+	tab, err := c.SettleTable(ctx, "dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := openHistoryLock(path + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.close()
+	if err := l.lock(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- tab.EnsureState(ctx, time.Unix(100, 0)) }()
+	select {
+	case err := <-done:
+		t.Fatalf("the settle's write went on while another process had the turn: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if err := l.unlock(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("the settle's write after the turn came: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the settle's write did not go on once the turn was let go")
+	}
+	states, err := tab.States(ctx, time.Time{})
+	if err != nil || len(states) != 1 {
+		t.Fatalf("states %v, %v: want the one written", states, err)
 	}
 }

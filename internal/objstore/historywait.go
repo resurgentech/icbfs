@@ -52,6 +52,7 @@ type historyFile struct {
 
 	mu      sync.Mutex
 	pending []pendingForget
+	seq     uint64 // the last pendingForget.seq given
 }
 
 // pendingForget is a forget that did not get the database within
@@ -60,8 +61,15 @@ type historyFile struct {
 // handle in this process reads what it names as a miss.
 type pendingForget struct {
 	key   string
-	under bool // every key starting with key; else the one key
+	under bool   // every key starting with key; else the one key
+	seq   uint64 // its place in the list: a write drops those it applied
 }
+
+// maxPendingForgets bounds the forgets held in memory. Past it they are
+// folded into one forget of everything (every read in this process a
+// miss until a write applies it): a file kept from this process for a
+// long time costs reads of the store, never a list without end.
+const maxPendingForgets = 256
 
 var historyFiles struct {
 	mu sync.Mutex
@@ -186,6 +194,29 @@ func (f *historyFile) take(ctx context.Context) (release func(), err error) {
 	}
 }
 
+// inTurn runs fn, a write of the settle's working table (SettleTable) on
+// this file, in the same write turn as the cache's writes, so that
+// neither kind passes the other over. A settle's write is not a cache's
+// and cannot be skipped: it waits for its turn up to historyBusyTimeout
+// and then goes ahead without it, on SQLite's own busy wait, as it did
+// before the turn existed; the turn never holds it longer than that.
+func (f *historyFile) inTurn(ctx context.Context, fn func() error) error {
+	if f == nil {
+		return fn()
+	}
+	turnCtx, cancel := context.WithTimeout(ctx, historyBusyTimeout)
+	release, err := f.take(turnCtx)
+	cancel()
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fn()
+	}
+	defer release()
+	return fn()
+}
+
 // pendingNow is the forgets pending now.
 func (f *historyFile) pendingNow() []pendingForget {
 	f.mu.Lock()
@@ -193,22 +224,37 @@ func (f *historyFile) pendingNow() []pendingForget {
 	return append([]pendingForget(nil), f.pending...)
 }
 
-// addPending holds a forget that did not get the database.
+// addPending holds a forget that did not get the database; past
+// maxPendingForgets, the list becomes one forget of everything.
 func (f *historyFile) addPending(p pendingForget) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.seq++
+	p.seq = f.seq
+	if len(f.pending) >= maxPendingForgets {
+		// A new seq: a write that took the list before this is not
+		// taken to have applied it.
+		f.pending = []pendingForget{{key: "", under: true, seq: f.seq}}
+		return
+	}
 	f.pending = append(f.pending, p)
 }
 
-// applied drops the forgets a committed write applied (the first n of
-// them: the list only grows at its end until then).
-func (f *historyFile) applied(n int) {
-	if n == 0 {
+// applied drops the forgets a committed write applied: those up to seq,
+// the last of the list it took.
+func (f *historyFile) applied(seq uint64) {
+	if seq == 0 {
 		return
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.pending = append([]pendingForget(nil), f.pending[n:]...)
+	kept := f.pending[:0:0]
+	for _, p := range f.pending {
+		if p.seq > seq {
+			kept = append(kept, p)
+		}
+	}
+	f.pending = kept
 }
 
 // pendingOn reports whether a pending forget covers key (under false) or
@@ -283,7 +329,7 @@ func (c *HistoryCache) query(ctx context.Context, fn func(context.Context, *sql.
 func (c *HistoryCache) write(ctx context.Context, fn func(context.Context, *sql.Tx) error) (bool, error) {
 	bounded, cancel := context.WithTimeout(ctx, c.wait)
 	defer cancel()
-	pending := 0
+	var applied uint64
 	release, err := c.f.take(bounded)
 	if err == nil {
 		err = c.f.withConn(bounded, func(conn *sql.Conn) error {
@@ -304,11 +350,13 @@ func (c *HistoryCache) write(ctx context.Context, fn func(context.Context, *sql.
 			if err := tx.Commit(); err != nil {
 				return err
 			}
-			pending = len(p)
+			if len(p) > 0 {
+				applied = p[len(p)-1].seq
+			}
 			return nil
 		})
 		release()
 	}
-	c.f.applied(pending)
+	c.f.applied(applied)
 	return c.settle(ctx, bounded, err)
 }
