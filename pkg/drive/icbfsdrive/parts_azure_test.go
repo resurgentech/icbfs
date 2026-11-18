@@ -471,13 +471,19 @@ func TestAzureWriteOverCommittedBlocks(t *testing.T) {
 
 // failLink is a store that refuses the first write after a new file's
 // content and .metadata (the folder's entry: the link), and remembers the
-// content's key.
+// content's key. The refusal is a store error, which ends the create; with
+// race set it is a lost condition (412) instead: the folder's block was
+// written by another meanwhile, which the link reads again and retries,
+// as a lost race on a directory always is (insertEntry, errRetry), on any
+// store (round 6: the first real-account run refused it with a 412, and
+// the create rightly succeeded).
 type failLink struct {
 	objstore.Store
 	mu      sync.Mutex
 	key     string
 	meta    bool
 	refused bool
+	race    bool
 }
 
 func (s *failLink) PutParts(ctx context.Context, key string, parts []objstore.Part, md map[string]string, ifMatch string) (*objstore.Object, error) {
@@ -500,8 +506,11 @@ func (s *failLink) Put(ctx context.Context, key string, body io.Reader, md map[s
 		s.refused, refuse = true, true
 	}
 	s.mu.Unlock()
+	if refuse && s.race {
+		return nil, fmt.Errorf("injected: the link lost a race: %w", objstore.ErrPreconditionFailed)
+	}
 	if refuse {
-		return nil, fmt.Errorf("injected: the link refused: %w", objstore.ErrPreconditionFailed)
+		return nil, errors.New("injected: the link refused: 503 ServerBusy")
 	}
 	return s.Store.Put(ctx, key, body, md, ifMatch)
 }
@@ -529,10 +538,30 @@ func TestAzureCreateLeavesNothing(t *testing.T) {
 		}
 	}
 	data := uploadData(9<<20+3, 7)
+	t.Run("link lost a race", func(t *testing.T) {
+		// A lost condition on the folder's block is read again and retried:
+		// the create answers no error, and then the file is there, whole,
+		// under the key it was written to.
+		st := &failLink{Store: az.store, race: true}
+		d := newDrive(t, st, icbfs.Settings{Name: "azrace", Size: 1 << 34, RootMode: 0o755, MaxFileSize: 8 << 30}, "/")
+		it, err := d.WriteFrom(ctx, "/f.bin", bytes.NewReader(data), int64(len(data)), drive.Condition{}, drive.WriteOptions{})
+		t.Logf("the create: %v (link refused once: %v); item %s", err, st.refused, it.ID)
+		if err != nil || !st.refused {
+			t.Fatalf("the create after a lost race: %v (refused: %v)", err, st.refused)
+		}
+		got, err := d.Stat(ctx, drive.ByPath("/f.bin"), drive.At{})
+		if err != nil || got.ID != st.key || got.Size != int64(len(data)) {
+			t.Fatalf("after the create: %+v %v (content key %s)", got, err, st.key)
+		}
+		if b := readAll(t, ctx, d, "/f.bin"); !bytes.Equal(b, data) {
+			t.Fatalf("read %d bytes, wrote %d", len(b), len(data))
+		}
+	})
 	t.Run("link refused", func(t *testing.T) {
 		st := &failLink{Store: az.store}
 		d := newDrive(t, st, icbfs.Settings{Name: "azlink", Size: 1 << 34, RootMode: 0o755, MaxFileSize: 8 << 30}, "/")
 		_, err := d.WriteFrom(ctx, "/f.bin", bytes.NewReader(data), int64(len(data)), drive.Condition{}, drive.WriteOptions{})
+		t.Logf("the create: %v (link refused: %v)", err, st.refused)
 		if err == nil || !st.refused {
 			t.Fatalf("the create: %v (link refused: %v)", err, st.refused)
 		}
