@@ -2,6 +2,7 @@ package icbfsdrive
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync/atomic"
@@ -106,7 +107,7 @@ func trashToTheEnd(t *testing.T, d *Drive, limit int, between func(rest []drive.
 	}
 }
 
-// TestTrashPages_TheDrivePassesTheLimitDown (interloc T84, docs/STATES.md
+// TestLK24_TheDrivePassesTheLimitDown (interloc T84, docs/STATES.md
 // 4.7: the read-back after a lost database reads one page of the trash
 // at a time): a mirror's trash of n of its source's items, paged 5 at a
 // time by origin to the end, takes store requests in step with n (the
@@ -114,7 +115,7 @@ func trashToTheEnd(t *testing.T, d *Drive, limit int, between func(rest []drive.
 // what one listing of everything gives, each entry once, in its order.
 // Before, each page listed the trash whole and read every entry after
 // the cursor: requests grew with n².
-func TestTrashPages_TheDrivePassesTheLimitDown(t *testing.T) {
+func TestLK24_TheDrivePassesTheLimitDown(t *testing.T) {
 	defer func(n int32) { objstore.HistoryPageSize = n }(objstore.HistoryPageSize)
 	objstore.HistoryPageSize = 4
 	store := miniotest.Store(t)
@@ -145,14 +146,14 @@ func TestTrashPages_TheDrivePassesTheLimitDown(t *testing.T) {
 	}
 }
 
-// TestTrashPages_ChangesBetweenTwoPages (interloc T84, the events a
+// TestSP12_ChangesBetweenTwoPages (interloc T84, the events a
 // paged listing meets): between two pages, an entry newer than the
 // cursor is added (a delete), one after it is restored and one is
 // purged. The pages that follow list none of the three and repeat
 // nothing: an entry added sorts before the cursor (the trash is newest
 // first), so this listing misses it; one restored or purged is gone.
 // Everything else is listed once.
-func TestTrashPages_ChangesBetweenTwoPages(t *testing.T) {
+func TestSP12_ChangesBetweenTwoPages(t *testing.T) {
 	store := miniotest.Store(t)
 	d := trashedDrive(t, store, "between", 12)
 	ctx := system()
@@ -185,5 +186,28 @@ func TestTrashPages_ChangesBetweenTwoPages(t *testing.T) {
 	}
 	if len(got) != 10 {
 		t.Fatalf("%d listed, want the 12 less the restored and the purged", len(got))
+	}
+}
+
+// TestLK24_TheDriveRefusesAMalformedCursor (interloc T84, docs/STATES.md
+// LK-24): the drive's trash listing refuses a cursor it never gave as
+// invalid (drive.ErrInvalid: the Drive API's 400), and still takes one it
+// gave and an entry id, as pages gave before.
+func TestLK24_TheDriveRefusesAMalformedCursor(t *testing.T) {
+	store := miniotest.Store(t)
+	d := trashedDrive(t, store, "badcursor", 6)
+	ctx := system()
+	first, err := d.Trash(ctx, drive.TrashOptions{OriginDrive: "src", Limit: 2})
+	if err != nil || first.Next == "" {
+		t.Fatal(first.Next, err)
+	}
+	if _, err := d.Trash(ctx, drive.TrashOptions{OriginDrive: "src", Limit: 2, Cursor: "not a cursor"}); !errors.Is(err, drive.ErrInvalid) {
+		t.Fatalf("a malformed cursor: %v, want drive.ErrInvalid", err)
+	}
+	for _, c := range []string{first.Next, first.Entries[1].ID} {
+		page, err := d.Trash(ctx, drive.TrashOptions{OriginDrive: "src", Limit: 2, Cursor: c})
+		if err != nil || len(page.Entries) != 2 || page.Entries[0].ID == first.Entries[0].ID || page.Entries[0].ID == first.Entries[1].ID {
+			t.Fatalf("cursor %q: %+v, %v; want the next two", c, page, err)
+		}
 	}
 }

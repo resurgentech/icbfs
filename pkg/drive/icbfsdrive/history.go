@@ -133,6 +133,9 @@ func (d *Drive) toTrash(e icbfs.TrashEntry) (drive.TrashEntry, bool) {
 // after the page, so pages to the end read the trash once, not once a
 // page.
 func (d *Drive) Trash(ctx context.Context, opts drive.TrashOptions) (drive.TrashPage, error) {
+	if !icbfs.ValidTrashCursor(opts.Cursor) {
+		return drive.TrashPage{}, fmt.Errorf("trash cursor %q: %w", opts.Cursor, drive.ErrInvalid) // LK-24
+	}
 	root, err := d.rootNode(ctx, d.fs)
 	if err != nil {
 		return drive.TrashPage{}, err

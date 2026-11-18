@@ -271,6 +271,9 @@ var errPageFull = errors.New("trash page full")
 // A read of an entry that fails for any reason but "not found" ends the
 // page with that error: the listing cannot say it listed everything.
 func (f *Filesystem) ListTrashPage(ctx context.Context, opts TrashOptions) (out []TrashEntry, next string, err error) {
+	if !ValidTrashCursor(opts.After) {
+		return nil, "", fmt.Errorf("trash cursor %q: %w", opts.After, ErrInvalidArgument)
+	}
 	prefix := f.trashPrefix()
 	after, older := "", ""
 	switch {
@@ -333,16 +336,43 @@ func (f *Filesystem) ListTrashPage(ctx context.Context, opts TrashOptions) (out 
 	return out, "", nil
 }
 
-// isTrashCursor reports whether c is a page's cursor: a trash key with
-// its filesystem's prefix taken off, <inverted time, 19 digits>-<entry
-// id>. An entry's id (a UUID) never is.
+// ValidTrashCursor reports whether c can carry on a trash listing: none
+// (""), a page's cursor (a trash key without its filesystem's prefix:
+// <inverted time, 19 digits>-<entry id>), or an entry's id, as pages
+// gave before cursors (LK-24). Anything else is refused as invalid.
+func ValidTrashCursor(c string) bool {
+	return c == "" || isTrashCursor(c) || isEntryID(c)
+}
+
+// isTrashCursor reports whether c is a page's cursor.
 func isTrashCursor(c string) bool {
-	if len(c) < 21 || c[19] != '-' {
+	if len(c) < 20 || c[19] != '-' {
 		return false
 	}
 	for _, r := range c[:19] {
 		if r < '0' || r > '9' {
 			return false
+		}
+	}
+	return isEntryID(c[20:])
+}
+
+// isEntryID reports whether c is an entry's id: a UUID, as NewUUIDv7
+// makes every one (lower-case hex, 8-4-4-4-12).
+func isEntryID(c string) bool {
+	if len(c) != 36 {
+		return false
+	}
+	for i, r := range c {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+				return false
+			}
 		}
 	}
 	return true

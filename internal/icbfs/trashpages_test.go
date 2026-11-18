@@ -17,6 +17,9 @@ import (
 	"github.com/resurgentech/icbfs/internal/objstore"
 )
 
+// errStoreDown is the fake store's error on a read it fails.
+var errStoreDown = errors.New("the store did not answer")
+
 // fakeTrash is a store that holds nothing but a trash of n entries, made
 // up from their index when asked: so its own memory does not grow with
 // n, and what a listing holds is the listing's. It counts the requests a
@@ -43,7 +46,7 @@ func (s *fakeTrash) key(i int) string {
 	return fmt.Sprintf("%s%019d-%s", s.prefix(), int64(1e15)+int64(i), s.entryID(i))
 }
 
-func (s *fakeTrash) entryID(i int) string { return fmt.Sprintf("e%09d", i) }
+func (s *fakeTrash) entryID(i int) string { return fmt.Sprintf("00000000-0000-7000-8000-%012d", i) }
 
 func (s *fakeTrash) itemID(i int) string { return fmt.Sprintf("%s-item%09d", s.fsid, i) }
 
@@ -114,7 +117,7 @@ func (s *fakeTrash) Get(ctx context.Context, key string) (io.ReadCloser, *objsto
 	}
 	if i, ok := s.index(key); ok && i >= 0 && i < s.n {
 		if i == s.failAt {
-			return nil, nil, errors.New("the store did not answer")
+			return nil, nil, errStoreDown
 		}
 		typ := TypeFile
 		if s.live(i) {
@@ -168,14 +171,14 @@ func allPages(t *testing.T, f *Filesystem, opts TrashOptions) ([]TrashEntry, int
 	}
 }
 
-// TestTrashPages_RequestsInStepWithTheTrash (interloc T84, docs/STATES.md
+// TestLK24_RequestsInStepWithTheTrash (interloc T84, docs/STATES.md
 // 4.7, "the read-back after a lost database: one page of the trash at a
 // time"): listing a trash of n entries to its end in pages of 50 takes
 // store requests in step with n: about two reads an entry (the entry and
 // the check that its item is not live) and a listing request a page of
 // keys, at 1,000 entries and at 2,000 alike. Before, every page listed the
 // trash's keys whole again: n²/(page·keys a request) listing requests.
-func TestTrashPages_RequestsInStepWithTheTrash(t *testing.T) {
+func TestLK24_RequestsInStepWithTheTrash(t *testing.T) {
 	defer func(n int32) { objstore.HistoryPageSize = n }(objstore.HistoryPageSize)
 	objstore.HistoryPageSize = 10
 	const limit = 50
@@ -199,11 +202,11 @@ func TestTrashPages_RequestsInStepWithTheTrash(t *testing.T) {
 	}
 }
 
-// TestTrashPages_HeapOfAPageFlat (interloc T84): one page of the trash,
+// TestLK24_HeapOfAPageFlat (interloc T84): one page of the trash,
 // the first and the one after it, holds no more at 200,000 entries than
 // at 20,000: a page of keys and the page's entries, never the trash's
 // whole listing.
-func TestTrashPages_HeapOfAPageFlat(t *testing.T) {
+func TestLK24_HeapOfAPageFlat(t *testing.T) {
 	peak := map[int]uint64{}
 	for _, n := range []int{20000, 200000} {
 		s := newFakeTrash(n)
@@ -237,13 +240,13 @@ func TestTrashPages_HeapOfAPageFlat(t *testing.T) {
 	}
 }
 
-// TestTrashPages_CarryOnExactlyWhereItStopped (interloc T84): pages of
+// TestLK24_CarryOnExactlyWhereItStopped (interloc T84): pages of
 // any size, put together, are what one listing of everything gives, in
 // its order, each entry once; an entry whose item is live again is in
 // none of them; a further filter (Keep) counts only what it keeps toward
 // a page; and the last page says nothing is left, also when the trash
 // ends exactly at a page's end.
-func TestTrashPages_CarryOnExactlyWhereItStopped(t *testing.T) {
+func TestLK24_CarryOnExactlyWhereItStopped(t *testing.T) {
 	defer func(n int32) { objstore.HistoryPageSize = n }(objstore.HistoryPageSize)
 	objstore.HistoryPageSize = 4
 	s := newFakeTrash(57)
@@ -256,7 +259,7 @@ func TestTrashPages_CarryOnExactlyWhereItStopped(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, e := range whole {
-			if i, _ := strconv.Atoi(strings.TrimPrefix(e.EntryID, "e")); s.live(i) {
+			if i, _ := strconv.Atoi(e.EntryID[24:]); s.live(i) {
 				t.Fatalf("listed %s, whose item is live", e.EntryID)
 			}
 		}
@@ -277,10 +280,10 @@ func TestTrashPages_CarryOnExactlyWhereItStopped(t *testing.T) {
 	}
 }
 
-// TestTrashPages_AnOlderCursorCarriesOn (interloc T84): a cursor that is
+// TestLK24_AnOlderCursorCarriesOn (interloc T84): a cursor that is
 // an entry's id, as pages gave before (a caller's, kept across an
 // upgrade), still carries on after that entry.
-func TestTrashPages_AnOlderCursorCarriesOn(t *testing.T) {
+func TestLK24_AnOlderCursorCarriesOn(t *testing.T) {
 	s := newFakeTrash(30)
 	f := trashFS(t, s)
 	page, next, err := f.ListTrashPage(context.Background(), TrashOptions{Limit: 5, After: s.entryID(9)})
@@ -293,21 +296,21 @@ func TestTrashPages_AnOlderCursorCarriesOn(t *testing.T) {
 	}
 }
 
-// TestTrashPages_AStoreErrorOnAnEntryIsAnError (interloc T84, a row the
+// TestSP13_AStoreErrorOnAnEntryIsAnError (interloc T84, a row the
 // table lacks: a store error on a page): a read of an entry that fails
 // for any reason but "not found" ends the listing with that error; it is
 // not taken for an entry purged since the listing, which would leave the
 // removal out of the read-back without a word (G4).
-func TestTrashPages_AStoreErrorOnAnEntryIsAnError(t *testing.T) {
+func TestSP13_AStoreErrorOnAnEntryIsAnError(t *testing.T) {
 	s := newFakeTrash(20)
 	s.failAt = 7
 	f := trashFS(t, s)
 	page, _, err := f.ListTrashPage(context.Background(), TrashOptions{Limit: 10})
-	if err == nil {
-		t.Fatalf("a failed read of entry 7: no error, %d entries", len(page))
+	if !errors.Is(err, errStoreDown) || page != nil {
+		t.Fatalf("a failed read of entry 7: %d entries, %v; want the store's error and no page", len(page), err)
 	}
-	if _, err := f.ListTrash(context.Background(), TrashOptions{}); err == nil {
-		t.Fatal("a failed read of entry 7: ListTrash answered no error")
+	if _, err := f.ListTrash(context.Background(), TrashOptions{}); !errors.Is(err, errStoreDown) {
+		t.Fatalf("a failed read of entry 7: ListTrash answered %v, want the store's error", err)
 	}
 	// Gone since the listing: passed over, as before.
 	s.failAt = -1
@@ -332,4 +335,30 @@ func (g *goneAt) Get(ctx context.Context, key string) (io.ReadCloser, *objstore.
 		return nil, nil, fmt.Errorf("get %s: %w", key, objstore.ErrNotFound)
 	}
 	return g.fakeTrash.Get(ctx, key)
+}
+
+// TestLK24_AMalformedCursorIsRefused (interloc T84, docs/STATES.md
+// LK-24): a cursor that is neither a page's (a trash key without the
+// filesystem's prefix) nor an entry's id is refused as invalid, and the
+// store is not asked.
+func TestLK24_AMalformedCursorIsRefused(t *testing.T) {
+	s := newFakeTrash(30)
+	f := trashFS(t, s)
+	_, good, err := f.ListTrashPage(context.Background(), TrashOptions{Limit: 5})
+	if err != nil || good == "" {
+		t.Fatal(good, err)
+	}
+	for _, c := range []string{"garbage", "../x", good + "/", good[:19], "1234567890123456789-not-an-id", s.entryID(3) + "x", strings.Repeat("9", 19) + "-" + s.entryID(1) + "-trash-"} {
+		lists, gets := s.lists.Load(), s.gets.Load()
+		page, next, err := f.ListTrashPage(context.Background(), TrashOptions{Limit: 5, After: c})
+		if !errors.Is(err, ErrInvalidArgument) || page != nil || next != "" {
+			t.Errorf("cursor %q: %d entries, next %q, %v; want refused as invalid", c, len(page), next, err)
+		}
+		if s.lists.Load() != lists || s.gets.Load() != gets {
+			t.Errorf("cursor %q: the store was asked", c)
+		}
+	}
+	if !ValidTrashCursor(good) || !ValidTrashCursor(s.entryID(3)) || !ValidTrashCursor("") {
+		t.Error("a page's cursor, an entry id or none: refused")
+	}
 }
