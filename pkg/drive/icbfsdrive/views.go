@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"time"
+	"weak"
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore"
@@ -33,7 +34,33 @@ type viewCache struct {
 	// past the one they saw, whoever's it is but this drive's own.
 	seenMark string
 	seen     bool
+	// mems are the views' id → path memories, by time (T82-15): kept
+	// apart from views, so a view made again for the same time (after
+	// it was dropped, or the past changed) still knows where it found
+	// items; a remembered path is checked against the id on use.
+	mems map[time.Time]*viewMemory
+	// moments are the moment of every view this cache made that is still
+	// in use, by its filesystem, weakly: a view dropped while a lookup
+	// holds it is still known by its moment (ME-5), and gone once nothing
+	// holds it.
+	moments map[weak.Pointer[icbfs.Filesystem]]moment
 }
+
+// moment is a view's time and the past's generation it was made in.
+type moment struct {
+	t   time.Time
+	gen uint64
+}
+
+// viewMemory is one time's id → path memory.
+type viewMemory struct {
+	paths idPathCache
+	used  time.Time
+}
+
+// maxViewMemories is how many times' memories are kept: twice the views,
+// the least recently used dropped first. Each is an idPathCache.
+const maxViewMemories = 2 * maxViews
 
 // pastCheck is how often views look for a change to the past (a purge, a
 // change made under a source time) since the last look: until then a
@@ -43,6 +70,8 @@ var pastCheck = 30 * time.Second // a variable for the tests
 type view struct {
 	fsys *icbfs.Filesystem
 	used time.Time
+	mem  *viewMemory
+	gen  uint64 // the past's generation when it was made (ME-8)
 }
 
 const maxViews = 8
@@ -76,7 +105,7 @@ func (c *viewCache) get(ctx context.Context, t time.Time) (*icbfs.Filesystem, er
 		if err := icbfs.ForgetPast(ctx, c.d.fs, history); err != nil {
 			return nil, err
 		}
-		clear(c.views)
+		c.forgetLocked()
 		c.forget = false
 	}
 	if time.Since(c.pastSeen) >= pastCheck {
@@ -112,8 +141,77 @@ func (c *viewCache) get(ctx context.Context, t time.Time) (*icbfs.Filesystem, er
 		}
 		delete(c.views, oldest)
 	}
-	c.views[t] = &view{fsys: fsys, used: time.Now()}
+	gen := c.d.stopped.generation()
+	c.views[t] = &view{fsys: fsys, used: time.Now(), mem: c.memLocked(t), gen: gen}
+	c.noteMomentLocked(fsys, moment{t, gen})
 	return fsys, nil
+}
+
+// memLocked is time t's memory, made if there is none.
+func (c *viewCache) memLocked(t time.Time) *viewMemory {
+	if m, ok := c.mems[t]; ok {
+		return m
+	}
+	if c.mems == nil {
+		c.mems = map[time.Time]*viewMemory{}
+	}
+	for len(c.mems) >= maxViewMemories {
+		var oldest time.Time
+		var oldestUse time.Time
+		for k, m := range c.mems {
+			if oldestUse.IsZero() || m.used.Before(oldestUse) {
+				oldest, oldestUse = k, m.used
+			}
+		}
+		delete(c.mems, oldest)
+	}
+	m := &viewMemory{used: time.Now()}
+	c.mems[t] = m
+	return m
+}
+
+// noteMomentLocked records fsys's moment, and lets go of the filesystems
+// nothing holds any more.
+func (c *viewCache) noteMomentLocked(fsys *icbfs.Filesystem, t moment) {
+	if c.moments == nil {
+		c.moments = map[weak.Pointer[icbfs.Filesystem]]moment{}
+	}
+	for k := range c.moments {
+		if k.Value() == nil {
+			delete(c.moments, k)
+		}
+	}
+	c.moments[weak.Make(fsys)] = t
+}
+
+// memoryOf is the id → path memory of fsys, a view this cache made, and
+// its moment: the view's, or, for a view dropped since (evicted, or the
+// past changed) that a lookup still holds, its moment's, made again if it
+// was let go (ME-5). ok is false for a filesystem this cache never made.
+func (c *viewCache) memoryOf(fsys *icbfs.Filesystem) (mem *idPathCache, at time.Time, gen uint64, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for t, v := range c.views {
+		if v.fsys == fsys {
+			v.mem.used = time.Now()
+			return &v.mem.paths, t, v.gen, true
+		}
+	}
+	mo, ok := c.moments[weak.Make(fsys)]
+	if !ok {
+		return nil, time.Time{}, 0, false
+	}
+	m := c.memLocked(mo.t)
+	m.used = time.Now()
+	return &m.paths, mo.t, mo.gen, true
+}
+
+// forgetLocked drops the views, the past having changed, and the
+// searches in them that stopped; the memories stay (their paths are
+// checked on use).
+func (c *viewCache) forgetLocked() {
+	clear(c.views)
+	c.d.stopped.dropPast()
 }
 
 // cache is the history cache views read through: the drive's
@@ -161,7 +259,7 @@ func (c *viewCache) checkPastLocked(ctx context.Context, history *objstore.Histo
 	c.pastSeen = time.Now()
 	moved := !c.seen || mark != c.seenMark
 	if forgot || moved {
-		clear(c.views)
+		c.forgetLocked()
 	}
 	c.seenMark, c.seen = mark, true
 	return forgot || moved, nil
@@ -181,7 +279,7 @@ func (c *viewCache) fresh(ctx context.Context) (*objstore.HistoryCache, error) {
 		if err := icbfs.ForgetPast(ctx, c.d.fs, history); err != nil {
 			return nil, err
 		}
-		clear(c.views)
+		c.forgetLocked()
 		c.forget = false
 	}
 	if _, err := c.checkPastLocked(ctx, history); err != nil {
@@ -197,7 +295,7 @@ func (c *viewCache) fresh(ctx context.Context) (*objstore.HistoryCache, error) {
 func (c *viewCache) forgetKeys(ctx context.Context, keys []string, prefixes ...string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	clear(c.views)
+	c.forgetLocked()
 	if c.history == nil {
 		return
 	}

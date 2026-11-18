@@ -34,9 +34,13 @@ import (
 // daemon needn't cap how much a pass may remove to limit the damage of a
 // bad listing.
 type Mirror struct {
-	d           Drive
-	finder      OriginFinder // d, which finds an item by its origin
-	err         error        // why the mirror refuses to work, if it does
+	d      Drive
+	finder OriginFinder // d, which finds an item by its origin
+	// hinted is d, if it takes a hint where an item is; hints is the
+	// daemon's word on where a source item's copy is (WithHints).
+	hinted      HintedOriginFinder
+	hints       func(ctx context.Context, sourceID string) string
+	err         error // why the mirror refuses to work, if it does
 	source      string
 	sourceTimes bool
 	// contents is the content map the mirror uses; hashes is the same
@@ -72,6 +76,7 @@ func NewMirror(d Drive, source string) *Mirror {
 	}}
 	if f, ok := d.(OriginFinder); ok {
 		m.finder = f
+		m.hinted, _ = d.(HintedOriginFinder)
 	} else {
 		m.err = fmt.Errorf("drive: %T doesn't find an item by its origin (no FindByOrigin): %w", d, ErrNoOriginFinder)
 	}
@@ -127,6 +132,30 @@ func born(src SourceItem) time.Time {
 // deleted, its trash entry. Neither: ErrNotFound.
 type OriginFinder interface {
 	FindByOrigin(ctx context.Context, originDrive, originID string) (Item, *TrashEntry, error)
+}
+
+// HintedOriginFinder is an OriginFinder that can be told where the
+// caller believes the item is: hint, a path on the drive (a daemon's own
+// record of where it put the item). The hint is tried, never trusted: the
+// item at hint is the answer only if it is the one FindByOrigin would
+// find; otherwise the lookup is FindByOrigin's, and the hint cost one
+// resolve of a path. An empty hint is no hint. The answers are
+// FindByOrigin's, whatever the hint.
+type HintedOriginFinder interface {
+	OriginFinder
+	FindByOriginHint(ctx context.Context, originDrive, originID, hint string) (Item, *TrashEntry, error)
+}
+
+// WithHints gives the mirror the daemon's word on where each source
+// item's copy is on the drive: hints returns its path there, or "" if the
+// daemon doesn't know. Every lookup (Known, Apply, Remove) passes it to a
+// drive that takes a hint (HintedOriginFinder); on one that doesn't, hints
+// is never called. A hint never changes an answer, only what it costs: on
+// icbfs, an item under a folder moved since its record was written, in a
+// process that doesn't remember it, is found without a walk of the tree.
+func (m *Mirror) WithHints(hints func(ctx context.Context, sourceID string) string) *Mirror {
+	m.hints = hints
+	return m
 }
 
 // ErrNoOriginFinder is a mirror's answer when its destination drive
@@ -935,15 +964,36 @@ func (p *probe) Close() error {
 }
 
 // writeRef writes path as a stub of e, whose SHA-256 is sha, with body
-// for a drive that keeps no references; and records it in the map.
+// for a drive that keeps no references; and records it in the map. e's
+// place, if the map has one, goes with the reference (Ref.Path), so the
+// drive finds the target without searching for it; an entry with none
+// (recorded before places were) has the place the drive found it at
+// written back, once (learnPlace).
 func (m *Mirror) writeRef(ctx context.Context, p string, body io.Reader, size int64, cond Condition, opts WriteOptions, sha string, e HashEntry) (Item, error) {
-	opts.SameAs = &Ref{ID: e.ID, Version: e.Version, SHA256: sha}
+	opts.SameAs = &Ref{ID: e.ID, Version: e.Version, SHA256: sha, Path: e.Path}
 	opts.Size = size
 	it, err := m.d.Write(ctx, p, body, cond, opts)
 	if err != nil {
 		return Item{}, err
 	}
+	if e.Path == "" {
+		m.learnPlace(ctx, sha, e)
+	}
 	return it, m.noteItem(ctx, it, sha)
+}
+
+// learnPlace records where the drive holds e, the target of a stub just
+// written whose entry had no place: a Stat by its id, which finds it
+// where the stub's write just did (the drive remembers it), and an Add
+// of the same entry with that place. Best effort: a failure leaves the
+// entry as it was, to be learned at its next stub.
+func (m *Mirror) learnPlace(ctx context.Context, sha string, e HashEntry) {
+	it, err := m.d.Stat(ctx, ByID(e.ID), At{})
+	if err != nil || it.Path == "" {
+		return
+	}
+	e.Path = it.Path
+	_ = m.contents.Add(ctx, sha, e)
 }
 
 // refused is whether a stub's write was refused for its target: one the
@@ -959,7 +1009,7 @@ func current(cur *Item, sha string, size int64) (HashEntry, bool) {
 		!strings.EqualFold(cur.Checksums.SHA256, sha) || cur.Size != size {
 		return HashEntry{}, false
 	}
-	return HashEntry{ID: cur.ID, Version: cur.Version.ID, Size: cur.Size}, true
+	return HashEntry{ID: cur.ID, Version: cur.Version.ID, Size: cur.Size, Path: cur.Path}, true
 }
 
 // sourceHit is the SHA-256 and version the map has for src's own hash,
@@ -1007,7 +1057,7 @@ func (m *Mirror) noteItem(ctx context.Context, it Item, sha string) error {
 	if it.Checksums != nil && it.Checksums.SHA256 != "" {
 		sha = it.Checksums.SHA256
 	}
-	if err := m.contents.Add(ctx, sha, HashEntry{ID: it.ID, Version: it.Version.ID, Size: it.Size}); err != nil {
+	if err := m.contents.Add(ctx, sha, HashEntry{ID: it.ID, Version: it.Version.ID, Size: it.Size, Path: it.Path}); err != nil {
 		return fmt.Errorf("the content map: %w", err)
 	}
 	return nil
@@ -1189,8 +1239,14 @@ func (m *Mirror) Undo(ctx context.Context, pass string) (int, error) {
 }
 
 // find is the drive's item, or trash entry, for the source item: a
-// lookup (OriginFinder), never a listing of the drive.
+// lookup (OriginFinder), with the daemon's hint if it has one
+// (WithHints), never a listing of the drive.
 func (m *Mirror) find(ctx context.Context, sourceID string) (Item, *TrashEntry, error) {
+	if m.hinted != nil && m.hints != nil {
+		if hint := m.hints(ctx, sourceID); hint != "" {
+			return m.hinted.FindByOriginHint(ctx, m.source, sourceID, hint)
+		}
+	}
 	return m.finder.FindByOrigin(ctx, m.source, sourceID)
 }
 
@@ -1203,11 +1259,22 @@ type Hash struct {
 }
 
 // HashEntry is a version a mirror wrote or read with some content: the
-// item, its version, and the content's size.
+// item, its version, and the content's size; and Path, the item's place
+// on the drive when it was recorded ("": not known, a map from before
+// places were kept). Path is a hint for a stub's write (Ref.Path), never
+// part of what the entry is: two entries of the same item, version and
+// size are the same entry (same), whatever their places.
 type HashEntry struct {
 	ID      string `json:"id"`
 	Version string `json:"version"`
 	Size    int64  `json:"size"`
+	Path    string `json:"path,omitempty"`
+}
+
+// same is whether e and o name the same version: item, version and size,
+// not the place.
+func (e HashEntry) same(o HashEntry) bool {
+	return e.ID == o.ID && e.Version == o.Version && e.Size == o.Size
 }
 
 // less orders entries by item id, then version: of two versions with the
@@ -1241,13 +1308,15 @@ type ContentMap interface {
 	// Add records that e holds content with SHA-256 sha. Of two versions
 	// with the same content the map holds the lesser (by item id, then
 	// version), whichever came first. An empty sha, e.ID or e.Version
-	// records nothing.
+	// records nothing. The same version again with a place (e.Path) the
+	// map lacks or holds otherwise records that place (T82-13).
 	Add(ctx context.Context, sha string, e HashEntry) error
 	// AddSource records that the source hash s is content with SHA-256
 	// sha. An empty s.Kind, s.Value or sha records nothing.
 	AddSource(ctx context.Context, s Hash, sha string) error
-	// Drop forgets sha's version if it's still e: one the drive can't
-	// reference any more (erased, say).
+	// Drop forgets sha's version if it's still e (its item, version and
+	// size; the place doesn't matter): one the drive can't reference any
+	// more (erased, say).
 	Drop(ctx context.Context, sha string, e HashEntry) error
 	// Count is how many contents (SHA-256s) the map holds.
 	Count(ctx context.Context) (int, error)
@@ -1314,7 +1383,7 @@ func (h *HashMap) Add(sha string, e HashEntry) {
 	sha = strings.ToLower(sha)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if cur, ok := h.sha[sha]; !ok || e.less(cur) {
+	if cur, ok := h.sha[sha]; !ok || e.less(cur) || e.same(cur) && e.Path != "" && e.Path != cur.Path {
 		h.sha[sha] = e
 	}
 }
@@ -1335,7 +1404,7 @@ func (h *HashMap) Drop(sha string, e HashEntry) {
 	sha = strings.ToLower(sha)
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.sha[sha] == e {
+	if cur, ok := h.sha[sha]; ok && cur.same(e) {
 		delete(h.sha, sha)
 	}
 }
@@ -1722,7 +1791,7 @@ func (m *Mirror) rebuildFile(ctx context.Context, add *rebuildAdder, it Item) er
 	}
 	for _, v := range vs {
 		if v.Checksums != nil && v.Checksums.SHA256 != "" {
-			if err := add.add(ctx, v.Checksums.SHA256, HashEntry{ID: it.ID, Version: v.ID, Size: v.Size}); err != nil {
+			if err := add.add(ctx, v.Checksums.SHA256, HashEntry{ID: it.ID, Version: v.ID, Size: v.Size, Path: it.Path}); err != nil {
 				return err
 			}
 		}

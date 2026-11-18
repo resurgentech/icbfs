@@ -3,6 +3,7 @@
 package icbfsdrive
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/resurgentech/icbfs/internal/block"
@@ -93,7 +95,28 @@ type Config struct {
 	// than the recorded present for the cut settle's, and that person's
 	// write is undone.
 	DeferLateFolders bool
+	// SearchBudget bounds a search of the tree for an item by id (an id
+	// with no path that leads to it, and none remembered): it reads at
+	// most this many folders in one call, then stops with
+	// drive.ErrNotSearched, keeping where it got to so the next call for
+	// that id goes on from there (stoppedSearches). 0, the default, is no
+	// budget: a search reads up to every folder, as before T82-15. A host
+	// that answers requests under a deadline sets one
+	// (DefaultSearchBudget). A cut context stops a search the same way,
+	// with or without a budget.
+	SearchBudget int
 }
+
+// DefaultSearchBudget is the search budget for a drive that answers
+// requests (T82-15): 128 folders, one store read each for a folder in
+// one block, so about 14 s at the 110 ms a read measured against
+// production's bucket, and a request that makes two such lookups (a
+// Draft's folder now and as of its base) still ends inside Workspaces'
+// 30-second client and far inside Drives' 60-second deadline. It covers
+// a Draft's own filesystem (a few dozen folders) and the top of a
+// library (every folder down to depth 4 of a ternary tree) in one call;
+// a deeper search goes on over the calls that ask again.
+const DefaultSearchBudget = 128
 
 // Drive is an icbfs drive.
 type Drive struct {
@@ -103,12 +126,20 @@ type Drive struct {
 	rootKey string
 	windows bool
 
-	views   viewCache
-	settle  settling
-	events  broadcaster
+	views  viewCache
+	settle settling
+	events broadcaster
+	// idPaths is where items are now, by id: the present tree's memory.
+	// A view of the past keeps its own (viewMemory), so a lookup as of a
+	// time never overwrites where an item is now (T82-15).
 	idPaths idPathCache
-	dirs    *dirCache
-	past    pastMarker
+	// stopped are the searches by id that stopped before they ended.
+	stopped stoppedSearches
+	// searches counts the walks of the tree for an item by id (findPaths,
+	// search).
+	searches atomic.Int64
+	dirs     *dirCache
+	past     pastMarker
 }
 
 var _ drive.Drive = (*Drive)(nil)
@@ -164,9 +195,15 @@ func (d *Drive) Capabilities() drive.Capabilities {
 
 // --- paths ---
 
-// cleanPath normalizes a path to "" (the top) or "/a/b".
+// cleanPath normalizes a path to "" (the top) or "/a/b". "/" is the only
+// separator: a backslash is a character of a name (T82-14). Turning it
+// into "/" here, after a caller (icbfs-git, a mirror) had checked the
+// path with "/" alone, let "..\" climb out of a Draft's folder and a
+// Clio name land in another matter. "." and ".." are still tidied, as
+// before, within the drive's root: Drafts and mirrors refuse them
+// themselves (drive.SplitPath) before they call the drive.
 func cleanPath(p string) string {
-	p = path.Clean("/" + strings.ReplaceAll(p, `\`, "/"))
+	p = path.Clean("/" + p)
 	if p == "/" {
 		return ""
 	}
@@ -313,6 +350,13 @@ func joinPath(dir, name string) string {
 
 // resolve finds an item by ref; by id it searches the drive's tree (the
 // filesystem keeps no parent pointers), remembering where it found it.
+// docs/STATES.md 5.1: a path given, then the memory, then (one search at
+// a time for an id in a view) what is remembered as nowhere, the trash,
+// and a search; "not there" (drive.ErrNotFound) only when the search read
+// every folder, else drive.ErrNotSearched. No error from a lookup by id
+// names a path a search found (LK-19): ids, counts and the path the
+// caller gave only; a find the caller may not traverse to is the refusal
+// a lookup by that path gets.
 func (d *Drive) resolve(ctx context.Context, fsys *icbfs.Filesystem, ref drive.ItemRef) (*node, error) {
 	if ref.ID == "" {
 		return d.resolvePath(ctx, fsys, ref.Path)
@@ -329,31 +373,206 @@ func (d *Drive) resolve(ctx context.Context, fsys *icbfs.Filesystem, ref drive.I
 			return n, nil
 		}
 	}
-	if p, ok := d.idPaths.get(ref.ID); ok {
-		if n, err := d.resolvePath(ctx, fsys, p); err == nil && n.key == ref.ID {
+	// What this view remembers: the present's memory for the present,
+	// the view's own for a view of the past (T82-15).
+	mem, at, gen, shared := d.memory(fsys)
+	remembered := func() *node {
+		if p, ok := mem.get(ref.ID); ok {
+			if n, err := d.resolvePath(ctx, fsys, p); err == nil && n.key == ref.ID {
+				return n
+			}
+		}
+		return nil
+	}
+	if n := remembered(); n != nil {
+		return n, nil
+	}
+	key := stoppedKey{at: at, id: ref.ID}
+	notThere := func(why string) error {
+		return fmt.Errorf("id %s: %s: %w", ref.ID, why, drive.ErrNotFound)
+	}
+	if !shared {
+		// A filesystem this drive did not make: no memory, kept search or
+		// "not there" of its own to share with another (ME-9).
+		p, err := d.search(ctx, fsys, key, gen, false)
+		if err != nil {
+			return nil, err
+		}
+		return d.found(ctx, fsys, ref.ID, p, notThere)
+	}
+	if d.stopped.isAbsent(key) {
+		return nil, notThere("found nowhere within the last minutes")
+	}
+	// One search for an id in a view at a time (LK-10): a second lookup
+	// waits for the first, within its own deadline, then takes what the
+	// first found, or goes on from where it stopped.
+	end, waited, err := d.stopped.begin(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("lookup by id %s: waited for another lookup of it: %w (%w)", ref.ID, drive.ErrNotSearched, err)
+	}
+	defer end()
+	if waited {
+		if n := remembered(); n != nil {
 			return n, nil
 		}
+		if d.stopped.isAbsent(key) {
+			return nil, notThere("found nowhere within the last minutes")
+		}
 	}
-	paths, err := d.findPaths(ctx, fsys, ref.ID, 1)
+	p, err := d.search(ctx, fsys, key, gen, true)
 	if err != nil {
 		return nil, err
 	}
-	if len(paths) == 0 {
-		return nil, fmt.Errorf("id %s: %w", ref.ID, drive.ErrNotFound)
+	if p == "" || p == inTrash {
+		d.stopped.noteAbsent(key, gen)
 	}
-	d.idPaths.put(ref.ID, paths[0])
-	return d.resolvePath(ctx, fsys, paths[0])
+	n, err := d.found(ctx, fsys, ref.ID, p, notThere)
+	if err != nil {
+		return nil, err
+	}
+	// A find in a view of the past whose past changed since the view was
+	// made belonged to the past as it was: not stored (ME-8).
+	if at.IsZero() || d.stopped.current(gen) {
+		mem.put(ref.ID, p)
+	}
+	return n, nil
 }
 
-// findPaths is up to max (0: all) drive-relative paths naming id. A
-// directory it can't read is passed over.
+// found is the item search answered for id: p, "" (in no folder) or
+// inTrash. A find the caller may not traverse to answers what a lookup by
+// that path answers, the refusal naming only the folder refused (LK-19);
+// a find that leads nowhere or elsewhere is a tree that changed under the
+// search (LK-7). Neither error names p.
+func (d *Drive) found(ctx context.Context, fsys *icbfs.Filesystem, id, p string, notThere func(string) error) (*node, error) {
+	switch p {
+	case "":
+		return nil, notThere("in no folder")
+	case inTrash:
+		return nil, notThere("in the trash")
+	}
+	n, err := d.resolvePath(ctx, fsys, p)
+	if errors.Is(err, drive.ErrForbidden) || errors.Is(err, drive.ErrNoAccess) {
+		return nil, err
+	}
+	if err != nil || n.key != id {
+		// Moved while it was searched for (a search that went on from an
+		// earlier call read that call's paths): the tree changed under
+		// the search, which is not "not there" (LK-7). Its kept search is
+		// gone (search took it), so asked again it starts from the root.
+		return nil, fmt.Errorf("lookup by id %s: the path found no longer leads to it: the tree changed under the search: %w", id, drive.ErrNotSearched)
+	}
+	return n, nil
+}
+
+// inTrash is search's answer for an id the trash holds.
+const inTrash = "\x00trash"
+
+// memory is the id → path memory of fsys, its moment, and the generation
+// of the past it was made in: the present's (d.idPaths, zero) for the
+// drive's filesystem, else the view's own (viewCache.memoryOf), also for
+// a view dropped while a lookup held it. shared is false for a filesystem
+// the drive did not make: it gets a memory of its own, thrown away after
+// the call, and keeps nothing (ME-9).
+func (d *Drive) memory(fsys *icbfs.Filesystem) (mem *idPathCache, at time.Time, gen uint64, shared bool) {
+	if fsys == d.fs {
+		return &d.idPaths, time.Time{}, 0, true
+	}
+	if m, at, gen, ok := d.views.memoryOf(fsys); ok {
+		return m, at, gen, true
+	}
+	return &idPathCache{}, time.Unix(0, 1), 0, false
+}
+
+// Walks is how many walks of the drive's tree for an item by id it has
+// made since it was opened (findPaths, search: an id it doesn't
+// remember, with no path, record or hint that finds it; a read a folder,
+// up to the whole tree or the search budget). A search that goes on from
+// one that stopped is a walk again. For tests and diagnostics.
+func (d *Drive) Walks() int64 { return d.searches.Load() }
+
+// search is the path of item id in fsys's tree, "" if it isn't there, or
+// inTrash: breadth first, one ReadDir a folder, going on from where a
+// search for it in the same view stopped (stoppedSearches). A search that
+// starts from the root in the present first asks the trash for the id
+// (a few reads: icbfs.Filesystem.TrashedItem), and an item there is not
+// searched for (LK-13). It stops when ctx ends, once it has read the
+// drive's budget of folders in this call (Config.SearchBudget), or when
+// the store fails reading a folder, with drive.ErrNotSearched, and keeps
+// the folders it still had to read, that one included, for the next call
+// (LK-6). A folder queued that is no longer there is a tree that changed
+// under the search: drive.ErrNotSearched, and nothing kept (LK-7).
+func (d *Drive) search(ctx context.Context, fsys *icbfs.Filesystem, key stoppedKey, gen uint64, keep bool) (string, error) {
+	id := key.id
+	var s *stoppedSearch
+	if keep {
+		s = d.stopped.take(key)
+	}
+	if s == nil {
+		if fsys == d.fs {
+			_, err := d.fs.TrashedItem(ctx, id)
+			if err == nil {
+				return inTrash, nil
+			}
+			if !errors.Is(err, icbfs.ErrNotFound) {
+				return "", fmt.Errorf("lookup by id %s: asking the trash: %w (%w)", id, drive.ErrNotSearched, err)
+			}
+		}
+		s = &stoppedSearch{queue: []searchDir{{d.rootKey, "/"}}}
+	}
+	d.searches.Add(1)
+	budget := d.cfg.SearchBudget
+	read := 0
+	stop := func(cause error) error {
+		if keep {
+			d.stopped.keep(key, s, gen)
+		}
+		if cause != nil {
+			return fmt.Errorf("lookup by id %s: searched %d folders (%d in this call), %d still to read: %w (%w)",
+				id, s.read, read, len(s.queue), drive.ErrNotSearched, cause)
+		}
+		return fmt.Errorf("lookup by id %s: searched %d folders (%d in this call), %d still to read: %w (its budget of %d folders a call)",
+			id, s.read, read, len(s.queue), drive.ErrNotSearched, budget)
+	}
+	for len(s.queue) > 0 {
+		if err := ctx.Err(); err != nil {
+			return "", stop(err)
+		}
+		if budget > 0 && read >= budget {
+			return "", stop(nil)
+		}
+		cur := s.queue[0]
+		entries, err := fsys.ReadDir(ctx, cur.key)
+		if err != nil {
+			if ctx.Err() != nil {
+				return "", stop(ctx.Err())
+			}
+			if errors.Is(err, icbfs.ErrNotFound) || objstore.IsNotFound(err) {
+				return "", fmt.Errorf("lookup by id %s: folder %s, queued, is gone: the tree changed under the search: %w",
+					id, cur.key, drive.ErrNotSearched)
+			}
+			return "", stop(fmt.Errorf("reading folder %s: %w", cur.key, err))
+		}
+		s.queue = s.queue[1:]
+		read++
+		s.read++
+		for _, e := range entries {
+			p := joinPath(cur.path, e.Name)
+			if e.UUID == id {
+				return p, nil
+			}
+			if e.Type == icbfs.TypeDir {
+				s.queue = append(s.queue, searchDir{e.UUID, p})
+			}
+		}
+	}
+	return "", nil
+}
+
+// findPaths is up to max (0: all) drive-relative paths naming id: a
+// whole walk, no budget (Stat's every path to a file with more than one
+// link; a lookup by id is search).
 func (d *Drive) findPaths(ctx context.Context, fsys *icbfs.Filesystem, id string, max int) ([]string, error) {
-	return d.searchPaths(ctx, fsys, id, max, false)
-}
-
-// searchPaths is findPaths; strict, a directory it can't read (but for
-// one gone meanwhile) fails it.
-func (d *Drive) searchPaths(ctx context.Context, fsys *icbfs.Filesystem, id string, max int, strict bool) ([]string, error) {
+	d.searches.Add(1)
 	type dir struct{ key, path string }
 	var out []string
 	queue := []dir{{d.rootKey, "/"}}
@@ -362,9 +581,6 @@ func (d *Drive) searchPaths(ctx context.Context, fsys *icbfs.Filesystem, id stri
 		queue = queue[1:]
 		entries, err := fsys.ReadDir(ctx, cur.key)
 		if err != nil {
-			if strict && !errors.Is(err, icbfs.ErrNotFound) && !objstore.IsNotFound(err) {
-				return nil, err
-			}
 			continue
 		}
 		for _, e := range entries {
@@ -542,39 +758,90 @@ func mapErr(err error) error {
 
 // --- the id → path memory ---
 
+// idPathEntries is how many item paths a drive remembers (T82-13): the
+// items it wrote, moved or found by a walk most recently. An entry is an
+// id (36 bytes), a path, a map slot and a list element: about 300 bytes
+// at a 100-byte path, so a full memory is about 0.3 MiB a drive, under
+// 0.5% of a daemon's 150 MiB soft limit with its two drives, and the
+// same at any size of drive. The mirrors don't need it to find what they
+// wrote: a lookup by origin is told where the item is
+// (drive.Mirror.WithHints, FindByOriginHint), and so is a stub's target
+// (drive.Ref.Path, the content map's place). What it still saves is a
+// walk for an id asked again soon after a write, a move or a walk that
+// found it, by a caller with no path (a stub's target whose place the
+// map doesn't have yet, which the mirror then learns; Drives' reads by
+// id).
+const idPathEntries = 1024
+
+// idPathCache remembers where items are, by id: at most max entries
+// (idPathEntries if 0), the least recently used dropped first.
 type idPathCache struct {
-	mu sync.Mutex
-	m  map[string]string
+	mu  sync.Mutex
+	max int
+	m   map[string]*list.Element // of *idPath, in lru
+	lru list.List                // most recently used first
 }
+
+type idPath struct{ id, path string }
 
 func (c *idPathCache) get(id string) (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	p, ok := c.m[id]
-	return p, ok
+	e, ok := c.m[id]
+	if !ok {
+		return "", false
+	}
+	c.lru.MoveToFront(e)
+	return e.Value.(*idPath).path, true
 }
 
 func (c *idPathCache) put(id, p string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.m == nil || len(c.m) > 500000 {
-		c.m = map[string]string{}
+	c.putLocked(id, p)
+}
+
+func (c *idPathCache) putLocked(id, p string) {
+	if e, ok := c.m[id]; ok {
+		e.Value.(*idPath).path = p
+		c.lru.MoveToFront(e)
+		return
 	}
-	c.m[id] = p
+	if c.m == nil {
+		c.m = map[string]*list.Element{}
+	}
+	limit := c.max
+	if limit <= 0 {
+		limit = idPathEntries
+	}
+	for c.lru.Len() >= limit {
+		old := c.lru.Back()
+		delete(c.m, old.Value.(*idPath).id)
+		c.lru.Remove(old)
+	}
+	c.m[id] = c.lru.PushFront(&idPath{id: id, path: p})
+}
+
+func (c *idPathCache) len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lru.Len()
 }
 
 // moved notes that id went from one path to another, and so did what it
-// held: a directory's remembered descendants move with it.
+// held: a directory's remembered descendants move with it (a pass over
+// at most max entries).
 func (c *idPathCache) moved(id, from, to string, dir bool) {
-	c.put(id, to)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.putLocked(id, to)
 	if !dir {
 		return
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for k, p := range c.m {
-		if rest, ok := strings.CutPrefix(p, from+"/"); ok {
-			c.m[k] = joinPath(to, rest)
+	for e := c.lru.Front(); e != nil; e = e.Next() {
+		ip := e.Value.(*idPath)
+		if rest, ok := strings.CutPrefix(ip.path, from+"/"); ok {
+			ip.path = joinPath(to, rest)
 		}
 	}
 }

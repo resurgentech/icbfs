@@ -118,7 +118,15 @@ func foundOf(it drive.Item, te *drive.TrashEntry, err error) found {
 // this change doesn't touch, is looked up too, and where it answers
 // otherwise than the search that is logged, not failed: it always has
 // in a few cases (the report of 2026-11-17 lists them).
+//
+// And told where the item is (FindByOriginHint, T82-13): before each
+// plain lookup, the same lookup with a hint that is right (where the
+// search found it), stale (where an earlier lookup found it), wrong
+// (nowhere), or another item's path, some of them after the drive
+// forgot every path it remembered (a start). Every hinted answer is the
+// plain lookup's, exactly.
 // ICBFS_SEARCH_SEEDS and ICBFS_SEARCH_STEPS run it longer.
+// STATES: LC-5
 func TestFindByOriginMatchesOldSearch(t *testing.T) {
 	seeds, steps := envInt("ICBFS_SEARCH_SEEDS", 6), envInt("ICBFS_SEARCH_STEPS", 60)
 	store := miniotest.Store(t)
@@ -141,6 +149,7 @@ func TestFindByOriginMatchesOldSearch(t *testing.T) {
 			idrv := newDrive(t, store, icbfs.Settings{Name: fmt.Sprint("search-", seed), Size: 1 << 30, RootMode: 0o777}, "")
 			d := plain(t, idrv)
 			r := &searchRun{t: t, ctx: system(), d: d, idrv: idrv, m: drive.NewMirror(d, srcDrive), rng: rand.New(rand.NewPCG(uint64(seed), 2026_11_17)),
+				hintRng: rand.New(rand.NewPCG(uint64(seed), 82_13)), lastPath: map[string]string{}, hints: map[string]int{},
 				src: &source{}, versions: map[string]int{}, bodies: map[string]string{}, kinds: map[string]int{}, answers: map[string]int{}, icbfsDiffers: map[string]int{}}
 			if err := r.m.Err(); err != nil {
 				t.Fatal(err)
@@ -152,7 +161,12 @@ func TestFindByOriginMatchesOldSearch(t *testing.T) {
 					t.Fatalf("after step %d; the changes:\n%s", step, strings.Join(r.log, "\n"))
 				}
 			}
-			t.Logf("%d changes, %d refused (%v); answers %v", steps, r.refused, r.kinds, r.answers)
+			t.Logf("%d changes, %d refused (%v); answers %v; hinted lookups %v", steps, r.refused, r.kinds, r.answers, r.hints)
+			for _, kind := range []string{"right", "stale", "wrong", "another"} {
+				if r.hints[kind] == 0 {
+					t.Errorf("no lookup was given a %s hint", kind)
+				}
+			}
 			mu.Lock()
 			for k, n := range r.answers {
 				answers[k] += n
@@ -201,6 +215,12 @@ type searchRun struct {
 	// icbfsDiffers counts icbfs FindByOrigin's answers that aren't the
 	// search's, by case.
 	icbfsDiffers map[string]int
+	// The hinted lookups: their own random numbers (the changes are the
+	// same sequences as without them), where each id was last found, and
+	// how many lookups had each kind of hint.
+	hintRng  *rand.Rand
+	lastPath map[string]string
+	hints    map[string]int
 }
 
 func (r *searchRun) pick(s []string) string { return s[r.rng.IntN(len(s))] }
@@ -347,8 +367,19 @@ func (r *searchRun) compare() bool {
 			r.t.Errorf("Known(%s) = %+v; the old search: %+v", id, known, want)
 			ok = false
 		}
+		hinted := r.hinted(id, sIt.Path, ids)
 		it, te, err := r.idrv.FindByOrigin(r.ctx, srcDrive, id)
-		if got := foundOf(it, te, err); got != want {
+		plainAnswer := foundOf(it, te, err)
+		for _, h := range hinted {
+			if h.got != plainAnswer {
+				r.t.Errorf("icbfs's FindByOriginHint(%s, %s hint %q) = %+v; FindByOrigin: %+v", id, h.kind, h.hint, h.got, plainAnswer)
+				ok = false
+			}
+		}
+		if err == nil && te == nil {
+			r.lastPath[id] = it.Path
+		}
+		if got := plainAnswer; got != want {
 			c := "other"
 			if newestClaimTrashed(id, sIt, sTe, sErr, te, err) {
 				c = "newest claim trashed"
@@ -359,6 +390,38 @@ func (r *searchRun) compare() bool {
 		}
 	}
 	return ok
+}
+
+// hintedAnswer is one hinted lookup's answer.
+type hintedAnswer struct {
+	kind, hint string
+	got        found
+}
+
+// hinted looks id up in icbfs with hints of each kind, in a random order,
+// sometimes after the drive forgot the paths it remembered; right is
+// where the search found it ("" if not live), ids every id looked up.
+func (r *searchRun) hinted(id, right string, ids []string) []hintedAnswer {
+	if r.hintRng.IntN(3) == 0 {
+		r.idrv.idPaths.forget()
+	}
+	other := r.lastPath[ids[r.hintRng.IntN(len(ids))]]
+	cands := []struct{ kind, hint string }{
+		{"right", right},
+		{"stale", r.lastPath[id]},
+		{"wrong", "/nowhere/" + id},
+		{"another", other},
+	}
+	r.hintRng.Shuffle(len(cands), func(i, j int) { cands[i], cands[j] = cands[j], cands[i] })
+	var out []hintedAnswer
+	for _, c := range cands {
+		if c.hint == "" || c.kind == "stale" && c.hint == right || c.kind == "another" && c.hint == right {
+			continue
+		}
+		r.hints[c.kind]++
+		out = append(out, hintedAnswer{c.kind, c.hint, foundOf(r.idrv.FindByOriginHint(r.ctx, srcDrive, id, c.hint))})
+	}
+	return out
 }
 
 // newestClaimTrashed is one case where icbfs's lookup has always

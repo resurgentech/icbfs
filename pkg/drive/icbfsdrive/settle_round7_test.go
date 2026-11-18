@@ -1066,3 +1066,29 @@ func TestST28_ARowNamingTheWrongItemIsProved(t *testing.T) {
 		t.Errorf("the known gap closed? a row naming the wrong item: %v (update ST-28)", err)
 	}
 }
+
+// TestLF13_ASettleNeverSearches (LF-13, with T82-15's search budget): on a
+// drive with and without a search budget, a settle given a path the folder
+// is not at answers ErrFolderNotAtPath and makes no search of the tree
+// (Walks unchanged); given its path, it settles, again with none.
+func TestLF13_ASettleNeverSearches(t *testing.T) {
+	for _, budget := range []int{0, DefaultSearchBudget} {
+		t.Run(fmt.Sprintf("budget %d", budget), func(t *testing.T) {
+			d, changes := cutCase(t, &failStore{Store: miniotest.Store(t)}, fmt.Sprintf("lf13s%d", budget), Config{DeferLateFolders: true, SearchBudget: budget})
+			writeAt(t, d, system(), 2025, "/o/p/f.txt")
+			before := d.Walks()
+			if _, err := d.SettleFolder(system(), changes, drive.SettleOptions{Path: "/o/p"}); !errors.Is(err, drive.ErrFolderNotAtPath) {
+				t.Errorf("another folder at the path: %v, want ErrFolderNotAtPath", err)
+			}
+			if _, err := d.SettleFolder(system(), changes, drive.SettleOptions{Path: "/nothing"}); !errors.Is(err, drive.ErrFolderNotAtPath) {
+				t.Errorf("nothing at the path: %v, want ErrFolderNotAtPath", err)
+			}
+			if _, err := d.SettleFolder(system(), changes, drive.SettleOptions{Path: "/dir"}); err != nil {
+				t.Fatal(err)
+			}
+			if n := d.Walks() - before; n != 0 {
+				t.Errorf("the settles searched the tree %d times", n)
+			}
+		})
+	}
+}
