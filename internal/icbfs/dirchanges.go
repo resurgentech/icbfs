@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/resurgentech/icbfs/internal/objstore"
@@ -153,17 +152,6 @@ func withFirstDates(ctx context.Context) context.Context {
 	return context.WithValue(ctx, firstDatesKey{}, &firstDates{m: map[string]time.Time{}})
 }
 
-// firstStateRule is rule 1.6-8 (above) on: off gives the code before it
-// (T83-8), for the tests that compare the two (SetFirstStateRule).
-var firstStateRule atomic.Bool
-
-func init() { firstStateRule.Store(true) }
-
-// SetFirstStateRule turns rule 1.6-8 off (false) or on, and returns what
-// it was: for the tests that build the same folders both ways and
-// compare every view. Nothing but a test calls it.
-func SetFirstStateRule(on bool) bool { return firstStateRule.Swap(on) }
-
 // PresentDated is the directories the changes under ctx wrote dated at
 // their newest state, and that state's time.
 func PresentDated(ctx context.Context) map[string]time.Time {
@@ -304,16 +292,16 @@ func (f *Filesystem) recordDating(ctx context.Context, dirKey string) (context.C
 }
 
 // refusing reports whether ctx's late changes are refused
-// (RefuseLateChanges) and rule 1.6-8 is on.
+// (RefuseLateChanges).
 func refusing(ctx context.Context) bool {
 	refuse, _ := ctx.Value(refuseLateKey{}).(bool)
-	return refuse && firstStateRule.Load()
+	return refuse
 }
 
 // dirStates is the times of directory dirKey's newest state and of its
 // first: the latest and the earliest date in its .version record, what
 // rec (if set) recorded of this operation's own writes left out. The
-// first is zero if the record lists nothing else, or rule 1.6-8 is off.
+// first is zero if the record lists nothing else.
 // A directory's key is its own for good: a move or a rename changes its
 // parents' entries (and adds a version of its .metadata, later), and a
 // trashed and restored directory keeps its key and its record, so its
@@ -353,9 +341,6 @@ func (f *Filesystem) dirStates(ctx context.Context, dirKey string, rec *objstore
 		if first.IsZero() || t.Before(first) {
 			first = t
 		}
-	}
-	if !firstStateRule.Load() {
-		first = time.Time{}
 	}
 	if root != nil && !root.Deleted && !ours[root.VersionID] {
 		if _, listed := dates[root.VersionID]; !listed {

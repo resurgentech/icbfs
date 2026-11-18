@@ -83,7 +83,7 @@ test-erase-full:
 # What CI checks: while working and before a commit; under ten minutes on a lab runner (docs/testing.md, "Which gate when"). The long tests are in pre-merge.
 ci: fmt-check tidy-check vet build test-ci
 
-# ci, then every long test ci leaves out (ICBFS_PRE_MERGE=1, the 100,000-entry erase, the timing test alone, a dated write killed at every request and dated at the next start: about two minutes; T83-8's views compared with rule 1.6-8 off and on: about 90 s), then the docs/STATES.md rows the tests prove: once, before a merge that touches icbfs
+# ci, then every long test ci leaves out (ICBFS_PRE_MERGE=1, the 100,000-entry erase, the timing test alone, a dated write killed at every request and dated at the next start: about two minutes; T83-8's views compared with the base's recorded views: about a minute), then the docs/STATES.md rows the tests prove: once, before a merge that touches icbfs
 pre-merge: ci test-erase-full test-settle test-settle-review
     ICBFS_PRE_MERGE=1 go test -race -count=1 -timeout 30m -run '^(TestTreeMemory|TestZZFanout)$' ./pkg/drive/icbfsdrive ./internal/icbfs
     ICBFS_PRE_MERGE=1 go test -race -count=1 -timeout 30m -run '^(TestBound16_BatchesInOrderSettleAsOneCall|TestModelTwoLevels|TestST27_AnotherWriterChangesOnlyTheRecordDuringTheReads)$' ./pkg/drive/icbfsdrive

@@ -851,14 +851,10 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 	return Settled{Read: read, Written: len(written), Erased: erased}, nil
 }
 
-// liveOf is list without its deletions.
 // firstState is the time of the directory's first state: the earliest
 // date of its root block's and .metadata's versions that are states
-// (live, not shadowed). Zero if it has none, or rule 1.6-8 is off.
+// (live, not shadowed). Zero if it has none.
 func firstState(dates objstore.Dates, shadowed map[string]bool, hists ...[]objstore.Object) time.Time {
-	if !firstStateRule.Load() {
-		return time.Time{}
-	}
 	var first time.Time
 	for _, h := range hists {
 		for i := range h {
@@ -897,6 +893,7 @@ func fromFirstState(changes []DirChange, first time.Time) []DirChange {
 	return out
 }
 
+// liveOf is list without its deletions.
 func liveOf(list []objstore.Object) []objstore.Object {
 	var out []objstore.Object
 	for _, o := range list {
