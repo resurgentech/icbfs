@@ -653,8 +653,8 @@ func (t *SettleTable) Encoded(ctx context.Context, at time.Time) (root, meta []b
 func (c *HistoryCache) UpTo(upTo map[string]string) *HistoryCache {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return &HistoryCache{store: c.store, db: c.db, ttl: c.ttl, offset: c.offset, offsetAt: c.offsetAt,
-		upTo: upTo}
+	return &HistoryCache{store: c.store, f: c.f, db: c.db, ttl: c.ttl, wait: c.wait, misses: c.misses,
+		offset: c.offset, offsetAt: c.offsetAt, upTo: upTo}
 }
 
 // dropAfter is list without the versions stored after the upTo version

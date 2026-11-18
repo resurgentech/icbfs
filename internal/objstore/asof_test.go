@@ -62,6 +62,12 @@ func (fixedStore) History(_ context.Context, key string) ([]Object, error) {
 	return []Object{{Key: "k", VersionID: "v1", LastModified: time.Now().Add(-time.Minute)}}, nil
 }
 
+// Sixteen handles on one file in one process, each forgetting and
+// reading back one key: every caller gets the store's history and no
+// error. The handles share the file's one connection and take their
+// write turns in order (historywait.go); under a load that kept a turn
+// from coming within HistoryWait, an operation would be a miss, which
+// still answers right: the test does not depend on the load.
 func TestHistoryCacheSharedByManyHandles(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "history.db")

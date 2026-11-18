@@ -805,6 +805,17 @@ it was written under a source time (see below).
   between mounts, one per store and credential, in the user's cache
   directory (`objstore.HistoryCache`; WAL, so as-of mounts and such
   programs share it).
+- Handles on one cache file in one process share its one connection.
+  Writers take turns in order: in the process, a queue; across
+  processes, a lock on `<file>.lock` that wakes the next writer when it
+  is let go (SQLite's own busy wait polls, up to 100 ms apart, and a
+  writer could be passed over by writers that kept coming until its
+  wait ran out). No operation of the cache waits longer than
+  `objstore.HistoryWait` (5 s); past it a read is a miss and the caller
+  reads the store, a keep is skipped, and a forget is held in the
+  process (what it names reads as a miss) until the next write applies
+  it. Each is counted (`ContendedMisses`). The cache never answers
+  "database is locked".
 - The cache keeps what each version says, too, which never changes: its
   metadata, and the content of the reads icbfs marks as metadata (its
   directory blocks, `.metadata` objects, symlink targets and the master
