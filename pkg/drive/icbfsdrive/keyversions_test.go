@@ -142,7 +142,7 @@ func rebuildBefore(ctx context.Context, d drive.Drive, source string) (*drive.Ha
 			}
 			for _, v := range vs {
 				if v.Checksums != nil && v.Checksums.SHA256 != "" {
-					h.Add(v.Checksums.SHA256, drive.HashEntry{ID: it.ID, Version: v.ID, Size: v.Size})
+					h.Add(v.Checksums.SHA256, drive.HashEntry{ID: it.ID, Version: v.ID, Size: v.Size, Path: it.Path})
 				}
 			}
 		}

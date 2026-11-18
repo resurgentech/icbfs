@@ -3,6 +3,7 @@ package icbfsdrive
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -249,7 +250,7 @@ func (d *Drive) Stat(ctx context.Context, ref drive.ItemRef, at drive.At) (drive
 	}
 	n, err := d.resolve(ctx, fsys, ref)
 	if err != nil {
-		if at.Version != "" && ref.ID != "" {
+		if at.Version != "" && ref.ID != "" && errors.Is(err, drive.ErrNotFound) {
 			return d.statTrashed(ctx, ref.ID, at.Version)
 		}
 		return drive.Item{}, err
@@ -384,7 +385,7 @@ func (d *Drive) versions(ctx context.Context, ref drive.ItemRef, withNames bool)
 			return nil, err
 		}
 		id = n.key
-	case ref.ID != "":
+	case ref.ID != "" && errors.Is(err, drive.ErrNotFound):
 		if _, terr := d.trashedItem(ctx, ref.ID); terr != nil {
 			return nil, err
 		}
@@ -482,7 +483,7 @@ func (d *Drive) Checksums(ctx context.Context, ref drive.ItemRef, version string
 			return drive.Checksums{}, err
 		}
 		id = n.key
-	case ref.ID != "":
+	case ref.ID != "" && errors.Is(err, drive.ErrNotFound):
 		if _, terr := d.trashedItem(ctx, ref.ID); terr != nil {
 			return drive.Checksums{}, err
 		}
