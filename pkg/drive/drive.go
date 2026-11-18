@@ -759,6 +759,14 @@ var (
 	ErrLocked = errors.New("locked by another holder")
 	// ErrNotLockHolder: the lease lapsed and the lock is gone or another's (Locker).
 	ErrNotLockHolder = errors.New("not the lock's holder")
+	// ErrNotSearched: a lookup by id that had to search the drive's tree
+	// (no path given, or the path given no longer leads to the item)
+	// stopped before it found the item or read every folder: the
+	// request's context ended, or the search used the drive's budget of
+	// reads. The item may well be there: this is not ErrNotFound. Asking
+	// again goes on from where the search stopped (icbfsdrive), and naming
+	// the item's path with its id needs no search at all.
+	ErrNotSearched = errors.New("the lookup by id could not search the drive within its limits")
 )
 
 // PreconditionError is ErrPrecondition with the current version.
