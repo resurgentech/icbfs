@@ -1053,3 +1053,16 @@ func TestST27_AnotherWriterChangesOnlyTheRecordDuringTheReads(t *testing.T) {
 		})
 	}
 }
+
+// TestST28_ARowNamingTheWrongItemIsProved (ST-28, a known gap, pinned so
+// a change to it is seen): a row whose name is right and whose item is
+// not (only a damaged database gives one) passes the proof: the proof
+// checks names against the present only from Until on.
+func TestST28_ARowNamingTheWrongItemIsProved(t *testing.T) {
+	d, changes := cutCase(t, &failStore{Store: miniotest.Store(t)}, "st28", Config{DeferLateFolders: true})
+	bad := append([]drive.LateChange(nil), changes...)
+	bad[0].Item = "not-the-item"
+	if _, err := d.SettleFolder(system(), bad, drive.SettleOptions{Path: "/dir", ProveOnly: true}); err != nil {
+		t.Errorf("the known gap closed? a row naming the wrong item: %v (update ST-28)", err)
+	}
+}
