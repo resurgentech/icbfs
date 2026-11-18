@@ -1,8 +1,10 @@
+diff --git a/internal/objstore/dates.go b/internal/objstore/dates.go
+index b2ce9f5..785cb73 100644
 --- a/internal/objstore/dates.go
 +++ b/internal/objstore/dates.go
-@@ -725,7 +725,7 @@
- 		return metadata
- 	}
+@@ -757,7 +757,7 @@ func PutAt(o *Object) (time.Time, bool) {
+ // blocks and .metadata since T83-1.
+ func withPutAt(ctx context.Context, key string, metadata map[string]string) map[string]string {
  	t, dated := DeclaredTime(ctx)
 -	if _, had := metadata[PutAtKey]; !dated && !had {
 +	if !dated {

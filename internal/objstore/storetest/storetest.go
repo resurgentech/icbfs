@@ -1197,7 +1197,7 @@ func historyCacheKeepsVersions(t *testing.T, newStore func(*testing.T) objstore.
 // asOfByVersionDates: versions written years after they came to be, under
 // declared times through a Recording store, are recorded and dated in the
 // item's .version record (AddDates), and a view picks by those dates. The
-// versions themselves carry nothing; a key with no record is dated by the
+// versions carry only their declared date (icbfsat); a key with no record is dated by the
 // store.
 func asOfByVersionDates(t *testing.T, newStore func(*testing.T) objstore.Store) {
 	store := objstore.Recording(newStore(t))
@@ -1224,8 +1224,10 @@ func asOfByVersionDates(t *testing.T, newStore func(*testing.T) objstore.Store) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if head.Metadata["m"] != "1" || len(head.Metadata) != 1 {
-		t.Fatalf("head metadata %v; want only m=1", head.Metadata)
+	// The version says its own declared date too (objstore.PutAtKey, since
+	// interloc T84-18: what a killed write left is dated from it).
+	if head.Metadata["m"] != "1" || len(head.Metadata) != 2 || head.Metadata[objstore.PutAtKey] != "2023-01-01T00:00:00Z" {
+		t.Fatalf("head metadata %v; want m=1 and its date", head.Metadata)
 	}
 	dates, err := objstore.ReadDates(ctx, store, "d/k")
 	if err != nil || len(dates) != 3 || !dates.Time(head).Equal(at(2023)) {
