@@ -265,7 +265,7 @@ func TestSettleStoppedByAnOutsideWrite(t *testing.T) {
 // is gone answers ErrFolderNotAtPath (round 6, LF-13) and nothing is
 // written.
 func TestSettleFinishedByKeyWhenGone(t *testing.T) {
-	store := &cutStore{Store: miniotest.Store(t)}
+	store := &settleCutStore{Store: miniotest.Store(t)}
 	d, changes := cutCase(t, store, "gonewithrecord", Config{DeferLateFolders: true})
 	folder := changes[0].Folder
 	ctx := system()

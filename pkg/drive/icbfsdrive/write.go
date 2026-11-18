@@ -67,6 +67,12 @@ type writeSource struct {
 	r    io.Reader
 	at   io.ReaderAt
 	size int64
+	// upload, if set, is an upload's staged parts (parts.go), copied on
+	// the store's side: no body.
+	upload *icbfs.UploadSource
+	// plan, with upload, is told the key before the first byte, and the
+	// store's copy id before the first piece (drive.UploadWrite.Plan).
+	plan func(ctx context.Context, p drive.UploadPlan) error
 }
 
 // streamed is whether the content goes to the store as it arrives, so
@@ -125,6 +131,26 @@ func (d *Drive) write(ctx context.Context, p string, src writeSource, cond drive
 				return obj, refErr(err)
 			}
 			return nil
+		case src.upload != nil:
+			// An upload's parts (T82-10): copied by the store, the
+			// checksums made as they were staged.
+			sums = src.upload.Sums
+			put = func(ctx context.Context, key, etag string) (*objstore.Object, error) {
+				if src.plan != nil {
+					// T82-10 round 6 (AS-14, AS-15): the key before any
+					// byte (a new file's when there is no etag: create's
+					// put), and the store's copy id before its first piece.
+					plan := drive.UploadPlan{Key: key, New: etag == ""}
+					if err := src.plan(ctx, plan); err != nil {
+						return nil, err
+					}
+					ctx = objstore.WithCopyStarted(ctx, func(id string) error {
+						plan.Copy = id
+						return src.plan(ctx, plan)
+					})
+				}
+				return d.fs.WriteUpload(ctx, key, *src.upload, etag)
+			}
 		case src.at != nil:
 			if src.size > d.fs.MaxFileSize() {
 				return drive.ErrTooLarge
@@ -278,7 +304,9 @@ func (d *Drive) write(ctx context.Context, p string, src writeSource, cond drive
 			if cond.IfNoneMatch {
 				return drive.Item{}, &drive.PreconditionError{}
 			}
-			if stream != nil {
+			if stream != nil || src.streamed() {
+				// The content went first, and the name was another
+				// writer's by then: a body sent as it arrived can't go again.
 				return drive.Item{}, fmt.Errorf("another write made the file first and a streamed body can't be sent again: %w", drive.ErrBusy)
 			}
 			continue // made meanwhile: write over it
@@ -465,59 +493,67 @@ func toChecksums(c icbfs.Checksums) *drive.Checksums {
 
 // create makes the file name in parent with its content: in the same two
 // writes when the content is in memory (icbfs CreateWith); a large one,
-// spooled or sent as it arrives (put), into a file created empty. sums
-// are the content's, or, when late, become known as put sends it.
+// spooled or sent as it arrives (put), written first, to the new file's
+// key, and named only once it has landed (icbfs CreateWithContent, T82-10
+// round 4). So a write that fails or is cut (a stop, mid-copy) leaves no
+// name behind: a reader of the folder sees no file until the whole file;
+// and nothing in the store either: every version under the new key is
+// erased (round 5).
+// sums are the content's, or, when late, become known as put sends it, and
+// are checked before the name is made.
 func (d *Drive) create(ctx context.Context, parent *node, name string, data []byte, spool *os.File, put putFunc, late bool, opts drive.WriteOptions, sums *icbfs.Checksums) (*node, error) {
 	sddl, mode, uid, gid := d.newOwnership(ctx, parent, false)
 	p := joinPath(parent.path, name)
+	var key string
+	var attr icbfs.Attr
 	if spool == nil && put == nil {
 		info, err := d.writeInfo(ctx, opts, *sums)
 		if err != nil {
 			return nil, err
 		}
-		key, attr, err := d.fs.CreateWith(ctx, parent.key, name, mode, uid, gid, data, sddl, info)
+		if key, attr, err = d.fs.CreateWith(ctx, parent.key, name, mode, uid, gid, data, sddl, info); err != nil {
+			return nil, mapCreateErr(err)
+		}
+	} else {
+		if put == nil {
+			st, err := spool.Stat()
+			if err != nil {
+				return nil, err
+			}
+			size := st.Size()
+			put = func(ctx context.Context, key, etag string) (*objstore.Object, error) {
+				return d.fs.WriteFrom(ctx, key, spool, size, etag)
+			}
+		}
+		info, err := d.writeInfo(ctx, opts, icbfs.Checksums{})
+		if err != nil {
+			return nil, err
+		}
+		info.Checksums = sums // known by the time put returns, which is when they're recorded
+		key, attr, err = d.fs.CreateWithContent(ctx, parent.key, name, mode, uid, gid, sddl, info, func(ctx context.Context, key string) (*objstore.Object, error) {
+			written, err := put(ctx, key, "")
+			if err != nil {
+				return nil, mapErr(err)
+			}
+			if late {
+				if err := checkSums(opts.Checksums, *sums); err != nil {
+					// Known only now, with the content written to a key no
+					// folder names: no name is made, and CreateWithContent
+					// erases every version under the key (Azure refuses to
+					// erase a current version one by one).
+					return nil, err
+				}
+			}
+			return written, nil
+		})
 		if err != nil {
 			return nil, mapCreateErr(err)
 		}
-		if opts.Origin != nil {
-			if err := d.recordOrigin(ctx, key, p, *opts.Origin, nil); err != nil {
-				return nil, err
-			}
-		}
-		return parent.child(block.Entry{Name: name, UUID: key, Type: icbfs.TypeFile}, attr), nil
 	}
-	key, _, etag, err := d.fs.Create(ctx, parent.key, name, mode, uid, gid)
-	if err != nil {
-		return nil, mapCreateErr(err)
-	}
-	if sddl != nil {
-		if _, err := d.fs.SetWindowsACL(ctx, key, icbfs.TypeFile, sddl); err != nil {
-			return nil, mapErr(err)
-		}
-	}
-	created, _ := d.fs.Store().Head(ctx, key)
-	written, err := d.writeContent(ctx, key, data, spool, put, etag)
-	if err != nil {
-		// The file was made before its content could be: a streamed body
-		// that fell short, or a store that refused. Not a file to leave.
-		d.dropCreated(ctx, parent, name, p)
-		return nil, mapErr(err)
-	}
-	if late {
-		if err := checkSums(opts.Checksums, *sums); err != nil {
-			_ = d.fs.Store().Erase(ctx, key, written.VersionID)
-			d.dropCreated(ctx, parent, name, p)
+	if opts.Origin != nil {
+		if err := d.recordOrigin(ctx, key, p, *opts.Origin, nil); err != nil {
 			return nil, err
 		}
-	}
-	attr, err := d.afterWrite(ctx, key, p, written, opts, *sums)
-	if err != nil {
-		return nil, err
-	}
-	// Creating made an empty version before the content's; a file the
-	// API makes starts with just its content.
-	if created != nil && created.Size == 0 {
-		_ = d.fs.Store().Erase(ctx, key, created.VersionID)
 	}
 	return parent.child(block.Entry{Name: name, UUID: key, Type: icbfs.TypeFile}, attr), nil
 }
@@ -544,15 +580,6 @@ func (d *Drive) createStream(ctx context.Context, parent *node, name string, bod
 		}
 	}
 	return parent.child(block.Entry{Name: name, UUID: key, Type: icbfs.TypeFile}, attr), nil
-}
-
-// dropCreated unlinks the empty file name a failed write made in parent
-// (to the trash, as any delete; it holds nothing). Best effort: the write
-// has its own error to report.
-func (d *Drive) dropCreated(ctx context.Context, parent *node, name, p string) {
-	dctx := icbfs.WithDeleteInfo(ctx, icbfs.DeleteInfo{By: drive.Actor(ctx), Path: d.fsPath(p)})
-	_ = d.fs.Unlink(dctx, parent.key, name)
-	d.changed(parent)
 }
 
 // mapCreateErr is mapErr, leaving icbfs.ErrExists as it is for Write to

@@ -221,3 +221,9 @@ func (s *dropOnWrite) EraseAll(ctx context.Context, prefix string) error {
 	defer s.dirs.dropAll()
 	return s.Store.EraseAll(ctx, prefix)
 }
+
+// AbortCopy passes the store's through (objstore.CopyAborter, T82-10
+// round 6).
+func (s *dropOnWrite) AbortCopy(ctx context.Context, key, id string) error {
+	return objstore.AbortCopy(ctx, s.Store, key, id)
+}

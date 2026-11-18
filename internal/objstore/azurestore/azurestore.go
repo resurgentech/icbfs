@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -632,8 +633,10 @@ func (s *Store) promote(ctx context.Context, key, versionID string) error {
 
 func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part, metadata map[string]string, ifMatchETag string) (*objstore.Object, error) {
 	bb := s.blob(key)
-	ids := make([]string, len(parts))
+	n := len(parts)
 	stream := objstore.IsStream(parts)
+	ids := newBlockIDs() // the call's own, of icbfs's length or the one stale blocks force (blockids.go)
+	var copies []int     // the parts copied on the store's side, staged after the loop
 	for i, p := range parts {
 		if stream {
 			// A stream of unknown length may end before its last part.
@@ -642,39 +645,37 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 				return nil, fmt.Errorf("put parts %s: %w", key, err)
 			}
 			if !ok {
-				ids = ids[:i]
+				n = i
 				break
 			}
 		}
-		ids[i] = base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("icbfs-part-%06d", i)))
 		if p.Body != nil {
-			if _, err := bb.StageBlock(ctx, ids[i], nopSeekCloser{p.Body}, nil); err != nil {
+			_, err := bb.StageBlock(ctx, ids.id(i), nopSeekCloser{p.Body}, nil)
+			if err != nil && ids.repair(ctx, bb, err) {
+				// Stale blocks of another id length (blockids.go): this
+				// part again, from its start, under the ids they force.
+				if _, serr := p.Body.Seek(0, io.SeekStart); serr == nil {
+					_, err = bb.StageBlock(ctx, ids.id(i), nopSeekCloser{p.Body}, nil)
+				}
+			}
+			if err != nil {
 				return nil, azureErr("put parts", key, err)
 			}
 			continue
 		}
-		from := key
-		if p.CopyKey != "" {
-			from = p.CopyKey
-		}
-		src, auth, err := s.source(ctx, from, p.CopyVersion)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := bb.StageBlockFromURL(ctx, ids[i], src, &blockblob.StageBlockFromURLOptions{
-			Range:                   blob.HTTPRange{Offset: p.CopyOffset, Count: p.Size},
-			CopySourceAuthorization: auth,
-		}); err != nil {
-			// A missing source comes back as CannotVerifyCopySource, not
-			// BlobNotFound; a Head of it says which it was. Staged blocks
-			// are never committed, so nothing is written.
-			if _, herr := s.HeadVersion(ctx, from, p.CopyVersion); objstore.IsNotFound(herr) {
-				return nil, fmt.Errorf("put parts %s: copy from %s version %s: %w (%v)", key, from, p.CopyVersion, objstore.ErrNotFound, err)
-			}
-			return nil, azureErr("put parts", key, err)
-		}
+		copies = append(copies, i)
 	}
-	resp, err := bb.CommitBlockList(ctx, ids, &blockblob.CommitBlockListOptions{
+	// T82-10: the copies, objstore.CopyConcurrency at once (a block's place
+	// in the blob is its place in the list committed, not when it was
+	// staged). The first failure stops the rest; nothing is committed.
+	if err := s.stageCopies(ctx, bb, key, parts, ids, copies); err != nil {
+		return nil, err
+	}
+	list := make([]string, n)
+	for i := range list {
+		list[i] = ids.id(i)
+	}
+	resp, err := bb.CommitBlockList(ctx, list, &blockblob.CommitBlockListOptions{
 		Metadata:         toAzureMeta(metadata),
 		AccessConditions: ifMatch(ifMatchETag),
 	})
@@ -682,6 +683,80 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 		return nil, azureErr("put parts", key, err)
 	}
 	return s.HeadVersion(ctx, key, deref(resp.VersionID))
+}
+
+// stageCopies stages the copied parts of a PutParts (parts[i] for i in
+// which), objstore.CopyConcurrency at once.
+func (s *Store) stageCopies(ctx context.Context, bb *blockblob.Client, key string, parts []objstore.Part, ids *blockIDs, which []int) error {
+	if len(which) == 0 {
+		return nil
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errs := make([]error, len(which))
+	sem := make(chan struct{}, objstore.CopyConcurrency)
+	var wg sync.WaitGroup
+	for j, i := range which {
+		sem <- struct{}{}
+		if cctx.Err() != nil {
+			<-sem
+			break
+		}
+		wg.Add(1)
+		go func(j, i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			p := parts[i]
+			from := key
+			if p.CopyKey != "" {
+				from = p.CopyKey
+			}
+			src, auth, err := s.source(cctx, from, p.CopyVersion)
+			if err == nil {
+				opts := &blockblob.StageBlockFromURLOptions{
+					Range:                   blob.HTTPRange{Offset: p.CopyOffset, Count: p.Size},
+					CopySourceAuthorization: auth,
+				}
+				_, err = bb.StageBlockFromURL(cctx, ids.id(i), src, opts)
+				if err != nil && ids.repair(cctx, bb, err) {
+					// Stale blocks of another id length (blockids.go).
+					_, err = bb.StageBlockFromURL(cctx, ids.id(i), src, opts)
+				}
+				if err != nil {
+					// A missing source comes back as CannotVerifyCopySource, not
+					// BlobNotFound; a Head of it says which it was. Staged blocks
+					// are never committed, so nothing is written.
+					if _, herr := s.HeadVersion(ctx, from, p.CopyVersion); objstore.IsNotFound(herr) {
+						err = fmt.Errorf("put parts %s: copy from %s version %s: %w (%v)", key, from, p.CopyVersion, objstore.ErrNotFound, err)
+					} else {
+						err = azureErr("put parts", key, err)
+					}
+				}
+			}
+			if err != nil {
+				errs[j] = err
+				cancel()
+			}
+		}(j, i)
+	}
+	wg.Wait()
+	var cancelled error
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, context.Canceled) && ctx.Err() == nil {
+			if cancelled == nil {
+				cancelled = err
+			}
+			continue
+		}
+		return err
+	}
+	if cancelled != nil {
+		return cancelled
+	}
+	return ctx.Err()
 }
 
 func (s *Store) List(ctx context.Context, prefix string) ([]objstore.Object, error) {
@@ -696,14 +771,65 @@ func (s *Store) List(ctx context.Context, prefix string) ([]objstore.Object, err
 	return out, nil
 }
 
+// VersionsSince is key's versions dated at or after since, newest first
+// (objstore.VersionsSincer). Azure lists one name's versions together but
+// not newest first, so the listing ends at the first blob of another name
+// (key's companions sort after it); only the versions since are held.
+// Markers are passed over.
+func (s *Store) VersionsSince(ctx context.Context, key string, since time.Time) ([]objstore.Object, error) {
+	var out []objstore.Object
+	pager := s.client.NewListBlobsFlatPager(&container.ListBlobsFlatOptions{
+		Prefix:     to.Ptr(s.k(key)),
+		Include:    container.ListBlobsInclude{Versions: true, Metadata: true},
+		MaxResults: to.Ptr(objstore.HistoryPageSize),
+	})
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, azureErr("list versions", key, err)
+		}
+		past := false
+		for _, b := range page.Segment.BlobItems {
+			if strings.TrimPrefix(deref(b.Name), s.keyPrefix) != key {
+				past = true
+				break
+			}
+			if isMarker(b.Metadata) || b.Properties == nil {
+				continue
+			}
+			o := objstore.Object{Key: key, VersionID: deref(b.VersionID), ETag: etagString(b.Properties.ETag),
+				Size: deref(b.Properties.ContentLength), LastModified: deref(b.Properties.LastModified)}
+			if !o.LastModified.Before(since) {
+				out = append(out, o)
+			}
+		}
+		if past {
+			break
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].VersionID > out[j].VersionID })
+	return out, nil
+}
+
 // ListPages is List a page (one listing request, HistoryPageSize blobs,
 // markers left out) at a time (objstore.PageLister).
 func (s *Store) ListPages(ctx context.Context, prefix string, fn func([]objstore.Object) error) error {
-	pager := s.client.NewListBlobsFlatPager(&container.ListBlobsFlatOptions{
+	return s.ListPagesAfter(ctx, prefix, "", fn)
+}
+
+// ListPagesAfter is ListPages from the first blob after after
+// (objstore.AfterLister): the listing starts there (StartFrom, which
+// includes after itself, left out here).
+func (s *Store) ListPagesAfter(ctx context.Context, prefix, after string, fn func([]objstore.Object) error) error {
+	opts := &container.ListBlobsFlatOptions{
 		Prefix:     to.Ptr(s.k(prefix)),
 		Include:    container.ListBlobsInclude{Metadata: true},
 		MaxResults: to.Ptr(objstore.HistoryPageSize),
-	})
+	}
+	if after != "" {
+		opts.StartFrom = to.Ptr(s.k(after))
+	}
+	pager := s.client.NewListBlobsFlatPager(opts)
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
@@ -715,8 +841,12 @@ func (s *Store) ListPages(ctx context.Context, prefix string, fn func([]objstore
 				continue
 			}
 			o := objstore.Object{Key: strings.TrimPrefix(deref(b.Name), s.keyPrefix)}
+			if after != "" && o.Key <= after {
+				continue
+			}
 			if b.Properties != nil {
 				o.Size = deref(b.Properties.ContentLength)
+				o.LastModified = deref(b.Properties.LastModified)
 			}
 			objs = append(objs, o)
 		}

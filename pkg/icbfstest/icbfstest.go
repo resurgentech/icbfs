@@ -21,6 +21,6 @@ func Store(t *testing.T) pkgicbfs.Store {
 func Start(t *testing.T) (pkgicbfs.Store, pkgicbfs.StoreConfig) {
 	t.Helper()
 	store, srv := miniotest.Start(t)
-	return store, pkgicbfs.StoreConfig{Kind: pkgicbfs.KindS3, S3: pkgicbfs.S3{Endpoint: srv.Endpoint, Bucket: srv.Bucket,
+	return r3Store{store}, pkgicbfs.StoreConfig{Kind: pkgicbfs.KindS3, S3: pkgicbfs.S3{Endpoint: srv.Endpoint, Bucket: srv.Bucket,
 		AccessKey: srv.AccessKey, SecretKey: srv.SecretKey}}
 }

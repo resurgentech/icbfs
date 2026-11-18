@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"io"
+	"log"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -84,6 +85,7 @@ type Filesystem struct {
 	fsName             string
 	id                 string                // 4-hex-digit prefix, set by Bootstrap
 	archived           atomic.Bool           // set by Bootstrap; see ErrArchived
+	unnamedLeft        atomic.Int64          // eraseUnnamed's failures; see UnnamedLeft
 	pastChanged        func(context.Context) // SetPastChanged's, if set
 	sourceTime         atomic.Bool           // the master entry's source_time; see dated
 	format             atomic.Uint32         // the master entry's format_version; see raiseFormat
@@ -1640,6 +1642,20 @@ func (f *Filesystem) CreateWithStream(ctx context.Context, dirKey, name string, 
 	}, nil)
 }
 
+// CreateWithContent is CreateWith with the content written by put, given
+// the new file's key, before anything else (T82-10 round 4): a put that
+// fails or is cut writes nothing a reader can reach, not even the name.
+// The name is linked only after the content and .metadata are written, so
+// a reader of the folder sees no file, then the whole file. info is read
+// after put returns (its Checksums, if a pointer the caller fills as put
+// goes, are recorded then). On any failure before the link, put's own
+// included, every version of what the create wrote is erased
+// (eraseUnnamed), as for CreateWithStream: nothing is left unnamed.
+func (f *Filesystem) CreateWithContent(ctx context.Context, dirKey, name string, mode, uid, gid uint32, sddl []byte, info ItemInfo,
+	put func(ctx context.Context, key string) (*objstore.Object, error)) (string, Attr, error) {
+	return f.createWith(ctx, dirKey, name, mode, uid, gid, sddl, info, put, nil)
+}
+
 // createWith is CreateWith with the content's write, put, given the new
 // key (CreateWithRef's writes a stub), and edit, if not nil, recording
 // more in .metadata about the content version put wrote.
@@ -1662,8 +1678,12 @@ func (f *Filesystem) createWith(ctx context.Context, dirKey, name string, mode, 
 	if sddl != nil {
 		attr.WindowsSDDL = sddl
 	}
+	// From here until the link, a failure erases what this create wrote
+	// (T82-10 round 5): put's own error included (a commit the store
+	// finished after the client gave up).
 	contentObj, err := put(ctx, newUUID)
 	if err != nil {
+		f.eraseUnnamed(ctx, newUUID)
 		return "", Attr{}, err
 	}
 	info.ContentETag = contentObj.ETag
@@ -1673,17 +1693,16 @@ func (f *Filesystem) createWith(ctx context.Context, dirKey, name string, mode, 
 	}
 	metaData, err := f.encodeMetadata(ctx, attr)
 	if err != nil {
-		_ = f.store.Delete(ctx, newUUID)
+		f.eraseUnnamed(ctx, newUUID)
 		return "", Attr{}, err
 	}
 	metaObj, err := f.store.Put(ctx, metadataObjectKey(newUUID), bytes.NewReader(metaData), nil, "")
 	if err != nil {
-		_ = f.store.Delete(ctx, newUUID)
+		f.eraseUnnamed(ctx, newUUID)
 		return "", Attr{}, err
 	}
 	if err := f.insertEntry(ctx, dirKey, name, newUUID, TypeFile); err != nil {
-		_ = f.store.Delete(ctx, newUUID)
-		_ = f.store.Delete(ctx, metadataObjectKey(newUUID))
+		f.eraseUnnamed(ctx, newUUID)
 		return "", Attr{}, err
 	}
 	if err := f.touchDir(ctx, dirKey); err != nil {
@@ -1695,6 +1714,38 @@ func (f *Filesystem) createWith(ctx context.Context, dirKey, name string, mode, 
 	}
 	return newUUID, created, nil
 }
+
+// unnamedEraseTimeout bounds the erase of a create that failed before its
+// name was linked.
+const unnamedEraseTimeout = time.Minute
+
+// eraseUnnamed erases every version of every object a create that failed
+// before its link wrote under key (its content, .metadata, its .version
+// date table): key is a UUIDv7 minted for that create, so its prefix holds
+// nothing else. A delete would only hide them behind markers on a
+// versioned store, where nothing reaches or reclaims them (review 4's P1).
+// It runs under a context of its own, which the caller's cut (a stop, the
+// usual reason it runs) does not cancel, bounded by unnamedEraseTimeout.
+// An erase that fails is logged with the key and counted
+// (UnnamedLeft); nothing else finds what it left (see UnnamedLeft).
+func (f *Filesystem) eraseUnnamed(ctx context.Context, key string) {
+	ectx, cancel := context.WithTimeout(context.WithoutCancel(ctx), unnamedEraseTimeout)
+	defer cancel()
+	// Not dated afterwards (in source time): there is nothing left to date.
+	objstore.ForgetNew(ctx, key)
+	if err := f.store.EraseAll(ectx, key); err != nil {
+		f.unnamedLeft.Add(1)
+		log.Printf("icbfs: filesystem %s: a failed create's objects under %s were not erased (left, unnamed, until erased by hand): %v", f.id, key, err)
+	}
+}
+
+// UnnamedLeft is how many failed creates' objects this process could not
+// erase (eraseUnnamed), each logged with its key. Nothing in icbfs finds
+// them afterwards: fs check lists a current one as unreachable (not one
+// behind a delete marker), DiskUsage counts only a current one, and no
+// sweep looks for them. An operator erases one by its logged key: every
+// version under that key prefix (the store's own console, or EraseAll).
+func (f *Filesystem) UnnamedLeft() int64 { return f.unnamedLeft.Load() }
 
 // Mknod creates a FIFO, a Unix socket, or a character or block device (typ
 // TypeFifo, TypeSocket, TypeCharDevice or TypeBlockDevice); rdev is stored

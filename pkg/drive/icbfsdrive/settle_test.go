@@ -410,9 +410,9 @@ func TestDatedWriteKeepsTheHistoryCache(t *testing.T) {
 	}
 }
 
-// cutStore fails the cut-th write to the folder's root block or its
+// settleCutStore fails the cut-th write to the folder's root block or its
 // .metadata once armed, and every one after it: a write-out cut there.
-type cutStore struct {
+type settleCutStore struct {
 	objstore.Store
 	mu     sync.Mutex
 	folder string
@@ -421,7 +421,7 @@ type cutStore struct {
 
 var errCut = errString("the write-out was cut here")
 
-func (s *cutStore) Put(ctx context.Context, key string, body io.Reader, md map[string]string, ifMatch string) (*objstore.Object, error) {
+func (s *settleCutStore) Put(ctx context.Context, key string, body io.Reader, md map[string]string, ifMatch string) (*objstore.Object, error) {
 	s.mu.Lock()
 	hit := s.folder != "" && (key == s.folder || key == s.folder+".metadata")
 	if hit {
@@ -443,7 +443,7 @@ func (s *cutStore) Put(ctx context.Context, key string, body io.Reader, md map[s
 func TestSettleCutThenAgain(t *testing.T) {
 	for cut := 1; cut <= 3; cut++ {
 		t.Run(fmt.Sprintf("request %d fails", cut), func(t *testing.T) {
-			store := &cutStore{Store: miniotest.Store(t)}
+			store := &settleCutStore{Store: miniotest.Store(t)}
 			d := newDriveWith(t, store, icbfs.Settings{Name: fmt.Sprintf("cut%d", cut), Size: 1 << 30, RootMode: 0o777, Created: year(2015)},
 				Config{DeferLateFolders: true})
 			ctx := system()

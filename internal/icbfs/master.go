@@ -238,6 +238,13 @@ func Prune(ctx context.Context, store objstore.Store, fsName string) error {
 	if err := store.EraseAll(ctx, prefix); err != nil {
 		return fmt.Errorf("prune %s: %w", fsName, err)
 	}
+	// Its uploads in parts, outside its prefix (uploads.go).
+	if err := store.EraseAll(ctx, fsID(idx)+".upload-"); err != nil {
+		return fmt.Errorf("prune %s: uploads: %w", fsName, err)
+	}
+	if err := store.EraseAll(ctx, uploadMarks+fsID(idx)); err != nil {
+		return fmt.Errorf("prune %s: its uploads' mark: %w", fsName, err)
+	}
 
 	return updateFilesystemEntry(ctx, store, fsName, func(e *pb.FilesystemEntry) {
 		e.Name = ""

@@ -531,6 +531,28 @@ func NoteNew(ctx context.Context, base string) {
 	}
 }
 
+// ForgetNew tells ctx's Recorder, if it has one, that base, an item the
+// operation made, is gone, every version erased (a create that failed
+// before its name: T82-10 round 5): nothing it wrote under base is dated,
+// so no .version record is written for a key that has nothing.
+func ForgetNew(ctx context.Context, base string) {
+	rec, _ := ctx.Value(recorderKey{}).(*Recorder)
+	if rec == nil {
+		return
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	kept := rec.written[:0]
+	for _, w := range rec.written {
+		if BaseKey(w.Key) != base {
+			kept = append(kept, w)
+		}
+	}
+	rec.written = kept
+	delete(rec.made, base)
+	delete(rec.absent, base)
+}
+
 // Fresh reports whether base likely has no .version record: an item
 // the operation made, or a key it wrote where there was none
 // (PutIfAbsent). A hint for MergeDates, which reads the record after all
@@ -659,6 +681,12 @@ func (r *recording) ListPages(ctx context.Context, prefix string, fn func([]Obje
 	return ListEach(ctx, r.Store, prefix, fn)
 }
 
+// VersionsSince reads back only to since if the store under it can: a
+// listing writes nothing.
+func (r *recording) VersionsSince(ctx context.Context, key string, since time.Time) ([]Object, error) {
+	return VersionsSince(ctx, r.Store, key, since)
+}
+
 // note records a version written under a declared time, or dates one
 // written without that DateAll says must be.
 func (r *recording) note(ctx context.Context, key string, obj *Object, err error) error {
@@ -772,4 +800,9 @@ func (r *recording) PutParts(ctx context.Context, key string, parts []Part, meta
 		return nil, err
 	}
 	return obj, err
+}
+
+// AbortCopy passes the store's through (CopyAborter).
+func (r *recording) AbortCopy(ctx context.Context, key, id string) error {
+	return AbortCopy(ctx, r.Store, key, id)
 }

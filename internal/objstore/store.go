@@ -159,7 +159,8 @@ type Store interface {
 	EraseAll(ctx context.Context, prefix string) error
 
 	// List returns every key starting with prefix that has a current
-	// version, with only Key and Size filled in: what df's "Used" needs.
+	// version, with only Key and Size filled in (and LastModified, by
+	// S3Store and AzureStore): what df's "Used" needs.
 	// It costs one listing request per thousand or so objects; no store
 	// has anything faster.
 	List(ctx context.Context, prefix string) ([]Object, error)
@@ -182,6 +183,43 @@ var HistoryPageSize int32 = 1000
 // unless it says so.
 type PageLister interface {
 	ListPages(ctx context.Context, prefix string, fn func([]Object) error) error
+}
+
+// VersionsSincer is a Store that reads one key's versions back only to a
+// time: VersionsSince returns key's versions (not its deletions) dated at
+// or after since, newest first, with no Metadata filled in. It lists a page
+// (HistoryPageSize) at a time, holds only what it returns, and ends the
+// listing as soon as the store's order says no later page holds more:
+// S3, at the first version of key older than since or the first entry of
+// another key (key's companions, key.metadata and the like, sort after
+// it); Azure, whose versions of one name are not listed newest first, at
+// the first entry of another name. S3Store and AzureStore have it; a
+// wrapper of a Store does not unless it says so (T82-10 round 4).
+type VersionsSincer interface {
+	VersionsSince(ctx context.Context, key string, since time.Time) ([]Object, error)
+}
+
+// VersionsSince is s's VersionsSince when it has one, and History's
+// versions dated at or after since when it does not.
+func VersionsSince(ctx context.Context, s Store, key string, since time.Time) ([]Object, error) {
+	if vs, ok := s.(VersionsSincer); ok {
+		return vs.VersionsSince(ctx, key, since)
+	}
+	hist, err := s.History(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	var out []Object
+	for _, v := range hist {
+		if v.Deleted {
+			continue
+		}
+		if v.LastModified.Before(since) {
+			break // newest first: the rest are older
+		}
+		out = append(out, v)
+	}
+	return out, nil
 }
 
 // ListEach is List a page at a time when s is a PageLister, and List's

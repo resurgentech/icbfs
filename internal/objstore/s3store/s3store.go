@@ -132,6 +132,13 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 			Bucket: aws.String(s.bucket), Key: aws.String(s.k(key)), UploadId: up.UploadId,
 		})
 	}
+	// The caller keeps the id before the first piece (T82-10 round 6,
+	// AS-14): a process killed from here on leaves a copy only that id
+	// ends.
+	if err := objstore.CopyStarted(ctx, aws.ToString(up.UploadId)); err != nil {
+		abort()
+		return nil, fmt.Errorf("put parts %s: %w", key, err)
+	}
 
 	pctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -140,6 +147,10 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 	// Parts from a stream share one buffer and are filled in order, so
 	// they go up one at a time; the loop starts them in order.
 	conc := partConcurrency
+	if allCopies(parts) {
+		// T82-10: copies on the store's side carry no bytes of ours.
+		conc = objstore.CopyConcurrency
+	}
 	stream := objstore.IsStream(parts)
 	if stream {
 		conc = 1
@@ -223,6 +234,16 @@ func (s *Store) PutParts(ctx context.Context, key string, parts []objstore.Part,
 		return nil, s3Error(fmt.Errorf("put parts %s: %w", key, err))
 	}
 	return s.headVersion(ctx, key, out.VersionId)
+}
+
+// allCopies: every part is copied on the store's side (no Body).
+func allCopies(parts []objstore.Part) bool {
+	for _, p := range parts {
+		if p.Body != nil {
+			return false
+		}
+	}
+	return len(parts) > 0
 }
 
 // firstRealError returns the first error in errs that isn't just a part
@@ -580,15 +601,73 @@ func (s *Store) List(ctx context.Context, prefix string) ([]objstore.Object, err
 	return all, nil
 }
 
+// VersionsSince is key's versions dated at or after since, newest first
+// (objstore.VersionsSincer): S3 lists one key's versions newest first and
+// key before its companions (key.metadata sorts after key), so the listing
+// ends at the first version of key older than since, or the first entry
+// of another key. Delete markers are passed over.
+func (s *Store) VersionsSince(ctx context.Context, key string, since time.Time) ([]objstore.Object, error) {
+	var out []objstore.Object
+	var keyMarker, versionMarker *string
+	for {
+		page, err := s.client.ListObjectVersions(ctx, &s3.ListObjectVersionsInput{
+			Bucket:          aws.String(s.bucket),
+			Prefix:          aws.String(s.k(key)),
+			KeyMarker:       keyMarker,
+			VersionIdMarker: versionMarker,
+			MaxKeys:         aws.Int32(objstore.HistoryPageSize),
+		})
+		if err != nil {
+			return nil, s3Error(fmt.Errorf("list versions %s: %w", key, err))
+		}
+		past := false
+		for _, v := range page.Versions {
+			if strings.TrimPrefix(aws.ToString(v.Key), s.keyPrefix) != key {
+				past = true // a companion: key's versions are all listed
+				break
+			}
+			t := aws.ToTime(v.LastModified)
+			if t.Before(since) {
+				past = true
+				break
+			}
+			out = append(out, objstore.Object{Key: key, VersionID: aws.ToString(v.VersionId),
+				ETag: aws.ToString(v.ETag), Size: aws.ToInt64(v.Size), LastModified: t})
+		}
+		for _, m := range page.DeleteMarkers {
+			if strings.TrimPrefix(aws.ToString(m.Key), s.keyPrefix) != key || aws.ToTime(m.LastModified).Before(since) {
+				past = true
+				break
+			}
+		}
+		if past || !aws.ToBool(page.IsTruncated) {
+			break
+		}
+		keyMarker, versionMarker = page.NextKeyMarker, page.NextVersionIdMarker
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].LastModified.After(out[j].LastModified) })
+	return out, nil
+}
+
 // ListPages is List a page (one ListObjectsV2 request, HistoryPageSize
 // keys) at a time (objstore.PageLister).
 func (s *Store) ListPages(ctx context.Context, prefix string, fn func([]objstore.Object) error) error {
-	var token *string
+	return s.ListPagesAfter(ctx, prefix, "", fn)
+}
+
+// ListPagesAfter is ListPages from the first key after after
+// (objstore.AfterLister: StartAfter).
+func (s *Store) ListPagesAfter(ctx context.Context, prefix, after string, fn func([]objstore.Object) error) error {
+	var token, start *string
+	if after != "" {
+		start = aws.String(s.k(after))
+	}
 	for {
 		out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket:            aws.String(s.bucket),
 			Prefix:            aws.String(s.k(prefix)),
 			ContinuationToken: token,
+			StartAfter:        start,
 			MaxKeys:           aws.Int32(objstore.HistoryPageSize),
 		})
 		if err != nil {
@@ -598,8 +677,9 @@ func (s *Store) ListPages(ctx context.Context, prefix string, fn func([]objstore
 			page := make([]objstore.Object, 0, len(out.Contents))
 			for _, o := range out.Contents {
 				page = append(page, objstore.Object{
-					Key:  strings.TrimPrefix(aws.ToString(o.Key), s.keyPrefix),
-					Size: aws.ToInt64(o.Size),
+					Key:          strings.TrimPrefix(aws.ToString(o.Key), s.keyPrefix),
+					Size:         aws.ToInt64(o.Size),
+					LastModified: aws.ToTime(o.LastModified),
 				})
 			}
 			if err := fn(page); err != nil {
@@ -677,4 +757,23 @@ func s3Error(err error) error {
 		return fmt.Errorf("%w: %w", objstore.ErrPreconditionFailed, err)
 	}
 	return err
+}
+
+var _ objstore.CopyAborter = (*Store)(nil)
+
+// AbortCopy ends multipart upload id into key (objstore.CopyAborter: the
+// copy a PutParts killed mid-way left, T82-10 round 6). An id S3 no longer
+// has (NoSuchUpload, a 404: completed or aborted already) is not an
+// error. It lists nothing: Drives' IAM user may abort and may not list.
+func (s *Store) AbortCopy(ctx context.Context, key, id string) error {
+	_, err := s.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket: aws.String(s.bucket), Key: aws.String(s.k(key)), UploadId: aws.String(id),
+	})
+	if err = s3Error(err); objstore.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("abort copy %s into %s: %w", id, key, err)
+	}
+	return nil
 }
