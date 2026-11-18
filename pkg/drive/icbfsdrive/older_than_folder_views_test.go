@@ -10,18 +10,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore"
 	"github.com/resurgentech/icbfs/internal/testutil/miniotest"
 	"github.com/resurgentech/icbfs/pkg/drive"
 )
 
-// The proof that rule 1.6-8 (T83-8) changes no view: the same folders
-// built twice from the same inputs, once with the rule off
-// (icbfs.SetFirstStateRule(false): the code before it, on its own code
-// path, every late row settled as the daemon's sweep does) and once with
-// it on, and every view compared at every date any version carries, a
-// second before and after each, and now.
+// The proof that rule 1.6-8 (T83-8) changes no view: the shapes built
+// with the rule, every late row settled as the daemon's sweep does, and
+// every view compared with the base's, recorded once on icbfs 4273bb5
+// with the rule off (olderGoldenFile), at every date any version of
+// either build carried, a second before and after each, and now.
 
 // olderOp is one input: a write of a file, a folder made, or an item
 // removed, at a source time.
@@ -40,13 +38,10 @@ type olderBuild struct {
 	rows int
 }
 
-// buildOlder applies ops to a new deferring drive with rule 1.6-8 on or
-// off, then settles every row by folder, as the daemon's sweep at the end
-// of a pass does.
-func buildOlder(t *testing.T, store objstore.Store, name string, ops []olderOp, rule bool) olderBuild {
+// buildOlder applies ops to a new deferring drive, then settles every row
+// by folder, as the daemon's sweep at the end of a pass does.
+func buildOlder(t *testing.T, store objstore.Store, name string, ops []olderOp) olderBuild {
 	t.Helper()
-	was := icbfs.SetFirstStateRule(rule)
-	defer icbfs.SetFirstStateRule(was)
 	d := newDriveWith(t, store, cutCaseSettings(name), Config{DeferLateFolders: true})
 	ctx := system()
 	var rows []drive.LateChange
@@ -66,7 +61,7 @@ func buildOlder(t *testing.T, store objstore.Store, name string, ops []olderOp, 
 			_, err = d.Move(wctx, drive.ByPath(from), to, false)
 		}
 		if err != nil {
-			t.Fatalf("%s %s at %s (rule %v): %v", o.op, o.path, o.at.Format(time.DateOnly), rule, err)
+			t.Fatalf("%s %s at %s: %v", o.op, o.path, o.at.Format(time.DateOnly), err)
 		}
 		rows = append(rows, late.Take()...)
 	}
@@ -81,7 +76,7 @@ func buildOlder(t *testing.T, store objstore.Store, name string, ops []olderOp, 
 	for _, f := range order {
 		p := pathOfKey(t, d, f)
 		if _, err := d.SettleFolder(ctx, byFolder[f], drive.SettleOptions{Path: p}); err != nil {
-			t.Fatalf("settle %s (rule %v): %v", p, rule, err)
+			t.Fatalf("settle %s: %v", p, err)
 		}
 	}
 	return olderBuild{d: d, rows: len(rows)}
@@ -308,145 +303,220 @@ func olderCases() []olderCase {
 	}
 }
 
+// olderAt is a sampled time as the golden file writes it: RFC 3339 to
+// the nanosecond, or "now".
+func olderAt(at time.Time) string {
+	if at.IsZero() {
+		return "now"
+	}
+	return at.UTC().Format(time.RFC3339Nano)
+}
+
+// olderGoldenFile holds the base's views: every view of each shape at
+// every time sampled, as icbfs gave them before rule 1.6-8 (T83-8), with
+// the late rows settled. Its first line says the commit. It is never
+// re-recorded without the commit saying so: the code that recorded it
+// (a switch that turned the rule off) is gone.
+const olderGoldenFile = "testdata/t838-base-views.txt"
+
+// olderGolden is one shape's recorded views: the times in order, and the
+// view at each ("now" is the zero time).
+type olderGolden struct {
+	times []time.Time
+	views []string
+}
+
+// readOlderGolden reads olderGoldenFile: "== name" starts a shape, "-- at
+// T" a time, "= same" says the view is the one before, and anything else
+// is a line of the view.
+func readOlderGolden(t *testing.T) map[string]*olderGolden {
+	t.Helper()
+	data, err := os.ReadFile(olderGoldenFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]*olderGolden{}
+	var cur *olderGolden
+	var view []string
+	flush := func() {
+		if cur != nil && len(cur.times) > len(cur.views) {
+			cur.views = append(cur.views, strings.Join(view, "\n"))
+		}
+		view = nil
+	}
+	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		switch {
+		case strings.HasPrefix(line, "#"):
+		case strings.HasPrefix(line, "== "):
+			flush()
+			cur = &olderGolden{}
+			out[strings.TrimPrefix(line, "== ")] = cur
+		case strings.HasPrefix(line, "-- at "):
+			flush()
+			at := time.Time{}
+			if s := strings.TrimPrefix(line, "-- at "); s != "now" {
+				if at, err = time.Parse(time.RFC3339Nano, s); err != nil {
+					t.Fatalf("%s: %q: %v", olderGoldenFile, line, err)
+				}
+			}
+			cur.times = append(cur.times, at)
+		case line == "= same":
+			cur.views = append(cur.views, cur.views[len(cur.views)-1])
+		default:
+			view = append(view, line)
+		}
+	}
+	flush()
+	return out
+}
+
 // TestT838_NoViewDiffers (rule 1.6-8; LF-36's last sentence; ST-29's
-// "the states from the first on are exact"): for each case, both builds'
-// views are equal at every date any version of either carries, a second
-// before and after it, and now; the build with the rule on makes no row
-// unless the case has a folder with later states (e, f2: LF-37; c: the
-// root, once /U is in it). One exception, case c: the root's first state
-// is the filesystem's making (2015); with the rule off a top-level folder
-// of 2013 had its settle write the root at 2013, so the views before 2015
-// showed the root and /T before the filesystem existed. With the rule
-// they show nothing there; from 2015 on the views are equal.
+// "the states from the first on are exact"): each shape built with the
+// rule, every late row settled by folder as the daemon's sweep does, and
+// every view compared with the base's, recorded before T83-8
+// (olderGoldenFile), at every time recorded there: every date a version of
+// either build carried, a second before and after, and now. Every date a
+// version of this build carries is among them. No row unless a folder has
+// later states (e, f2, g: LF-37; c: the root, once /U is in it). Case c:
+// the root's first state is the filesystem's making (2015); the base wrote
+// the root at 2013 for a top-level folder of 2013 and showed it before the
+// filesystem existed; with the rule every view before 2015 shows nothing,
+// and from 2015 on the views are the base's.
 // STATES: LF-36
 func TestT838_NoViewDiffers(t *testing.T) {
 	if os.Getenv("ICBFS_PRE_MERGE") == "" {
-		t.Skip("eight cases built twice and every view compared at every date (about 90 s without -race): ICBFS_PRE_MERGE=1, just pre-merge")
+		t.Skip("eight shapes built and every view compared with the base's at every date (about a minute without -race): ICBFS_PRE_MERGE=1, just pre-merge")
 	}
+	golden := readOlderGolden(t)
 	store := miniotest.Store(t)
 	for i, c := range olderCases() {
 		t.Run(c.name, func(t *testing.T) {
-			before := buildOlder(t, store, fmt.Sprintf("older%doff", i), c.ops, false)
-			after := buildOlder(t, store, fmt.Sprintf("older%don", i), c.ops, true)
+			g := golden[c.name]
+			if g == nil || len(g.times) == 0 || len(g.times) != len(g.views) {
+				t.Fatalf("%s holds no views of %q", olderGoldenFile, c.name)
+			}
+			after := buildOlder(t, store, fmt.Sprintf("older%d", i), c.ops)
 			all, folders := olderPaths(c.ops)
-			dates := olderDates(t, before, all)
+			recorded := map[time.Time]bool{}
+			for _, at := range g.times {
+				recorded[at] = true
+			}
 			for at := range olderDates(t, after, all) {
-				dates[at] = true
+				for _, s := range []time.Time{at.Add(-time.Second), at, at.Add(time.Second)} {
+					if !recorded[s] {
+						t.Errorf("a version dated %s: the base's views were not recorded at %s", olderAt(at), olderAt(s))
+					}
+				}
 			}
-			for _, o := range c.ops {
-				dates[o.at] = true
-			}
-			var times []time.Time
-			for at := range dates {
-				times = append(times, at.Add(-time.Second), at, at.Add(time.Second))
-			}
-			sort.Slice(times, func(i, j int) bool { return times[i].Before(times[j]) })
-			times = append(times, time.Time{}) // now
-			ib, ia := olderIDs(before, all), olderIDs(after, all)
+			ia := olderIDs(after, all)
 			differ, early := 0, 0
-			for _, at := range times {
-				vb := olderView(t, before, all, folders, ib, at)
+			for k, at := range g.times {
 				va := olderView(t, after, all, folders, ia, at)
 				if !at.IsZero() && at.Before(c.from) {
 					// Before the root's first state: every view shows nothing.
 					if want := olderNothing(all, folders, ia); va != want {
-						t.Errorf("as of %v, before the root's first state, the views are:\n%s\nwant:\n%s", at, va, want)
+						t.Errorf("as of %s, before the root's first state, the views are:\n%s\nwant:\n%s", olderAt(at), va, want)
 					}
-					if vb != va {
+					if g.views[k] != va {
 						early++
 					}
 					continue
 				}
-				if vb != va {
+				if g.views[k] != va {
 					differ++
 					if differ <= 3 {
-						t.Errorf("as of %v the views differ:\nrule off:\n%s\nrule on:\n%s", at, vb, va)
+						t.Errorf("as of %s the views differ:\nthe base's:\n%s\nwith the rule:\n%s", olderAt(at), g.views[k], va)
 					}
 				}
 			}
-			t.Logf("%d dates compared (%d views each), %d differ; %d before the root's first state, where the rule off showed the root before it existed; rows: rule off %d, rule on %d",
-				len(times), 2*len(folders)+2*len(all), differ, early, before.rows, after.rows)
+			t.Logf("%d times compared (%d views each), %d differ; %d before the root's first state, where the base showed the root before it existed; rows %d",
+				len(g.times), 2*len(folders)+2*len(all), differ, early, after.rows)
 			switch {
 			case c.wantRows < 0 && after.rows == 0:
-				t.Errorf("a folder with later states: no row with the rule on; want its late rows (LF-37)")
+				t.Errorf("a folder with later states: no row; want its late rows (LF-37)")
 			case c.wantRows >= 0 && after.rows != c.wantRows:
-				t.Errorf("rule on: %d rows; want %d", after.rows, c.wantRows)
+				t.Errorf("%d rows; want %d", after.rows, c.wantRows)
 			}
 		})
 	}
 }
 
-// TestT838_RequestsOfAWrite: rule 1.6-8 adds no request to a write. The
-// same writes counted with the rule off (the code before it) and on: an
-// on-time write, a late write, and an LF-36 write (an item older than a
-// folder being built) on a deferring drive; on a refusing drive an
-// on-time write, an LF-39 write (with the rule off: refused, and its
-// undo), and a folder's own record set from before its first state.
-// On-time and late: equal. LF-36: not more than the same write with the
-// rule off, which was late. LF-39: what an on-time write costs (with the
-// rule off it was refused, and its undo made fewer). The folder's record:
-// not more.
+// olderBaseRequests are the requests of each write of
+// TestT838_RequestsOfAWrite on the code before rule 1.6-8 (icbfs 54378e4,
+// measured on the lab 2026-11-17, and the same with the rule switched off
+// on 4273bb5).
+var olderBaseRequests = map[string]int{
+	"deferring on time": 14,
+	"deferring late":    14,
+	"deferring older than its folder being built":             14, // late then: a row
+	"deferring a folder's record from before its first state": 9,
+	"refusing on time": 14,
+	"refusing late":    10, // refused
+	"refusing older than its folder being built":             10, // refused and undone
+	"refusing a folder's record from before its first state": 15, // written at 2018, the current record put back on top
+}
+
+// TestT838_RequestsOfAWrite: rule 1.6-8 adds no request to a write. Each
+// write counted against the base's (olderBaseRequests): an on-time write,
+// a late write, and an LF-36 write (an item older than a folder being
+// built) on a deferring drive; on a refusing drive the same, the LF-36
+// write being LF-39's; and a folder's own record set from before its
+// first state on each. On-time and late: equal. LF-36: not more than the
+// base's late write. LF-39: what an on-time write costs (the base refused
+// it and undid it: fewer). The folder's record: not more.
 func TestT838_RequestsOfAWrite(t *testing.T) {
-	type counts map[string]int
-	run := func(rule bool) counts {
-		was := icbfs.SetFirstStateRule(rule)
-		defer icbfs.SetFirstStateRule(was)
-		out := counts{}
-		for _, deferring := range []bool{true, false} {
-			store := &requestCounter{Store: miniotest.Store(t), n: map[string]int{}}
-			d := newDriveWith(t, store, cutCaseSettings(fmt.Sprintf("req838-%v-%v", rule, deferring)), Config{DeferLateFolders: deferring})
-			ctx := system()
-			writeAt(t, d, ctx, 2020, "/on/a.txt")
-			writeAt(t, d, ctx, 2020, "/late/a.txt")
-			writeAt(t, d, ctx, 2022, "/late/b.txt")
-			writeAt(t, d, ctx, 2020, "/built/a.txt")
-			writeAt(t, d, ctx, 2020, "/rec/a.txt")
-			kind := "refusing "
-			if deferring {
-				kind = "deferring "
-			}
-			counted := func(what string, f func() error) {
-				t.Helper()
-				store.take()
-				err := f()
-				n, by := store.take()
-				out[kind+what] = n
-				t.Logf("rule %v, %s%s: %d requests (err %v)%s", rule, kind, what, n, err, by)
-			}
-			late := &drive.LateChanges{}
-			wr := func(p string, y int) func() error {
-				return func() error {
-					_, err := d.Write(at(drive.WithLateChanges(ctx, late), y), p, strings.NewReader(p), drive.Condition{}, drive.WriteOptions{})
-					return err
-				}
-			}
-			counted("on time", wr("/on/x.txt", 2021))
-			counted("late", wr("/late/x.txt", 2021))
-			counted("older than its folder being built", wr("/built/x.txt", 2018))
-			counted("a folder's record from before its first state", func() error {
-				_, err := d.SetTimes(at(drive.WithLateChanges(ctx, late), 2018), drive.ByPath("/rec"), year(2018), time.Time{})
-				return err
-			})
+	on := map[string]int{}
+	for _, deferring := range []bool{true, false} {
+		store := &requestCounter{Store: miniotest.Store(t), n: map[string]int{}}
+		d := newDriveWith(t, store, cutCaseSettings(fmt.Sprintf("req838-%v", deferring)), Config{DeferLateFolders: deferring})
+		ctx := system()
+		writeAt(t, d, ctx, 2020, "/on/a.txt")
+		writeAt(t, d, ctx, 2020, "/late/a.txt")
+		writeAt(t, d, ctx, 2022, "/late/b.txt")
+		writeAt(t, d, ctx, 2020, "/built/a.txt")
+		writeAt(t, d, ctx, 2020, "/rec/a.txt")
+		kind := "refusing "
+		if deferring {
+			kind = "deferring "
 		}
-		return out
+		counted := func(what string, f func() error) {
+			t.Helper()
+			store.take()
+			err := f()
+			n, by := store.take()
+			on[kind+what] = n
+			t.Logf("%s%s: %d requests (err %v)%s", kind, what, n, err, by)
+		}
+		late := &drive.LateChanges{}
+		wr := func(p string, y int) func() error {
+			return func() error {
+				_, err := d.Write(at(drive.WithLateChanges(ctx, late), y), p, strings.NewReader(p), drive.Condition{}, drive.WriteOptions{})
+				return err
+			}
+		}
+		counted("on time", wr("/on/x.txt", 2021))
+		counted("late", wr("/late/x.txt", 2021))
+		counted("older than its folder being built", wr("/built/x.txt", 2018))
+		counted("a folder's record from before its first state", func() error {
+			_, err := d.SetTimes(at(drive.WithLateChanges(ctx, late), 2018), drive.ByPath("/rec"), year(2018), time.Time{})
+			return err
+		})
 	}
-	off, on := run(false), run(true)
-	for k, n := range on {
+	for k, base := range olderBaseRequests {
+		n := on[k]
 		switch {
 		case strings.HasSuffix(k, "on time") || strings.HasSuffix(k, "late"):
-			if n != off[k] {
-				t.Errorf("%s: %d requests with the rule, %d without", k, n, off[k])
+			if n != base {
+				t.Errorf("%s: %d requests, the base %d", k, n, base)
 			}
 		case strings.HasSuffix(k, "being built"):
-			// On time now: what an on-time write costs (on a refusing drive
-			// the write without the rule was refused and undone: fewer).
 			kind := strings.TrimSuffix(k, "older than its folder being built")
-			if n > on[kind+"on time"] || n > off[k] && strings.HasPrefix(k, "deferring") {
-				t.Errorf("%s: %d requests with the rule; an on-time write %d, the same write without it %d", k, n, on[kind+"on time"], off[k])
+			if n > on[kind+"on time"] || strings.HasPrefix(k, "deferring") && n > base {
+				t.Errorf("%s: %d requests; an on-time write %d, the base %d", k, n, on[kind+"on time"], base)
 			}
 		default:
-			if n > off[k] {
-				t.Errorf("%s: %d requests with the rule, more than %d without", k, n, off[k])
+			if n > base {
+				t.Errorf("%s: %d requests, more than the base's %d", k, n, base)
 			}
 		}
 	}

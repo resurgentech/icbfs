@@ -1,0 +1,3418 @@
+# The views of TestT838_NoViewDiffers's shapes on icbfs 4273bb5 with rule 1.6-8 switched off: the code before T83-8 (every late row settled by folder, as the daemon's sweep does). Recorded once, 2026-11-18, with the switch since removed; not to be re-recorded without the commit saying so.
+== a the smallest case
+-- at 2014-12-31T23:59:59Z
+path / absent
+id of / absent
+path /F absent
+id of /F absent
+stat / absent
+stat id of / absent
+stat /F absent
+stat id of /F absent
+stat /F/c.txt absent
+stat id of /F/c.txt absent
+stat /F/d.txt absent
+stat id of /F/d.txt absent
+-- at 2015-01-01T00:00:00Z
+path / 
+id of / 
+path /F absent
+id of /F absent
+stat / dir:2:2015-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:2
+stat /F absent
+stat id of /F absent
+stat /F/c.txt absent
+stat id of /F/c.txt absent
+stat /F/d.txt absent
+stat id of /F/d.txt absent
+-- at 2015-01-01T00:00:01Z
+= same
+-- at 2017-12-31T23:59:59Z
+= same
+-- at 2018-01-01T00:00:00Z
+= same
+-- at 2018-01-01T00:00:01Z
+= same
+-- at 2019-12-31T23:59:59Z
+= same
+-- at 2020-01-01T00:00:00Z
+path / F:dir:106:2020-01-01T00:00:00Z
+id of / F:dir:106:2020-01-01T00:00:00Z
+path /F c.txt:file:37:2020-01-01T00:00:00Z,d.txt:file:37:2018-01-01T00:00:00Z
+id of /F c.txt:file:37:2020-01-01T00:00:00Z,d.txt:file:37:2018-01-01T00:00:00Z
+stat / dir:52:2020-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:52
+stat /F dir:106:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F /F:dir:106
+stat /F/c.txt file:37:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/c.txt /F/c.txt:file:37
+stat /F/d.txt file:37:2018-01-01T00:00:00Z:2018-01-01T00:00:00Z
+stat id of /F/d.txt /F/d.txt:file:37
+-- at 2020-01-01T00:00:01Z
+= same
+-- at now
+= same
+== b a folder older than its parent holding items older than itself
+-- at 2014-12-31T23:59:59Z
+path / absent
+id of / absent
+path /P absent
+id of /P absent
+path /P/G absent
+id of /P/G absent
+stat / absent
+stat id of / absent
+stat /P absent
+stat id of /P absent
+stat /P/p.txt absent
+stat id of /P/p.txt absent
+stat /P/G absent
+stat id of /P/G absent
+stat /P/G/g1.txt absent
+stat id of /P/G/g1.txt absent
+stat /P/G/g0.txt absent
+stat id of /P/G/g0.txt absent
+stat /P/G/g2.txt absent
+stat id of /P/G/g2.txt absent
+-- at 2015-01-01T00:00:00Z
+path / 
+id of / 
+path /P absent
+id of /P absent
+path /P/G absent
+id of /P/G absent
+stat / dir:2:2015-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:2
+stat /P absent
+stat id of /P absent
+stat /P/p.txt absent
+stat id of /P/p.txt absent
+stat /P/G absent
+stat id of /P/G absent
+stat /P/G/g1.txt absent
+stat id of /P/G/g1.txt absent
+stat /P/G/g0.txt absent
+stat id of /P/G/g0.txt absent
+stat /P/G/g2.txt absent
+stat id of /P/G/g2.txt absent
+-- at 2015-01-01T00:00:01Z
+= same
+-- at 2016-05-31T23:59:59Z
+= same
+-- at 2016-06-01T00:00:00Z
+= same
+-- at 2016-06-01T00:00:01Z
+= same
+-- at 2016-12-31T23:59:59Z
+= same
+-- at 2017-01-01T00:00:00Z
+= same
+-- at 2017-01-01T00:00:01Z
+= same
+-- at 2017-12-31T23:59:59Z
+= same
+-- at 2018-01-01T00:00:00Z
+= same
+-- at 2018-01-01T00:00:01Z
+= same
+-- at 2018-12-31T23:59:59Z
+= same
+-- at 2019-01-01T00:00:00Z
+= same
+-- at 2019-01-01T00:00:01Z
+= same
+-- at 2019-12-31T23:59:59Z
+= same
+-- at 2020-01-01T00:00:00Z
+path / P:dir:104:2020-01-01T00:00:00Z
+id of / P:dir:104:2020-01-01T00:00:00Z
+path /P G:dir:161:2019-01-01T00:00:00Z,p.txt:file:37:2020-01-01T00:00:00Z
+id of /P G:dir:161:2019-01-01T00:00:00Z,p.txt:file:37:2020-01-01T00:00:00Z
+path /P/G g0.txt:file:40:2017-01-01T00:00:00Z,g1.txt:file:40:2016-06-01T00:00:00Z,g2.txt:file:40:2019-01-01T00:00:00Z
+id of /P/G g0.txt:file:40:2017-01-01T00:00:00Z,g1.txt:file:40:2016-06-01T00:00:00Z,g2.txt:file:40:2019-01-01T00:00:00Z
+stat / dir:52:2020-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:52
+stat /P dir:104:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /P /P:dir:104
+stat /P/p.txt file:37:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /P/p.txt /P/p.txt:file:37
+stat /P/G dir:161:2019-01-01T00:00:00Z:2018-01-01T00:00:00Z
+stat id of /P/G /P/G:dir:161
+stat /P/G/g1.txt file:40:2016-06-01T00:00:00Z:2016-06-01T00:00:00Z
+stat id of /P/G/g1.txt /P/G/g1.txt:file:40
+stat /P/G/g0.txt file:40:2017-01-01T00:00:00Z:2017-01-01T00:00:00Z
+stat id of /P/G/g0.txt /P/G/g0.txt:file:40
+stat /P/G/g2.txt file:40:2019-01-01T00:00:00Z:2019-01-01T00:00:00Z
+stat id of /P/G/g2.txt /P/G/g2.txt:file:40
+-- at 2020-01-01T00:00:01Z
+= same
+-- at now
+= same
+== c a top-level folder older than the root
+-- at 2011-12-31T23:59:59Z
+path / absent
+id of / absent
+path /T absent
+id of /T absent
+path /U absent
+id of /U absent
+path /V absent
+id of /V absent
+stat / absent
+stat id of / absent
+stat /T absent
+stat id of /T absent
+stat /T/t.txt absent
+stat id of /T/t.txt absent
+stat /U absent
+stat id of /U absent
+stat /U/u.txt absent
+stat id of /U/u.txt absent
+stat /V absent
+stat id of /V absent
+-- at 2012-01-01T00:00:00Z
+= same
+-- at 2012-01-01T00:00:01Z
+= same
+-- at 2012-12-31T23:59:59Z
+= same
+-- at 2013-01-01T00:00:00Z
+path / T:dir:54:2013-01-01T00:00:00Z
+id of / T:dir:54:2013-01-01T00:00:00Z
+path /T t.txt:file:37:2012-01-01T00:00:00Z
+id of /T t.txt:file:37:2012-01-01T00:00:00Z
+path /U absent
+id of /U absent
+path /V absent
+id of /V absent
+stat / dir:52:2013-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:52
+stat /T dir:54:2013-01-01T00:00:00Z:2013-01-01T00:00:00Z
+stat id of /T /T:dir:54
+stat /T/t.txt file:37:2012-01-01T00:00:00Z:2012-01-01T00:00:00Z
+stat id of /T/t.txt /T/t.txt:file:37
+stat /U absent
+stat id of /U absent
+stat /U/u.txt absent
+stat id of /U/u.txt absent
+stat /V absent
+stat id of /V absent
+-- at 2013-01-01T00:00:01Z
+= same
+-- at 2013-12-31T23:59:59Z
+= same
+-- at 2014-01-01T00:00:00Z
+path / T:dir:54:2013-01-01T00:00:00Z,V:dir:2:2014-01-01T00:00:00Z
+id of / T:dir:54:2013-01-01T00:00:00Z,V:dir:2:2014-01-01T00:00:00Z
+path /T t.txt:file:37:2012-01-01T00:00:00Z
+id of /T t.txt:file:37:2012-01-01T00:00:00Z
+path /U absent
+id of /U absent
+path /V 
+id of /V 
+stat / dir:102:2014-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:102
+stat /T dir:54:2013-01-01T00:00:00Z:2013-01-01T00:00:00Z
+stat id of /T /T:dir:54
+stat /T/t.txt file:37:2012-01-01T00:00:00Z:2012-01-01T00:00:00Z
+stat id of /T/t.txt /T/t.txt:file:37
+stat /U absent
+stat id of /U absent
+stat /U/u.txt absent
+stat id of /U/u.txt absent
+stat /V dir:2:2014-01-01T00:00:00Z:2014-01-01T00:00:00Z
+stat id of /V /V:dir:2
+-- at 2014-01-01T00:00:01Z
+= same
+-- at 2014-12-31T23:59:59Z
+= same
+-- at 2015-01-01T00:00:00Z
+path / T:dir:54:2013-01-01T00:00:00Z,V:dir:2:2014-01-01T00:00:00Z
+id of / T:dir:54:2013-01-01T00:00:00Z,V:dir:2:2014-01-01T00:00:00Z
+path /T t.txt:file:37:2012-01-01T00:00:00Z
+id of /T t.txt:file:37:2012-01-01T00:00:00Z
+path /U absent
+id of /U absent
+path /V 
+id of /V 
+stat / dir:102:2015-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:102
+stat /T dir:54:2013-01-01T00:00:00Z:2013-01-01T00:00:00Z
+stat id of /T /T:dir:54
+stat /T/t.txt file:37:2012-01-01T00:00:00Z:2012-01-01T00:00:00Z
+stat id of /T/t.txt /T/t.txt:file:37
+stat /U absent
+stat id of /U absent
+stat /U/u.txt absent
+stat id of /U/u.txt absent
+stat /V dir:2:2014-01-01T00:00:00Z:2014-01-01T00:00:00Z
+stat id of /V /V:dir:2
+-- at 2015-01-01T00:00:01Z
+= same
+-- at 2015-12-31T23:59:59Z
+= same
+-- at 2016-01-01T00:00:00Z
+path / T:dir:54:2013-01-01T00:00:00Z,U:dir:54:2016-01-01T00:00:00Z,V:dir:2:2014-01-01T00:00:00Z
+id of / T:dir:54:2013-01-01T00:00:00Z,U:dir:54:2016-01-01T00:00:00Z,V:dir:2:2014-01-01T00:00:00Z
+path /T t.txt:file:37:2012-01-01T00:00:00Z
+id of /T t.txt:file:37:2012-01-01T00:00:00Z
+path /U u.txt:file:37:2016-01-01T00:00:00Z
+id of /U u.txt:file:37:2016-01-01T00:00:00Z
+path /V 
+id of /V 
+stat / dir:152:2016-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:152
+stat /T dir:54:2013-01-01T00:00:00Z:2013-01-01T00:00:00Z
+stat id of /T /T:dir:54
+stat /T/t.txt file:37:2012-01-01T00:00:00Z:2012-01-01T00:00:00Z
+stat id of /T/t.txt /T/t.txt:file:37
+stat /U dir:54:2016-01-01T00:00:00Z:2016-01-01T00:00:00Z
+stat id of /U /U:dir:54
+stat /U/u.txt file:37:2016-01-01T00:00:00Z:2016-01-01T00:00:00Z
+stat id of /U/u.txt /U/u.txt:file:37
+stat /V dir:2:2014-01-01T00:00:00Z:2014-01-01T00:00:00Z
+stat id of /V /V:dir:2
+-- at 2016-01-01T00:00:01Z
+= same
+-- at now
+= same
+== d an add and a remove both before the first state
+-- at 2014-12-31T23:59:59Z
+path / absent
+id of / absent
+path /F absent
+id of /F absent
+stat / absent
+stat id of / absent
+stat /F absent
+stat id of /F absent
+stat /F/a.txt absent
+stat id of /F/a.txt absent
+stat /F/x.txt absent
+-- at 2015-01-01T00:00:00Z
+path / 
+id of / 
+path /F absent
+id of /F absent
+stat / dir:2:2015-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:2
+stat /F absent
+stat id of /F absent
+stat /F/a.txt absent
+stat id of /F/a.txt absent
+stat /F/x.txt absent
+-- at 2015-01-01T00:00:01Z
+= same
+-- at 2016-12-31T23:59:59Z
+= same
+-- at 2017-01-01T00:00:00Z
+= same
+-- at 2017-01-01T00:00:01Z
+= same
+-- at 2017-12-31T23:59:59Z
+= same
+-- at 2018-01-01T00:00:00Z
+= same
+-- at 2018-01-01T00:00:01Z
+= same
+-- at 2019-12-31T23:59:59Z
+= same
+-- at 2020-01-01T00:00:00Z
+path / F:dir:54:2020-01-01T00:00:00Z
+id of / F:dir:54:2020-01-01T00:00:00Z
+path /F a.txt:file:37:2020-01-01T00:00:00Z
+id of /F a.txt:file:37:2020-01-01T00:00:00Z
+stat / dir:52:2020-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:52
+stat /F dir:54:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F /F:dir:54
+stat /F/a.txt file:37:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/a.txt /F/a.txt:file:37
+stat /F/x.txt absent
+-- at 2020-01-01T00:00:01Z
+= same
+-- at now
+= same
+== e a folder with later states receives an item older than it
+-- at 2014-12-31T23:59:59Z
+path / absent
+id of / absent
+path /F absent
+id of /F absent
+stat / absent
+stat id of / absent
+stat /F absent
+stat id of /F absent
+stat /F/a.txt absent
+stat id of /F/a.txt absent
+stat /F/b.txt absent
+stat id of /F/b.txt absent
+stat /F/old.txt absent
+stat id of /F/old.txt absent
+stat /F/mid.txt absent
+stat id of /F/mid.txt absent
+-- at 2015-01-01T00:00:00Z
+path / 
+id of / 
+path /F absent
+id of /F absent
+stat / dir:2:2015-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:2
+stat /F absent
+stat id of /F absent
+stat /F/a.txt absent
+stat id of /F/a.txt absent
+stat /F/b.txt absent
+stat id of /F/b.txt absent
+stat /F/old.txt absent
+stat id of /F/old.txt absent
+stat /F/mid.txt absent
+stat id of /F/mid.txt absent
+-- at 2015-01-01T00:00:01Z
+= same
+-- at 2017-12-31T23:59:59Z
+= same
+-- at 2018-01-01T00:00:00Z
+= same
+-- at 2018-01-01T00:00:01Z
+= same
+-- at 2019-12-31T23:59:59Z
+= same
+-- at 2020-01-01T00:00:00Z
+path / F:dir:108:2020-01-01T00:00:00Z
+id of / F:dir:108:2020-01-01T00:00:00Z
+path /F a.txt:file:37:2020-01-01T00:00:00Z,old.txt:file:39:2018-01-01T00:00:00Z
+id of /F a.txt:file:37:2020-01-01T00:00:00Z,old.txt:file:39:2018-01-01T00:00:00Z
+stat / dir:52:2020-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:52
+stat /F dir:108:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F /F:dir:108
+stat /F/a.txt file:37:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/a.txt /F/a.txt:file:37
+stat /F/b.txt absent
+stat id of /F/b.txt absent
+stat /F/old.txt file:39:2018-01-01T00:00:00Z:2018-01-01T00:00:00Z
+stat id of /F/old.txt /F/old.txt:file:39
+stat /F/mid.txt absent
+stat id of /F/mid.txt absent
+-- at 2020-01-01T00:00:01Z
+= same
+-- at 2020-12-31T23:59:59Z
+= same
+-- at 2021-01-01T00:00:00Z
+path / F:dir:162:2021-01-01T00:00:00Z
+id of / F:dir:162:2021-01-01T00:00:00Z
+path /F a.txt:file:37:2020-01-01T00:00:00Z,mid.txt:file:39:2021-01-01T00:00:00Z,old.txt:file:39:2018-01-01T00:00:00Z
+id of /F a.txt:file:37:2020-01-01T00:00:00Z,mid.txt:file:39:2021-01-01T00:00:00Z,old.txt:file:39:2018-01-01T00:00:00Z
+stat / dir:52:2020-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:52
+stat /F dir:162:2021-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F /F:dir:162
+stat /F/a.txt file:37:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/a.txt /F/a.txt:file:37
+stat /F/b.txt absent
+stat id of /F/b.txt absent
+stat /F/old.txt file:39:2018-01-01T00:00:00Z:2018-01-01T00:00:00Z
+stat id of /F/old.txt /F/old.txt:file:39
+stat /F/mid.txt file:39:2021-01-01T00:00:00Z:2021-01-01T00:00:00Z
+stat id of /F/mid.txt /F/mid.txt:file:39
+-- at 2021-01-01T00:00:01Z
+= same
+-- at 2021-12-31T23:59:59Z
+= same
+-- at 2022-01-01T00:00:00Z
+path / F:dir:214:2022-01-01T00:00:00Z
+id of / F:dir:214:2022-01-01T00:00:00Z
+path /F a.txt:file:37:2020-01-01T00:00:00Z,b.txt:file:37:2022-01-01T00:00:00Z,mid.txt:file:39:2021-01-01T00:00:00Z,old.txt:file:39:2018-01-01T00:00:00Z
+id of /F a.txt:file:37:2020-01-01T00:00:00Z,b.txt:file:37:2022-01-01T00:00:00Z,mid.txt:file:39:2021-01-01T00:00:00Z,old.txt:file:39:2018-01-01T00:00:00Z
+stat / dir:52:2020-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:52
+stat /F dir:214:2022-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F /F:dir:214
+stat /F/a.txt file:37:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/a.txt /F/a.txt:file:37
+stat /F/b.txt file:37:2022-01-01T00:00:00Z:2022-01-01T00:00:00Z
+stat id of /F/b.txt /F/b.txt:file:37
+stat /F/old.txt file:39:2018-01-01T00:00:00Z:2018-01-01T00:00:00Z
+stat id of /F/old.txt /F/old.txt:file:39
+stat /F/mid.txt file:39:2021-01-01T00:00:00Z:2021-01-01T00:00:00Z
+stat id of /F/mid.txt /F/mid.txt:file:39
+-- at 2022-01-01T00:00:01Z
+= same
+-- at now
+= same
+== g a folder moved, then an item older than it
+-- at 2014-12-31T23:59:59Z
+path / absent
+id of / absent
+path /A absent
+id of /A absent
+path /A/F absent
+path /B absent
+id of /B absent
+path /B/F absent
+id of /B/F absent
+stat / absent
+stat id of / absent
+stat /A absent
+stat id of /A absent
+stat /A/F absent
+stat /A/F/f.txt absent
+stat /A/F/old.txt absent
+stat /B absent
+stat id of /B absent
+stat /B/F absent
+stat id of /B/F absent
+stat /B/F/older.txt absent
+stat id of /B/F/older.txt absent
+stat /A/G.txt absent
+stat id of /A/G.txt absent
+-- at 2015-01-01T00:00:00Z
+path / 
+id of / 
+path /A absent
+id of /A absent
+path /A/F absent
+path /B absent
+id of /B absent
+path /B/F absent
+id of /B/F absent
+stat / dir:2:2015-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:2
+stat /A absent
+stat id of /A absent
+stat /A/F absent
+stat /A/F/f.txt absent
+stat /A/F/old.txt absent
+stat /B absent
+stat id of /B absent
+stat /B/F absent
+stat id of /B/F absent
+stat /B/F/older.txt absent
+stat id of /B/F/older.txt absent
+stat /A/G.txt absent
+stat id of /A/G.txt absent
+-- at 2015-01-01T00:00:01Z
+= same
+-- at 2015-12-31T23:59:59Z
+= same
+-- at 2016-01-01T00:00:00Z
+= same
+-- at 2016-01-01T00:00:01Z
+= same
+-- at 2016-12-31T23:59:59Z
+= same
+-- at 2017-01-01T00:00:00Z
+= same
+-- at 2017-01-01T00:00:01Z
+= same
+-- at 2017-12-31T23:59:59Z
+= same
+-- at 2018-01-01T00:00:00Z
+= same
+-- at 2018-01-01T00:00:01Z
+= same
+-- at 2018-12-31T23:59:59Z
+= same
+-- at 2019-01-01T00:00:00Z
+path / B:dir:2:2019-01-01T00:00:00Z
+id of / B:dir:2:2019-01-01T00:00:00Z
+path /A absent
+id of /A absent
+path /A/F absent
+path /B 
+id of /B 
+path /B/F absent
+id of /B/F absent
+stat / dir:52:2019-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:52
+stat /A absent
+stat id of /A absent
+stat /A/F absent
+stat /A/F/f.txt absent
+stat /A/F/old.txt absent
+stat /B dir:2:2019-01-01T00:00:00Z:2019-01-01T00:00:00Z
+stat id of /B /B:dir:2
+stat /B/F absent
+stat id of /B/F absent
+stat /B/F/older.txt absent
+stat id of /B/F/older.txt absent
+stat /A/G.txt absent
+stat id of /A/G.txt absent
+-- at 2019-01-01T00:00:01Z
+= same
+-- at 2019-12-31T23:59:59Z
+= same
+-- at 2020-01-01T00:00:00Z
+path / A:dir:104:2020-01-01T00:00:00Z,B:dir:2:2019-01-01T00:00:00Z
+id of / A:dir:104:2020-01-01T00:00:00Z,B:dir:2:2019-01-01T00:00:00Z
+path /A F:dir:164:2020-01-01T00:00:00Z,G.txt:file:37:2016-01-01T00:00:00Z
+id of /A F:dir:164:2020-01-01T00:00:00Z,G.txt:file:37:2016-01-01T00:00:00Z
+path /A/F f.txt:file:39:2020-01-01T00:00:00Z,old.txt:file:41:2018-01-01T00:00:00Z,older.txt:file:43:2017-01-01T00:00:00Z
+path /B 
+id of /B 
+path /B/F absent
+id of /B/F f.txt:file:39:2020-01-01T00:00:00Z,old.txt:file:41:2018-01-01T00:00:00Z,older.txt:file:43:2017-01-01T00:00:00Z
+stat / dir:102:2020-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:102
+stat /A dir:104:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /A /A:dir:104
+stat /A/F dir:164:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat /A/F/f.txt file:39:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat /A/F/old.txt file:41:2018-01-01T00:00:00Z:2018-01-01T00:00:00Z
+stat /B dir:2:2019-01-01T00:00:00Z:2019-01-01T00:00:00Z
+stat id of /B /B:dir:2
+stat /B/F absent
+stat id of /B/F /A/F:dir:164
+stat /B/F/older.txt absent
+stat id of /B/F/older.txt /A/F/older.txt:file:43
+stat /A/G.txt file:37:2016-01-01T00:00:00Z:2016-01-01T00:00:00Z
+stat id of /A/G.txt /A/G.txt:file:37
+-- at 2020-01-01T00:00:01Z
+= same
+-- at 2021-12-31T23:59:59Z
+= same
+-- at 2022-01-01T00:00:00Z
+path / A:dir:54:2022-01-01T00:00:00Z,B:dir:52:2022-01-01T00:00:00Z
+id of / A:dir:54:2022-01-01T00:00:00Z,B:dir:52:2022-01-01T00:00:00Z
+path /A G.txt:file:37:2016-01-01T00:00:00Z
+id of /A G.txt:file:37:2016-01-01T00:00:00Z
+path /A/F absent
+path /B F:dir:164:2022-01-01T00:00:00Z
+id of /B F:dir:164:2022-01-01T00:00:00Z
+path /B/F f.txt:file:39:2020-01-01T00:00:00Z,old.txt:file:41:2018-01-01T00:00:00Z,older.txt:file:43:2017-01-01T00:00:00Z
+id of /B/F f.txt:file:39:2020-01-01T00:00:00Z,old.txt:file:41:2018-01-01T00:00:00Z,older.txt:file:43:2017-01-01T00:00:00Z
+stat / dir:102:2020-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:102
+stat /A dir:54:2022-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /A /A:dir:54
+stat /A/F absent
+stat /A/F/f.txt absent
+stat /A/F/old.txt absent
+stat /B dir:52:2022-01-01T00:00:00Z:2019-01-01T00:00:00Z
+stat id of /B /B:dir:52
+stat /B/F dir:164:2022-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /B/F /B/F:dir:164
+stat /B/F/older.txt file:43:2017-01-01T00:00:00Z:2017-01-01T00:00:00Z
+stat id of /B/F/older.txt /B/F/older.txt:file:43
+stat /A/G.txt file:37:2016-01-01T00:00:00Z:2016-01-01T00:00:00Z
+stat id of /A/G.txt /A/G.txt:file:37
+-- at 2022-01-01T00:00:01Z
+= same
+-- at now
+= same
+== f1 more than 128 entries, being built
+-- at 2014-12-31T23:59:59Z
+path / absent
+id of / absent
+path /F absent
+id of /F absent
+stat / absent
+stat id of / absent
+stat /F absent
+stat id of /F absent
+stat /F/f000.txt absent
+stat id of /F/f000.txt absent
+stat /F/f001.txt absent
+stat id of /F/f001.txt absent
+stat /F/f002.txt absent
+stat id of /F/f002.txt absent
+stat /F/f003.txt absent
+stat id of /F/f003.txt absent
+stat /F/f004.txt absent
+stat id of /F/f004.txt absent
+stat /F/f005.txt absent
+stat id of /F/f005.txt absent
+stat /F/f006.txt absent
+stat id of /F/f006.txt absent
+stat /F/f007.txt absent
+stat id of /F/f007.txt absent
+stat /F/f008.txt absent
+stat id of /F/f008.txt absent
+stat /F/f009.txt absent
+stat id of /F/f009.txt absent
+stat /F/f010.txt absent
+stat id of /F/f010.txt absent
+stat /F/f011.txt absent
+stat id of /F/f011.txt absent
+stat /F/f012.txt absent
+stat id of /F/f012.txt absent
+stat /F/f013.txt absent
+stat id of /F/f013.txt absent
+stat /F/f014.txt absent
+stat id of /F/f014.txt absent
+stat /F/f015.txt absent
+stat id of /F/f015.txt absent
+stat /F/f016.txt absent
+stat id of /F/f016.txt absent
+stat /F/f017.txt absent
+stat id of /F/f017.txt absent
+stat /F/f018.txt absent
+stat id of /F/f018.txt absent
+stat /F/f019.txt absent
+stat id of /F/f019.txt absent
+stat /F/f020.txt absent
+stat id of /F/f020.txt absent
+stat /F/f021.txt absent
+stat id of /F/f021.txt absent
+stat /F/f022.txt absent
+stat id of /F/f022.txt absent
+stat /F/f023.txt absent
+stat id of /F/f023.txt absent
+stat /F/f024.txt absent
+stat id of /F/f024.txt absent
+stat /F/f025.txt absent
+stat id of /F/f025.txt absent
+stat /F/f026.txt absent
+stat id of /F/f026.txt absent
+stat /F/f027.txt absent
+stat id of /F/f027.txt absent
+stat /F/f028.txt absent
+stat id of /F/f028.txt absent
+stat /F/f029.txt absent
+stat id of /F/f029.txt absent
+stat /F/f030.txt absent
+stat id of /F/f030.txt absent
+stat /F/f031.txt absent
+stat id of /F/f031.txt absent
+stat /F/f032.txt absent
+stat id of /F/f032.txt absent
+stat /F/f033.txt absent
+stat id of /F/f033.txt absent
+stat /F/f034.txt absent
+stat id of /F/f034.txt absent
+stat /F/f035.txt absent
+stat id of /F/f035.txt absent
+stat /F/f036.txt absent
+stat id of /F/f036.txt absent
+stat /F/f037.txt absent
+stat id of /F/f037.txt absent
+stat /F/f038.txt absent
+stat id of /F/f038.txt absent
+stat /F/f039.txt absent
+stat id of /F/f039.txt absent
+stat /F/f040.txt absent
+stat id of /F/f040.txt absent
+stat /F/f041.txt absent
+stat id of /F/f041.txt absent
+stat /F/f042.txt absent
+stat id of /F/f042.txt absent
+stat /F/f043.txt absent
+stat id of /F/f043.txt absent
+stat /F/f044.txt absent
+stat id of /F/f044.txt absent
+stat /F/f045.txt absent
+stat id of /F/f045.txt absent
+stat /F/f046.txt absent
+stat id of /F/f046.txt absent
+stat /F/f047.txt absent
+stat id of /F/f047.txt absent
+stat /F/f048.txt absent
+stat id of /F/f048.txt absent
+stat /F/f049.txt absent
+stat id of /F/f049.txt absent
+stat /F/f050.txt absent
+stat id of /F/f050.txt absent
+stat /F/f051.txt absent
+stat id of /F/f051.txt absent
+stat /F/f052.txt absent
+stat id of /F/f052.txt absent
+stat /F/f053.txt absent
+stat id of /F/f053.txt absent
+stat /F/f054.txt absent
+stat id of /F/f054.txt absent
+stat /F/f055.txt absent
+stat id of /F/f055.txt absent
+stat /F/f056.txt absent
+stat id of /F/f056.txt absent
+stat /F/f057.txt absent
+stat id of /F/f057.txt absent
+stat /F/f058.txt absent
+stat id of /F/f058.txt absent
+stat /F/f059.txt absent
+stat id of /F/f059.txt absent
+stat /F/f060.txt absent
+stat id of /F/f060.txt absent
+stat /F/f061.txt absent
+stat id of /F/f061.txt absent
+stat /F/f062.txt absent
+stat id of /F/f062.txt absent
+stat /F/f063.txt absent
+stat id of /F/f063.txt absent
+stat /F/f064.txt absent
+stat id of /F/f064.txt absent
+stat /F/f065.txt absent
+stat id of /F/f065.txt absent
+stat /F/f066.txt absent
+stat id of /F/f066.txt absent
+stat /F/f067.txt absent
+stat id of /F/f067.txt absent
+stat /F/f068.txt absent
+stat id of /F/f068.txt absent
+stat /F/f069.txt absent
+stat id of /F/f069.txt absent
+stat /F/f070.txt absent
+stat id of /F/f070.txt absent
+stat /F/f071.txt absent
+stat id of /F/f071.txt absent
+stat /F/f072.txt absent
+stat id of /F/f072.txt absent
+stat /F/f073.txt absent
+stat id of /F/f073.txt absent
+stat /F/f074.txt absent
+stat id of /F/f074.txt absent
+stat /F/f075.txt absent
+stat id of /F/f075.txt absent
+stat /F/f076.txt absent
+stat id of /F/f076.txt absent
+stat /F/f077.txt absent
+stat id of /F/f077.txt absent
+stat /F/f078.txt absent
+stat id of /F/f078.txt absent
+stat /F/f079.txt absent
+stat id of /F/f079.txt absent
+stat /F/f080.txt absent
+stat id of /F/f080.txt absent
+stat /F/f081.txt absent
+stat id of /F/f081.txt absent
+stat /F/f082.txt absent
+stat id of /F/f082.txt absent
+stat /F/f083.txt absent
+stat id of /F/f083.txt absent
+stat /F/f084.txt absent
+stat id of /F/f084.txt absent
+stat /F/f085.txt absent
+stat id of /F/f085.txt absent
+stat /F/f086.txt absent
+stat id of /F/f086.txt absent
+stat /F/f087.txt absent
+stat id of /F/f087.txt absent
+stat /F/f088.txt absent
+stat id of /F/f088.txt absent
+stat /F/f089.txt absent
+stat id of /F/f089.txt absent
+stat /F/f090.txt absent
+stat id of /F/f090.txt absent
+stat /F/f091.txt absent
+stat id of /F/f091.txt absent
+stat /F/f092.txt absent
+stat id of /F/f092.txt absent
+stat /F/f093.txt absent
+stat id of /F/f093.txt absent
+stat /F/f094.txt absent
+stat id of /F/f094.txt absent
+stat /F/f095.txt absent
+stat id of /F/f095.txt absent
+stat /F/f096.txt absent
+stat id of /F/f096.txt absent
+stat /F/f097.txt absent
+stat id of /F/f097.txt absent
+stat /F/f098.txt absent
+stat id of /F/f098.txt absent
+stat /F/f099.txt absent
+stat id of /F/f099.txt absent
+stat /F/f100.txt absent
+stat id of /F/f100.txt absent
+stat /F/f101.txt absent
+stat id of /F/f101.txt absent
+stat /F/f102.txt absent
+stat id of /F/f102.txt absent
+stat /F/f103.txt absent
+stat id of /F/f103.txt absent
+stat /F/f104.txt absent
+stat id of /F/f104.txt absent
+stat /F/f105.txt absent
+stat id of /F/f105.txt absent
+stat /F/f106.txt absent
+stat id of /F/f106.txt absent
+stat /F/f107.txt absent
+stat id of /F/f107.txt absent
+stat /F/f108.txt absent
+stat id of /F/f108.txt absent
+stat /F/f109.txt absent
+stat id of /F/f109.txt absent
+stat /F/f110.txt absent
+stat id of /F/f110.txt absent
+stat /F/f111.txt absent
+stat id of /F/f111.txt absent
+stat /F/f112.txt absent
+stat id of /F/f112.txt absent
+stat /F/f113.txt absent
+stat id of /F/f113.txt absent
+stat /F/f114.txt absent
+stat id of /F/f114.txt absent
+stat /F/f115.txt absent
+stat id of /F/f115.txt absent
+stat /F/f116.txt absent
+stat id of /F/f116.txt absent
+stat /F/f117.txt absent
+stat id of /F/f117.txt absent
+stat /F/f118.txt absent
+stat id of /F/f118.txt absent
+stat /F/f119.txt absent
+stat id of /F/f119.txt absent
+stat /F/f120.txt absent
+stat id of /F/f120.txt absent
+stat /F/f121.txt absent
+stat id of /F/f121.txt absent
+stat /F/f122.txt absent
+stat id of /F/f122.txt absent
+stat /F/f123.txt absent
+stat id of /F/f123.txt absent
+stat /F/f124.txt absent
+stat id of /F/f124.txt absent
+stat /F/f125.txt absent
+stat id of /F/f125.txt absent
+stat /F/f126.txt absent
+stat id of /F/f126.txt absent
+stat /F/f127.txt absent
+stat id of /F/f127.txt absent
+stat /F/f128.txt absent
+stat id of /F/f128.txt absent
+stat /F/f129.txt absent
+stat id of /F/f129.txt absent
+stat /F/a-old.txt absent
+stat id of /F/a-old.txt absent
+stat /F/z-old.txt absent
+stat id of /F/z-old.txt absent
+stat /F/m-old.txt absent
+stat id of /F/m-old.txt absent
+-- at 2015-01-01T00:00:00Z
+path / 
+id of / 
+path /F absent
+id of /F absent
+stat / dir:2:2015-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:2
+stat /F absent
+stat id of /F absent
+stat /F/f000.txt absent
+stat id of /F/f000.txt absent
+stat /F/f001.txt absent
+stat id of /F/f001.txt absent
+stat /F/f002.txt absent
+stat id of /F/f002.txt absent
+stat /F/f003.txt absent
+stat id of /F/f003.txt absent
+stat /F/f004.txt absent
+stat id of /F/f004.txt absent
+stat /F/f005.txt absent
+stat id of /F/f005.txt absent
+stat /F/f006.txt absent
+stat id of /F/f006.txt absent
+stat /F/f007.txt absent
+stat id of /F/f007.txt absent
+stat /F/f008.txt absent
+stat id of /F/f008.txt absent
+stat /F/f009.txt absent
+stat id of /F/f009.txt absent
+stat /F/f010.txt absent
+stat id of /F/f010.txt absent
+stat /F/f011.txt absent
+stat id of /F/f011.txt absent
+stat /F/f012.txt absent
+stat id of /F/f012.txt absent
+stat /F/f013.txt absent
+stat id of /F/f013.txt absent
+stat /F/f014.txt absent
+stat id of /F/f014.txt absent
+stat /F/f015.txt absent
+stat id of /F/f015.txt absent
+stat /F/f016.txt absent
+stat id of /F/f016.txt absent
+stat /F/f017.txt absent
+stat id of /F/f017.txt absent
+stat /F/f018.txt absent
+stat id of /F/f018.txt absent
+stat /F/f019.txt absent
+stat id of /F/f019.txt absent
+stat /F/f020.txt absent
+stat id of /F/f020.txt absent
+stat /F/f021.txt absent
+stat id of /F/f021.txt absent
+stat /F/f022.txt absent
+stat id of /F/f022.txt absent
+stat /F/f023.txt absent
+stat id of /F/f023.txt absent
+stat /F/f024.txt absent
+stat id of /F/f024.txt absent
+stat /F/f025.txt absent
+stat id of /F/f025.txt absent
+stat /F/f026.txt absent
+stat id of /F/f026.txt absent
+stat /F/f027.txt absent
+stat id of /F/f027.txt absent
+stat /F/f028.txt absent
+stat id of /F/f028.txt absent
+stat /F/f029.txt absent
+stat id of /F/f029.txt absent
+stat /F/f030.txt absent
+stat id of /F/f030.txt absent
+stat /F/f031.txt absent
+stat id of /F/f031.txt absent
+stat /F/f032.txt absent
+stat id of /F/f032.txt absent
+stat /F/f033.txt absent
+stat id of /F/f033.txt absent
+stat /F/f034.txt absent
+stat id of /F/f034.txt absent
+stat /F/f035.txt absent
+stat id of /F/f035.txt absent
+stat /F/f036.txt absent
+stat id of /F/f036.txt absent
+stat /F/f037.txt absent
+stat id of /F/f037.txt absent
+stat /F/f038.txt absent
+stat id of /F/f038.txt absent
+stat /F/f039.txt absent
+stat id of /F/f039.txt absent
+stat /F/f040.txt absent
+stat id of /F/f040.txt absent
+stat /F/f041.txt absent
+stat id of /F/f041.txt absent
+stat /F/f042.txt absent
+stat id of /F/f042.txt absent
+stat /F/f043.txt absent
+stat id of /F/f043.txt absent
+stat /F/f044.txt absent
+stat id of /F/f044.txt absent
+stat /F/f045.txt absent
+stat id of /F/f045.txt absent
+stat /F/f046.txt absent
+stat id of /F/f046.txt absent
+stat /F/f047.txt absent
+stat id of /F/f047.txt absent
+stat /F/f048.txt absent
+stat id of /F/f048.txt absent
+stat /F/f049.txt absent
+stat id of /F/f049.txt absent
+stat /F/f050.txt absent
+stat id of /F/f050.txt absent
+stat /F/f051.txt absent
+stat id of /F/f051.txt absent
+stat /F/f052.txt absent
+stat id of /F/f052.txt absent
+stat /F/f053.txt absent
+stat id of /F/f053.txt absent
+stat /F/f054.txt absent
+stat id of /F/f054.txt absent
+stat /F/f055.txt absent
+stat id of /F/f055.txt absent
+stat /F/f056.txt absent
+stat id of /F/f056.txt absent
+stat /F/f057.txt absent
+stat id of /F/f057.txt absent
+stat /F/f058.txt absent
+stat id of /F/f058.txt absent
+stat /F/f059.txt absent
+stat id of /F/f059.txt absent
+stat /F/f060.txt absent
+stat id of /F/f060.txt absent
+stat /F/f061.txt absent
+stat id of /F/f061.txt absent
+stat /F/f062.txt absent
+stat id of /F/f062.txt absent
+stat /F/f063.txt absent
+stat id of /F/f063.txt absent
+stat /F/f064.txt absent
+stat id of /F/f064.txt absent
+stat /F/f065.txt absent
+stat id of /F/f065.txt absent
+stat /F/f066.txt absent
+stat id of /F/f066.txt absent
+stat /F/f067.txt absent
+stat id of /F/f067.txt absent
+stat /F/f068.txt absent
+stat id of /F/f068.txt absent
+stat /F/f069.txt absent
+stat id of /F/f069.txt absent
+stat /F/f070.txt absent
+stat id of /F/f070.txt absent
+stat /F/f071.txt absent
+stat id of /F/f071.txt absent
+stat /F/f072.txt absent
+stat id of /F/f072.txt absent
+stat /F/f073.txt absent
+stat id of /F/f073.txt absent
+stat /F/f074.txt absent
+stat id of /F/f074.txt absent
+stat /F/f075.txt absent
+stat id of /F/f075.txt absent
+stat /F/f076.txt absent
+stat id of /F/f076.txt absent
+stat /F/f077.txt absent
+stat id of /F/f077.txt absent
+stat /F/f078.txt absent
+stat id of /F/f078.txt absent
+stat /F/f079.txt absent
+stat id of /F/f079.txt absent
+stat /F/f080.txt absent
+stat id of /F/f080.txt absent
+stat /F/f081.txt absent
+stat id of /F/f081.txt absent
+stat /F/f082.txt absent
+stat id of /F/f082.txt absent
+stat /F/f083.txt absent
+stat id of /F/f083.txt absent
+stat /F/f084.txt absent
+stat id of /F/f084.txt absent
+stat /F/f085.txt absent
+stat id of /F/f085.txt absent
+stat /F/f086.txt absent
+stat id of /F/f086.txt absent
+stat /F/f087.txt absent
+stat id of /F/f087.txt absent
+stat /F/f088.txt absent
+stat id of /F/f088.txt absent
+stat /F/f089.txt absent
+stat id of /F/f089.txt absent
+stat /F/f090.txt absent
+stat id of /F/f090.txt absent
+stat /F/f091.txt absent
+stat id of /F/f091.txt absent
+stat /F/f092.txt absent
+stat id of /F/f092.txt absent
+stat /F/f093.txt absent
+stat id of /F/f093.txt absent
+stat /F/f094.txt absent
+stat id of /F/f094.txt absent
+stat /F/f095.txt absent
+stat id of /F/f095.txt absent
+stat /F/f096.txt absent
+stat id of /F/f096.txt absent
+stat /F/f097.txt absent
+stat id of /F/f097.txt absent
+stat /F/f098.txt absent
+stat id of /F/f098.txt absent
+stat /F/f099.txt absent
+stat id of /F/f099.txt absent
+stat /F/f100.txt absent
+stat id of /F/f100.txt absent
+stat /F/f101.txt absent
+stat id of /F/f101.txt absent
+stat /F/f102.txt absent
+stat id of /F/f102.txt absent
+stat /F/f103.txt absent
+stat id of /F/f103.txt absent
+stat /F/f104.txt absent
+stat id of /F/f104.txt absent
+stat /F/f105.txt absent
+stat id of /F/f105.txt absent
+stat /F/f106.txt absent
+stat id of /F/f106.txt absent
+stat /F/f107.txt absent
+stat id of /F/f107.txt absent
+stat /F/f108.txt absent
+stat id of /F/f108.txt absent
+stat /F/f109.txt absent
+stat id of /F/f109.txt absent
+stat /F/f110.txt absent
+stat id of /F/f110.txt absent
+stat /F/f111.txt absent
+stat id of /F/f111.txt absent
+stat /F/f112.txt absent
+stat id of /F/f112.txt absent
+stat /F/f113.txt absent
+stat id of /F/f113.txt absent
+stat /F/f114.txt absent
+stat id of /F/f114.txt absent
+stat /F/f115.txt absent
+stat id of /F/f115.txt absent
+stat /F/f116.txt absent
+stat id of /F/f116.txt absent
+stat /F/f117.txt absent
+stat id of /F/f117.txt absent
+stat /F/f118.txt absent
+stat id of /F/f118.txt absent
+stat /F/f119.txt absent
+stat id of /F/f119.txt absent
+stat /F/f120.txt absent
+stat id of /F/f120.txt absent
+stat /F/f121.txt absent
+stat id of /F/f121.txt absent
+stat /F/f122.txt absent
+stat id of /F/f122.txt absent
+stat /F/f123.txt absent
+stat id of /F/f123.txt absent
+stat /F/f124.txt absent
+stat id of /F/f124.txt absent
+stat /F/f125.txt absent
+stat id of /F/f125.txt absent
+stat /F/f126.txt absent
+stat id of /F/f126.txt absent
+stat /F/f127.txt absent
+stat id of /F/f127.txt absent
+stat /F/f128.txt absent
+stat id of /F/f128.txt absent
+stat /F/f129.txt absent
+stat id of /F/f129.txt absent
+stat /F/a-old.txt absent
+stat id of /F/a-old.txt absent
+stat /F/z-old.txt absent
+stat id of /F/z-old.txt absent
+stat /F/m-old.txt absent
+stat id of /F/m-old.txt absent
+-- at 2015-01-01T00:00:01Z
+= same
+-- at 2016-12-31T23:59:59Z
+= same
+-- at 2017-01-01T00:00:00Z
+= same
+-- at 2017-01-01T00:00:01Z
+= same
+-- at 2017-12-31T23:59:59Z
+= same
+-- at 2018-01-01T00:00:00Z
+= same
+-- at 2018-01-01T00:00:01Z
+= same
+-- at 2018-12-31T23:59:59Z
+= same
+-- at 2019-01-01T00:00:00Z
+= same
+-- at 2019-01-01T00:00:01Z
+= same
+-- at 2019-12-31T23:59:59Z
+= same
+-- at 2020-01-01T00:00:00Z
+path / F:dir:104:2020-01-01T00:00:00Z
+id of / F:dir:104:2020-01-01T00:00:00Z
+path /F a-old.txt:file:41:2018-01-01T00:00:00Z,f000.txt:file:40:2020-01-01T00:00:00Z,f001.txt:file:40:2020-01-01T00:00:00Z,f002.txt:file:40:2020-01-01T00:00:00Z,f003.txt:file:40:2020-01-01T00:00:00Z,f004.txt:file:40:2020-01-01T00:00:00Z,f005.txt:file:40:2020-01-01T00:00:00Z,f006.txt:file:40:2020-01-01T00:00:00Z,f007.txt:file:40:2020-01-01T00:00:00Z,f008.txt:file:40:2020-01-01T00:00:00Z,f009.txt:file:40:2020-01-01T00:00:00Z,f010.txt:file:40:2020-01-01T00:00:00Z,f011.txt:file:40:2020-01-01T00:00:00Z,f012.txt:file:40:2020-01-01T00:00:00Z,f013.txt:file:40:2020-01-01T00:00:00Z,f014.txt:file:40:2020-01-01T00:00:00Z,f015.txt:file:40:2020-01-01T00:00:00Z,f016.txt:file:40:2020-01-01T00:00:00Z,f017.txt:file:40:2020-01-01T00:00:00Z,f018.txt:file:40:2020-01-01T00:00:00Z,f019.txt:file:40:2020-01-01T00:00:00Z,f020.txt:file:40:2020-01-01T00:00:00Z,f021.txt:file:40:2020-01-01T00:00:00Z,f022.txt:file:40:2020-01-01T00:00:00Z,f023.txt:file:40:2020-01-01T00:00:00Z,f024.txt:file:40:2020-01-01T00:00:00Z,f025.txt:file:40:2020-01-01T00:00:00Z,f026.txt:file:40:2020-01-01T00:00:00Z,f027.txt:file:40:2020-01-01T00:00:00Z,f028.txt:file:40:2020-01-01T00:00:00Z,f029.txt:file:40:2020-01-01T00:00:00Z,f030.txt:file:40:2020-01-01T00:00:00Z,f031.txt:file:40:2020-01-01T00:00:00Z,f032.txt:file:40:2020-01-01T00:00:00Z,f033.txt:file:40:2020-01-01T00:00:00Z,f034.txt:file:40:2020-01-01T00:00:00Z,f035.txt:file:40:2020-01-01T00:00:00Z,f036.txt:file:40:2020-01-01T00:00:00Z,f037.txt:file:40:2020-01-01T00:00:00Z,f038.txt:file:40:2020-01-01T00:00:00Z,f039.txt:file:40:2020-01-01T00:00:00Z,f040.txt:file:40:2020-01-01T00:00:00Z,f041.txt:file:40:2020-01-01T00:00:00Z,f042.txt:file:40:2020-01-01T00:00:00Z,f043.txt:file:40:2020-01-01T00:00:00Z,f044.txt:file:40:2020-01-01T00:00:00Z,f045.txt:file:40:2020-01-01T00:00:00Z,f046.txt:file:40:2020-01-01T00:00:00Z,f047.txt:file:40:2020-01-01T00:00:00Z,f048.txt:file:40:2020-01-01T00:00:00Z,f049.txt:file:40:2020-01-01T00:00:00Z,f050.txt:file:40:2020-01-01T00:00:00Z,f051.txt:file:40:2020-01-01T00:00:00Z,f052.txt:file:40:2020-01-01T00:00:00Z,f053.txt:file:40:2020-01-01T00:00:00Z,f054.txt:file:40:2020-01-01T00:00:00Z,f055.txt:file:40:2020-01-01T00:00:00Z,f056.txt:file:40:2020-01-01T00:00:00Z,f057.txt:file:40:2020-01-01T00:00:00Z,f058.txt:file:40:2020-01-01T00:00:00Z,f059.txt:file:40:2020-01-01T00:00:00Z,f060.txt:file:40:2020-01-01T00:00:00Z,f061.txt:file:40:2020-01-01T00:00:00Z,f062.txt:file:40:2020-01-01T00:00:00Z,f063.txt:file:40:2020-01-01T00:00:00Z,f064.txt:file:40:2020-01-01T00:00:00Z,f065.txt:file:40:2020-01-01T00:00:00Z,f066.txt:file:40:2020-01-01T00:00:00Z,f067.txt:file:40:2020-01-01T00:00:00Z,f068.txt:file:40:2020-01-01T00:00:00Z,f069.txt:file:40:2020-01-01T00:00:00Z,f070.txt:file:40:2020-01-01T00:00:00Z,f071.txt:file:40:2020-01-01T00:00:00Z,f072.txt:file:40:2020-01-01T00:00:00Z,f073.txt:file:40:2020-01-01T00:00:00Z,f074.txt:file:40:2020-01-01T00:00:00Z,f075.txt:file:40:2020-01-01T00:00:00Z,f076.txt:file:40:2020-01-01T00:00:00Z,f077.txt:file:40:2020-01-01T00:00:00Z,f078.txt:file:40:2020-01-01T00:00:00Z,f079.txt:file:40:2020-01-01T00:00:00Z,f080.txt:file:40:2020-01-01T00:00:00Z,f081.txt:file:40:2020-01-01T00:00:00Z,f082.txt:file:40:2020-01-01T00:00:00Z,f083.txt:file:40:2020-01-01T00:00:00Z,f084.txt:file:40:2020-01-01T00:00:00Z,f085.txt:file:40:2020-01-01T00:00:00Z,f086.txt:file:40:2020-01-01T00:00:00Z,f087.txt:file:40:2020-01-01T00:00:00Z,f088.txt:file:40:2020-01-01T00:00:00Z,f089.txt:file:40:2020-01-01T00:00:00Z,f090.txt:file:40:2020-01-01T00:00:00Z,f091.txt:file:40:2020-01-01T00:00:00Z,f092.txt:file:40:2020-01-01T00:00:00Z,f093.txt:file:40:2020-01-01T00:00:00Z,f094.txt:file:40:2020-01-01T00:00:00Z,f095.txt:file:40:2020-01-01T00:00:00Z,f096.txt:file:40:2020-01-01T00:00:00Z,f097.txt:file:40:2020-01-01T00:00:00Z,f098.txt:file:40:2020-01-01T00:00:00Z,f099.txt:file:40:2020-01-01T00:00:00Z,f100.txt:file:40:2020-01-01T00:00:00Z,f101.txt:file:40:2020-01-01T00:00:00Z,f102.txt:file:40:2020-01-01T00:00:00Z,f103.txt:file:40:2020-01-01T00:00:00Z,f104.txt:file:40:2020-01-01T00:00:00Z,f105.txt:file:40:2020-01-01T00:00:00Z,f106.txt:file:40:2020-01-01T00:00:00Z,f107.txt:file:40:2020-01-01T00:00:00Z,f108.txt:file:40:2020-01-01T00:00:00Z,f109.txt:file:40:2020-01-01T00:00:00Z,f110.txt:file:40:2020-01-01T00:00:00Z,f111.txt:file:40:2020-01-01T00:00:00Z,f112.txt:file:40:2020-01-01T00:00:00Z,f113.txt:file:40:2020-01-01T00:00:00Z,f114.txt:file:40:2020-01-01T00:00:00Z,f115.txt:file:40:2020-01-01T00:00:00Z,f116.txt:file:40:2020-01-01T00:00:00Z,f117.txt:file:40:2020-01-01T00:00:00Z,f118.txt:file:40:2020-01-01T00:00:00Z,f119.txt:file:40:2020-01-01T00:00:00Z,f120.txt:file:40:2020-01-01T00:00:00Z,f121.txt:file:40:2020-01-01T00:00:00Z,f122.txt:file:40:2020-01-01T00:00:00Z,f123.txt:file:40:2020-01-01T00:00:00Z,f124.txt:file:40:2020-01-01T00:00:00Z,f125.txt:file:40:2020-01-01T00:00:00Z,f126.txt:file:40:2020-01-01T00:00:00Z,f127.txt:file:40:2020-01-01T00:00:00Z,f128.txt:file:40:2020-01-01T00:00:00Z,f129.txt:file:40:2020-01-01T00:00:00Z,m-old.txt:file:41:2019-01-01T00:00:00Z,z-old.txt:file:41:2017-01-01T00:00:00Z
+id of /F a-old.txt:file:41:2018-01-01T00:00:00Z,f000.txt:file:40:2020-01-01T00:00:00Z,f001.txt:file:40:2020-01-01T00:00:00Z,f002.txt:file:40:2020-01-01T00:00:00Z,f003.txt:file:40:2020-01-01T00:00:00Z,f004.txt:file:40:2020-01-01T00:00:00Z,f005.txt:file:40:2020-01-01T00:00:00Z,f006.txt:file:40:2020-01-01T00:00:00Z,f007.txt:file:40:2020-01-01T00:00:00Z,f008.txt:file:40:2020-01-01T00:00:00Z,f009.txt:file:40:2020-01-01T00:00:00Z,f010.txt:file:40:2020-01-01T00:00:00Z,f011.txt:file:40:2020-01-01T00:00:00Z,f012.txt:file:40:2020-01-01T00:00:00Z,f013.txt:file:40:2020-01-01T00:00:00Z,f014.txt:file:40:2020-01-01T00:00:00Z,f015.txt:file:40:2020-01-01T00:00:00Z,f016.txt:file:40:2020-01-01T00:00:00Z,f017.txt:file:40:2020-01-01T00:00:00Z,f018.txt:file:40:2020-01-01T00:00:00Z,f019.txt:file:40:2020-01-01T00:00:00Z,f020.txt:file:40:2020-01-01T00:00:00Z,f021.txt:file:40:2020-01-01T00:00:00Z,f022.txt:file:40:2020-01-01T00:00:00Z,f023.txt:file:40:2020-01-01T00:00:00Z,f024.txt:file:40:2020-01-01T00:00:00Z,f025.txt:file:40:2020-01-01T00:00:00Z,f026.txt:file:40:2020-01-01T00:00:00Z,f027.txt:file:40:2020-01-01T00:00:00Z,f028.txt:file:40:2020-01-01T00:00:00Z,f029.txt:file:40:2020-01-01T00:00:00Z,f030.txt:file:40:2020-01-01T00:00:00Z,f031.txt:file:40:2020-01-01T00:00:00Z,f032.txt:file:40:2020-01-01T00:00:00Z,f033.txt:file:40:2020-01-01T00:00:00Z,f034.txt:file:40:2020-01-01T00:00:00Z,f035.txt:file:40:2020-01-01T00:00:00Z,f036.txt:file:40:2020-01-01T00:00:00Z,f037.txt:file:40:2020-01-01T00:00:00Z,f038.txt:file:40:2020-01-01T00:00:00Z,f039.txt:file:40:2020-01-01T00:00:00Z,f040.txt:file:40:2020-01-01T00:00:00Z,f041.txt:file:40:2020-01-01T00:00:00Z,f042.txt:file:40:2020-01-01T00:00:00Z,f043.txt:file:40:2020-01-01T00:00:00Z,f044.txt:file:40:2020-01-01T00:00:00Z,f045.txt:file:40:2020-01-01T00:00:00Z,f046.txt:file:40:2020-01-01T00:00:00Z,f047.txt:file:40:2020-01-01T00:00:00Z,f048.txt:file:40:2020-01-01T00:00:00Z,f049.txt:file:40:2020-01-01T00:00:00Z,f050.txt:file:40:2020-01-01T00:00:00Z,f051.txt:file:40:2020-01-01T00:00:00Z,f052.txt:file:40:2020-01-01T00:00:00Z,f053.txt:file:40:2020-01-01T00:00:00Z,f054.txt:file:40:2020-01-01T00:00:00Z,f055.txt:file:40:2020-01-01T00:00:00Z,f056.txt:file:40:2020-01-01T00:00:00Z,f057.txt:file:40:2020-01-01T00:00:00Z,f058.txt:file:40:2020-01-01T00:00:00Z,f059.txt:file:40:2020-01-01T00:00:00Z,f060.txt:file:40:2020-01-01T00:00:00Z,f061.txt:file:40:2020-01-01T00:00:00Z,f062.txt:file:40:2020-01-01T00:00:00Z,f063.txt:file:40:2020-01-01T00:00:00Z,f064.txt:file:40:2020-01-01T00:00:00Z,f065.txt:file:40:2020-01-01T00:00:00Z,f066.txt:file:40:2020-01-01T00:00:00Z,f067.txt:file:40:2020-01-01T00:00:00Z,f068.txt:file:40:2020-01-01T00:00:00Z,f069.txt:file:40:2020-01-01T00:00:00Z,f070.txt:file:40:2020-01-01T00:00:00Z,f071.txt:file:40:2020-01-01T00:00:00Z,f072.txt:file:40:2020-01-01T00:00:00Z,f073.txt:file:40:2020-01-01T00:00:00Z,f074.txt:file:40:2020-01-01T00:00:00Z,f075.txt:file:40:2020-01-01T00:00:00Z,f076.txt:file:40:2020-01-01T00:00:00Z,f077.txt:file:40:2020-01-01T00:00:00Z,f078.txt:file:40:2020-01-01T00:00:00Z,f079.txt:file:40:2020-01-01T00:00:00Z,f080.txt:file:40:2020-01-01T00:00:00Z,f081.txt:file:40:2020-01-01T00:00:00Z,f082.txt:file:40:2020-01-01T00:00:00Z,f083.txt:file:40:2020-01-01T00:00:00Z,f084.txt:file:40:2020-01-01T00:00:00Z,f085.txt:file:40:2020-01-01T00:00:00Z,f086.txt:file:40:2020-01-01T00:00:00Z,f087.txt:file:40:2020-01-01T00:00:00Z,f088.txt:file:40:2020-01-01T00:00:00Z,f089.txt:file:40:2020-01-01T00:00:00Z,f090.txt:file:40:2020-01-01T00:00:00Z,f091.txt:file:40:2020-01-01T00:00:00Z,f092.txt:file:40:2020-01-01T00:00:00Z,f093.txt:file:40:2020-01-01T00:00:00Z,f094.txt:file:40:2020-01-01T00:00:00Z,f095.txt:file:40:2020-01-01T00:00:00Z,f096.txt:file:40:2020-01-01T00:00:00Z,f097.txt:file:40:2020-01-01T00:00:00Z,f098.txt:file:40:2020-01-01T00:00:00Z,f099.txt:file:40:2020-01-01T00:00:00Z,f100.txt:file:40:2020-01-01T00:00:00Z,f101.txt:file:40:2020-01-01T00:00:00Z,f102.txt:file:40:2020-01-01T00:00:00Z,f103.txt:file:40:2020-01-01T00:00:00Z,f104.txt:file:40:2020-01-01T00:00:00Z,f105.txt:file:40:2020-01-01T00:00:00Z,f106.txt:file:40:2020-01-01T00:00:00Z,f107.txt:file:40:2020-01-01T00:00:00Z,f108.txt:file:40:2020-01-01T00:00:00Z,f109.txt:file:40:2020-01-01T00:00:00Z,f110.txt:file:40:2020-01-01T00:00:00Z,f111.txt:file:40:2020-01-01T00:00:00Z,f112.txt:file:40:2020-01-01T00:00:00Z,f113.txt:file:40:2020-01-01T00:00:00Z,f114.txt:file:40:2020-01-01T00:00:00Z,f115.txt:file:40:2020-01-01T00:00:00Z,f116.txt:file:40:2020-01-01T00:00:00Z,f117.txt:file:40:2020-01-01T00:00:00Z,f118.txt:file:40:2020-01-01T00:00:00Z,f119.txt:file:40:2020-01-01T00:00:00Z,f120.txt:file:40:2020-01-01T00:00:00Z,f121.txt:file:40:2020-01-01T00:00:00Z,f122.txt:file:40:2020-01-01T00:00:00Z,f123.txt:file:40:2020-01-01T00:00:00Z,f124.txt:file:40:2020-01-01T00:00:00Z,f125.txt:file:40:2020-01-01T00:00:00Z,f126.txt:file:40:2020-01-01T00:00:00Z,f127.txt:file:40:2020-01-01T00:00:00Z,f128.txt:file:40:2020-01-01T00:00:00Z,f129.txt:file:40:2020-01-01T00:00:00Z,m-old.txt:file:41:2019-01-01T00:00:00Z,z-old.txt:file:41:2017-01-01T00:00:00Z
+stat / dir:52:2020-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:52
+stat /F dir:104:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F /F:dir:104
+stat /F/f000.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f000.txt /F/f000.txt:file:40
+stat /F/f001.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f001.txt /F/f001.txt:file:40
+stat /F/f002.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f002.txt /F/f002.txt:file:40
+stat /F/f003.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f003.txt /F/f003.txt:file:40
+stat /F/f004.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f004.txt /F/f004.txt:file:40
+stat /F/f005.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f005.txt /F/f005.txt:file:40
+stat /F/f006.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f006.txt /F/f006.txt:file:40
+stat /F/f007.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f007.txt /F/f007.txt:file:40
+stat /F/f008.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f008.txt /F/f008.txt:file:40
+stat /F/f009.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f009.txt /F/f009.txt:file:40
+stat /F/f010.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f010.txt /F/f010.txt:file:40
+stat /F/f011.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f011.txt /F/f011.txt:file:40
+stat /F/f012.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f012.txt /F/f012.txt:file:40
+stat /F/f013.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f013.txt /F/f013.txt:file:40
+stat /F/f014.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f014.txt /F/f014.txt:file:40
+stat /F/f015.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f015.txt /F/f015.txt:file:40
+stat /F/f016.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f016.txt /F/f016.txt:file:40
+stat /F/f017.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f017.txt /F/f017.txt:file:40
+stat /F/f018.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f018.txt /F/f018.txt:file:40
+stat /F/f019.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f019.txt /F/f019.txt:file:40
+stat /F/f020.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f020.txt /F/f020.txt:file:40
+stat /F/f021.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f021.txt /F/f021.txt:file:40
+stat /F/f022.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f022.txt /F/f022.txt:file:40
+stat /F/f023.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f023.txt /F/f023.txt:file:40
+stat /F/f024.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f024.txt /F/f024.txt:file:40
+stat /F/f025.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f025.txt /F/f025.txt:file:40
+stat /F/f026.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f026.txt /F/f026.txt:file:40
+stat /F/f027.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f027.txt /F/f027.txt:file:40
+stat /F/f028.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f028.txt /F/f028.txt:file:40
+stat /F/f029.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f029.txt /F/f029.txt:file:40
+stat /F/f030.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f030.txt /F/f030.txt:file:40
+stat /F/f031.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f031.txt /F/f031.txt:file:40
+stat /F/f032.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f032.txt /F/f032.txt:file:40
+stat /F/f033.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f033.txt /F/f033.txt:file:40
+stat /F/f034.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f034.txt /F/f034.txt:file:40
+stat /F/f035.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f035.txt /F/f035.txt:file:40
+stat /F/f036.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f036.txt /F/f036.txt:file:40
+stat /F/f037.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f037.txt /F/f037.txt:file:40
+stat /F/f038.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f038.txt /F/f038.txt:file:40
+stat /F/f039.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f039.txt /F/f039.txt:file:40
+stat /F/f040.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f040.txt /F/f040.txt:file:40
+stat /F/f041.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f041.txt /F/f041.txt:file:40
+stat /F/f042.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f042.txt /F/f042.txt:file:40
+stat /F/f043.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f043.txt /F/f043.txt:file:40
+stat /F/f044.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f044.txt /F/f044.txt:file:40
+stat /F/f045.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f045.txt /F/f045.txt:file:40
+stat /F/f046.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f046.txt /F/f046.txt:file:40
+stat /F/f047.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f047.txt /F/f047.txt:file:40
+stat /F/f048.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f048.txt /F/f048.txt:file:40
+stat /F/f049.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f049.txt /F/f049.txt:file:40
+stat /F/f050.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f050.txt /F/f050.txt:file:40
+stat /F/f051.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f051.txt /F/f051.txt:file:40
+stat /F/f052.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f052.txt /F/f052.txt:file:40
+stat /F/f053.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f053.txt /F/f053.txt:file:40
+stat /F/f054.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f054.txt /F/f054.txt:file:40
+stat /F/f055.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f055.txt /F/f055.txt:file:40
+stat /F/f056.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f056.txt /F/f056.txt:file:40
+stat /F/f057.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f057.txt /F/f057.txt:file:40
+stat /F/f058.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f058.txt /F/f058.txt:file:40
+stat /F/f059.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f059.txt /F/f059.txt:file:40
+stat /F/f060.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f060.txt /F/f060.txt:file:40
+stat /F/f061.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f061.txt /F/f061.txt:file:40
+stat /F/f062.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f062.txt /F/f062.txt:file:40
+stat /F/f063.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f063.txt /F/f063.txt:file:40
+stat /F/f064.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f064.txt /F/f064.txt:file:40
+stat /F/f065.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f065.txt /F/f065.txt:file:40
+stat /F/f066.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f066.txt /F/f066.txt:file:40
+stat /F/f067.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f067.txt /F/f067.txt:file:40
+stat /F/f068.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f068.txt /F/f068.txt:file:40
+stat /F/f069.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f069.txt /F/f069.txt:file:40
+stat /F/f070.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f070.txt /F/f070.txt:file:40
+stat /F/f071.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f071.txt /F/f071.txt:file:40
+stat /F/f072.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f072.txt /F/f072.txt:file:40
+stat /F/f073.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f073.txt /F/f073.txt:file:40
+stat /F/f074.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f074.txt /F/f074.txt:file:40
+stat /F/f075.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f075.txt /F/f075.txt:file:40
+stat /F/f076.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f076.txt /F/f076.txt:file:40
+stat /F/f077.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f077.txt /F/f077.txt:file:40
+stat /F/f078.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f078.txt /F/f078.txt:file:40
+stat /F/f079.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f079.txt /F/f079.txt:file:40
+stat /F/f080.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f080.txt /F/f080.txt:file:40
+stat /F/f081.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f081.txt /F/f081.txt:file:40
+stat /F/f082.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f082.txt /F/f082.txt:file:40
+stat /F/f083.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f083.txt /F/f083.txt:file:40
+stat /F/f084.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f084.txt /F/f084.txt:file:40
+stat /F/f085.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f085.txt /F/f085.txt:file:40
+stat /F/f086.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f086.txt /F/f086.txt:file:40
+stat /F/f087.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f087.txt /F/f087.txt:file:40
+stat /F/f088.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f088.txt /F/f088.txt:file:40
+stat /F/f089.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f089.txt /F/f089.txt:file:40
+stat /F/f090.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f090.txt /F/f090.txt:file:40
+stat /F/f091.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f091.txt /F/f091.txt:file:40
+stat /F/f092.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f092.txt /F/f092.txt:file:40
+stat /F/f093.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f093.txt /F/f093.txt:file:40
+stat /F/f094.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f094.txt /F/f094.txt:file:40
+stat /F/f095.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f095.txt /F/f095.txt:file:40
+stat /F/f096.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f096.txt /F/f096.txt:file:40
+stat /F/f097.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f097.txt /F/f097.txt:file:40
+stat /F/f098.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f098.txt /F/f098.txt:file:40
+stat /F/f099.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f099.txt /F/f099.txt:file:40
+stat /F/f100.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f100.txt /F/f100.txt:file:40
+stat /F/f101.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f101.txt /F/f101.txt:file:40
+stat /F/f102.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f102.txt /F/f102.txt:file:40
+stat /F/f103.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f103.txt /F/f103.txt:file:40
+stat /F/f104.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f104.txt /F/f104.txt:file:40
+stat /F/f105.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f105.txt /F/f105.txt:file:40
+stat /F/f106.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f106.txt /F/f106.txt:file:40
+stat /F/f107.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f107.txt /F/f107.txt:file:40
+stat /F/f108.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f108.txt /F/f108.txt:file:40
+stat /F/f109.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f109.txt /F/f109.txt:file:40
+stat /F/f110.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f110.txt /F/f110.txt:file:40
+stat /F/f111.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f111.txt /F/f111.txt:file:40
+stat /F/f112.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f112.txt /F/f112.txt:file:40
+stat /F/f113.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f113.txt /F/f113.txt:file:40
+stat /F/f114.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f114.txt /F/f114.txt:file:40
+stat /F/f115.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f115.txt /F/f115.txt:file:40
+stat /F/f116.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f116.txt /F/f116.txt:file:40
+stat /F/f117.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f117.txt /F/f117.txt:file:40
+stat /F/f118.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f118.txt /F/f118.txt:file:40
+stat /F/f119.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f119.txt /F/f119.txt:file:40
+stat /F/f120.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f120.txt /F/f120.txt:file:40
+stat /F/f121.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f121.txt /F/f121.txt:file:40
+stat /F/f122.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f122.txt /F/f122.txt:file:40
+stat /F/f123.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f123.txt /F/f123.txt:file:40
+stat /F/f124.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f124.txt /F/f124.txt:file:40
+stat /F/f125.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f125.txt /F/f125.txt:file:40
+stat /F/f126.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f126.txt /F/f126.txt:file:40
+stat /F/f127.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f127.txt /F/f127.txt:file:40
+stat /F/f128.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f128.txt /F/f128.txt:file:40
+stat /F/f129.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f129.txt /F/f129.txt:file:40
+stat /F/a-old.txt file:41:2018-01-01T00:00:00Z:2018-01-01T00:00:00Z
+stat id of /F/a-old.txt /F/a-old.txt:file:41
+stat /F/z-old.txt file:41:2017-01-01T00:00:00Z:2017-01-01T00:00:00Z
+stat id of /F/z-old.txt /F/z-old.txt:file:41
+stat /F/m-old.txt file:41:2019-01-01T00:00:00Z:2019-01-01T00:00:00Z
+stat id of /F/m-old.txt /F/m-old.txt:file:41
+-- at 2020-01-01T00:00:01Z
+= same
+-- at now
+= same
+== f2 more than 128 entries, with later states
+-- at 2014-12-31T23:59:59Z
+path / absent
+id of / absent
+path /F absent
+id of /F absent
+stat / absent
+stat id of / absent
+stat /F absent
+stat id of /F absent
+stat /F/f000.txt absent
+stat id of /F/f000.txt absent
+stat /F/f001.txt absent
+stat id of /F/f001.txt absent
+stat /F/f002.txt absent
+stat id of /F/f002.txt absent
+stat /F/f003.txt absent
+stat id of /F/f003.txt absent
+stat /F/f004.txt absent
+stat id of /F/f004.txt absent
+stat /F/f005.txt absent
+stat id of /F/f005.txt absent
+stat /F/f006.txt absent
+stat id of /F/f006.txt absent
+stat /F/f007.txt absent
+stat id of /F/f007.txt absent
+stat /F/f008.txt absent
+stat id of /F/f008.txt absent
+stat /F/f009.txt absent
+stat id of /F/f009.txt absent
+stat /F/f010.txt absent
+stat id of /F/f010.txt absent
+stat /F/f011.txt absent
+stat id of /F/f011.txt absent
+stat /F/f012.txt absent
+stat id of /F/f012.txt absent
+stat /F/f013.txt absent
+stat id of /F/f013.txt absent
+stat /F/f014.txt absent
+stat id of /F/f014.txt absent
+stat /F/f015.txt absent
+stat id of /F/f015.txt absent
+stat /F/f016.txt absent
+stat id of /F/f016.txt absent
+stat /F/f017.txt absent
+stat id of /F/f017.txt absent
+stat /F/f018.txt absent
+stat id of /F/f018.txt absent
+stat /F/f019.txt absent
+stat id of /F/f019.txt absent
+stat /F/f020.txt absent
+stat id of /F/f020.txt absent
+stat /F/f021.txt absent
+stat id of /F/f021.txt absent
+stat /F/f022.txt absent
+stat id of /F/f022.txt absent
+stat /F/f023.txt absent
+stat id of /F/f023.txt absent
+stat /F/f024.txt absent
+stat id of /F/f024.txt absent
+stat /F/f025.txt absent
+stat id of /F/f025.txt absent
+stat /F/f026.txt absent
+stat id of /F/f026.txt absent
+stat /F/f027.txt absent
+stat id of /F/f027.txt absent
+stat /F/f028.txt absent
+stat id of /F/f028.txt absent
+stat /F/f029.txt absent
+stat id of /F/f029.txt absent
+stat /F/f030.txt absent
+stat id of /F/f030.txt absent
+stat /F/f031.txt absent
+stat id of /F/f031.txt absent
+stat /F/f032.txt absent
+stat id of /F/f032.txt absent
+stat /F/f033.txt absent
+stat id of /F/f033.txt absent
+stat /F/f034.txt absent
+stat id of /F/f034.txt absent
+stat /F/f035.txt absent
+stat id of /F/f035.txt absent
+stat /F/f036.txt absent
+stat id of /F/f036.txt absent
+stat /F/f037.txt absent
+stat id of /F/f037.txt absent
+stat /F/f038.txt absent
+stat id of /F/f038.txt absent
+stat /F/f039.txt absent
+stat id of /F/f039.txt absent
+stat /F/f040.txt absent
+stat id of /F/f040.txt absent
+stat /F/f041.txt absent
+stat id of /F/f041.txt absent
+stat /F/f042.txt absent
+stat id of /F/f042.txt absent
+stat /F/f043.txt absent
+stat id of /F/f043.txt absent
+stat /F/f044.txt absent
+stat id of /F/f044.txt absent
+stat /F/f045.txt absent
+stat id of /F/f045.txt absent
+stat /F/f046.txt absent
+stat id of /F/f046.txt absent
+stat /F/f047.txt absent
+stat id of /F/f047.txt absent
+stat /F/f048.txt absent
+stat id of /F/f048.txt absent
+stat /F/f049.txt absent
+stat id of /F/f049.txt absent
+stat /F/f050.txt absent
+stat id of /F/f050.txt absent
+stat /F/f051.txt absent
+stat id of /F/f051.txt absent
+stat /F/f052.txt absent
+stat id of /F/f052.txt absent
+stat /F/f053.txt absent
+stat id of /F/f053.txt absent
+stat /F/f054.txt absent
+stat id of /F/f054.txt absent
+stat /F/f055.txt absent
+stat id of /F/f055.txt absent
+stat /F/f056.txt absent
+stat id of /F/f056.txt absent
+stat /F/f057.txt absent
+stat id of /F/f057.txt absent
+stat /F/f058.txt absent
+stat id of /F/f058.txt absent
+stat /F/f059.txt absent
+stat id of /F/f059.txt absent
+stat /F/f060.txt absent
+stat id of /F/f060.txt absent
+stat /F/f061.txt absent
+stat id of /F/f061.txt absent
+stat /F/f062.txt absent
+stat id of /F/f062.txt absent
+stat /F/f063.txt absent
+stat id of /F/f063.txt absent
+stat /F/f064.txt absent
+stat id of /F/f064.txt absent
+stat /F/f065.txt absent
+stat id of /F/f065.txt absent
+stat /F/f066.txt absent
+stat id of /F/f066.txt absent
+stat /F/f067.txt absent
+stat id of /F/f067.txt absent
+stat /F/f068.txt absent
+stat id of /F/f068.txt absent
+stat /F/f069.txt absent
+stat id of /F/f069.txt absent
+stat /F/f070.txt absent
+stat id of /F/f070.txt absent
+stat /F/f071.txt absent
+stat id of /F/f071.txt absent
+stat /F/f072.txt absent
+stat id of /F/f072.txt absent
+stat /F/f073.txt absent
+stat id of /F/f073.txt absent
+stat /F/f074.txt absent
+stat id of /F/f074.txt absent
+stat /F/f075.txt absent
+stat id of /F/f075.txt absent
+stat /F/f076.txt absent
+stat id of /F/f076.txt absent
+stat /F/f077.txt absent
+stat id of /F/f077.txt absent
+stat /F/f078.txt absent
+stat id of /F/f078.txt absent
+stat /F/f079.txt absent
+stat id of /F/f079.txt absent
+stat /F/f080.txt absent
+stat id of /F/f080.txt absent
+stat /F/f081.txt absent
+stat id of /F/f081.txt absent
+stat /F/f082.txt absent
+stat id of /F/f082.txt absent
+stat /F/f083.txt absent
+stat id of /F/f083.txt absent
+stat /F/f084.txt absent
+stat id of /F/f084.txt absent
+stat /F/f085.txt absent
+stat id of /F/f085.txt absent
+stat /F/f086.txt absent
+stat id of /F/f086.txt absent
+stat /F/f087.txt absent
+stat id of /F/f087.txt absent
+stat /F/f088.txt absent
+stat id of /F/f088.txt absent
+stat /F/f089.txt absent
+stat id of /F/f089.txt absent
+stat /F/f090.txt absent
+stat id of /F/f090.txt absent
+stat /F/f091.txt absent
+stat id of /F/f091.txt absent
+stat /F/f092.txt absent
+stat id of /F/f092.txt absent
+stat /F/f093.txt absent
+stat id of /F/f093.txt absent
+stat /F/f094.txt absent
+stat id of /F/f094.txt absent
+stat /F/f095.txt absent
+stat id of /F/f095.txt absent
+stat /F/f096.txt absent
+stat id of /F/f096.txt absent
+stat /F/f097.txt absent
+stat id of /F/f097.txt absent
+stat /F/f098.txt absent
+stat id of /F/f098.txt absent
+stat /F/f099.txt absent
+stat id of /F/f099.txt absent
+stat /F/f100.txt absent
+stat id of /F/f100.txt absent
+stat /F/f101.txt absent
+stat id of /F/f101.txt absent
+stat /F/f102.txt absent
+stat id of /F/f102.txt absent
+stat /F/f103.txt absent
+stat id of /F/f103.txt absent
+stat /F/f104.txt absent
+stat id of /F/f104.txt absent
+stat /F/f105.txt absent
+stat id of /F/f105.txt absent
+stat /F/f106.txt absent
+stat id of /F/f106.txt absent
+stat /F/f107.txt absent
+stat id of /F/f107.txt absent
+stat /F/f108.txt absent
+stat id of /F/f108.txt absent
+stat /F/f109.txt absent
+stat id of /F/f109.txt absent
+stat /F/f110.txt absent
+stat id of /F/f110.txt absent
+stat /F/f111.txt absent
+stat id of /F/f111.txt absent
+stat /F/f112.txt absent
+stat id of /F/f112.txt absent
+stat /F/f113.txt absent
+stat id of /F/f113.txt absent
+stat /F/f114.txt absent
+stat id of /F/f114.txt absent
+stat /F/f115.txt absent
+stat id of /F/f115.txt absent
+stat /F/f116.txt absent
+stat id of /F/f116.txt absent
+stat /F/f117.txt absent
+stat id of /F/f117.txt absent
+stat /F/f118.txt absent
+stat id of /F/f118.txt absent
+stat /F/f119.txt absent
+stat id of /F/f119.txt absent
+stat /F/f120.txt absent
+stat id of /F/f120.txt absent
+stat /F/f121.txt absent
+stat id of /F/f121.txt absent
+stat /F/f122.txt absent
+stat id of /F/f122.txt absent
+stat /F/f123.txt absent
+stat id of /F/f123.txt absent
+stat /F/f124.txt absent
+stat id of /F/f124.txt absent
+stat /F/f125.txt absent
+stat id of /F/f125.txt absent
+stat /F/f126.txt absent
+stat id of /F/f126.txt absent
+stat /F/f127.txt absent
+stat id of /F/f127.txt absent
+stat /F/f128.txt absent
+stat id of /F/f128.txt absent
+stat /F/f129.txt absent
+stat id of /F/f129.txt absent
+stat /F/a-old.txt absent
+stat id of /F/a-old.txt absent
+stat /F/z-old.txt absent
+stat id of /F/z-old.txt absent
+stat /F/m-old.txt absent
+stat id of /F/m-old.txt absent
+-- at 2015-01-01T00:00:00Z
+path / 
+id of / 
+path /F absent
+id of /F absent
+stat / dir:2:2015-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:2
+stat /F absent
+stat id of /F absent
+stat /F/f000.txt absent
+stat id of /F/f000.txt absent
+stat /F/f001.txt absent
+stat id of /F/f001.txt absent
+stat /F/f002.txt absent
+stat id of /F/f002.txt absent
+stat /F/f003.txt absent
+stat id of /F/f003.txt absent
+stat /F/f004.txt absent
+stat id of /F/f004.txt absent
+stat /F/f005.txt absent
+stat id of /F/f005.txt absent
+stat /F/f006.txt absent
+stat id of /F/f006.txt absent
+stat /F/f007.txt absent
+stat id of /F/f007.txt absent
+stat /F/f008.txt absent
+stat id of /F/f008.txt absent
+stat /F/f009.txt absent
+stat id of /F/f009.txt absent
+stat /F/f010.txt absent
+stat id of /F/f010.txt absent
+stat /F/f011.txt absent
+stat id of /F/f011.txt absent
+stat /F/f012.txt absent
+stat id of /F/f012.txt absent
+stat /F/f013.txt absent
+stat id of /F/f013.txt absent
+stat /F/f014.txt absent
+stat id of /F/f014.txt absent
+stat /F/f015.txt absent
+stat id of /F/f015.txt absent
+stat /F/f016.txt absent
+stat id of /F/f016.txt absent
+stat /F/f017.txt absent
+stat id of /F/f017.txt absent
+stat /F/f018.txt absent
+stat id of /F/f018.txt absent
+stat /F/f019.txt absent
+stat id of /F/f019.txt absent
+stat /F/f020.txt absent
+stat id of /F/f020.txt absent
+stat /F/f021.txt absent
+stat id of /F/f021.txt absent
+stat /F/f022.txt absent
+stat id of /F/f022.txt absent
+stat /F/f023.txt absent
+stat id of /F/f023.txt absent
+stat /F/f024.txt absent
+stat id of /F/f024.txt absent
+stat /F/f025.txt absent
+stat id of /F/f025.txt absent
+stat /F/f026.txt absent
+stat id of /F/f026.txt absent
+stat /F/f027.txt absent
+stat id of /F/f027.txt absent
+stat /F/f028.txt absent
+stat id of /F/f028.txt absent
+stat /F/f029.txt absent
+stat id of /F/f029.txt absent
+stat /F/f030.txt absent
+stat id of /F/f030.txt absent
+stat /F/f031.txt absent
+stat id of /F/f031.txt absent
+stat /F/f032.txt absent
+stat id of /F/f032.txt absent
+stat /F/f033.txt absent
+stat id of /F/f033.txt absent
+stat /F/f034.txt absent
+stat id of /F/f034.txt absent
+stat /F/f035.txt absent
+stat id of /F/f035.txt absent
+stat /F/f036.txt absent
+stat id of /F/f036.txt absent
+stat /F/f037.txt absent
+stat id of /F/f037.txt absent
+stat /F/f038.txt absent
+stat id of /F/f038.txt absent
+stat /F/f039.txt absent
+stat id of /F/f039.txt absent
+stat /F/f040.txt absent
+stat id of /F/f040.txt absent
+stat /F/f041.txt absent
+stat id of /F/f041.txt absent
+stat /F/f042.txt absent
+stat id of /F/f042.txt absent
+stat /F/f043.txt absent
+stat id of /F/f043.txt absent
+stat /F/f044.txt absent
+stat id of /F/f044.txt absent
+stat /F/f045.txt absent
+stat id of /F/f045.txt absent
+stat /F/f046.txt absent
+stat id of /F/f046.txt absent
+stat /F/f047.txt absent
+stat id of /F/f047.txt absent
+stat /F/f048.txt absent
+stat id of /F/f048.txt absent
+stat /F/f049.txt absent
+stat id of /F/f049.txt absent
+stat /F/f050.txt absent
+stat id of /F/f050.txt absent
+stat /F/f051.txt absent
+stat id of /F/f051.txt absent
+stat /F/f052.txt absent
+stat id of /F/f052.txt absent
+stat /F/f053.txt absent
+stat id of /F/f053.txt absent
+stat /F/f054.txt absent
+stat id of /F/f054.txt absent
+stat /F/f055.txt absent
+stat id of /F/f055.txt absent
+stat /F/f056.txt absent
+stat id of /F/f056.txt absent
+stat /F/f057.txt absent
+stat id of /F/f057.txt absent
+stat /F/f058.txt absent
+stat id of /F/f058.txt absent
+stat /F/f059.txt absent
+stat id of /F/f059.txt absent
+stat /F/f060.txt absent
+stat id of /F/f060.txt absent
+stat /F/f061.txt absent
+stat id of /F/f061.txt absent
+stat /F/f062.txt absent
+stat id of /F/f062.txt absent
+stat /F/f063.txt absent
+stat id of /F/f063.txt absent
+stat /F/f064.txt absent
+stat id of /F/f064.txt absent
+stat /F/f065.txt absent
+stat id of /F/f065.txt absent
+stat /F/f066.txt absent
+stat id of /F/f066.txt absent
+stat /F/f067.txt absent
+stat id of /F/f067.txt absent
+stat /F/f068.txt absent
+stat id of /F/f068.txt absent
+stat /F/f069.txt absent
+stat id of /F/f069.txt absent
+stat /F/f070.txt absent
+stat id of /F/f070.txt absent
+stat /F/f071.txt absent
+stat id of /F/f071.txt absent
+stat /F/f072.txt absent
+stat id of /F/f072.txt absent
+stat /F/f073.txt absent
+stat id of /F/f073.txt absent
+stat /F/f074.txt absent
+stat id of /F/f074.txt absent
+stat /F/f075.txt absent
+stat id of /F/f075.txt absent
+stat /F/f076.txt absent
+stat id of /F/f076.txt absent
+stat /F/f077.txt absent
+stat id of /F/f077.txt absent
+stat /F/f078.txt absent
+stat id of /F/f078.txt absent
+stat /F/f079.txt absent
+stat id of /F/f079.txt absent
+stat /F/f080.txt absent
+stat id of /F/f080.txt absent
+stat /F/f081.txt absent
+stat id of /F/f081.txt absent
+stat /F/f082.txt absent
+stat id of /F/f082.txt absent
+stat /F/f083.txt absent
+stat id of /F/f083.txt absent
+stat /F/f084.txt absent
+stat id of /F/f084.txt absent
+stat /F/f085.txt absent
+stat id of /F/f085.txt absent
+stat /F/f086.txt absent
+stat id of /F/f086.txt absent
+stat /F/f087.txt absent
+stat id of /F/f087.txt absent
+stat /F/f088.txt absent
+stat id of /F/f088.txt absent
+stat /F/f089.txt absent
+stat id of /F/f089.txt absent
+stat /F/f090.txt absent
+stat id of /F/f090.txt absent
+stat /F/f091.txt absent
+stat id of /F/f091.txt absent
+stat /F/f092.txt absent
+stat id of /F/f092.txt absent
+stat /F/f093.txt absent
+stat id of /F/f093.txt absent
+stat /F/f094.txt absent
+stat id of /F/f094.txt absent
+stat /F/f095.txt absent
+stat id of /F/f095.txt absent
+stat /F/f096.txt absent
+stat id of /F/f096.txt absent
+stat /F/f097.txt absent
+stat id of /F/f097.txt absent
+stat /F/f098.txt absent
+stat id of /F/f098.txt absent
+stat /F/f099.txt absent
+stat id of /F/f099.txt absent
+stat /F/f100.txt absent
+stat id of /F/f100.txt absent
+stat /F/f101.txt absent
+stat id of /F/f101.txt absent
+stat /F/f102.txt absent
+stat id of /F/f102.txt absent
+stat /F/f103.txt absent
+stat id of /F/f103.txt absent
+stat /F/f104.txt absent
+stat id of /F/f104.txt absent
+stat /F/f105.txt absent
+stat id of /F/f105.txt absent
+stat /F/f106.txt absent
+stat id of /F/f106.txt absent
+stat /F/f107.txt absent
+stat id of /F/f107.txt absent
+stat /F/f108.txt absent
+stat id of /F/f108.txt absent
+stat /F/f109.txt absent
+stat id of /F/f109.txt absent
+stat /F/f110.txt absent
+stat id of /F/f110.txt absent
+stat /F/f111.txt absent
+stat id of /F/f111.txt absent
+stat /F/f112.txt absent
+stat id of /F/f112.txt absent
+stat /F/f113.txt absent
+stat id of /F/f113.txt absent
+stat /F/f114.txt absent
+stat id of /F/f114.txt absent
+stat /F/f115.txt absent
+stat id of /F/f115.txt absent
+stat /F/f116.txt absent
+stat id of /F/f116.txt absent
+stat /F/f117.txt absent
+stat id of /F/f117.txt absent
+stat /F/f118.txt absent
+stat id of /F/f118.txt absent
+stat /F/f119.txt absent
+stat id of /F/f119.txt absent
+stat /F/f120.txt absent
+stat id of /F/f120.txt absent
+stat /F/f121.txt absent
+stat id of /F/f121.txt absent
+stat /F/f122.txt absent
+stat id of /F/f122.txt absent
+stat /F/f123.txt absent
+stat id of /F/f123.txt absent
+stat /F/f124.txt absent
+stat id of /F/f124.txt absent
+stat /F/f125.txt absent
+stat id of /F/f125.txt absent
+stat /F/f126.txt absent
+stat id of /F/f126.txt absent
+stat /F/f127.txt absent
+stat id of /F/f127.txt absent
+stat /F/f128.txt absent
+stat id of /F/f128.txt absent
+stat /F/f129.txt absent
+stat id of /F/f129.txt absent
+stat /F/a-old.txt absent
+stat id of /F/a-old.txt absent
+stat /F/z-old.txt absent
+stat id of /F/z-old.txt absent
+stat /F/m-old.txt absent
+stat id of /F/m-old.txt absent
+-- at 2015-01-01T00:00:01Z
+= same
+-- at 2017-12-31T23:59:59Z
+= same
+-- at 2018-01-01T00:00:00Z
+= same
+-- at 2018-01-01T00:00:01Z
+= same
+-- at 2018-12-31T23:59:59Z
+= same
+-- at 2019-01-01T00:00:00Z
+= same
+-- at 2019-01-01T00:00:01Z
+= same
+-- at 2019-12-31T23:59:59Z
+= same
+-- at 2020-01-01T00:00:00Z
+path / F:dir:1544:2020-01-01T00:00:00Z
+id of / F:dir:1544:2020-01-01T00:00:00Z
+path /F a-old.txt:file:41:2018-01-01T00:00:00Z,f000.txt:file:40:2020-01-01T00:00:00Z,f001.txt:file:40:2020-01-01T00:00:00Z,f002.txt:file:40:2020-01-01T00:00:00Z,f003.txt:file:40:2020-01-01T00:00:00Z,f004.txt:file:40:2020-01-01T00:00:00Z,f005.txt:file:40:2020-01-01T00:00:00Z,f006.txt:file:40:2020-01-01T00:00:00Z,f007.txt:file:40:2020-01-01T00:00:00Z,f008.txt:file:40:2020-01-01T00:00:00Z,f009.txt:file:40:2020-01-01T00:00:00Z,f010.txt:file:40:2020-01-01T00:00:00Z,f011.txt:file:40:2020-01-01T00:00:00Z,f012.txt:file:40:2020-01-01T00:00:00Z,f013.txt:file:40:2020-01-01T00:00:00Z,f014.txt:file:40:2020-01-01T00:00:00Z,f015.txt:file:40:2020-01-01T00:00:00Z,f016.txt:file:40:2020-01-01T00:00:00Z,f017.txt:file:40:2020-01-01T00:00:00Z,f018.txt:file:40:2020-01-01T00:00:00Z,f019.txt:file:40:2020-01-01T00:00:00Z,f020.txt:file:40:2020-01-01T00:00:00Z,f021.txt:file:40:2020-01-01T00:00:00Z,f022.txt:file:40:2020-01-01T00:00:00Z,f023.txt:file:40:2020-01-01T00:00:00Z,f024.txt:file:40:2020-01-01T00:00:00Z,f025.txt:file:40:2020-01-01T00:00:00Z,m-old.txt:file:41:2019-01-01T00:00:00Z
+id of /F a-old.txt:file:41:2018-01-01T00:00:00Z,f000.txt:file:40:2020-01-01T00:00:00Z,f001.txt:file:40:2020-01-01T00:00:00Z,f002.txt:file:40:2020-01-01T00:00:00Z,f003.txt:file:40:2020-01-01T00:00:00Z,f004.txt:file:40:2020-01-01T00:00:00Z,f005.txt:file:40:2020-01-01T00:00:00Z,f006.txt:file:40:2020-01-01T00:00:00Z,f007.txt:file:40:2020-01-01T00:00:00Z,f008.txt:file:40:2020-01-01T00:00:00Z,f009.txt:file:40:2020-01-01T00:00:00Z,f010.txt:file:40:2020-01-01T00:00:00Z,f011.txt:file:40:2020-01-01T00:00:00Z,f012.txt:file:40:2020-01-01T00:00:00Z,f013.txt:file:40:2020-01-01T00:00:00Z,f014.txt:file:40:2020-01-01T00:00:00Z,f015.txt:file:40:2020-01-01T00:00:00Z,f016.txt:file:40:2020-01-01T00:00:00Z,f017.txt:file:40:2020-01-01T00:00:00Z,f018.txt:file:40:2020-01-01T00:00:00Z,f019.txt:file:40:2020-01-01T00:00:00Z,f020.txt:file:40:2020-01-01T00:00:00Z,f021.txt:file:40:2020-01-01T00:00:00Z,f022.txt:file:40:2020-01-01T00:00:00Z,f023.txt:file:40:2020-01-01T00:00:00Z,f024.txt:file:40:2020-01-01T00:00:00Z,f025.txt:file:40:2020-01-01T00:00:00Z,m-old.txt:file:41:2019-01-01T00:00:00Z
+stat / dir:52:2020-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:52
+stat /F dir:1544:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F /F:dir:1544
+stat /F/f000.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f000.txt /F/f000.txt:file:40
+stat /F/f001.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f001.txt /F/f001.txt:file:40
+stat /F/f002.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f002.txt /F/f002.txt:file:40
+stat /F/f003.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f003.txt /F/f003.txt:file:40
+stat /F/f004.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f004.txt /F/f004.txt:file:40
+stat /F/f005.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f005.txt /F/f005.txt:file:40
+stat /F/f006.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f006.txt /F/f006.txt:file:40
+stat /F/f007.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f007.txt /F/f007.txt:file:40
+stat /F/f008.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f008.txt /F/f008.txt:file:40
+stat /F/f009.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f009.txt /F/f009.txt:file:40
+stat /F/f010.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f010.txt /F/f010.txt:file:40
+stat /F/f011.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f011.txt /F/f011.txt:file:40
+stat /F/f012.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f012.txt /F/f012.txt:file:40
+stat /F/f013.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f013.txt /F/f013.txt:file:40
+stat /F/f014.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f014.txt /F/f014.txt:file:40
+stat /F/f015.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f015.txt /F/f015.txt:file:40
+stat /F/f016.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f016.txt /F/f016.txt:file:40
+stat /F/f017.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f017.txt /F/f017.txt:file:40
+stat /F/f018.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f018.txt /F/f018.txt:file:40
+stat /F/f019.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f019.txt /F/f019.txt:file:40
+stat /F/f020.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f020.txt /F/f020.txt:file:40
+stat /F/f021.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f021.txt /F/f021.txt:file:40
+stat /F/f022.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f022.txt /F/f022.txt:file:40
+stat /F/f023.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f023.txt /F/f023.txt:file:40
+stat /F/f024.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f024.txt /F/f024.txt:file:40
+stat /F/f025.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f025.txt /F/f025.txt:file:40
+stat /F/f026.txt absent
+stat id of /F/f026.txt absent
+stat /F/f027.txt absent
+stat id of /F/f027.txt absent
+stat /F/f028.txt absent
+stat id of /F/f028.txt absent
+stat /F/f029.txt absent
+stat id of /F/f029.txt absent
+stat /F/f030.txt absent
+stat id of /F/f030.txt absent
+stat /F/f031.txt absent
+stat id of /F/f031.txt absent
+stat /F/f032.txt absent
+stat id of /F/f032.txt absent
+stat /F/f033.txt absent
+stat id of /F/f033.txt absent
+stat /F/f034.txt absent
+stat id of /F/f034.txt absent
+stat /F/f035.txt absent
+stat id of /F/f035.txt absent
+stat /F/f036.txt absent
+stat id of /F/f036.txt absent
+stat /F/f037.txt absent
+stat id of /F/f037.txt absent
+stat /F/f038.txt absent
+stat id of /F/f038.txt absent
+stat /F/f039.txt absent
+stat id of /F/f039.txt absent
+stat /F/f040.txt absent
+stat id of /F/f040.txt absent
+stat /F/f041.txt absent
+stat id of /F/f041.txt absent
+stat /F/f042.txt absent
+stat id of /F/f042.txt absent
+stat /F/f043.txt absent
+stat id of /F/f043.txt absent
+stat /F/f044.txt absent
+stat id of /F/f044.txt absent
+stat /F/f045.txt absent
+stat id of /F/f045.txt absent
+stat /F/f046.txt absent
+stat id of /F/f046.txt absent
+stat /F/f047.txt absent
+stat id of /F/f047.txt absent
+stat /F/f048.txt absent
+stat id of /F/f048.txt absent
+stat /F/f049.txt absent
+stat id of /F/f049.txt absent
+stat /F/f050.txt absent
+stat id of /F/f050.txt absent
+stat /F/f051.txt absent
+stat id of /F/f051.txt absent
+stat /F/f052.txt absent
+stat id of /F/f052.txt absent
+stat /F/f053.txt absent
+stat id of /F/f053.txt absent
+stat /F/f054.txt absent
+stat id of /F/f054.txt absent
+stat /F/f055.txt absent
+stat id of /F/f055.txt absent
+stat /F/f056.txt absent
+stat id of /F/f056.txt absent
+stat /F/f057.txt absent
+stat id of /F/f057.txt absent
+stat /F/f058.txt absent
+stat id of /F/f058.txt absent
+stat /F/f059.txt absent
+stat id of /F/f059.txt absent
+stat /F/f060.txt absent
+stat id of /F/f060.txt absent
+stat /F/f061.txt absent
+stat id of /F/f061.txt absent
+stat /F/f062.txt absent
+stat id of /F/f062.txt absent
+stat /F/f063.txt absent
+stat id of /F/f063.txt absent
+stat /F/f064.txt absent
+stat id of /F/f064.txt absent
+stat /F/f065.txt absent
+stat id of /F/f065.txt absent
+stat /F/f066.txt absent
+stat id of /F/f066.txt absent
+stat /F/f067.txt absent
+stat id of /F/f067.txt absent
+stat /F/f068.txt absent
+stat id of /F/f068.txt absent
+stat /F/f069.txt absent
+stat id of /F/f069.txt absent
+stat /F/f070.txt absent
+stat id of /F/f070.txt absent
+stat /F/f071.txt absent
+stat id of /F/f071.txt absent
+stat /F/f072.txt absent
+stat id of /F/f072.txt absent
+stat /F/f073.txt absent
+stat id of /F/f073.txt absent
+stat /F/f074.txt absent
+stat id of /F/f074.txt absent
+stat /F/f075.txt absent
+stat id of /F/f075.txt absent
+stat /F/f076.txt absent
+stat id of /F/f076.txt absent
+stat /F/f077.txt absent
+stat id of /F/f077.txt absent
+stat /F/f078.txt absent
+stat id of /F/f078.txt absent
+stat /F/f079.txt absent
+stat id of /F/f079.txt absent
+stat /F/f080.txt absent
+stat id of /F/f080.txt absent
+stat /F/f081.txt absent
+stat id of /F/f081.txt absent
+stat /F/f082.txt absent
+stat id of /F/f082.txt absent
+stat /F/f083.txt absent
+stat id of /F/f083.txt absent
+stat /F/f084.txt absent
+stat id of /F/f084.txt absent
+stat /F/f085.txt absent
+stat id of /F/f085.txt absent
+stat /F/f086.txt absent
+stat id of /F/f086.txt absent
+stat /F/f087.txt absent
+stat id of /F/f087.txt absent
+stat /F/f088.txt absent
+stat id of /F/f088.txt absent
+stat /F/f089.txt absent
+stat id of /F/f089.txt absent
+stat /F/f090.txt absent
+stat id of /F/f090.txt absent
+stat /F/f091.txt absent
+stat id of /F/f091.txt absent
+stat /F/f092.txt absent
+stat id of /F/f092.txt absent
+stat /F/f093.txt absent
+stat id of /F/f093.txt absent
+stat /F/f094.txt absent
+stat id of /F/f094.txt absent
+stat /F/f095.txt absent
+stat id of /F/f095.txt absent
+stat /F/f096.txt absent
+stat id of /F/f096.txt absent
+stat /F/f097.txt absent
+stat id of /F/f097.txt absent
+stat /F/f098.txt absent
+stat id of /F/f098.txt absent
+stat /F/f099.txt absent
+stat id of /F/f099.txt absent
+stat /F/f100.txt absent
+stat id of /F/f100.txt absent
+stat /F/f101.txt absent
+stat id of /F/f101.txt absent
+stat /F/f102.txt absent
+stat id of /F/f102.txt absent
+stat /F/f103.txt absent
+stat id of /F/f103.txt absent
+stat /F/f104.txt absent
+stat id of /F/f104.txt absent
+stat /F/f105.txt absent
+stat id of /F/f105.txt absent
+stat /F/f106.txt absent
+stat id of /F/f106.txt absent
+stat /F/f107.txt absent
+stat id of /F/f107.txt absent
+stat /F/f108.txt absent
+stat id of /F/f108.txt absent
+stat /F/f109.txt absent
+stat id of /F/f109.txt absent
+stat /F/f110.txt absent
+stat id of /F/f110.txt absent
+stat /F/f111.txt absent
+stat id of /F/f111.txt absent
+stat /F/f112.txt absent
+stat id of /F/f112.txt absent
+stat /F/f113.txt absent
+stat id of /F/f113.txt absent
+stat /F/f114.txt absent
+stat id of /F/f114.txt absent
+stat /F/f115.txt absent
+stat id of /F/f115.txt absent
+stat /F/f116.txt absent
+stat id of /F/f116.txt absent
+stat /F/f117.txt absent
+stat id of /F/f117.txt absent
+stat /F/f118.txt absent
+stat id of /F/f118.txt absent
+stat /F/f119.txt absent
+stat id of /F/f119.txt absent
+stat /F/f120.txt absent
+stat id of /F/f120.txt absent
+stat /F/f121.txt absent
+stat id of /F/f121.txt absent
+stat /F/f122.txt absent
+stat id of /F/f122.txt absent
+stat /F/f123.txt absent
+stat id of /F/f123.txt absent
+stat /F/f124.txt absent
+stat id of /F/f124.txt absent
+stat /F/f125.txt absent
+stat id of /F/f125.txt absent
+stat /F/f126.txt absent
+stat id of /F/f126.txt absent
+stat /F/f127.txt absent
+stat id of /F/f127.txt absent
+stat /F/f128.txt absent
+stat id of /F/f128.txt absent
+stat /F/f129.txt absent
+stat id of /F/f129.txt absent
+stat /F/a-old.txt file:41:2018-01-01T00:00:00Z:2018-01-01T00:00:00Z
+stat id of /F/a-old.txt /F/a-old.txt:file:41
+stat /F/z-old.txt absent
+stat id of /F/z-old.txt absent
+stat /F/m-old.txt file:41:2019-01-01T00:00:00Z:2019-01-01T00:00:00Z
+stat id of /F/m-old.txt /F/m-old.txt:file:41
+-- at 2020-01-01T00:00:01Z
+= same
+-- at 2020-01-01T23:59:59Z
+= same
+-- at 2020-01-02T00:00:00Z
+path / F:dir:3030:2020-01-02T00:00:00Z
+id of / F:dir:3030:2020-01-02T00:00:00Z
+path /F a-old.txt:file:41:2018-01-01T00:00:00Z,f000.txt:file:40:2020-01-01T00:00:00Z,f001.txt:file:40:2020-01-01T00:00:00Z,f002.txt:file:40:2020-01-01T00:00:00Z,f003.txt:file:40:2020-01-01T00:00:00Z,f004.txt:file:40:2020-01-01T00:00:00Z,f005.txt:file:40:2020-01-01T00:00:00Z,f006.txt:file:40:2020-01-01T00:00:00Z,f007.txt:file:40:2020-01-01T00:00:00Z,f008.txt:file:40:2020-01-01T00:00:00Z,f009.txt:file:40:2020-01-01T00:00:00Z,f010.txt:file:40:2020-01-01T00:00:00Z,f011.txt:file:40:2020-01-01T00:00:00Z,f012.txt:file:40:2020-01-01T00:00:00Z,f013.txt:file:40:2020-01-01T00:00:00Z,f014.txt:file:40:2020-01-01T00:00:00Z,f015.txt:file:40:2020-01-01T00:00:00Z,f016.txt:file:40:2020-01-01T00:00:00Z,f017.txt:file:40:2020-01-01T00:00:00Z,f018.txt:file:40:2020-01-01T00:00:00Z,f019.txt:file:40:2020-01-01T00:00:00Z,f020.txt:file:40:2020-01-01T00:00:00Z,f021.txt:file:40:2020-01-01T00:00:00Z,f022.txt:file:40:2020-01-01T00:00:00Z,f023.txt:file:40:2020-01-01T00:00:00Z,f024.txt:file:40:2020-01-01T00:00:00Z,f025.txt:file:40:2020-01-01T00:00:00Z,f026.txt:file:40:2020-01-02T00:00:00Z,f027.txt:file:40:2020-01-02T00:00:00Z,f028.txt:file:40:2020-01-02T00:00:00Z,f029.txt:file:40:2020-01-02T00:00:00Z,f030.txt:file:40:2020-01-02T00:00:00Z,f031.txt:file:40:2020-01-02T00:00:00Z,f032.txt:file:40:2020-01-02T00:00:00Z,f033.txt:file:40:2020-01-02T00:00:00Z,f034.txt:file:40:2020-01-02T00:00:00Z,f035.txt:file:40:2020-01-02T00:00:00Z,f036.txt:file:40:2020-01-02T00:00:00Z,f037.txt:file:40:2020-01-02T00:00:00Z,f038.txt:file:40:2020-01-02T00:00:00Z,f039.txt:file:40:2020-01-02T00:00:00Z,f040.txt:file:40:2020-01-02T00:00:00Z,f041.txt:file:40:2020-01-02T00:00:00Z,f042.txt:file:40:2020-01-02T00:00:00Z,f043.txt:file:40:2020-01-02T00:00:00Z,f044.txt:file:40:2020-01-02T00:00:00Z,f045.txt:file:40:2020-01-02T00:00:00Z,f046.txt:file:40:2020-01-02T00:00:00Z,f047.txt:file:40:2020-01-02T00:00:00Z,f048.txt:file:40:2020-01-02T00:00:00Z,f049.txt:file:40:2020-01-02T00:00:00Z,f050.txt:file:40:2020-01-02T00:00:00Z,f051.txt:file:40:2020-01-02T00:00:00Z,m-old.txt:file:41:2019-01-01T00:00:00Z,z-old.txt:file:41:2020-01-02T00:00:00Z
+id of /F a-old.txt:file:41:2018-01-01T00:00:00Z,f000.txt:file:40:2020-01-01T00:00:00Z,f001.txt:file:40:2020-01-01T00:00:00Z,f002.txt:file:40:2020-01-01T00:00:00Z,f003.txt:file:40:2020-01-01T00:00:00Z,f004.txt:file:40:2020-01-01T00:00:00Z,f005.txt:file:40:2020-01-01T00:00:00Z,f006.txt:file:40:2020-01-01T00:00:00Z,f007.txt:file:40:2020-01-01T00:00:00Z,f008.txt:file:40:2020-01-01T00:00:00Z,f009.txt:file:40:2020-01-01T00:00:00Z,f010.txt:file:40:2020-01-01T00:00:00Z,f011.txt:file:40:2020-01-01T00:00:00Z,f012.txt:file:40:2020-01-01T00:00:00Z,f013.txt:file:40:2020-01-01T00:00:00Z,f014.txt:file:40:2020-01-01T00:00:00Z,f015.txt:file:40:2020-01-01T00:00:00Z,f016.txt:file:40:2020-01-01T00:00:00Z,f017.txt:file:40:2020-01-01T00:00:00Z,f018.txt:file:40:2020-01-01T00:00:00Z,f019.txt:file:40:2020-01-01T00:00:00Z,f020.txt:file:40:2020-01-01T00:00:00Z,f021.txt:file:40:2020-01-01T00:00:00Z,f022.txt:file:40:2020-01-01T00:00:00Z,f023.txt:file:40:2020-01-01T00:00:00Z,f024.txt:file:40:2020-01-01T00:00:00Z,f025.txt:file:40:2020-01-01T00:00:00Z,f026.txt:file:40:2020-01-02T00:00:00Z,f027.txt:file:40:2020-01-02T00:00:00Z,f028.txt:file:40:2020-01-02T00:00:00Z,f029.txt:file:40:2020-01-02T00:00:00Z,f030.txt:file:40:2020-01-02T00:00:00Z,f031.txt:file:40:2020-01-02T00:00:00Z,f032.txt:file:40:2020-01-02T00:00:00Z,f033.txt:file:40:2020-01-02T00:00:00Z,f034.txt:file:40:2020-01-02T00:00:00Z,f035.txt:file:40:2020-01-02T00:00:00Z,f036.txt:file:40:2020-01-02T00:00:00Z,f037.txt:file:40:2020-01-02T00:00:00Z,f038.txt:file:40:2020-01-02T00:00:00Z,f039.txt:file:40:2020-01-02T00:00:00Z,f040.txt:file:40:2020-01-02T00:00:00Z,f041.txt:file:40:2020-01-02T00:00:00Z,f042.txt:file:40:2020-01-02T00:00:00Z,f043.txt:file:40:2020-01-02T00:00:00Z,f044.txt:file:40:2020-01-02T00:00:00Z,f045.txt:file:40:2020-01-02T00:00:00Z,f046.txt:file:40:2020-01-02T00:00:00Z,f047.txt:file:40:2020-01-02T00:00:00Z,f048.txt:file:40:2020-01-02T00:00:00Z,f049.txt:file:40:2020-01-02T00:00:00Z,f050.txt:file:40:2020-01-02T00:00:00Z,f051.txt:file:40:2020-01-02T00:00:00Z,m-old.txt:file:41:2019-01-01T00:00:00Z,z-old.txt:file:41:2020-01-02T00:00:00Z
+stat / dir:52:2020-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:52
+stat /F dir:3030:2020-01-02T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F /F:dir:3030
+stat /F/f000.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f000.txt /F/f000.txt:file:40
+stat /F/f001.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f001.txt /F/f001.txt:file:40
+stat /F/f002.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f002.txt /F/f002.txt:file:40
+stat /F/f003.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f003.txt /F/f003.txt:file:40
+stat /F/f004.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f004.txt /F/f004.txt:file:40
+stat /F/f005.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f005.txt /F/f005.txt:file:40
+stat /F/f006.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f006.txt /F/f006.txt:file:40
+stat /F/f007.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f007.txt /F/f007.txt:file:40
+stat /F/f008.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f008.txt /F/f008.txt:file:40
+stat /F/f009.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f009.txt /F/f009.txt:file:40
+stat /F/f010.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f010.txt /F/f010.txt:file:40
+stat /F/f011.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f011.txt /F/f011.txt:file:40
+stat /F/f012.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f012.txt /F/f012.txt:file:40
+stat /F/f013.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f013.txt /F/f013.txt:file:40
+stat /F/f014.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f014.txt /F/f014.txt:file:40
+stat /F/f015.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f015.txt /F/f015.txt:file:40
+stat /F/f016.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f016.txt /F/f016.txt:file:40
+stat /F/f017.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f017.txt /F/f017.txt:file:40
+stat /F/f018.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f018.txt /F/f018.txt:file:40
+stat /F/f019.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f019.txt /F/f019.txt:file:40
+stat /F/f020.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f020.txt /F/f020.txt:file:40
+stat /F/f021.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f021.txt /F/f021.txt:file:40
+stat /F/f022.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f022.txt /F/f022.txt:file:40
+stat /F/f023.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f023.txt /F/f023.txt:file:40
+stat /F/f024.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f024.txt /F/f024.txt:file:40
+stat /F/f025.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f025.txt /F/f025.txt:file:40
+stat /F/f026.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f026.txt /F/f026.txt:file:40
+stat /F/f027.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f027.txt /F/f027.txt:file:40
+stat /F/f028.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f028.txt /F/f028.txt:file:40
+stat /F/f029.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f029.txt /F/f029.txt:file:40
+stat /F/f030.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f030.txt /F/f030.txt:file:40
+stat /F/f031.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f031.txt /F/f031.txt:file:40
+stat /F/f032.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f032.txt /F/f032.txt:file:40
+stat /F/f033.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f033.txt /F/f033.txt:file:40
+stat /F/f034.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f034.txt /F/f034.txt:file:40
+stat /F/f035.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f035.txt /F/f035.txt:file:40
+stat /F/f036.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f036.txt /F/f036.txt:file:40
+stat /F/f037.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f037.txt /F/f037.txt:file:40
+stat /F/f038.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f038.txt /F/f038.txt:file:40
+stat /F/f039.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f039.txt /F/f039.txt:file:40
+stat /F/f040.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f040.txt /F/f040.txt:file:40
+stat /F/f041.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f041.txt /F/f041.txt:file:40
+stat /F/f042.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f042.txt /F/f042.txt:file:40
+stat /F/f043.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f043.txt /F/f043.txt:file:40
+stat /F/f044.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f044.txt /F/f044.txt:file:40
+stat /F/f045.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f045.txt /F/f045.txt:file:40
+stat /F/f046.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f046.txt /F/f046.txt:file:40
+stat /F/f047.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f047.txt /F/f047.txt:file:40
+stat /F/f048.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f048.txt /F/f048.txt:file:40
+stat /F/f049.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f049.txt /F/f049.txt:file:40
+stat /F/f050.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f050.txt /F/f050.txt:file:40
+stat /F/f051.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f051.txt /F/f051.txt:file:40
+stat /F/f052.txt absent
+stat id of /F/f052.txt absent
+stat /F/f053.txt absent
+stat id of /F/f053.txt absent
+stat /F/f054.txt absent
+stat id of /F/f054.txt absent
+stat /F/f055.txt absent
+stat id of /F/f055.txt absent
+stat /F/f056.txt absent
+stat id of /F/f056.txt absent
+stat /F/f057.txt absent
+stat id of /F/f057.txt absent
+stat /F/f058.txt absent
+stat id of /F/f058.txt absent
+stat /F/f059.txt absent
+stat id of /F/f059.txt absent
+stat /F/f060.txt absent
+stat id of /F/f060.txt absent
+stat /F/f061.txt absent
+stat id of /F/f061.txt absent
+stat /F/f062.txt absent
+stat id of /F/f062.txt absent
+stat /F/f063.txt absent
+stat id of /F/f063.txt absent
+stat /F/f064.txt absent
+stat id of /F/f064.txt absent
+stat /F/f065.txt absent
+stat id of /F/f065.txt absent
+stat /F/f066.txt absent
+stat id of /F/f066.txt absent
+stat /F/f067.txt absent
+stat id of /F/f067.txt absent
+stat /F/f068.txt absent
+stat id of /F/f068.txt absent
+stat /F/f069.txt absent
+stat id of /F/f069.txt absent
+stat /F/f070.txt absent
+stat id of /F/f070.txt absent
+stat /F/f071.txt absent
+stat id of /F/f071.txt absent
+stat /F/f072.txt absent
+stat id of /F/f072.txt absent
+stat /F/f073.txt absent
+stat id of /F/f073.txt absent
+stat /F/f074.txt absent
+stat id of /F/f074.txt absent
+stat /F/f075.txt absent
+stat id of /F/f075.txt absent
+stat /F/f076.txt absent
+stat id of /F/f076.txt absent
+stat /F/f077.txt absent
+stat id of /F/f077.txt absent
+stat /F/f078.txt absent
+stat id of /F/f078.txt absent
+stat /F/f079.txt absent
+stat id of /F/f079.txt absent
+stat /F/f080.txt absent
+stat id of /F/f080.txt absent
+stat /F/f081.txt absent
+stat id of /F/f081.txt absent
+stat /F/f082.txt absent
+stat id of /F/f082.txt absent
+stat /F/f083.txt absent
+stat id of /F/f083.txt absent
+stat /F/f084.txt absent
+stat id of /F/f084.txt absent
+stat /F/f085.txt absent
+stat id of /F/f085.txt absent
+stat /F/f086.txt absent
+stat id of /F/f086.txt absent
+stat /F/f087.txt absent
+stat id of /F/f087.txt absent
+stat /F/f088.txt absent
+stat id of /F/f088.txt absent
+stat /F/f089.txt absent
+stat id of /F/f089.txt absent
+stat /F/f090.txt absent
+stat id of /F/f090.txt absent
+stat /F/f091.txt absent
+stat id of /F/f091.txt absent
+stat /F/f092.txt absent
+stat id of /F/f092.txt absent
+stat /F/f093.txt absent
+stat id of /F/f093.txt absent
+stat /F/f094.txt absent
+stat id of /F/f094.txt absent
+stat /F/f095.txt absent
+stat id of /F/f095.txt absent
+stat /F/f096.txt absent
+stat id of /F/f096.txt absent
+stat /F/f097.txt absent
+stat id of /F/f097.txt absent
+stat /F/f098.txt absent
+stat id of /F/f098.txt absent
+stat /F/f099.txt absent
+stat id of /F/f099.txt absent
+stat /F/f100.txt absent
+stat id of /F/f100.txt absent
+stat /F/f101.txt absent
+stat id of /F/f101.txt absent
+stat /F/f102.txt absent
+stat id of /F/f102.txt absent
+stat /F/f103.txt absent
+stat id of /F/f103.txt absent
+stat /F/f104.txt absent
+stat id of /F/f104.txt absent
+stat /F/f105.txt absent
+stat id of /F/f105.txt absent
+stat /F/f106.txt absent
+stat id of /F/f106.txt absent
+stat /F/f107.txt absent
+stat id of /F/f107.txt absent
+stat /F/f108.txt absent
+stat id of /F/f108.txt absent
+stat /F/f109.txt absent
+stat id of /F/f109.txt absent
+stat /F/f110.txt absent
+stat id of /F/f110.txt absent
+stat /F/f111.txt absent
+stat id of /F/f111.txt absent
+stat /F/f112.txt absent
+stat id of /F/f112.txt absent
+stat /F/f113.txt absent
+stat id of /F/f113.txt absent
+stat /F/f114.txt absent
+stat id of /F/f114.txt absent
+stat /F/f115.txt absent
+stat id of /F/f115.txt absent
+stat /F/f116.txt absent
+stat id of /F/f116.txt absent
+stat /F/f117.txt absent
+stat id of /F/f117.txt absent
+stat /F/f118.txt absent
+stat id of /F/f118.txt absent
+stat /F/f119.txt absent
+stat id of /F/f119.txt absent
+stat /F/f120.txt absent
+stat id of /F/f120.txt absent
+stat /F/f121.txt absent
+stat id of /F/f121.txt absent
+stat /F/f122.txt absent
+stat id of /F/f122.txt absent
+stat /F/f123.txt absent
+stat id of /F/f123.txt absent
+stat /F/f124.txt absent
+stat id of /F/f124.txt absent
+stat /F/f125.txt absent
+stat id of /F/f125.txt absent
+stat /F/f126.txt absent
+stat id of /F/f126.txt absent
+stat /F/f127.txt absent
+stat id of /F/f127.txt absent
+stat /F/f128.txt absent
+stat id of /F/f128.txt absent
+stat /F/f129.txt absent
+stat id of /F/f129.txt absent
+stat /F/a-old.txt file:41:2018-01-01T00:00:00Z:2018-01-01T00:00:00Z
+stat id of /F/a-old.txt /F/a-old.txt:file:41
+stat /F/z-old.txt file:41:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/z-old.txt /F/z-old.txt:file:41
+stat /F/m-old.txt file:41:2019-01-01T00:00:00Z:2019-01-01T00:00:00Z
+stat id of /F/m-old.txt /F/m-old.txt:file:41
+-- at 2020-01-02T00:00:01Z
+= same
+-- at 2020-01-02T23:59:59Z
+= same
+-- at 2020-01-03T00:00:00Z
+path / F:dir:4460:2020-01-03T00:00:00Z
+id of / F:dir:4460:2020-01-03T00:00:00Z
+path /F a-old.txt:file:41:2018-01-01T00:00:00Z,f000.txt:file:40:2020-01-01T00:00:00Z,f001.txt:file:40:2020-01-01T00:00:00Z,f002.txt:file:40:2020-01-01T00:00:00Z,f003.txt:file:40:2020-01-01T00:00:00Z,f004.txt:file:40:2020-01-01T00:00:00Z,f005.txt:file:40:2020-01-01T00:00:00Z,f006.txt:file:40:2020-01-01T00:00:00Z,f007.txt:file:40:2020-01-01T00:00:00Z,f008.txt:file:40:2020-01-01T00:00:00Z,f009.txt:file:40:2020-01-01T00:00:00Z,f010.txt:file:40:2020-01-01T00:00:00Z,f011.txt:file:40:2020-01-01T00:00:00Z,f012.txt:file:40:2020-01-01T00:00:00Z,f013.txt:file:40:2020-01-01T00:00:00Z,f014.txt:file:40:2020-01-01T00:00:00Z,f015.txt:file:40:2020-01-01T00:00:00Z,f016.txt:file:40:2020-01-01T00:00:00Z,f017.txt:file:40:2020-01-01T00:00:00Z,f018.txt:file:40:2020-01-01T00:00:00Z,f019.txt:file:40:2020-01-01T00:00:00Z,f020.txt:file:40:2020-01-01T00:00:00Z,f021.txt:file:40:2020-01-01T00:00:00Z,f022.txt:file:40:2020-01-01T00:00:00Z,f023.txt:file:40:2020-01-01T00:00:00Z,f024.txt:file:40:2020-01-01T00:00:00Z,f025.txt:file:40:2020-01-01T00:00:00Z,f026.txt:file:40:2020-01-02T00:00:00Z,f027.txt:file:40:2020-01-02T00:00:00Z,f028.txt:file:40:2020-01-02T00:00:00Z,f029.txt:file:40:2020-01-02T00:00:00Z,f030.txt:file:40:2020-01-02T00:00:00Z,f031.txt:file:40:2020-01-02T00:00:00Z,f032.txt:file:40:2020-01-02T00:00:00Z,f033.txt:file:40:2020-01-02T00:00:00Z,f034.txt:file:40:2020-01-02T00:00:00Z,f035.txt:file:40:2020-01-02T00:00:00Z,f036.txt:file:40:2020-01-02T00:00:00Z,f037.txt:file:40:2020-01-02T00:00:00Z,f038.txt:file:40:2020-01-02T00:00:00Z,f039.txt:file:40:2020-01-02T00:00:00Z,f040.txt:file:40:2020-01-02T00:00:00Z,f041.txt:file:40:2020-01-02T00:00:00Z,f042.txt:file:40:2020-01-02T00:00:00Z,f043.txt:file:40:2020-01-02T00:00:00Z,f044.txt:file:40:2020-01-02T00:00:00Z,f045.txt:file:40:2020-01-02T00:00:00Z,f046.txt:file:40:2020-01-02T00:00:00Z,f047.txt:file:40:2020-01-02T00:00:00Z,f048.txt:file:40:2020-01-02T00:00:00Z,f049.txt:file:40:2020-01-02T00:00:00Z,f050.txt:file:40:2020-01-02T00:00:00Z,f051.txt:file:40:2020-01-02T00:00:00Z,f052.txt:file:40:2020-01-03T00:00:00Z,f053.txt:file:40:2020-01-03T00:00:00Z,f054.txt:file:40:2020-01-03T00:00:00Z,f055.txt:file:40:2020-01-03T00:00:00Z,f056.txt:file:40:2020-01-03T00:00:00Z,f057.txt:file:40:2020-01-03T00:00:00Z,f058.txt:file:40:2020-01-03T00:00:00Z,f059.txt:file:40:2020-01-03T00:00:00Z,f060.txt:file:40:2020-01-03T00:00:00Z,f061.txt:file:40:2020-01-03T00:00:00Z,f062.txt:file:40:2020-01-03T00:00:00Z,f063.txt:file:40:2020-01-03T00:00:00Z,f064.txt:file:40:2020-01-03T00:00:00Z,f065.txt:file:40:2020-01-03T00:00:00Z,f066.txt:file:40:2020-01-03T00:00:00Z,f067.txt:file:40:2020-01-03T00:00:00Z,f068.txt:file:40:2020-01-03T00:00:00Z,f069.txt:file:40:2020-01-03T00:00:00Z,f070.txt:file:40:2020-01-03T00:00:00Z,f071.txt:file:40:2020-01-03T00:00:00Z,f072.txt:file:40:2020-01-03T00:00:00Z,f073.txt:file:40:2020-01-03T00:00:00Z,f074.txt:file:40:2020-01-03T00:00:00Z,f075.txt:file:40:2020-01-03T00:00:00Z,f076.txt:file:40:2020-01-03T00:00:00Z,f077.txt:file:40:2020-01-03T00:00:00Z,m-old.txt:file:41:2019-01-01T00:00:00Z,z-old.txt:file:41:2020-01-02T00:00:00Z
+id of /F a-old.txt:file:41:2018-01-01T00:00:00Z,f000.txt:file:40:2020-01-01T00:00:00Z,f001.txt:file:40:2020-01-01T00:00:00Z,f002.txt:file:40:2020-01-01T00:00:00Z,f003.txt:file:40:2020-01-01T00:00:00Z,f004.txt:file:40:2020-01-01T00:00:00Z,f005.txt:file:40:2020-01-01T00:00:00Z,f006.txt:file:40:2020-01-01T00:00:00Z,f007.txt:file:40:2020-01-01T00:00:00Z,f008.txt:file:40:2020-01-01T00:00:00Z,f009.txt:file:40:2020-01-01T00:00:00Z,f010.txt:file:40:2020-01-01T00:00:00Z,f011.txt:file:40:2020-01-01T00:00:00Z,f012.txt:file:40:2020-01-01T00:00:00Z,f013.txt:file:40:2020-01-01T00:00:00Z,f014.txt:file:40:2020-01-01T00:00:00Z,f015.txt:file:40:2020-01-01T00:00:00Z,f016.txt:file:40:2020-01-01T00:00:00Z,f017.txt:file:40:2020-01-01T00:00:00Z,f018.txt:file:40:2020-01-01T00:00:00Z,f019.txt:file:40:2020-01-01T00:00:00Z,f020.txt:file:40:2020-01-01T00:00:00Z,f021.txt:file:40:2020-01-01T00:00:00Z,f022.txt:file:40:2020-01-01T00:00:00Z,f023.txt:file:40:2020-01-01T00:00:00Z,f024.txt:file:40:2020-01-01T00:00:00Z,f025.txt:file:40:2020-01-01T00:00:00Z,f026.txt:file:40:2020-01-02T00:00:00Z,f027.txt:file:40:2020-01-02T00:00:00Z,f028.txt:file:40:2020-01-02T00:00:00Z,f029.txt:file:40:2020-01-02T00:00:00Z,f030.txt:file:40:2020-01-02T00:00:00Z,f031.txt:file:40:2020-01-02T00:00:00Z,f032.txt:file:40:2020-01-02T00:00:00Z,f033.txt:file:40:2020-01-02T00:00:00Z,f034.txt:file:40:2020-01-02T00:00:00Z,f035.txt:file:40:2020-01-02T00:00:00Z,f036.txt:file:40:2020-01-02T00:00:00Z,f037.txt:file:40:2020-01-02T00:00:00Z,f038.txt:file:40:2020-01-02T00:00:00Z,f039.txt:file:40:2020-01-02T00:00:00Z,f040.txt:file:40:2020-01-02T00:00:00Z,f041.txt:file:40:2020-01-02T00:00:00Z,f042.txt:file:40:2020-01-02T00:00:00Z,f043.txt:file:40:2020-01-02T00:00:00Z,f044.txt:file:40:2020-01-02T00:00:00Z,f045.txt:file:40:2020-01-02T00:00:00Z,f046.txt:file:40:2020-01-02T00:00:00Z,f047.txt:file:40:2020-01-02T00:00:00Z,f048.txt:file:40:2020-01-02T00:00:00Z,f049.txt:file:40:2020-01-02T00:00:00Z,f050.txt:file:40:2020-01-02T00:00:00Z,f051.txt:file:40:2020-01-02T00:00:00Z,f052.txt:file:40:2020-01-03T00:00:00Z,f053.txt:file:40:2020-01-03T00:00:00Z,f054.txt:file:40:2020-01-03T00:00:00Z,f055.txt:file:40:2020-01-03T00:00:00Z,f056.txt:file:40:2020-01-03T00:00:00Z,f057.txt:file:40:2020-01-03T00:00:00Z,f058.txt:file:40:2020-01-03T00:00:00Z,f059.txt:file:40:2020-01-03T00:00:00Z,f060.txt:file:40:2020-01-03T00:00:00Z,f061.txt:file:40:2020-01-03T00:00:00Z,f062.txt:file:40:2020-01-03T00:00:00Z,f063.txt:file:40:2020-01-03T00:00:00Z,f064.txt:file:40:2020-01-03T00:00:00Z,f065.txt:file:40:2020-01-03T00:00:00Z,f066.txt:file:40:2020-01-03T00:00:00Z,f067.txt:file:40:2020-01-03T00:00:00Z,f068.txt:file:40:2020-01-03T00:00:00Z,f069.txt:file:40:2020-01-03T00:00:00Z,f070.txt:file:40:2020-01-03T00:00:00Z,f071.txt:file:40:2020-01-03T00:00:00Z,f072.txt:file:40:2020-01-03T00:00:00Z,f073.txt:file:40:2020-01-03T00:00:00Z,f074.txt:file:40:2020-01-03T00:00:00Z,f075.txt:file:40:2020-01-03T00:00:00Z,f076.txt:file:40:2020-01-03T00:00:00Z,f077.txt:file:40:2020-01-03T00:00:00Z,m-old.txt:file:41:2019-01-01T00:00:00Z,z-old.txt:file:41:2020-01-02T00:00:00Z
+stat / dir:52:2020-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:52
+stat /F dir:4460:2020-01-03T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F /F:dir:4460
+stat /F/f000.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f000.txt /F/f000.txt:file:40
+stat /F/f001.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f001.txt /F/f001.txt:file:40
+stat /F/f002.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f002.txt /F/f002.txt:file:40
+stat /F/f003.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f003.txt /F/f003.txt:file:40
+stat /F/f004.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f004.txt /F/f004.txt:file:40
+stat /F/f005.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f005.txt /F/f005.txt:file:40
+stat /F/f006.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f006.txt /F/f006.txt:file:40
+stat /F/f007.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f007.txt /F/f007.txt:file:40
+stat /F/f008.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f008.txt /F/f008.txt:file:40
+stat /F/f009.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f009.txt /F/f009.txt:file:40
+stat /F/f010.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f010.txt /F/f010.txt:file:40
+stat /F/f011.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f011.txt /F/f011.txt:file:40
+stat /F/f012.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f012.txt /F/f012.txt:file:40
+stat /F/f013.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f013.txt /F/f013.txt:file:40
+stat /F/f014.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f014.txt /F/f014.txt:file:40
+stat /F/f015.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f015.txt /F/f015.txt:file:40
+stat /F/f016.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f016.txt /F/f016.txt:file:40
+stat /F/f017.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f017.txt /F/f017.txt:file:40
+stat /F/f018.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f018.txt /F/f018.txt:file:40
+stat /F/f019.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f019.txt /F/f019.txt:file:40
+stat /F/f020.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f020.txt /F/f020.txt:file:40
+stat /F/f021.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f021.txt /F/f021.txt:file:40
+stat /F/f022.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f022.txt /F/f022.txt:file:40
+stat /F/f023.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f023.txt /F/f023.txt:file:40
+stat /F/f024.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f024.txt /F/f024.txt:file:40
+stat /F/f025.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f025.txt /F/f025.txt:file:40
+stat /F/f026.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f026.txt /F/f026.txt:file:40
+stat /F/f027.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f027.txt /F/f027.txt:file:40
+stat /F/f028.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f028.txt /F/f028.txt:file:40
+stat /F/f029.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f029.txt /F/f029.txt:file:40
+stat /F/f030.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f030.txt /F/f030.txt:file:40
+stat /F/f031.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f031.txt /F/f031.txt:file:40
+stat /F/f032.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f032.txt /F/f032.txt:file:40
+stat /F/f033.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f033.txt /F/f033.txt:file:40
+stat /F/f034.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f034.txt /F/f034.txt:file:40
+stat /F/f035.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f035.txt /F/f035.txt:file:40
+stat /F/f036.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f036.txt /F/f036.txt:file:40
+stat /F/f037.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f037.txt /F/f037.txt:file:40
+stat /F/f038.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f038.txt /F/f038.txt:file:40
+stat /F/f039.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f039.txt /F/f039.txt:file:40
+stat /F/f040.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f040.txt /F/f040.txt:file:40
+stat /F/f041.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f041.txt /F/f041.txt:file:40
+stat /F/f042.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f042.txt /F/f042.txt:file:40
+stat /F/f043.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f043.txt /F/f043.txt:file:40
+stat /F/f044.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f044.txt /F/f044.txt:file:40
+stat /F/f045.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f045.txt /F/f045.txt:file:40
+stat /F/f046.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f046.txt /F/f046.txt:file:40
+stat /F/f047.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f047.txt /F/f047.txt:file:40
+stat /F/f048.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f048.txt /F/f048.txt:file:40
+stat /F/f049.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f049.txt /F/f049.txt:file:40
+stat /F/f050.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f050.txt /F/f050.txt:file:40
+stat /F/f051.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f051.txt /F/f051.txt:file:40
+stat /F/f052.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f052.txt /F/f052.txt:file:40
+stat /F/f053.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f053.txt /F/f053.txt:file:40
+stat /F/f054.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f054.txt /F/f054.txt:file:40
+stat /F/f055.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f055.txt /F/f055.txt:file:40
+stat /F/f056.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f056.txt /F/f056.txt:file:40
+stat /F/f057.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f057.txt /F/f057.txt:file:40
+stat /F/f058.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f058.txt /F/f058.txt:file:40
+stat /F/f059.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f059.txt /F/f059.txt:file:40
+stat /F/f060.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f060.txt /F/f060.txt:file:40
+stat /F/f061.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f061.txt /F/f061.txt:file:40
+stat /F/f062.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f062.txt /F/f062.txt:file:40
+stat /F/f063.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f063.txt /F/f063.txt:file:40
+stat /F/f064.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f064.txt /F/f064.txt:file:40
+stat /F/f065.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f065.txt /F/f065.txt:file:40
+stat /F/f066.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f066.txt /F/f066.txt:file:40
+stat /F/f067.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f067.txt /F/f067.txt:file:40
+stat /F/f068.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f068.txt /F/f068.txt:file:40
+stat /F/f069.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f069.txt /F/f069.txt:file:40
+stat /F/f070.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f070.txt /F/f070.txt:file:40
+stat /F/f071.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f071.txt /F/f071.txt:file:40
+stat /F/f072.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f072.txt /F/f072.txt:file:40
+stat /F/f073.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f073.txt /F/f073.txt:file:40
+stat /F/f074.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f074.txt /F/f074.txt:file:40
+stat /F/f075.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f075.txt /F/f075.txt:file:40
+stat /F/f076.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f076.txt /F/f076.txt:file:40
+stat /F/f077.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f077.txt /F/f077.txt:file:40
+stat /F/f078.txt absent
+stat id of /F/f078.txt absent
+stat /F/f079.txt absent
+stat id of /F/f079.txt absent
+stat /F/f080.txt absent
+stat id of /F/f080.txt absent
+stat /F/f081.txt absent
+stat id of /F/f081.txt absent
+stat /F/f082.txt absent
+stat id of /F/f082.txt absent
+stat /F/f083.txt absent
+stat id of /F/f083.txt absent
+stat /F/f084.txt absent
+stat id of /F/f084.txt absent
+stat /F/f085.txt absent
+stat id of /F/f085.txt absent
+stat /F/f086.txt absent
+stat id of /F/f086.txt absent
+stat /F/f087.txt absent
+stat id of /F/f087.txt absent
+stat /F/f088.txt absent
+stat id of /F/f088.txt absent
+stat /F/f089.txt absent
+stat id of /F/f089.txt absent
+stat /F/f090.txt absent
+stat id of /F/f090.txt absent
+stat /F/f091.txt absent
+stat id of /F/f091.txt absent
+stat /F/f092.txt absent
+stat id of /F/f092.txt absent
+stat /F/f093.txt absent
+stat id of /F/f093.txt absent
+stat /F/f094.txt absent
+stat id of /F/f094.txt absent
+stat /F/f095.txt absent
+stat id of /F/f095.txt absent
+stat /F/f096.txt absent
+stat id of /F/f096.txt absent
+stat /F/f097.txt absent
+stat id of /F/f097.txt absent
+stat /F/f098.txt absent
+stat id of /F/f098.txt absent
+stat /F/f099.txt absent
+stat id of /F/f099.txt absent
+stat /F/f100.txt absent
+stat id of /F/f100.txt absent
+stat /F/f101.txt absent
+stat id of /F/f101.txt absent
+stat /F/f102.txt absent
+stat id of /F/f102.txt absent
+stat /F/f103.txt absent
+stat id of /F/f103.txt absent
+stat /F/f104.txt absent
+stat id of /F/f104.txt absent
+stat /F/f105.txt absent
+stat id of /F/f105.txt absent
+stat /F/f106.txt absent
+stat id of /F/f106.txt absent
+stat /F/f107.txt absent
+stat id of /F/f107.txt absent
+stat /F/f108.txt absent
+stat id of /F/f108.txt absent
+stat /F/f109.txt absent
+stat id of /F/f109.txt absent
+stat /F/f110.txt absent
+stat id of /F/f110.txt absent
+stat /F/f111.txt absent
+stat id of /F/f111.txt absent
+stat /F/f112.txt absent
+stat id of /F/f112.txt absent
+stat /F/f113.txt absent
+stat id of /F/f113.txt absent
+stat /F/f114.txt absent
+stat id of /F/f114.txt absent
+stat /F/f115.txt absent
+stat id of /F/f115.txt absent
+stat /F/f116.txt absent
+stat id of /F/f116.txt absent
+stat /F/f117.txt absent
+stat id of /F/f117.txt absent
+stat /F/f118.txt absent
+stat id of /F/f118.txt absent
+stat /F/f119.txt absent
+stat id of /F/f119.txt absent
+stat /F/f120.txt absent
+stat id of /F/f120.txt absent
+stat /F/f121.txt absent
+stat id of /F/f121.txt absent
+stat /F/f122.txt absent
+stat id of /F/f122.txt absent
+stat /F/f123.txt absent
+stat id of /F/f123.txt absent
+stat /F/f124.txt absent
+stat id of /F/f124.txt absent
+stat /F/f125.txt absent
+stat id of /F/f125.txt absent
+stat /F/f126.txt absent
+stat id of /F/f126.txt absent
+stat /F/f127.txt absent
+stat id of /F/f127.txt absent
+stat /F/f128.txt absent
+stat id of /F/f128.txt absent
+stat /F/f129.txt absent
+stat id of /F/f129.txt absent
+stat /F/a-old.txt file:41:2018-01-01T00:00:00Z:2018-01-01T00:00:00Z
+stat id of /F/a-old.txt /F/a-old.txt:file:41
+stat /F/z-old.txt file:41:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/z-old.txt /F/z-old.txt:file:41
+stat /F/m-old.txt file:41:2019-01-01T00:00:00Z:2019-01-01T00:00:00Z
+stat id of /F/m-old.txt /F/m-old.txt:file:41
+-- at 2020-01-03T00:00:01Z
+= same
+-- at 2020-01-03T23:59:59Z
+= same
+-- at 2020-01-04T00:00:00Z
+path / F:dir:5890:2020-01-04T00:00:00Z
+id of / F:dir:5890:2020-01-04T00:00:00Z
+path /F a-old.txt:file:41:2018-01-01T00:00:00Z,f000.txt:file:40:2020-01-01T00:00:00Z,f001.txt:file:40:2020-01-01T00:00:00Z,f002.txt:file:40:2020-01-01T00:00:00Z,f003.txt:file:40:2020-01-01T00:00:00Z,f004.txt:file:40:2020-01-01T00:00:00Z,f005.txt:file:40:2020-01-01T00:00:00Z,f006.txt:file:40:2020-01-01T00:00:00Z,f007.txt:file:40:2020-01-01T00:00:00Z,f008.txt:file:40:2020-01-01T00:00:00Z,f009.txt:file:40:2020-01-01T00:00:00Z,f010.txt:file:40:2020-01-01T00:00:00Z,f011.txt:file:40:2020-01-01T00:00:00Z,f012.txt:file:40:2020-01-01T00:00:00Z,f013.txt:file:40:2020-01-01T00:00:00Z,f014.txt:file:40:2020-01-01T00:00:00Z,f015.txt:file:40:2020-01-01T00:00:00Z,f016.txt:file:40:2020-01-01T00:00:00Z,f017.txt:file:40:2020-01-01T00:00:00Z,f018.txt:file:40:2020-01-01T00:00:00Z,f019.txt:file:40:2020-01-01T00:00:00Z,f020.txt:file:40:2020-01-01T00:00:00Z,f021.txt:file:40:2020-01-01T00:00:00Z,f022.txt:file:40:2020-01-01T00:00:00Z,f023.txt:file:40:2020-01-01T00:00:00Z,f024.txt:file:40:2020-01-01T00:00:00Z,f025.txt:file:40:2020-01-01T00:00:00Z,f026.txt:file:40:2020-01-02T00:00:00Z,f027.txt:file:40:2020-01-02T00:00:00Z,f028.txt:file:40:2020-01-02T00:00:00Z,f029.txt:file:40:2020-01-02T00:00:00Z,f030.txt:file:40:2020-01-02T00:00:00Z,f031.txt:file:40:2020-01-02T00:00:00Z,f032.txt:file:40:2020-01-02T00:00:00Z,f033.txt:file:40:2020-01-02T00:00:00Z,f034.txt:file:40:2020-01-02T00:00:00Z,f035.txt:file:40:2020-01-02T00:00:00Z,f036.txt:file:40:2020-01-02T00:00:00Z,f037.txt:file:40:2020-01-02T00:00:00Z,f038.txt:file:40:2020-01-02T00:00:00Z,f039.txt:file:40:2020-01-02T00:00:00Z,f040.txt:file:40:2020-01-02T00:00:00Z,f041.txt:file:40:2020-01-02T00:00:00Z,f042.txt:file:40:2020-01-02T00:00:00Z,f043.txt:file:40:2020-01-02T00:00:00Z,f044.txt:file:40:2020-01-02T00:00:00Z,f045.txt:file:40:2020-01-02T00:00:00Z,f046.txt:file:40:2020-01-02T00:00:00Z,f047.txt:file:40:2020-01-02T00:00:00Z,f048.txt:file:40:2020-01-02T00:00:00Z,f049.txt:file:40:2020-01-02T00:00:00Z,f050.txt:file:40:2020-01-02T00:00:00Z,f051.txt:file:40:2020-01-02T00:00:00Z,f052.txt:file:40:2020-01-03T00:00:00Z,f053.txt:file:40:2020-01-03T00:00:00Z,f054.txt:file:40:2020-01-03T00:00:00Z,f055.txt:file:40:2020-01-03T00:00:00Z,f056.txt:file:40:2020-01-03T00:00:00Z,f057.txt:file:40:2020-01-03T00:00:00Z,f058.txt:file:40:2020-01-03T00:00:00Z,f059.txt:file:40:2020-01-03T00:00:00Z,f060.txt:file:40:2020-01-03T00:00:00Z,f061.txt:file:40:2020-01-03T00:00:00Z,f062.txt:file:40:2020-01-03T00:00:00Z,f063.txt:file:40:2020-01-03T00:00:00Z,f064.txt:file:40:2020-01-03T00:00:00Z,f065.txt:file:40:2020-01-03T00:00:00Z,f066.txt:file:40:2020-01-03T00:00:00Z,f067.txt:file:40:2020-01-03T00:00:00Z,f068.txt:file:40:2020-01-03T00:00:00Z,f069.txt:file:40:2020-01-03T00:00:00Z,f070.txt:file:40:2020-01-03T00:00:00Z,f071.txt:file:40:2020-01-03T00:00:00Z,f072.txt:file:40:2020-01-03T00:00:00Z,f073.txt:file:40:2020-01-03T00:00:00Z,f074.txt:file:40:2020-01-03T00:00:00Z,f075.txt:file:40:2020-01-03T00:00:00Z,f076.txt:file:40:2020-01-03T00:00:00Z,f077.txt:file:40:2020-01-03T00:00:00Z,f078.txt:file:40:2020-01-04T00:00:00Z,f079.txt:file:40:2020-01-04T00:00:00Z,f080.txt:file:40:2020-01-04T00:00:00Z,f081.txt:file:40:2020-01-04T00:00:00Z,f082.txt:file:40:2020-01-04T00:00:00Z,f083.txt:file:40:2020-01-04T00:00:00Z,f084.txt:file:40:2020-01-04T00:00:00Z,f085.txt:file:40:2020-01-04T00:00:00Z,f086.txt:file:40:2020-01-04T00:00:00Z,f087.txt:file:40:2020-01-04T00:00:00Z,f088.txt:file:40:2020-01-04T00:00:00Z,f089.txt:file:40:2020-01-04T00:00:00Z,f090.txt:file:40:2020-01-04T00:00:00Z,f091.txt:file:40:2020-01-04T00:00:00Z,f092.txt:file:40:2020-01-04T00:00:00Z,f093.txt:file:40:2020-01-04T00:00:00Z,f094.txt:file:40:2020-01-04T00:00:00Z,f095.txt:file:40:2020-01-04T00:00:00Z,f096.txt:file:40:2020-01-04T00:00:00Z,f097.txt:file:40:2020-01-04T00:00:00Z,f098.txt:file:40:2020-01-04T00:00:00Z,f099.txt:file:40:2020-01-04T00:00:00Z,f100.txt:file:40:2020-01-04T00:00:00Z,f101.txt:file:40:2020-01-04T00:00:00Z,f102.txt:file:40:2020-01-04T00:00:00Z,f103.txt:file:40:2020-01-04T00:00:00Z,m-old.txt:file:41:2019-01-01T00:00:00Z,z-old.txt:file:41:2020-01-02T00:00:00Z
+id of /F a-old.txt:file:41:2018-01-01T00:00:00Z,f000.txt:file:40:2020-01-01T00:00:00Z,f001.txt:file:40:2020-01-01T00:00:00Z,f002.txt:file:40:2020-01-01T00:00:00Z,f003.txt:file:40:2020-01-01T00:00:00Z,f004.txt:file:40:2020-01-01T00:00:00Z,f005.txt:file:40:2020-01-01T00:00:00Z,f006.txt:file:40:2020-01-01T00:00:00Z,f007.txt:file:40:2020-01-01T00:00:00Z,f008.txt:file:40:2020-01-01T00:00:00Z,f009.txt:file:40:2020-01-01T00:00:00Z,f010.txt:file:40:2020-01-01T00:00:00Z,f011.txt:file:40:2020-01-01T00:00:00Z,f012.txt:file:40:2020-01-01T00:00:00Z,f013.txt:file:40:2020-01-01T00:00:00Z,f014.txt:file:40:2020-01-01T00:00:00Z,f015.txt:file:40:2020-01-01T00:00:00Z,f016.txt:file:40:2020-01-01T00:00:00Z,f017.txt:file:40:2020-01-01T00:00:00Z,f018.txt:file:40:2020-01-01T00:00:00Z,f019.txt:file:40:2020-01-01T00:00:00Z,f020.txt:file:40:2020-01-01T00:00:00Z,f021.txt:file:40:2020-01-01T00:00:00Z,f022.txt:file:40:2020-01-01T00:00:00Z,f023.txt:file:40:2020-01-01T00:00:00Z,f024.txt:file:40:2020-01-01T00:00:00Z,f025.txt:file:40:2020-01-01T00:00:00Z,f026.txt:file:40:2020-01-02T00:00:00Z,f027.txt:file:40:2020-01-02T00:00:00Z,f028.txt:file:40:2020-01-02T00:00:00Z,f029.txt:file:40:2020-01-02T00:00:00Z,f030.txt:file:40:2020-01-02T00:00:00Z,f031.txt:file:40:2020-01-02T00:00:00Z,f032.txt:file:40:2020-01-02T00:00:00Z,f033.txt:file:40:2020-01-02T00:00:00Z,f034.txt:file:40:2020-01-02T00:00:00Z,f035.txt:file:40:2020-01-02T00:00:00Z,f036.txt:file:40:2020-01-02T00:00:00Z,f037.txt:file:40:2020-01-02T00:00:00Z,f038.txt:file:40:2020-01-02T00:00:00Z,f039.txt:file:40:2020-01-02T00:00:00Z,f040.txt:file:40:2020-01-02T00:00:00Z,f041.txt:file:40:2020-01-02T00:00:00Z,f042.txt:file:40:2020-01-02T00:00:00Z,f043.txt:file:40:2020-01-02T00:00:00Z,f044.txt:file:40:2020-01-02T00:00:00Z,f045.txt:file:40:2020-01-02T00:00:00Z,f046.txt:file:40:2020-01-02T00:00:00Z,f047.txt:file:40:2020-01-02T00:00:00Z,f048.txt:file:40:2020-01-02T00:00:00Z,f049.txt:file:40:2020-01-02T00:00:00Z,f050.txt:file:40:2020-01-02T00:00:00Z,f051.txt:file:40:2020-01-02T00:00:00Z,f052.txt:file:40:2020-01-03T00:00:00Z,f053.txt:file:40:2020-01-03T00:00:00Z,f054.txt:file:40:2020-01-03T00:00:00Z,f055.txt:file:40:2020-01-03T00:00:00Z,f056.txt:file:40:2020-01-03T00:00:00Z,f057.txt:file:40:2020-01-03T00:00:00Z,f058.txt:file:40:2020-01-03T00:00:00Z,f059.txt:file:40:2020-01-03T00:00:00Z,f060.txt:file:40:2020-01-03T00:00:00Z,f061.txt:file:40:2020-01-03T00:00:00Z,f062.txt:file:40:2020-01-03T00:00:00Z,f063.txt:file:40:2020-01-03T00:00:00Z,f064.txt:file:40:2020-01-03T00:00:00Z,f065.txt:file:40:2020-01-03T00:00:00Z,f066.txt:file:40:2020-01-03T00:00:00Z,f067.txt:file:40:2020-01-03T00:00:00Z,f068.txt:file:40:2020-01-03T00:00:00Z,f069.txt:file:40:2020-01-03T00:00:00Z,f070.txt:file:40:2020-01-03T00:00:00Z,f071.txt:file:40:2020-01-03T00:00:00Z,f072.txt:file:40:2020-01-03T00:00:00Z,f073.txt:file:40:2020-01-03T00:00:00Z,f074.txt:file:40:2020-01-03T00:00:00Z,f075.txt:file:40:2020-01-03T00:00:00Z,f076.txt:file:40:2020-01-03T00:00:00Z,f077.txt:file:40:2020-01-03T00:00:00Z,f078.txt:file:40:2020-01-04T00:00:00Z,f079.txt:file:40:2020-01-04T00:00:00Z,f080.txt:file:40:2020-01-04T00:00:00Z,f081.txt:file:40:2020-01-04T00:00:00Z,f082.txt:file:40:2020-01-04T00:00:00Z,f083.txt:file:40:2020-01-04T00:00:00Z,f084.txt:file:40:2020-01-04T00:00:00Z,f085.txt:file:40:2020-01-04T00:00:00Z,f086.txt:file:40:2020-01-04T00:00:00Z,f087.txt:file:40:2020-01-04T00:00:00Z,f088.txt:file:40:2020-01-04T00:00:00Z,f089.txt:file:40:2020-01-04T00:00:00Z,f090.txt:file:40:2020-01-04T00:00:00Z,f091.txt:file:40:2020-01-04T00:00:00Z,f092.txt:file:40:2020-01-04T00:00:00Z,f093.txt:file:40:2020-01-04T00:00:00Z,f094.txt:file:40:2020-01-04T00:00:00Z,f095.txt:file:40:2020-01-04T00:00:00Z,f096.txt:file:40:2020-01-04T00:00:00Z,f097.txt:file:40:2020-01-04T00:00:00Z,f098.txt:file:40:2020-01-04T00:00:00Z,f099.txt:file:40:2020-01-04T00:00:00Z,f100.txt:file:40:2020-01-04T00:00:00Z,f101.txt:file:40:2020-01-04T00:00:00Z,f102.txt:file:40:2020-01-04T00:00:00Z,f103.txt:file:40:2020-01-04T00:00:00Z,m-old.txt:file:41:2019-01-01T00:00:00Z,z-old.txt:file:41:2020-01-02T00:00:00Z
+stat / dir:52:2020-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:52
+stat /F dir:5890:2020-01-04T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F /F:dir:5890
+stat /F/f000.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f000.txt /F/f000.txt:file:40
+stat /F/f001.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f001.txt /F/f001.txt:file:40
+stat /F/f002.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f002.txt /F/f002.txt:file:40
+stat /F/f003.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f003.txt /F/f003.txt:file:40
+stat /F/f004.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f004.txt /F/f004.txt:file:40
+stat /F/f005.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f005.txt /F/f005.txt:file:40
+stat /F/f006.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f006.txt /F/f006.txt:file:40
+stat /F/f007.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f007.txt /F/f007.txt:file:40
+stat /F/f008.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f008.txt /F/f008.txt:file:40
+stat /F/f009.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f009.txt /F/f009.txt:file:40
+stat /F/f010.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f010.txt /F/f010.txt:file:40
+stat /F/f011.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f011.txt /F/f011.txt:file:40
+stat /F/f012.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f012.txt /F/f012.txt:file:40
+stat /F/f013.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f013.txt /F/f013.txt:file:40
+stat /F/f014.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f014.txt /F/f014.txt:file:40
+stat /F/f015.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f015.txt /F/f015.txt:file:40
+stat /F/f016.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f016.txt /F/f016.txt:file:40
+stat /F/f017.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f017.txt /F/f017.txt:file:40
+stat /F/f018.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f018.txt /F/f018.txt:file:40
+stat /F/f019.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f019.txt /F/f019.txt:file:40
+stat /F/f020.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f020.txt /F/f020.txt:file:40
+stat /F/f021.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f021.txt /F/f021.txt:file:40
+stat /F/f022.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f022.txt /F/f022.txt:file:40
+stat /F/f023.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f023.txt /F/f023.txt:file:40
+stat /F/f024.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f024.txt /F/f024.txt:file:40
+stat /F/f025.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f025.txt /F/f025.txt:file:40
+stat /F/f026.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f026.txt /F/f026.txt:file:40
+stat /F/f027.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f027.txt /F/f027.txt:file:40
+stat /F/f028.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f028.txt /F/f028.txt:file:40
+stat /F/f029.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f029.txt /F/f029.txt:file:40
+stat /F/f030.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f030.txt /F/f030.txt:file:40
+stat /F/f031.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f031.txt /F/f031.txt:file:40
+stat /F/f032.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f032.txt /F/f032.txt:file:40
+stat /F/f033.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f033.txt /F/f033.txt:file:40
+stat /F/f034.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f034.txt /F/f034.txt:file:40
+stat /F/f035.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f035.txt /F/f035.txt:file:40
+stat /F/f036.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f036.txt /F/f036.txt:file:40
+stat /F/f037.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f037.txt /F/f037.txt:file:40
+stat /F/f038.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f038.txt /F/f038.txt:file:40
+stat /F/f039.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f039.txt /F/f039.txt:file:40
+stat /F/f040.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f040.txt /F/f040.txt:file:40
+stat /F/f041.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f041.txt /F/f041.txt:file:40
+stat /F/f042.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f042.txt /F/f042.txt:file:40
+stat /F/f043.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f043.txt /F/f043.txt:file:40
+stat /F/f044.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f044.txt /F/f044.txt:file:40
+stat /F/f045.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f045.txt /F/f045.txt:file:40
+stat /F/f046.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f046.txt /F/f046.txt:file:40
+stat /F/f047.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f047.txt /F/f047.txt:file:40
+stat /F/f048.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f048.txt /F/f048.txt:file:40
+stat /F/f049.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f049.txt /F/f049.txt:file:40
+stat /F/f050.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f050.txt /F/f050.txt:file:40
+stat /F/f051.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f051.txt /F/f051.txt:file:40
+stat /F/f052.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f052.txt /F/f052.txt:file:40
+stat /F/f053.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f053.txt /F/f053.txt:file:40
+stat /F/f054.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f054.txt /F/f054.txt:file:40
+stat /F/f055.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f055.txt /F/f055.txt:file:40
+stat /F/f056.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f056.txt /F/f056.txt:file:40
+stat /F/f057.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f057.txt /F/f057.txt:file:40
+stat /F/f058.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f058.txt /F/f058.txt:file:40
+stat /F/f059.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f059.txt /F/f059.txt:file:40
+stat /F/f060.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f060.txt /F/f060.txt:file:40
+stat /F/f061.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f061.txt /F/f061.txt:file:40
+stat /F/f062.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f062.txt /F/f062.txt:file:40
+stat /F/f063.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f063.txt /F/f063.txt:file:40
+stat /F/f064.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f064.txt /F/f064.txt:file:40
+stat /F/f065.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f065.txt /F/f065.txt:file:40
+stat /F/f066.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f066.txt /F/f066.txt:file:40
+stat /F/f067.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f067.txt /F/f067.txt:file:40
+stat /F/f068.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f068.txt /F/f068.txt:file:40
+stat /F/f069.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f069.txt /F/f069.txt:file:40
+stat /F/f070.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f070.txt /F/f070.txt:file:40
+stat /F/f071.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f071.txt /F/f071.txt:file:40
+stat /F/f072.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f072.txt /F/f072.txt:file:40
+stat /F/f073.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f073.txt /F/f073.txt:file:40
+stat /F/f074.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f074.txt /F/f074.txt:file:40
+stat /F/f075.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f075.txt /F/f075.txt:file:40
+stat /F/f076.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f076.txt /F/f076.txt:file:40
+stat /F/f077.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f077.txt /F/f077.txt:file:40
+stat /F/f078.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f078.txt /F/f078.txt:file:40
+stat /F/f079.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f079.txt /F/f079.txt:file:40
+stat /F/f080.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f080.txt /F/f080.txt:file:40
+stat /F/f081.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f081.txt /F/f081.txt:file:40
+stat /F/f082.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f082.txt /F/f082.txt:file:40
+stat /F/f083.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f083.txt /F/f083.txt:file:40
+stat /F/f084.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f084.txt /F/f084.txt:file:40
+stat /F/f085.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f085.txt /F/f085.txt:file:40
+stat /F/f086.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f086.txt /F/f086.txt:file:40
+stat /F/f087.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f087.txt /F/f087.txt:file:40
+stat /F/f088.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f088.txt /F/f088.txt:file:40
+stat /F/f089.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f089.txt /F/f089.txt:file:40
+stat /F/f090.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f090.txt /F/f090.txt:file:40
+stat /F/f091.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f091.txt /F/f091.txt:file:40
+stat /F/f092.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f092.txt /F/f092.txt:file:40
+stat /F/f093.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f093.txt /F/f093.txt:file:40
+stat /F/f094.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f094.txt /F/f094.txt:file:40
+stat /F/f095.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f095.txt /F/f095.txt:file:40
+stat /F/f096.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f096.txt /F/f096.txt:file:40
+stat /F/f097.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f097.txt /F/f097.txt:file:40
+stat /F/f098.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f098.txt /F/f098.txt:file:40
+stat /F/f099.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f099.txt /F/f099.txt:file:40
+stat /F/f100.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f100.txt /F/f100.txt:file:40
+stat /F/f101.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f101.txt /F/f101.txt:file:40
+stat /F/f102.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f102.txt /F/f102.txt:file:40
+stat /F/f103.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f103.txt /F/f103.txt:file:40
+stat /F/f104.txt absent
+stat id of /F/f104.txt absent
+stat /F/f105.txt absent
+stat id of /F/f105.txt absent
+stat /F/f106.txt absent
+stat id of /F/f106.txt absent
+stat /F/f107.txt absent
+stat id of /F/f107.txt absent
+stat /F/f108.txt absent
+stat id of /F/f108.txt absent
+stat /F/f109.txt absent
+stat id of /F/f109.txt absent
+stat /F/f110.txt absent
+stat id of /F/f110.txt absent
+stat /F/f111.txt absent
+stat id of /F/f111.txt absent
+stat /F/f112.txt absent
+stat id of /F/f112.txt absent
+stat /F/f113.txt absent
+stat id of /F/f113.txt absent
+stat /F/f114.txt absent
+stat id of /F/f114.txt absent
+stat /F/f115.txt absent
+stat id of /F/f115.txt absent
+stat /F/f116.txt absent
+stat id of /F/f116.txt absent
+stat /F/f117.txt absent
+stat id of /F/f117.txt absent
+stat /F/f118.txt absent
+stat id of /F/f118.txt absent
+stat /F/f119.txt absent
+stat id of /F/f119.txt absent
+stat /F/f120.txt absent
+stat id of /F/f120.txt absent
+stat /F/f121.txt absent
+stat id of /F/f121.txt absent
+stat /F/f122.txt absent
+stat id of /F/f122.txt absent
+stat /F/f123.txt absent
+stat id of /F/f123.txt absent
+stat /F/f124.txt absent
+stat id of /F/f124.txt absent
+stat /F/f125.txt absent
+stat id of /F/f125.txt absent
+stat /F/f126.txt absent
+stat id of /F/f126.txt absent
+stat /F/f127.txt absent
+stat id of /F/f127.txt absent
+stat /F/f128.txt absent
+stat id of /F/f128.txt absent
+stat /F/f129.txt absent
+stat id of /F/f129.txt absent
+stat /F/a-old.txt file:41:2018-01-01T00:00:00Z:2018-01-01T00:00:00Z
+stat id of /F/a-old.txt /F/a-old.txt:file:41
+stat /F/z-old.txt file:41:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/z-old.txt /F/z-old.txt:file:41
+stat /F/m-old.txt file:41:2019-01-01T00:00:00Z:2019-01-01T00:00:00Z
+stat id of /F/m-old.txt /F/m-old.txt:file:41
+-- at 2020-01-04T00:00:01Z
+= same
+-- at 2020-01-04T23:59:59Z
+= same
+-- at 2020-01-05T00:00:00Z
+path / F:dir:104:2020-01-05T00:00:00Z
+id of / F:dir:104:2020-01-05T00:00:00Z
+path /F a-old.txt:file:41:2018-01-01T00:00:00Z,f000.txt:file:40:2020-01-01T00:00:00Z,f001.txt:file:40:2020-01-01T00:00:00Z,f002.txt:file:40:2020-01-01T00:00:00Z,f003.txt:file:40:2020-01-01T00:00:00Z,f004.txt:file:40:2020-01-01T00:00:00Z,f005.txt:file:40:2020-01-01T00:00:00Z,f006.txt:file:40:2020-01-01T00:00:00Z,f007.txt:file:40:2020-01-01T00:00:00Z,f008.txt:file:40:2020-01-01T00:00:00Z,f009.txt:file:40:2020-01-01T00:00:00Z,f010.txt:file:40:2020-01-01T00:00:00Z,f011.txt:file:40:2020-01-01T00:00:00Z,f012.txt:file:40:2020-01-01T00:00:00Z,f013.txt:file:40:2020-01-01T00:00:00Z,f014.txt:file:40:2020-01-01T00:00:00Z,f015.txt:file:40:2020-01-01T00:00:00Z,f016.txt:file:40:2020-01-01T00:00:00Z,f017.txt:file:40:2020-01-01T00:00:00Z,f018.txt:file:40:2020-01-01T00:00:00Z,f019.txt:file:40:2020-01-01T00:00:00Z,f020.txt:file:40:2020-01-01T00:00:00Z,f021.txt:file:40:2020-01-01T00:00:00Z,f022.txt:file:40:2020-01-01T00:00:00Z,f023.txt:file:40:2020-01-01T00:00:00Z,f024.txt:file:40:2020-01-01T00:00:00Z,f025.txt:file:40:2020-01-01T00:00:00Z,f026.txt:file:40:2020-01-02T00:00:00Z,f027.txt:file:40:2020-01-02T00:00:00Z,f028.txt:file:40:2020-01-02T00:00:00Z,f029.txt:file:40:2020-01-02T00:00:00Z,f030.txt:file:40:2020-01-02T00:00:00Z,f031.txt:file:40:2020-01-02T00:00:00Z,f032.txt:file:40:2020-01-02T00:00:00Z,f033.txt:file:40:2020-01-02T00:00:00Z,f034.txt:file:40:2020-01-02T00:00:00Z,f035.txt:file:40:2020-01-02T00:00:00Z,f036.txt:file:40:2020-01-02T00:00:00Z,f037.txt:file:40:2020-01-02T00:00:00Z,f038.txt:file:40:2020-01-02T00:00:00Z,f039.txt:file:40:2020-01-02T00:00:00Z,f040.txt:file:40:2020-01-02T00:00:00Z,f041.txt:file:40:2020-01-02T00:00:00Z,f042.txt:file:40:2020-01-02T00:00:00Z,f043.txt:file:40:2020-01-02T00:00:00Z,f044.txt:file:40:2020-01-02T00:00:00Z,f045.txt:file:40:2020-01-02T00:00:00Z,f046.txt:file:40:2020-01-02T00:00:00Z,f047.txt:file:40:2020-01-02T00:00:00Z,f048.txt:file:40:2020-01-02T00:00:00Z,f049.txt:file:40:2020-01-02T00:00:00Z,f050.txt:file:40:2020-01-02T00:00:00Z,f051.txt:file:40:2020-01-02T00:00:00Z,f052.txt:file:40:2020-01-03T00:00:00Z,f053.txt:file:40:2020-01-03T00:00:00Z,f054.txt:file:40:2020-01-03T00:00:00Z,f055.txt:file:40:2020-01-03T00:00:00Z,f056.txt:file:40:2020-01-03T00:00:00Z,f057.txt:file:40:2020-01-03T00:00:00Z,f058.txt:file:40:2020-01-03T00:00:00Z,f059.txt:file:40:2020-01-03T00:00:00Z,f060.txt:file:40:2020-01-03T00:00:00Z,f061.txt:file:40:2020-01-03T00:00:00Z,f062.txt:file:40:2020-01-03T00:00:00Z,f063.txt:file:40:2020-01-03T00:00:00Z,f064.txt:file:40:2020-01-03T00:00:00Z,f065.txt:file:40:2020-01-03T00:00:00Z,f066.txt:file:40:2020-01-03T00:00:00Z,f067.txt:file:40:2020-01-03T00:00:00Z,f068.txt:file:40:2020-01-03T00:00:00Z,f069.txt:file:40:2020-01-03T00:00:00Z,f070.txt:file:40:2020-01-03T00:00:00Z,f071.txt:file:40:2020-01-03T00:00:00Z,f072.txt:file:40:2020-01-03T00:00:00Z,f073.txt:file:40:2020-01-03T00:00:00Z,f074.txt:file:40:2020-01-03T00:00:00Z,f075.txt:file:40:2020-01-03T00:00:00Z,f076.txt:file:40:2020-01-03T00:00:00Z,f077.txt:file:40:2020-01-03T00:00:00Z,f078.txt:file:40:2020-01-04T00:00:00Z,f079.txt:file:40:2020-01-04T00:00:00Z,f080.txt:file:40:2020-01-04T00:00:00Z,f081.txt:file:40:2020-01-04T00:00:00Z,f082.txt:file:40:2020-01-04T00:00:00Z,f083.txt:file:40:2020-01-04T00:00:00Z,f084.txt:file:40:2020-01-04T00:00:00Z,f085.txt:file:40:2020-01-04T00:00:00Z,f086.txt:file:40:2020-01-04T00:00:00Z,f087.txt:file:40:2020-01-04T00:00:00Z,f088.txt:file:40:2020-01-04T00:00:00Z,f089.txt:file:40:2020-01-04T00:00:00Z,f090.txt:file:40:2020-01-04T00:00:00Z,f091.txt:file:40:2020-01-04T00:00:00Z,f092.txt:file:40:2020-01-04T00:00:00Z,f093.txt:file:40:2020-01-04T00:00:00Z,f094.txt:file:40:2020-01-04T00:00:00Z,f095.txt:file:40:2020-01-04T00:00:00Z,f096.txt:file:40:2020-01-04T00:00:00Z,f097.txt:file:40:2020-01-04T00:00:00Z,f098.txt:file:40:2020-01-04T00:00:00Z,f099.txt:file:40:2020-01-04T00:00:00Z,f100.txt:file:40:2020-01-04T00:00:00Z,f101.txt:file:40:2020-01-04T00:00:00Z,f102.txt:file:40:2020-01-04T00:00:00Z,f103.txt:file:40:2020-01-04T00:00:00Z,f104.txt:file:40:2020-01-05T00:00:00Z,f105.txt:file:40:2020-01-05T00:00:00Z,f106.txt:file:40:2020-01-05T00:00:00Z,f107.txt:file:40:2020-01-05T00:00:00Z,f108.txt:file:40:2020-01-05T00:00:00Z,f109.txt:file:40:2020-01-05T00:00:00Z,f110.txt:file:40:2020-01-05T00:00:00Z,f111.txt:file:40:2020-01-05T00:00:00Z,f112.txt:file:40:2020-01-05T00:00:00Z,f113.txt:file:40:2020-01-05T00:00:00Z,f114.txt:file:40:2020-01-05T00:00:00Z,f115.txt:file:40:2020-01-05T00:00:00Z,f116.txt:file:40:2020-01-05T00:00:00Z,f117.txt:file:40:2020-01-05T00:00:00Z,f118.txt:file:40:2020-01-05T00:00:00Z,f119.txt:file:40:2020-01-05T00:00:00Z,f120.txt:file:40:2020-01-05T00:00:00Z,f121.txt:file:40:2020-01-05T00:00:00Z,f122.txt:file:40:2020-01-05T00:00:00Z,f123.txt:file:40:2020-01-05T00:00:00Z,f124.txt:file:40:2020-01-05T00:00:00Z,f125.txt:file:40:2020-01-05T00:00:00Z,f126.txt:file:40:2020-01-05T00:00:00Z,f127.txt:file:40:2020-01-05T00:00:00Z,f128.txt:file:40:2020-01-05T00:00:00Z,f129.txt:file:40:2020-01-05T00:00:00Z,m-old.txt:file:41:2019-01-01T00:00:00Z,z-old.txt:file:41:2020-01-02T00:00:00Z
+id of /F a-old.txt:file:41:2018-01-01T00:00:00Z,f000.txt:file:40:2020-01-01T00:00:00Z,f001.txt:file:40:2020-01-01T00:00:00Z,f002.txt:file:40:2020-01-01T00:00:00Z,f003.txt:file:40:2020-01-01T00:00:00Z,f004.txt:file:40:2020-01-01T00:00:00Z,f005.txt:file:40:2020-01-01T00:00:00Z,f006.txt:file:40:2020-01-01T00:00:00Z,f007.txt:file:40:2020-01-01T00:00:00Z,f008.txt:file:40:2020-01-01T00:00:00Z,f009.txt:file:40:2020-01-01T00:00:00Z,f010.txt:file:40:2020-01-01T00:00:00Z,f011.txt:file:40:2020-01-01T00:00:00Z,f012.txt:file:40:2020-01-01T00:00:00Z,f013.txt:file:40:2020-01-01T00:00:00Z,f014.txt:file:40:2020-01-01T00:00:00Z,f015.txt:file:40:2020-01-01T00:00:00Z,f016.txt:file:40:2020-01-01T00:00:00Z,f017.txt:file:40:2020-01-01T00:00:00Z,f018.txt:file:40:2020-01-01T00:00:00Z,f019.txt:file:40:2020-01-01T00:00:00Z,f020.txt:file:40:2020-01-01T00:00:00Z,f021.txt:file:40:2020-01-01T00:00:00Z,f022.txt:file:40:2020-01-01T00:00:00Z,f023.txt:file:40:2020-01-01T00:00:00Z,f024.txt:file:40:2020-01-01T00:00:00Z,f025.txt:file:40:2020-01-01T00:00:00Z,f026.txt:file:40:2020-01-02T00:00:00Z,f027.txt:file:40:2020-01-02T00:00:00Z,f028.txt:file:40:2020-01-02T00:00:00Z,f029.txt:file:40:2020-01-02T00:00:00Z,f030.txt:file:40:2020-01-02T00:00:00Z,f031.txt:file:40:2020-01-02T00:00:00Z,f032.txt:file:40:2020-01-02T00:00:00Z,f033.txt:file:40:2020-01-02T00:00:00Z,f034.txt:file:40:2020-01-02T00:00:00Z,f035.txt:file:40:2020-01-02T00:00:00Z,f036.txt:file:40:2020-01-02T00:00:00Z,f037.txt:file:40:2020-01-02T00:00:00Z,f038.txt:file:40:2020-01-02T00:00:00Z,f039.txt:file:40:2020-01-02T00:00:00Z,f040.txt:file:40:2020-01-02T00:00:00Z,f041.txt:file:40:2020-01-02T00:00:00Z,f042.txt:file:40:2020-01-02T00:00:00Z,f043.txt:file:40:2020-01-02T00:00:00Z,f044.txt:file:40:2020-01-02T00:00:00Z,f045.txt:file:40:2020-01-02T00:00:00Z,f046.txt:file:40:2020-01-02T00:00:00Z,f047.txt:file:40:2020-01-02T00:00:00Z,f048.txt:file:40:2020-01-02T00:00:00Z,f049.txt:file:40:2020-01-02T00:00:00Z,f050.txt:file:40:2020-01-02T00:00:00Z,f051.txt:file:40:2020-01-02T00:00:00Z,f052.txt:file:40:2020-01-03T00:00:00Z,f053.txt:file:40:2020-01-03T00:00:00Z,f054.txt:file:40:2020-01-03T00:00:00Z,f055.txt:file:40:2020-01-03T00:00:00Z,f056.txt:file:40:2020-01-03T00:00:00Z,f057.txt:file:40:2020-01-03T00:00:00Z,f058.txt:file:40:2020-01-03T00:00:00Z,f059.txt:file:40:2020-01-03T00:00:00Z,f060.txt:file:40:2020-01-03T00:00:00Z,f061.txt:file:40:2020-01-03T00:00:00Z,f062.txt:file:40:2020-01-03T00:00:00Z,f063.txt:file:40:2020-01-03T00:00:00Z,f064.txt:file:40:2020-01-03T00:00:00Z,f065.txt:file:40:2020-01-03T00:00:00Z,f066.txt:file:40:2020-01-03T00:00:00Z,f067.txt:file:40:2020-01-03T00:00:00Z,f068.txt:file:40:2020-01-03T00:00:00Z,f069.txt:file:40:2020-01-03T00:00:00Z,f070.txt:file:40:2020-01-03T00:00:00Z,f071.txt:file:40:2020-01-03T00:00:00Z,f072.txt:file:40:2020-01-03T00:00:00Z,f073.txt:file:40:2020-01-03T00:00:00Z,f074.txt:file:40:2020-01-03T00:00:00Z,f075.txt:file:40:2020-01-03T00:00:00Z,f076.txt:file:40:2020-01-03T00:00:00Z,f077.txt:file:40:2020-01-03T00:00:00Z,f078.txt:file:40:2020-01-04T00:00:00Z,f079.txt:file:40:2020-01-04T00:00:00Z,f080.txt:file:40:2020-01-04T00:00:00Z,f081.txt:file:40:2020-01-04T00:00:00Z,f082.txt:file:40:2020-01-04T00:00:00Z,f083.txt:file:40:2020-01-04T00:00:00Z,f084.txt:file:40:2020-01-04T00:00:00Z,f085.txt:file:40:2020-01-04T00:00:00Z,f086.txt:file:40:2020-01-04T00:00:00Z,f087.txt:file:40:2020-01-04T00:00:00Z,f088.txt:file:40:2020-01-04T00:00:00Z,f089.txt:file:40:2020-01-04T00:00:00Z,f090.txt:file:40:2020-01-04T00:00:00Z,f091.txt:file:40:2020-01-04T00:00:00Z,f092.txt:file:40:2020-01-04T00:00:00Z,f093.txt:file:40:2020-01-04T00:00:00Z,f094.txt:file:40:2020-01-04T00:00:00Z,f095.txt:file:40:2020-01-04T00:00:00Z,f096.txt:file:40:2020-01-04T00:00:00Z,f097.txt:file:40:2020-01-04T00:00:00Z,f098.txt:file:40:2020-01-04T00:00:00Z,f099.txt:file:40:2020-01-04T00:00:00Z,f100.txt:file:40:2020-01-04T00:00:00Z,f101.txt:file:40:2020-01-04T00:00:00Z,f102.txt:file:40:2020-01-04T00:00:00Z,f103.txt:file:40:2020-01-04T00:00:00Z,f104.txt:file:40:2020-01-05T00:00:00Z,f105.txt:file:40:2020-01-05T00:00:00Z,f106.txt:file:40:2020-01-05T00:00:00Z,f107.txt:file:40:2020-01-05T00:00:00Z,f108.txt:file:40:2020-01-05T00:00:00Z,f109.txt:file:40:2020-01-05T00:00:00Z,f110.txt:file:40:2020-01-05T00:00:00Z,f111.txt:file:40:2020-01-05T00:00:00Z,f112.txt:file:40:2020-01-05T00:00:00Z,f113.txt:file:40:2020-01-05T00:00:00Z,f114.txt:file:40:2020-01-05T00:00:00Z,f115.txt:file:40:2020-01-05T00:00:00Z,f116.txt:file:40:2020-01-05T00:00:00Z,f117.txt:file:40:2020-01-05T00:00:00Z,f118.txt:file:40:2020-01-05T00:00:00Z,f119.txt:file:40:2020-01-05T00:00:00Z,f120.txt:file:40:2020-01-05T00:00:00Z,f121.txt:file:40:2020-01-05T00:00:00Z,f122.txt:file:40:2020-01-05T00:00:00Z,f123.txt:file:40:2020-01-05T00:00:00Z,f124.txt:file:40:2020-01-05T00:00:00Z,f125.txt:file:40:2020-01-05T00:00:00Z,f126.txt:file:40:2020-01-05T00:00:00Z,f127.txt:file:40:2020-01-05T00:00:00Z,f128.txt:file:40:2020-01-05T00:00:00Z,f129.txt:file:40:2020-01-05T00:00:00Z,m-old.txt:file:41:2019-01-01T00:00:00Z,z-old.txt:file:41:2020-01-02T00:00:00Z
+stat / dir:52:2020-01-01T00:00:00Z:0001-01-01T00:00:00Z
+stat id of / /:dir:52
+stat /F dir:104:2020-01-05T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F /F:dir:104
+stat /F/f000.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f000.txt /F/f000.txt:file:40
+stat /F/f001.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f001.txt /F/f001.txt:file:40
+stat /F/f002.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f002.txt /F/f002.txt:file:40
+stat /F/f003.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f003.txt /F/f003.txt:file:40
+stat /F/f004.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f004.txt /F/f004.txt:file:40
+stat /F/f005.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f005.txt /F/f005.txt:file:40
+stat /F/f006.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f006.txt /F/f006.txt:file:40
+stat /F/f007.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f007.txt /F/f007.txt:file:40
+stat /F/f008.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f008.txt /F/f008.txt:file:40
+stat /F/f009.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f009.txt /F/f009.txt:file:40
+stat /F/f010.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f010.txt /F/f010.txt:file:40
+stat /F/f011.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f011.txt /F/f011.txt:file:40
+stat /F/f012.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f012.txt /F/f012.txt:file:40
+stat /F/f013.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f013.txt /F/f013.txt:file:40
+stat /F/f014.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f014.txt /F/f014.txt:file:40
+stat /F/f015.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f015.txt /F/f015.txt:file:40
+stat /F/f016.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f016.txt /F/f016.txt:file:40
+stat /F/f017.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f017.txt /F/f017.txt:file:40
+stat /F/f018.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f018.txt /F/f018.txt:file:40
+stat /F/f019.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f019.txt /F/f019.txt:file:40
+stat /F/f020.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f020.txt /F/f020.txt:file:40
+stat /F/f021.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f021.txt /F/f021.txt:file:40
+stat /F/f022.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f022.txt /F/f022.txt:file:40
+stat /F/f023.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f023.txt /F/f023.txt:file:40
+stat /F/f024.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f024.txt /F/f024.txt:file:40
+stat /F/f025.txt file:40:2020-01-01T00:00:00Z:2020-01-01T00:00:00Z
+stat id of /F/f025.txt /F/f025.txt:file:40
+stat /F/f026.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f026.txt /F/f026.txt:file:40
+stat /F/f027.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f027.txt /F/f027.txt:file:40
+stat /F/f028.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f028.txt /F/f028.txt:file:40
+stat /F/f029.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f029.txt /F/f029.txt:file:40
+stat /F/f030.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f030.txt /F/f030.txt:file:40
+stat /F/f031.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f031.txt /F/f031.txt:file:40
+stat /F/f032.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f032.txt /F/f032.txt:file:40
+stat /F/f033.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f033.txt /F/f033.txt:file:40
+stat /F/f034.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f034.txt /F/f034.txt:file:40
+stat /F/f035.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f035.txt /F/f035.txt:file:40
+stat /F/f036.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f036.txt /F/f036.txt:file:40
+stat /F/f037.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f037.txt /F/f037.txt:file:40
+stat /F/f038.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f038.txt /F/f038.txt:file:40
+stat /F/f039.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f039.txt /F/f039.txt:file:40
+stat /F/f040.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f040.txt /F/f040.txt:file:40
+stat /F/f041.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f041.txt /F/f041.txt:file:40
+stat /F/f042.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f042.txt /F/f042.txt:file:40
+stat /F/f043.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f043.txt /F/f043.txt:file:40
+stat /F/f044.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f044.txt /F/f044.txt:file:40
+stat /F/f045.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f045.txt /F/f045.txt:file:40
+stat /F/f046.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f046.txt /F/f046.txt:file:40
+stat /F/f047.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f047.txt /F/f047.txt:file:40
+stat /F/f048.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f048.txt /F/f048.txt:file:40
+stat /F/f049.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f049.txt /F/f049.txt:file:40
+stat /F/f050.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f050.txt /F/f050.txt:file:40
+stat /F/f051.txt file:40:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/f051.txt /F/f051.txt:file:40
+stat /F/f052.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f052.txt /F/f052.txt:file:40
+stat /F/f053.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f053.txt /F/f053.txt:file:40
+stat /F/f054.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f054.txt /F/f054.txt:file:40
+stat /F/f055.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f055.txt /F/f055.txt:file:40
+stat /F/f056.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f056.txt /F/f056.txt:file:40
+stat /F/f057.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f057.txt /F/f057.txt:file:40
+stat /F/f058.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f058.txt /F/f058.txt:file:40
+stat /F/f059.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f059.txt /F/f059.txt:file:40
+stat /F/f060.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f060.txt /F/f060.txt:file:40
+stat /F/f061.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f061.txt /F/f061.txt:file:40
+stat /F/f062.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f062.txt /F/f062.txt:file:40
+stat /F/f063.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f063.txt /F/f063.txt:file:40
+stat /F/f064.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f064.txt /F/f064.txt:file:40
+stat /F/f065.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f065.txt /F/f065.txt:file:40
+stat /F/f066.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f066.txt /F/f066.txt:file:40
+stat /F/f067.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f067.txt /F/f067.txt:file:40
+stat /F/f068.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f068.txt /F/f068.txt:file:40
+stat /F/f069.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f069.txt /F/f069.txt:file:40
+stat /F/f070.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f070.txt /F/f070.txt:file:40
+stat /F/f071.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f071.txt /F/f071.txt:file:40
+stat /F/f072.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f072.txt /F/f072.txt:file:40
+stat /F/f073.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f073.txt /F/f073.txt:file:40
+stat /F/f074.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f074.txt /F/f074.txt:file:40
+stat /F/f075.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f075.txt /F/f075.txt:file:40
+stat /F/f076.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f076.txt /F/f076.txt:file:40
+stat /F/f077.txt file:40:2020-01-03T00:00:00Z:2020-01-03T00:00:00Z
+stat id of /F/f077.txt /F/f077.txt:file:40
+stat /F/f078.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f078.txt /F/f078.txt:file:40
+stat /F/f079.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f079.txt /F/f079.txt:file:40
+stat /F/f080.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f080.txt /F/f080.txt:file:40
+stat /F/f081.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f081.txt /F/f081.txt:file:40
+stat /F/f082.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f082.txt /F/f082.txt:file:40
+stat /F/f083.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f083.txt /F/f083.txt:file:40
+stat /F/f084.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f084.txt /F/f084.txt:file:40
+stat /F/f085.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f085.txt /F/f085.txt:file:40
+stat /F/f086.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f086.txt /F/f086.txt:file:40
+stat /F/f087.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f087.txt /F/f087.txt:file:40
+stat /F/f088.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f088.txt /F/f088.txt:file:40
+stat /F/f089.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f089.txt /F/f089.txt:file:40
+stat /F/f090.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f090.txt /F/f090.txt:file:40
+stat /F/f091.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f091.txt /F/f091.txt:file:40
+stat /F/f092.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f092.txt /F/f092.txt:file:40
+stat /F/f093.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f093.txt /F/f093.txt:file:40
+stat /F/f094.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f094.txt /F/f094.txt:file:40
+stat /F/f095.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f095.txt /F/f095.txt:file:40
+stat /F/f096.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f096.txt /F/f096.txt:file:40
+stat /F/f097.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f097.txt /F/f097.txt:file:40
+stat /F/f098.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f098.txt /F/f098.txt:file:40
+stat /F/f099.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f099.txt /F/f099.txt:file:40
+stat /F/f100.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f100.txt /F/f100.txt:file:40
+stat /F/f101.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f101.txt /F/f101.txt:file:40
+stat /F/f102.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f102.txt /F/f102.txt:file:40
+stat /F/f103.txt file:40:2020-01-04T00:00:00Z:2020-01-04T00:00:00Z
+stat id of /F/f103.txt /F/f103.txt:file:40
+stat /F/f104.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f104.txt /F/f104.txt:file:40
+stat /F/f105.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f105.txt /F/f105.txt:file:40
+stat /F/f106.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f106.txt /F/f106.txt:file:40
+stat /F/f107.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f107.txt /F/f107.txt:file:40
+stat /F/f108.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f108.txt /F/f108.txt:file:40
+stat /F/f109.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f109.txt /F/f109.txt:file:40
+stat /F/f110.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f110.txt /F/f110.txt:file:40
+stat /F/f111.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f111.txt /F/f111.txt:file:40
+stat /F/f112.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f112.txt /F/f112.txt:file:40
+stat /F/f113.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f113.txt /F/f113.txt:file:40
+stat /F/f114.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f114.txt /F/f114.txt:file:40
+stat /F/f115.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f115.txt /F/f115.txt:file:40
+stat /F/f116.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f116.txt /F/f116.txt:file:40
+stat /F/f117.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f117.txt /F/f117.txt:file:40
+stat /F/f118.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f118.txt /F/f118.txt:file:40
+stat /F/f119.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f119.txt /F/f119.txt:file:40
+stat /F/f120.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f120.txt /F/f120.txt:file:40
+stat /F/f121.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f121.txt /F/f121.txt:file:40
+stat /F/f122.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f122.txt /F/f122.txt:file:40
+stat /F/f123.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f123.txt /F/f123.txt:file:40
+stat /F/f124.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f124.txt /F/f124.txt:file:40
+stat /F/f125.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f125.txt /F/f125.txt:file:40
+stat /F/f126.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f126.txt /F/f126.txt:file:40
+stat /F/f127.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f127.txt /F/f127.txt:file:40
+stat /F/f128.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f128.txt /F/f128.txt:file:40
+stat /F/f129.txt file:40:2020-01-05T00:00:00Z:2020-01-05T00:00:00Z
+stat id of /F/f129.txt /F/f129.txt:file:40
+stat /F/a-old.txt file:41:2018-01-01T00:00:00Z:2018-01-01T00:00:00Z
+stat id of /F/a-old.txt /F/a-old.txt:file:41
+stat /F/z-old.txt file:41:2020-01-02T00:00:00Z:2020-01-02T00:00:00Z
+stat id of /F/z-old.txt /F/z-old.txt:file:41
+stat /F/m-old.txt file:41:2019-01-01T00:00:00Z:2019-01-01T00:00:00Z
+stat id of /F/m-old.txt /F/m-old.txt:file:41
+-- at 2020-01-05T00:00:01Z
+= same
+-- at now
+= same
