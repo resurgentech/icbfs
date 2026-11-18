@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"sort"
 	"strings"
 	"time"
 
@@ -235,51 +234,148 @@ type TrashOptions struct {
 	Batch      string // only this batch
 	Pass       string // only what this sync pass removed
 	Limit      int    // at most this many (0: all)
-	After      string // continue after this entry id (a previous page's last)
+	// After carries on after a previous page: its cursor (ListTrashPage's
+	// next), or an entry's id, as pages gave before cursors (that lists
+	// the keys from the start to find it).
+	After string
+	// Keep, if set, is a further filter, asked before an entry is
+	// checked for being live: only what it keeps is listed, and counts
+	// toward Limit.
+	Keep func(TrashEntry) bool
 }
 
 // ListTrash lists deleted items, newest first. An entry whose item is
 // live (a delete that stopped after writing it, a restore that couldn't
 // remove it) isn't listed.
 func (f *Filesystem) ListTrash(ctx context.Context, opts TrashOptions) ([]TrashEntry, error) {
-	objs, err := f.store.List(ctx, f.trashPrefix())
-	if err != nil {
-		return nil, err
+	out, _, err := f.ListTrashPage(ctx, opts)
+	return out, err
+}
+
+// errPageFull ends a page's listing once the page is full and one more
+// entry is known to follow.
+var errPageFull = errors.New("trash page full")
+
+// ListTrashPage is ListTrash a page at a time, with next, the cursor that
+// carries on exactly after the page ("" when nothing is left: the trash
+// is not asked again for an empty last page). The trash's keys are
+// listed a page of the store's at a time (objstore.ListEachAfter),
+// starting after the cursor's key, and the listing stops once Limit
+// entries are kept and one more is found: a page costs the reads of its
+// own entries, of what the filters passed over on the way and of that
+// one more, which the next page reads again, and holds a page of keys
+// and its entries, however long the trash is. An entry passed over
+// (filtered, gone since the listing, its item live again) sorts before
+// next, so no page lists it later.
+//
+// A read of an entry that fails for any reason but "not found" ends the
+// page with that error: the listing cannot say it listed everything.
+func (f *Filesystem) ListTrashPage(ctx context.Context, opts TrashOptions) (out []TrashEntry, next string, err error) {
+	if !ValidTrashCursor(opts.After) {
+		return nil, "", fmt.Errorf("trash cursor %q: %w", opts.After, ErrInvalidArgument)
 	}
-	sort.Slice(objs, func(i, j int) bool { return objs[i].Key < objs[j].Key })
-	var out []TrashEntry
-	skipping := opts.After != ""
-	for _, o := range objs {
-		if skipping {
-			if strings.HasSuffix(o.Key, "-"+opts.After) {
-				skipping = false
+	prefix := f.trashPrefix()
+	after, older := "", ""
+	switch {
+	case opts.After == "":
+	case isTrashCursor(opts.After):
+		after = prefix + opts.After
+	default:
+		older = opts.After // an entry's id: list from the start to it
+	}
+	last := "" // the key of the last entry passed, kept or not
+	err = objstore.ListEachAfter(ctx, f.store, prefix, after, func(page []objstore.Object) error {
+		for _, o := range page {
+			if older != "" {
+				if strings.HasSuffix(o.Key, "-"+older) {
+					older = ""
+				}
+				continue
 			}
-			continue
+			e, err := f.readTrash(ctx, o.Key)
+			switch {
+			case errors.Is(err, ErrNotFound):
+				last = o.Key
+				continue // gone since the listing
+			case errors.Is(err, errTrashDecode):
+				last = o.Key
+				continue // not an entry this build reads, as before
+			case err != nil:
+				return fmt.Errorf("reading the trash entry %s: %w", strings.TrimPrefix(o.Key, prefix), err)
+			}
+			if opts.Batch != "" && e.Batch != opts.Batch ||
+				opts.Pass != "" && e.Pass != opts.Pass ||
+				opts.PathPrefix != "" && !underPath(e.Path, opts.PathPrefix) ||
+				opts.Keep != nil && !opts.Keep(e) {
+				last = o.Key
+				continue
+			}
+			live, err := f.itemLive(ctx, e.ItemID, e.Type)
+			if err != nil {
+				return err
+			}
+			if live {
+				last = o.Key
+				continue
+			}
+			if opts.Limit > 0 && len(out) == opts.Limit {
+				next = strings.TrimPrefix(last, prefix)
+				return errPageFull
+			}
+			out = append(out, e)
+			last = o.Key
 		}
-		e, err := f.readTrash(ctx, o.Key)
-		if err != nil {
-			continue // gone since the listing
-		}
-		if opts.Batch != "" && e.Batch != opts.Batch {
-			continue
-		}
-		if opts.Pass != "" && e.Pass != opts.Pass {
-			continue
-		}
-		if opts.PathPrefix != "" && !underPath(e.Path, opts.PathPrefix) {
-			continue
-		}
-		if live, err := f.itemLive(ctx, e.ItemID, e.Type); err != nil {
-			return nil, err
-		} else if live {
-			continue
-		}
-		out = append(out, e)
-		if opts.Limit > 0 && len(out) == opts.Limit {
-			break
+		return nil
+	})
+	if errors.Is(err, errPageFull) {
+		return out, next, nil
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	return out, "", nil
+}
+
+// ValidTrashCursor reports whether c can carry on a trash listing: none
+// (""), a page's cursor (a trash key without its filesystem's prefix:
+// <inverted time, 19 digits>-<entry id>), or an entry's id, as pages
+// gave before cursors (LK-24). Anything else is refused as invalid.
+func ValidTrashCursor(c string) bool {
+	return c == "" || isTrashCursor(c) || isEntryID(c)
+}
+
+// isTrashCursor reports whether c is a page's cursor.
+func isTrashCursor(c string) bool {
+	if len(c) < 20 || c[19] != '-' {
+		return false
+	}
+	for _, r := range c[:19] {
+		if r < '0' || r > '9' {
+			return false
 		}
 	}
-	return out, nil
+	return isEntryID(c[20:])
+}
+
+// isEntryID reports whether c is an entry's id: a UUID, as NewUUIDv7
+// makes every one (lower-case hex, 8-4-4-4-12).
+func isEntryID(c string) bool {
+	if len(c) != 36 {
+		return false
+	}
+	for i, r := range c {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func underPath(p, prefix string) bool {
@@ -298,11 +394,17 @@ func (f *Filesystem) readTrash(ctx context.Context, key string) (TrashEntry, err
 		return TrashEntry{}, err
 	}
 	e, err := decodeTrashEntry(data)
-	if err == nil && obj != nil {
+	if err != nil {
+		return e, fmt.Errorf("%w: %w", errTrashDecode, err)
+	}
+	if obj != nil {
 		e.Stored = obj.LastModified.UTC()
 	}
-	return e, err
+	return e, nil
 }
+
+// errTrashDecode is readTrash's answer for a record it cannot decode.
+var errTrashDecode = errors.New("trash entry not readable")
 
 // trashEntry finds an entry by its id, with its key.
 func (f *Filesystem) trashEntry(ctx context.Context, entryID string) (TrashEntry, string, error) {

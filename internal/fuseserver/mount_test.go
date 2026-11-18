@@ -23,7 +23,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
-	"github.com/testcontainers/testcontainers-go/modules/minio"
 
 	"github.com/resurgentech/icbfs/internal/testutil/minioimage"
 	"golang.org/x/sys/unix"
@@ -63,7 +62,7 @@ func newMinIO(t *testing.T) testMinIO {
 	t.Helper()
 	ctx := context.Background()
 
-	container, err := minio.Run(ctx, minioimage.Image())
+	container, err := minioimage.Run(ctx)
 	if err != nil {
 		t.Fatalf("start minio container: %v", err)
 	}
@@ -88,7 +87,7 @@ func newMinIO(t *testing.T) testMinIO {
 	})
 
 	const bucket = "icbfs-mount-test"
-	testutil.RetryUntilReady(t, 10*time.Second, func() error {
+	testutil.RetryUntilReady(t, time.Minute, func() error {
 		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
 		return err
 	})
@@ -1827,8 +1826,15 @@ func runMmapAfterCloseHelper(path string) {
 }
 
 // TestMountSmallWritesAreQuick: 4-byte writes don't each cost a store
-// round trip (the kernel's security.capability check per write).
+// round trip (the kernel's security.capability check per write). A
+// timing test: on a loaded machine it fails for the load, not the code,
+// so it runs only in just pre-merge (ICBFS_PRE_MERGE=1), alone, after
+// the rest. Its cause stays in just ci without a clock:
+// TestCapabilityXattrFromNode (the capability answered without a stat).
 func TestMountSmallWritesAreQuick(t *testing.T) {
+	if os.Getenv("ICBFS_PRE_MERGE") == "" {
+		t.Skip("a timing test: set ICBFS_PRE_MERGE=1 (just pre-merge runs it alone)")
+	}
 	mnt := mountTestFS(t)
 	f, err := os.Create(filepath.Join(mnt, "small"))
 	if err != nil {

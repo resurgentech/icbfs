@@ -10,7 +10,6 @@ import (
 	awscreds "github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
-	"github.com/testcontainers/testcontainers-go/modules/minio"
 
 	"github.com/resurgentech/icbfs/internal/icbfs"
 	"github.com/resurgentech/icbfs/internal/objstore/s3store"
@@ -24,7 +23,7 @@ func newTestFilesystem(t *testing.T) *icbfs.Filesystem {
 	t.Helper()
 	ctx := context.Background()
 
-	container, err := minio.Run(ctx, minioimage.Image())
+	container, err := minioimage.Run(ctx)
 	if err != nil {
 		t.Fatalf("start minio container: %v", err)
 	}
@@ -49,7 +48,7 @@ func newTestFilesystem(t *testing.T) *icbfs.Filesystem {
 	})
 
 	const bucket = "icbfs-winfspserver-test"
-	testutil.RetryUntilReady(t, 10*time.Second, func() error {
+	testutil.RetryUntilReady(t, time.Minute, func() error {
 		_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
 		return err
 	})

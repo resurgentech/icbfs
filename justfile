@@ -38,15 +38,18 @@ test-short *args:
     go test -short {{args}} ./...
 
 # The -timeout is explicit because Go cuts a test package at 10 minutes by default, and internal/icbfs takes 5 on a quiet machine.
+# pkg/drive/icbfsdrive took 7 to 12 minutes alone and internal/icbfs 6 (2026-11-17), so scripts/split-gotest.sh runs their tests in processes split by name (four and two; the last of each takes every test the others do not), beside the rest, and fails unless each test go test -list names ran exactly once.
 # The Go tests CI runs, with the race detector
-# pkg/drive/icbfsdrive (about 23 minutes under -race) runs as two processes: its settle tests, then every other test (-skip, the same pattern), so no test is left out.
 test-ci:
-    go test -race -timeout 25m $(go list ./... | grep -v '/pkg/drive/icbfsdrive$')
-    go test -race -timeout 25m -run '{{drive_settle_tests}}' ./pkg/drive/icbfsdrive
-    go test -race -timeout 25m -skip '{{drive_settle_tests}}' ./pkg/drive/icbfsdrive
-
-# pkg/drive/icbfsdrive's settle tests, by name: test-ci's first half of that package.
-drive_settle_tests := '^Test(Settle|ST[0-9]|CH[0-9]|LF[0-9]|RV4|Model|FR_|Bound16|Rerun|Undated|Killed|Late|Deferred|TwoLate)'
+    #!/usr/bin/env bash
+    set -uo pipefail
+    d=github.com/resurgentech/icbfs/pkg/drive/icbfsdrive i=github.com/resurgentech/icbfs/internal/icbfs
+    go test -race -timeout 25m $(go list ./... | grep -vx -e "$d" -e "$i") & p1=$!
+    scripts/split-gotest.sh ./pkg/drive/icbfsdrive '^Test[A-J]' '^Test[KL]' '^TestM' & p2=$!
+    scripts/split-gotest.sh ./internal/icbfs '^Test[A-N]' & p3=$!
+    rc=0
+    for p in $p1 $p2 $p3; do wait $p || rc=1; done
+    exit $rc
 
 # The Go tests that run on Windows (no Docker there)
 test-windows:
@@ -77,25 +80,18 @@ generate:
 test-erase-full:
     ICBFS_ERASE_FULL=1 go test -race -count=1 -run 'TestEraseAllHoldsOnePage' ./internal/objstore/s3store ./internal/objstore/azurestore
 
-# What CI checks
-ci: fmt-check tidy-check vet build test-ci test-erase-full test-settle
+# What CI checks: while working and before a commit; under ten minutes on a lab runner (docs/testing.md, "Which gate when"). The long tests are in pre-merge.
+ci: fmt-check tidy-check vet build test-ci
 
-# T83-1's settle tests run without -race (too long under it, and heap
-# measured without it): the request and heap gates, the cut sweeps, the
-# killed-write sweep, the round-4 review's model (two seeds at 4 entries a
-# block, one at 128, with moves, renames, restores, child folders and the
-# folders' own records)
-test-settle:
-    go test -count=1 -timeout 40m -run 'TestSettleRequestsBoundedByLaterStates|TestSettleRequestsBeyondOnePage|TestSettleCutAtEveryRequest' ./pkg/drive/icbfsdrive
-    T83_ALWAYS=1 RV4_CUT=plain go test -count=1 -timeout 40m -run 'TestKilledWriteLeavesTheFolderSettleable|TestRV4Cut$' ./pkg/drive/icbfsdrive
-    RV4_SEEDS=4229-4230 RV4_K=3 RV4_ENTRIES=4 RV4_OPS=120 go test -count=1 -timeout 30m -run 'TestRV4Model$' ./pkg/drive/icbfsdrive
-    RV4_SEEDS=5201 RV4_K=3 RV4_ENTRIES=0 RV4_N0=300 RV4_OPS=150 go test -count=1 -timeout 40m -run 'TestRV4Model$' ./pkg/drive/icbfsdrive
+# ci, then every long test ci leaves out (ICBFS_PRE_MERGE=1, the 100,000-entry erase, the timing test alone), then the docs/STATES.md rows the tests prove: once, before a merge that touches icbfs
+pre-merge: ci test-erase-full
+    ICBFS_PRE_MERGE=1 go test -race -count=1 -timeout 30m -run '^(TestTreeMemory|TestZZFanout)$' ./pkg/drive/icbfsdrive ./internal/icbfs
+    ICBFS_PRE_MERGE=1 go test -race -count=1 -run '^TestMountSmallWritesAreQuick$' ./internal/fuseserver
+    @just rows
 
-# T83-1's slow settle checks, not in ci (about an hour; before a change to the settle merges): an immediate stop at every request of a settle (one folder, then a split one), and the mutations, each of which must turn its row's test red (test/settle-mutations/run.sh)
-test-settle-review:
-    T83_SWEEP=1 go test -count=1 -timeout 30m -run 'TestST9_ImmediateStopAtEveryRequest$' ./pkg/drive/icbfsdrive
-    T83_SWEEP=1 FR_CASE=split go test -count=1 -timeout 50m -run 'TestST9_ImmediateStopAtEveryRequest$' ./pkg/drive/icbfsdrive
-    test/settle-mutations/run.sh
+# The docs/STATES.md row ids this module's tests carry: in a test's name (TestLF4_..., TestPL2_PL3_...) or a // STATES: comment beside it
+rows:
+    @{ { grep -rhoE 'func Test([A-Z]{2,3}[0-9]+_)+' --include='*_test.go' cmd internal pkg || true; } | sed -E 's/^func Test//; s/_/\n/g'; { grep -rhE '//[[:space:]]*STATES:' --include='*_test.go' cmd internal pkg || true; } | { grep -oE '[A-Z]{2,3}-[0-9]+' || true; } | tr -d '-'; } | { grep -E '^[A-Z]{2,3}[0-9]+$' || true; } | sed -E 's/^([A-Z]+)([0-9]+)$/\1-\2/' | sort -uV | awk '{ r = r " " $0; k++ } END { print k+0 " docs/STATES.md row ids carried by this module'"'"'s tests:" r }'
 
 # Tag HEAD as VERSION (vX.Y.Z, new; tree clean, on origin/main, CI green) and build bin/; the tag's push is printed, not done
 release VERSION:
