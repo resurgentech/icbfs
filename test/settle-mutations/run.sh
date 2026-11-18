@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The settle's mutations (T83-1, from the final review of 2026-11-17 and
-# round 7; FIRSTCLIP and FIRSTLATE, T83-8's rule 1.6-8): each patch breaks one row of interloc's docs/STATES.md
+# round 7; FIRSTCLIP and FIRSTLATE, T83-8's rule 1.6-8; PS31, T83-9: the
+# settle's progress reports removed): each patch breaks one row of interloc's docs/STATES.md
 # section 1 in one or two lines, and that row's test must then fail.
 # Run from the repository root on a clean tree (the recipe
 # test-settle-review does):
@@ -32,9 +33,10 @@ declare -A TESTS=(
   [ICBFSAT]='TestFR_Icbfsat$|TestUndatedThenLate$'
   [FIRSTCLIP]='TestST29_ARowFromBeforeTheFirstStateIsPlayedFromIt$|TestST30_ARowWhoseSpanFromTheFirstStateIsEmpty$'
   [FIRSTLATE]='TestLF36_AnItemOlderThanItsFolderIsOnTimeInAFolderBeingBuilt$|TestLF39_AnItemOlderThanItsFolderFromACallerThatRefusesLateChanges$'
+  [PS31]='TestPS31_ASettleReportsEachTimeItMoves$'
 )
 names=("$@")
-[ ${#names[@]} -eq 0 ] && names=(ST3 ST5 ST6 ST7 ST9 ST11 ST14b ST16 ST19 ST20 ST22 ST27 ST26 ST26AGE LF27 LF28 CH4 CH13 RECORDSUM ICBFSAT FIRSTCLIP FIRSTLATE)
+[ ${#names[@]} -eq 0 ] && names=(ST3 ST5 ST6 ST7 ST9 ST11 ST14b ST16 ST19 ST20 ST22 ST27 ST26 ST26AGE LF27 LF28 CH4 CH13 RECORDSUM ICBFSAT FIRSTCLIP FIRSTLATE PS31)
 out=$(mktemp -d)
 applied=""
 trap '[ -n "$applied" ] && git apply -R "$applied"' EXIT

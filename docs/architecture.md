@@ -1024,6 +1024,32 @@ there, or another item there, is `drive.ErrFolderNotAtPath`, and nothing
 is written; the drive never walks its tree for it, and never says it is
 gone (the caller looks it up as any item, round 6 of T83-1).
 
+A settle tells its caller each time it moves (`SettleOptions.Progress`,
+T83-9, interloc docs/STATES.md PS-31), so that a daemon whose pass is
+in one long settle is not taken for hung and can say how far it is. The
+report (`drive.SettleProgress`) names the part (of the parts of
+`MaxSettleChanges` rows), the step (build, play, prove, plan, record,
+new blocks, window, commit, erase, done), the step's units done of how
+many, and the states written of the states the part writes. It is made
+at each state read as it builds, each change played, each state proved,
+each state and block the plan looks at, the record, each state's
+blocks stored and each `.version` merged, each state written in the
+window, the commit, each version erased, and the end; and before and
+after each store call that can run long, never inside one. A rerun with
+`Cut` reports the same way. It is a plain call on the settle's
+goroutine, under the drive's settle lock: it makes no request, returns
+at once and does not call back into the drive; one that blocks holds the
+settle. A panic in it is recovered and logged once, and that settle
+reports no more; its result is as without a function. nil costs nothing.
+
+The bound: one store call carries no report inside it. The longest is a
+whole block's erase (`EraseAll`): one listing a page and one erase
+request a version of that block, about one version a state of the
+folder. At 110 ms a request a daemon's 15-minute limit is about 8,000
+versions of one block; T83-7's top folder of 1,000 states has about
+1,000 (under two minutes). A key's history listing is a request a page
+of 1,000 versions.
+
 Round 5 of T83-1 adds, to the late change and the settle:
 
 - **What a dated entry change costs.** It reads its folder's `.version`

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"google.golang.org/protobuf/proto"
 	"io"
+	"log"
 	"sort"
 	"strings"
 	"time"
@@ -173,6 +174,71 @@ type SettleInput struct {
 	// nothing. nil: the settle would be done; ErrSettleRefused: it would be
 	// refused. Not with Cut.
 	ProveOnly bool
+	// Progress, if set, is told each time the settle moves (PS-31): each
+	// state read as it builds, each change played, each state proved, each
+	// state and block looked at for what to write and erase, the record,
+	// each state's blocks stored, each state written in the window, the
+	// commit, each version erased, the end; before and after each store
+	// call that can run long (a history's listing, a block's whole
+	// erase), never inside one. It is a plain call on the settle's own
+	// goroutine, while the settle holds its caller's lock: it returns at
+	// once, makes no request and does not call back into the filesystem or
+	// its drive. One that blocks holds the settle (the caller's fault). A
+	// panic in it is recovered, logged once, and no further report of that
+	// settle is made; the settle carries on as without it. nil costs
+	// nothing.
+	Progress func(SettleProgress)
+}
+
+// The steps a settle reports (SettleProgress.Step), in the order it
+// runs them. Plan is the reads between the proof and the record (what to
+// write, what to erase); the others are interloc docs/STATES.md 1.3's.
+const (
+	SettleStepBuild     = "build"
+	SettleStepPlay      = "play"
+	SettleStepProve     = "prove"
+	SettleStepPlan      = "plan"
+	SettleStepRecord    = "record"
+	SettleStepNewBlocks = "new blocks"
+	SettleStepWindow    = "window"
+	SettleStepCommit    = "commit"
+	SettleStepErase     = "erase"
+	SettleStepDone      = "done"
+)
+
+// SettleProgress is where a settle stands (SettleInput.Progress).
+type SettleProgress struct {
+	Step string // a SettleStep* name
+	// Done and Of are the step's units done and how many it has (Of 0:
+	// not known): states read (build), changes played (play), states
+	// proved (prove), states and blocks looked at (plan, Of 0), states
+	// whose blocks are stored then .version records merged (new blocks),
+	// states written (window), versions erased (erase).
+	Done, Of int
+	// Written is the states the window has written of ToWrite, the states
+	// this settle writes (0 until the plan knows them).
+	Written, ToWrite int
+}
+
+// settleReport is a settle's Progress with the counts it carries.
+type settleReport struct {
+	fn               func(SettleProgress)
+	written, toWrite int
+}
+
+// to tells fn that the settle is at done of of in step. A panic in fn is
+// recovered and logged, and fn is told nothing more.
+func (r *settleReport) to(step string, done, of int) {
+	if r == nil || r.fn == nil {
+		return
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			r.fn = nil
+			log.Printf("icbfs: a settle's progress function panicked (%v); the settle goes on without reporting", p)
+		}
+	}()
+	r.fn(SettleProgress{Step: step, Done: done, Of: of, Written: r.written, ToWrite: r.toWrite})
 }
 
 // SettleRecord is what a settle hands its caller before it writes
@@ -282,12 +348,15 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 		}
 	}()
 	meta := metadataObjectKey(dirKey)
+	rep := &settleReport{fn: in.Progress}
 
 	// --- Build ---
+	rep.to(SettleStepBuild, 0, 0)
 	dates, err := objstore.ReadDates(ctx, f.store, dirKey)
 	if err != nil {
 		return Settled{}, err
 	}
+	rep.to(SettleStepBuild, 0, 0)
 	// The .metadata's history before the root block's: a writer between
 	// the two listings left a root after the root listed, or a .metadata
 	// after the one listed, and the present read last finds either (ST-22,
@@ -296,19 +365,22 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 	if err != nil {
 		return Settled{}, err
 	}
+	rep.to(SettleStepBuild, 0, 0)
 	rootHist, err := history(ctx, dirKey)
 	if err != nil {
 		return Settled{}, err
 	}
+	rep.to(SettleStepBuild, 0, 0)
 	// The .version record's history too, so views read the dates just read
 	// (a cache shared with another drive may hold an older one).
 	if _, err := history(ctx, dirKey+objstore.VersionSuffix); err != nil {
 		return Settled{}, err
 	}
+	rep.to(SettleStepBuild, 0, 0)
 	if in.Cut != nil && len(liveOf(rootHist))+len(liveOf(metaHist)) == 0 {
 		// Purged while its settle was cut: nothing of it to finish but the
 		// cut settle's new blocks.
-		return f.settlePurged(ctx, *in.Cut, in.Done)
+		return f.settlePurged(ctx, *in.Cut, in.Done, rep)
 	}
 	// The present (V0), and what of the store's versions are the
 	// directory's states.
@@ -412,15 +484,25 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 		_, err = tab.ReadState(ctx, t, toSettleEntries(entries), recData, recSum)
 		return err
 	}
+	// The states to read, then the present: each a step (PS-31).
+	toRead := len(times) + 1
+	if !tb.IsZero() {
+		toRead++
+	}
+	reads := 0
 	if !tb.IsZero() {
 		if err := readState(tb); err != nil {
 			return Settled{}, err
 		}
+		reads++
+		rep.to(SettleStepBuild, reads, toRead)
 	}
 	for _, t := range sortedTimes(times) {
 		if err := readState(t); err != nil {
 			return Settled{}, err
 		}
+		reads++
+		rep.to(SettleStepBuild, reads, toRead)
 	}
 	// The present, and its blocks.
 	present, presentKeys, attr, err := f.settlePresentNow(ctx, dirKey, firstLive(rootH), firstLive(metaH),
@@ -431,9 +513,11 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 	if err := tab.AddBlocks(ctx, objstore.SettlePresent, presentKeys...); err != nil {
 		return Settled{}, err
 	}
+	rep.to(SettleStepBuild, toRead, toRead)
 
 	// --- Play ---
-	for _, ch := range changes {
+	for i, ch := range changes {
+		rep.to(SettleStepPlay, i, len(changes))
 		switch ch.Op {
 		case ChangeAdd, ChangeRemove:
 		default:
@@ -457,7 +541,8 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 	// --- Proof ---
 	// A table emptied under the settle (another process that took its run
 	// for dead) is no proof of anything, refused or not.
-	perr := f.settleProof(ctx, tab, changes, t0, present, attr)
+	rep.to(SettleStepPlay, len(changes), len(changes))
+	perr := f.settleProof(ctx, tab, changes, t0, present, attr, rep)
 	if err := tab.Held(ctx); err != nil {
 		return Settled{}, err
 	}
@@ -469,7 +554,12 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 	}
 
 	// --- Write-out: what to write ---
-	gen, first, err := f.settleStates(ctx, tab, t0, tb)
+	looked := 0 // states and blocks the plan looked at
+	plan := func() {
+		looked++
+		rep.to(SettleStepPlan, looked, 0)
+	}
+	gen, first, err := f.settleStates(ctx, tab, t0, tb, plan)
 	if err != nil {
 		return Settled{}, err
 	}
@@ -480,6 +570,7 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 		tw = written[0].at
 	}
 	writes := len(written) > 0
+	rep.toWrite = len(written)
 
 	// What goes of the root and .metadata: the leftovers, then V0 (the
 	// mark that the old states are no longer whole), then every other
@@ -507,7 +598,7 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 	if in.Cut != nil {
 		cutKeys = append(append(cutKeys, in.Cut.Create...), in.Cut.Old...)
 	}
-	lower, err := f.lowerErasures(ctx, dirKey, tab, cutKeys, writes, tb, tw)
+	lower, err := f.lowerErasures(ctx, dirKey, tab, cutKeys, writes, tb, tw, plan)
 	if err != nil {
 		return Settled{}, err
 	}
@@ -558,11 +649,13 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 	for _, s := range written {
 		rec.Times = append(rec.Times, s.at)
 	}
+	rep.to(SettleStepRecord, 0, 1)
 	if in.Record != nil {
 		if err := in.Record(rec); err != nil {
 			return Settled{}, err
 		}
 	}
+	rep.to(SettleStepRecord, 1, 1)
 
 	// --- Write-out: the blocks below the roots, and each state's root
 	// block and .metadata made, before the window ---
@@ -619,6 +712,7 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 				if last {
 					kept = append(kept, put{obj, data})
 				}
+				rep.to(SettleStepNewBlocks, si, len(written))
 			}
 		}
 		rootData, err := root.Encode()
@@ -649,11 +743,16 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 		if err := tab.SetEncoded(ctx, s.at, rootData, metaData); err != nil {
 			return Settled{}, err
 		}
+		rep.to(SettleStepNewBlocks, si+1, len(written))
 	}
-	for base, d := range recorder.Dates() {
+	newDates := recorder.Dates()
+	merged := 0
+	for base, d := range newDates {
 		if _, err := objstore.MergeDates(ctx, f.store, base, d, recorder.Fresh(base)); err != nil {
 			return Settled{}, err
 		}
+		merged++
+		rep.to(SettleStepNewBlocks, merged, len(newDates))
 	}
 	// The states the window puts were made from the table: whole still, or
 	// the settle stops before its window (the record stays: a rerun).
@@ -700,7 +799,7 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 				// Nothing of the window is written: the settle's own new
 				// blocks go, and the record with them, so the next settle
 				// starts from the present the other writer left.
-				return Settled{Read: read}, f.settleStoppedFirst(wctx, create, rec, in.Done, err)
+				return Settled{Read: read}, f.settleStoppedFirst(wctx, create, rec, in.Done, err, rep)
 			}
 			if err != nil {
 				return Settled{Read: read}, err
@@ -712,9 +811,12 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 				kept = append(kept, put{obj, p.data})
 			}
 		}
+		rep.written = i + 1
+		rep.to(SettleStepWindow, i+1, len(written))
 	}
 
 	// --- The commit ---
+	rep.to(SettleStepCommit, 0, 1)
 	if writes {
 		if err := settleRetry(wctx, nil, func() error {
 			_, err := objstore.UpdateDates(wctx, f.store, dirKey, winDates)
@@ -723,6 +825,7 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 			return Settled{}, err
 		}
 	}
+	rep.to(SettleStepCommit, 1, 1)
 
 	// --- What goes ---
 	// A put tried again may have been made the first time too (its answer
@@ -733,6 +836,7 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 			if err != nil {
 				return Settled{}, err
 			}
+			rep.to(SettleStepErase, 0, 0)
 			v := rec.Root
 			if key == meta {
 				v = rec.Meta
@@ -749,6 +853,13 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 		}
 	}
 	erased := 0
+	// The versions to erase, as Settled.Erased counts them (PS-31).
+	toErase := len(leftovers) + len(v0) + len(superseded)
+	for _, le := range lower {
+		toErase += len(le.ids)
+	}
+	moved := func() { rep.to(SettleStepErase, erased, toErase) }
+	moved()
 	gone := map[string]bool{}
 	eraseRoot := func(list []objstore.Object) error {
 		for _, o := range list {
@@ -757,6 +868,7 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 			}
 			gone[o.VersionID] = true
 			erased++
+			moved()
 		}
 		return nil
 	}
@@ -767,11 +879,13 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 		return Settled{}, err
 	}
 	for _, le := range lower {
-		n, err := f.eraseLower(wctx, le)
-		erased += n
+		base := erased
+		n, err := f.eraseLower(wctx, le, func(n int) { erased = base + n; moved() })
+		erased = base + n
 		if err != nil {
 			return Settled{}, err
 		}
+		moved()
 	}
 	// Each written state's blocks but the last's: the present doesn't
 	// reach them, its state does (past its deletion), as ReplaceDirHistory
@@ -787,6 +901,7 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 			}); err != nil {
 				return Settled{}, err
 			}
+			moved()
 		}
 	}
 	if err := eraseRoot(superseded); err != nil {
@@ -811,6 +926,7 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 		}); err != nil {
 			return Settled{}, err
 		}
+		moved()
 	}
 	// The past mark is put whatever the context says (markPast): an
 	// immediate stop before it leaves it to the rerun.
@@ -820,6 +936,7 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 	if err := f.markPast(wctx); err != nil {
 		return Settled{}, err
 	}
+	moved()
 
 	// --- The cache: what changed goes, what was written is kept ---
 	if in.Forget != nil {
@@ -843,11 +960,13 @@ func (f *Filesystem) SettleDir(ctx context.Context, dirKey string, changes []Dir
 			}
 		}
 	}
+	rep.to(SettleStepDone, 0, 1)
 	if in.Done != nil {
 		if err := in.Done(rec); err != nil {
 			return Settled{Read: read, Written: len(written), Erased: erased}, err
 		}
 	}
+	rep.to(SettleStepDone, 1, 1)
 	return Settled{Read: read, Written: len(written), Erased: erased}, nil
 }
 
@@ -932,7 +1051,7 @@ func uniqueStrings(list []string) []string {
 // none): a state read whose sum is not its sum as read, or one a change
 // made. A state a change made that is the one before it is no state.
 // prevAt, if set, is the state before from.
-func (f *Filesystem) settleStates(ctx context.Context, tab *objstore.SettleTable, from, prevAt time.Time) ([]settleState, int, error) {
+func (f *Filesystem) settleStates(ctx context.Context, tab *objstore.SettleTable, from, prevAt time.Time, step func()) ([]settleState, int, error) {
 	states, err := tab.States(ctx, from)
 	if err != nil {
 		return nil, -1, err
@@ -968,6 +1087,7 @@ func (f *Filesystem) settleStates(ctx context.Context, tab *objstore.SettleTable
 		}
 		gen = append(gen, settleState{at: s.At, keys: n})
 		prevSum = sum
+		step()
 	}
 	return gen, first, nil
 }
@@ -1044,7 +1164,7 @@ func (f *Filesystem) settlePresentNow(ctx context.Context, dirKey string, root, 
 // shadowed by a newer one dated alike, always. A block no state reaches any version of goes whole; one that
 // the directory now doesn't reach gets a deletion on top (after writing,
 // the present reaches only new keys).
-func (f *Filesystem) lowerErasures(ctx context.Context, dirKey string, tab *objstore.SettleTable, cut []string, writes bool, tb, tw time.Time) ([]lowerErase, error) {
+func (f *Filesystem) lowerErasures(ctx context.Context, dirKey string, tab *objstore.SettleTable, cut []string, writes bool, tb, tw time.Time, step func()) ([]lowerErase, error) {
 	blocks, err := tab.Blocks(ctx)
 	if err != nil {
 		return nil, err
@@ -1079,10 +1199,12 @@ func (f *Filesystem) lowerErasures(ctx context.Context, dirKey string, tab *objs
 		if err != nil {
 			return nil, err
 		}
+		step()
 		kd, err := objstore.ReadDates(ctx, f.store, k)
 		if err != nil {
 			return nil, err
 		}
+		step()
 		shadowed, _ := objstore.NotStates(h, kd)
 		le := lowerErase{key: k}
 		live := 0
@@ -1115,8 +1237,10 @@ func (f *Filesystem) lowerErasures(ctx context.Context, dirKey string, tab *objs
 	return out, nil
 }
 
-// eraseLower does le, and reports the versions it erased.
-func (f *Filesystem) eraseLower(ctx context.Context, le lowerErase) (int, error) {
+// eraseLower does le, and reports the versions it erased; erasedSoFar is
+// told of each as it goes (PS-31: a whole block's erase is one store call
+// and is told after it).
+func (f *Filesystem) eraseLower(ctx context.Context, le lowerErase, erasedSoFar func(int)) (int, error) {
 	if le.whole {
 		if err := settleRetry(ctx, nil, func() error { return f.store.EraseAll(ctx, le.key) }); err != nil {
 			return 0, err
@@ -1136,6 +1260,7 @@ func (f *Filesystem) eraseLower(ctx context.Context, le lowerErase) (int, error)
 		}); err != nil {
 			return 0, err
 		}
+		erasedSoFar(0)
 	}
 	n := 0
 	for _, id := range le.ids {
@@ -1143,6 +1268,7 @@ func (f *Filesystem) eraseLower(ctx context.Context, le lowerErase) (int, error)
 			return n, err
 		}
 		n++
+		erasedSoFar(n)
 	}
 	if len(le.ids) > 0 {
 		if err := settleRetry(ctx, nil, func() error {
@@ -1285,12 +1411,13 @@ func recordSum(a Attr) (string, error) {
 // what no change says: a difference between the states read plus the
 // changes and the present (a change not queued, a write not by this
 // rule) is ErrSettleRefused.
-func (f *Filesystem) settleProof(ctx context.Context, tab *objstore.SettleTable, changes []DirChange, t0 time.Time, present []block.Entry, presentAttr Attr) error {
+func (f *Filesystem) settleProof(ctx context.Context, tab *objstore.SettleTable, changes []DirChange, t0 time.Time, present []block.Entry, presentAttr Attr, rep *settleReport) error {
 	states, err := tab.States(ctx, t0)
 	if err != nil {
 		return err
 	}
-	for _, s := range states {
+	for i, s := range states {
+		rep.to(SettleStepProve, i, len(states))
 		base, err := tab.ReadEntriesAt(ctx, s.At)
 		if err != nil {
 			return err
@@ -1337,6 +1464,7 @@ func (f *Filesystem) settleProof(ctx context.Context, tab *objstore.SettleTable,
 			}
 		}
 	}
+	rep.to(SettleStepProve, len(states), len(states))
 	if len(states) == 0 {
 		return nil
 	}
@@ -1439,11 +1567,12 @@ func (f *Filesystem) settlePut(ctx context.Context, key string, data []byte, ifM
 // minted), and its caller is told the record can go, so that no rerun
 // takes the other writer's version for the settle's own. stop is the
 // settle's error.
-func (f *Filesystem) settleStoppedFirst(ctx context.Context, create []string, rec SettleRecord, done func(SettleRecord) error, stop error) error {
-	for _, k := range create {
+func (f *Filesystem) settleStoppedFirst(ctx context.Context, create []string, rec SettleRecord, done func(SettleRecord) error, stop error, rep *settleReport) error {
+	for i, k := range create {
 		if err := settleRetry(ctx, nil, func() error { return f.store.EraseAll(ctx, k) }); err != nil {
 			return errors.Join(stop, err)
 		}
+		rep.to(SettleStepErase, i+1, len(create))
 	}
 	if done != nil {
 		if err := done(rec); err != nil {
@@ -1456,12 +1585,13 @@ func (f *Filesystem) settleStoppedFirst(ctx context.Context, create []string, re
 // settlePurged ends a cut settle of a directory none of whose root block
 // and .metadata is stored any more: the cut settle's new blocks go, and
 // the caller is told the record can go.
-func (f *Filesystem) settlePurged(ctx context.Context, cut SettleRecord, done func(SettleRecord) error) (Settled, error) {
+func (f *Filesystem) settlePurged(ctx context.Context, cut SettleRecord, done func(SettleRecord) error, rep *settleReport) (Settled, error) {
 	wctx := ctx
-	for _, k := range cut.Create {
+	for i, k := range cut.Create {
 		if err := settleRetry(wctx, nil, func() error { return f.store.EraseAll(wctx, k) }); err != nil {
 			return Settled{}, err
 		}
+		rep.to(SettleStepErase, i+1, len(cut.Create))
 	}
 	if done != nil {
 		if err := done(cut); err != nil {

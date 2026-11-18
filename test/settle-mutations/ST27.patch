@@ -1,6 +1,6 @@
 --- a/internal/icbfs/settle.go
 +++ b/internal/icbfs/settle.go
-@@ -293,11 +293,11 @@
+@@ -361,12 +361,12 @@
  	// the two listings left a root after the root listed, or a .metadata
  	// after the one listed, and the present read last finds either (ST-22,
  	// ST-27; settlePresentNow).
@@ -8,15 +8,17 @@
 +	if err != nil {
 +		return Settled{}, err
 +	}
++	rep.to(SettleStepBuild, 0, 0)
  	metaHist, err := history(ctx, meta)
 -	if err != nil {
 -		return Settled{}, err
 -	}
+-	rep.to(SettleStepBuild, 0, 0)
 -	rootHist, err := history(ctx, dirKey)
  	if err != nil {
  		return Settled{}, err
  	}
-@@ -939,7 +939,7 @@
+@@ -1118,7 +1118,7 @@
  			return nil, nil, Attr{}, fmt.Errorf("directory %s was written while the settle read it (its root block is version %s, not %s): %w",
  				dirKey, cur.VersionID, root.VersionID, ErrSettleRefused)
  		}
