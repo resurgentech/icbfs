@@ -335,44 +335,59 @@ func (c *HistoryCache) history(ctx context.Context, key string, at time.Time) ([
 }
 
 func (c *HistoryCache) fullHistory(ctx context.Context, key string, at time.Time) ([]Object, error) {
-	if !c.f.pendingOn(key, false) {
-		list, hit, err := c.cached(ctx, `(whole = 1 AND prefix = ?1) OR (whole = 0 AND substr(?1, 1, length(prefix)) = prefix)`, key, at,
-			`SELECT key, version, etag, size, modified, deleted FROM versions WHERE key = ? ORDER BY pos`, key)
-		if err != nil || hit {
-			return list, err
+	kept := func() ([]Object, bool, error) {
+		if c.f.pendingOn(key, false) {
+			return nil, false, nil
 		}
+		return c.cached(ctx, `(whole = 1 AND prefix = ?1) OR (whole = 0 AND substr(?1, 1, length(prefix)) = prefix)`, key, at,
+			`SELECT key, version, etag, size, modified, deleted FROM versions WHERE key = ? ORDER BY pos`, key)
 	}
-	upto, err := c.upto(ctx, at)
-	if err != nil {
-		return nil, err
-	}
-	list, err := c.store.History(ctx, key)
-	if err != nil {
-		return nil, err
-	}
-	return list, c.save(ctx, key, true, list, upto)
+	return c.fetchOnce(ctx, "key "+key, at, kept, func(ctx context.Context) ([]Object, error) { return c.store.History(ctx, key) },
+		func(list []Object, upto time.Time) error { return c.save(ctx, key, true, list, upto) })
 }
 
 // historyUnder is the history of every key starting with prefix, keys in
 // order and each newest first, complete at least up to at.
 func (c *HistoryCache) historyUnder(ctx context.Context, prefix string, at time.Time) ([]Object, error) {
-	if !c.f.pendingOn(prefix, true) {
-		where, args := underPrefix(prefix)
-		list, hit, err := c.cached(ctx, `whole = 0 AND substr(?1, 1, length(prefix)) = prefix`, prefix, at,
-			`SELECT key, version, etag, size, modified, deleted FROM versions WHERE `+where+` ORDER BY key, pos`, args...)
-		if err != nil || hit {
-			return list, err
+	kept := func() ([]Object, bool, error) {
+		if c.f.pendingOn(prefix, true) {
+			return nil, false, nil
 		}
+		where, args := underPrefix(prefix)
+		return c.cached(ctx, `whole = 0 AND substr(?1, 1, length(prefix)) = prefix`, prefix, at,
+			`SELECT key, version, etag, size, modified, deleted FROM versions WHERE `+where+` ORDER BY key, pos`, args...)
+	}
+	return c.fetchOnce(ctx, "under "+prefix, at, kept, func(ctx context.Context) ([]Object, error) { return c.store.HistoryUnder(ctx, prefix) },
+		func(list []Object, upto time.Time) error { return c.save(ctx, prefix, false, list, upto) })
+}
+
+// fetchOnce is what kept answers, or else the store's answer (fetch),
+// kept (keep) as complete up to now. In one process one fetch of a name
+// is in flight at a time: a caller that finds one waits for it and then
+// asks kept again, so two lookups of one key at once ask the store once
+// (when the first's keep was done; else the second fetches too).
+func (c *HistoryCache) fetchOnce(ctx context.Context, name string, at time.Time, kept func() ([]Object, bool, error),
+	fetch func(context.Context) ([]Object, error), keep func([]Object, time.Time) error) ([]Object, error) {
+	if list, hit, err := kept(); err != nil || hit {
+		return list, err
+	}
+	done, err := c.f.fetching(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+	if list, hit, err := kept(); err != nil || hit {
+		return list, err
 	}
 	upto, err := c.upto(ctx, at)
 	if err != nil {
 		return nil, err
 	}
-	list, err := c.store.HistoryUnder(ctx, prefix)
+	list, err := fetch(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return list, c.save(ctx, prefix, false, list, upto)
+	return list, keep(list, upto)
 }
 
 // cached is what query reads, if a covered row matching match (with ?1

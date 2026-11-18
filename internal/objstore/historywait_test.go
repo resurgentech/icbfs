@@ -349,3 +349,46 @@ func TestHistoryCacheOutsideWriterBoundsTheUncontendedPath(t *testing.T) {
 		t.Fatalf("contended misses %d, want 1", n)
 	}
 }
+
+// slowStore is countingStore whose History waits for its gate.
+type slowStore struct {
+	countingStore
+	gate chan struct{}
+}
+
+func (s slowStore) History(ctx context.Context, key string) ([]Object, error) {
+	<-s.gate
+	return s.countingStore.History(ctx, key)
+}
+
+// Two lookups of one key at once in one process ask the store once: the
+// second waits for the first's fetch and reads what it kept.
+func TestHistoryCacheOneFetchOfAKeyAtATime(t *testing.T) {
+	ctx := context.Background()
+	store := slowStore{countingStore{n: new(atomic.Int64)}, make(chan struct{})}
+	c, err := OpenHistoryCache(ctx, store, filepath.Join(t.TempDir(), "history.db"), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() {
+			h, err := c.history(ctx, "k", heldAt)
+			if err == nil && (len(h) != 1 || h[0].VersionID != "v1") {
+				err = fmt.Errorf("history %v", h)
+			}
+			errs <- err
+		}()
+	}
+	time.Sleep(100 * time.Millisecond) // both asked: one in the store, one waiting for it
+	close(store.gate)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := store.n.Load(); n != 1 {
+		t.Fatalf("store asked %d times for one key looked up twice at once, want 1", n)
+	}
+}

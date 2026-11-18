@@ -63,6 +63,39 @@ type historyFile struct {
 	mu      sync.Mutex
 	pending []pendingForget
 	seq     uint64 // the last pendingForget.seq given
+
+	// inflight is the store fetches under way in this process, by name
+	// (fetching): closed when each is done.
+	inflight map[string]chan struct{}
+}
+
+// fetching waits until no fetch of name is under way in this process (or
+// ctx is done), then marks one as under way until done is called.
+func (f *historyFile) fetching(ctx context.Context, name string) (done func(), err error) {
+	for {
+		f.mu.Lock()
+		ch, busy := f.inflight[name]
+		if !busy {
+			if f.inflight == nil {
+				f.inflight = map[string]chan struct{}{}
+			}
+			ch = make(chan struct{})
+			f.inflight[name] = ch
+			f.mu.Unlock()
+			return func() {
+				f.mu.Lock()
+				delete(f.inflight, name)
+				f.mu.Unlock()
+				close(ch)
+			}, nil
+		}
+		f.mu.Unlock()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 }
 
 // pendingForget is a forget that did not get the database within
