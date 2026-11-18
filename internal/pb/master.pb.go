@@ -57,7 +57,16 @@ type FilesystemEntry struct {
 	// mirror's), set when it's created with a history that starts earlier
 	// or at its first change made under a source time. Every item's
 	// .version then lists all versions of its content and .metadata.
-	SourceTime    bool `protobuf:"varint,9,opt,name=source_time,json=sourceTime,proto3" json:"source_time,omitempty"`
+	SourceTime bool `protobuf:"varint,9,opt,name=source_time,json=sourceTime,proto3" json:"source_time,omitempty"`
+	// uid: the filesystem's own id, 32 lowercase hex digits from 16 random
+	// bytes, written once when the filesystem is registered and never
+	// changed: no two filesystems share one, not even one pruned or erased
+	// and made again under the same name in the same slot (its id above is
+	// the slot's position, and is reused). A filesystem registered before
+	// this field has none until FilesystemUID gives it one, once. Code that
+	// predates the field keeps it when it rewrites the master block: an
+	// unknown field survives a decode and encode.
+	Uid           string `protobuf:"bytes,10,opt,name=uid,proto3" json:"uid,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -155,6 +164,13 @@ func (x *FilesystemEntry) GetSourceTime() bool {
 	return false
 }
 
+func (x *FilesystemEntry) GetUid() string {
+	if x != nil {
+		return x.Uid
+	}
+	return ""
+}
+
 // MasterBlock is the body of the one, fixed, well-known master-block
 // object per bucket. The list can only ever grow in length, never
 // shrink or reorder — a deleted filesystem's entry is blanked in place
@@ -218,7 +234,7 @@ var File_spec_proto_icbfs_v1_master_proto protoreflect.FileDescriptor
 
 const file_spec_proto_icbfs_v1_master_proto_rawDesc = "" +
 	"\n" +
-	" spec/proto/icbfs/v1/master.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xcc\x02\n" +
+	" spec/proto/icbfs/v1/master.proto\x12\bicbfs.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xde\x02\n" +
 	"\x0fFilesystemEntry\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x04R\x04size\x12\x1a\n" +
@@ -229,7 +245,9 @@ const file_spec_proto_icbfs_v1_master_proto_rawDesc = "" +
 	"\x11dir_block_entries\x18\a \x01(\rR\x0fdirBlockEntries\x12%\n" +
 	"\x0eformat_version\x18\b \x01(\rR\rformatVersion\x12\x1f\n" +
 	"\vsource_time\x18\t \x01(\bR\n" +
-	"sourceTime\"b\n" +
+	"sourceTime\x12\x10\n" +
+	"\x03uid\x18\n" +
+	" \x01(\tR\x03uid\"b\n" +
 	"\vMasterBlock\x12;\n" +
 	"\vfilesystems\x18\x01 \x03(\v2\x19.icbfs.v1.FilesystemEntryR\vfilesystems\x12\x16\n" +
 	"\x06layout\x18\x02 \x01(\rR\x06layoutB+Z)github.com/resurgentech/icbfs/internal/pbb\x06proto3"
